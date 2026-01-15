@@ -51,7 +51,7 @@
  *    - Consistent across all entities
  */
 
-import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, getDatabase, deleteCache, deleteCachePattern, logger } from 'core-service';
+import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, getDatabase, deleteCache, deleteCachePattern, logger, validateInput } from 'core-service';
 import type { Wallet, WalletTransaction, WalletCategory, WalletTransactionType } from '../types.js';
 import { emitPaymentEvent } from '../event-dispatcher.js';
 
@@ -366,8 +366,7 @@ export const walletService = createService<Wallet, CreateWalletInput>({
     graphqlInput: `input CreateWalletInput { userId: String! currency: String! category: String tenantId: String }`,
     validateInput: (input) => {
       const result = walletSchema(input);
-      if (result instanceof type.errors) return { errors: [result.summary] };
-      return result as CreateWalletInput;
+      return validateInput(result) as CreateWalletInput | { errors: string[] };
     },
     indexes: [
       // Unique constraint: one wallet per user+currency+category
@@ -642,8 +641,7 @@ export const walletTransactionService = createService<WalletTransaction, CreateW
     }`,
     validateInput: (input) => {
       const result = walletTxSchema(input);
-      if (result instanceof type.errors) return { errors: [result.summary] };
-      return result as CreateWalletTxInput;
+      return validateInput(result) as CreateWalletTxInput | { errors: string[] };
     },
     indexes: [
       // Core queries (wallet history)

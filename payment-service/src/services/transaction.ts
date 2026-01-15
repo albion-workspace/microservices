@@ -2,7 +2,7 @@
  * Transaction Service - Saga-based payment processing
  */
 
-import { createService, generateId, type, type Repository, type SagaContext, getDatabase } from 'core-service';
+import { createService, generateId, type, type Repository, type SagaContext, getDatabase, validateInput } from 'core-service';
 import type { Transaction, ProviderConfig, TransactionStatus } from '../types.js';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -82,8 +82,7 @@ export const providerConfigService = createService<ProviderConfig, CreateProvide
     graphqlInput: `input CreateProviderConfigInput { provider: String! name: String! tenantId: String supportedMethods: [String!]! supportedCurrencies: [String!]! feeType: String feePercentage: Float }`,
     validateInput: (input) => {
       const result = providerSchema(input);
-      if (result instanceof type.errors) return { errors: [result.summary] };
-      return result as CreateProviderConfigInput;
+      return validateInput(result) as CreateProviderConfigInput | { errors: string[] };
     },
     indexes: [
       { fields: { tenantId: 1, provider: 1 }, options: { unique: true } },
@@ -294,8 +293,7 @@ export const depositService = createService<Transaction, CreateDepositInput>({
     graphqlInput: `input CreateDepositInput { userId: String! amount: Float! currency: String! tenantId: String method: String }`,
     validateInput: (input) => {
       const result = depositSchema(input);
-      if (result instanceof type.errors) return { errors: [result.summary] };
-      return result as CreateDepositInput;
+      return validateInput(result) as CreateDepositInput | { errors: string[] };
     },
     indexes: [
       { fields: { userId: 1, type: 1, status: 1 } },
@@ -504,8 +502,7 @@ export const withdrawalService = createService<Transaction, CreateWithdrawalInpu
     graphqlInput: `input CreateWithdrawalInput { userId: String! amount: Float! currency: String! method: String! tenantId: String bankAccount: String walletAddress: String }`,
     validateInput: (input) => {
       const result = withdrawalSchema(input);
-      if (result instanceof type.errors) return { errors: [result.summary] };
-      return result as CreateWithdrawalInput;
+      return validateInput(result) as CreateWithdrawalInput | { errors: string[] };
     },
     indexes: [],
   },

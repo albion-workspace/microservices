@@ -494,20 +494,28 @@ function buildSchema(
   const mutationFieldsWithResolvers: Record<string, any> = {};
   const subscriptionFieldsWithResolvers: Record<string, any> = {};
   
-  // Process Query fields from extended schema
-  if (extendedQueryType) {
-    for (const [fieldName, field] of Object.entries(extendedQueryType.getFields())) {
-      queryFieldsWithResolvers[fieldName] = buildFieldResolver('Query', fieldName, field, resolvers, subscriptionConfig, checkPermission);
+  /**
+   * Helper function to process GraphQL type fields and build resolvers
+   */
+  function processFields(
+    opType: 'Query' | 'Mutation' | 'Subscription',
+    type: any,
+    targetFields: Record<string, any>
+  ): void {
+    if (!type) return;
+    const fields = type.getFields();
+    for (const [fieldName, field] of Object.entries(fields)) {
+      targetFields[fieldName] = buildFieldResolver(opType, fieldName, field, resolvers, subscriptionConfig, checkPermission);
     }
   }
+  
+  // Process Query fields from extended schema
+  processFields('Query', extendedQueryType, queryFieldsWithResolvers);
   
   // Process Mutation fields from extended schema
   if (extendedMutationType) {
-    for (const [fieldName, field] of Object.entries(extendedMutationType.getFields())) {
-      mutationFieldsWithResolvers[fieldName] = buildFieldResolver('Mutation', fieldName, field, resolvers, subscriptionConfig, checkPermission);
-    }
-  }
-  
+    processFields('Mutation', extendedMutationType, mutationFieldsWithResolvers);
+  }  
   // If schema extension failed but we have mutation resolvers, we need to use the extended schema anyway
   // The warning is non-fatal - the schema was still extended, just with warnings
   // Check if extendedMutationType has fields even if extension "failed"
@@ -523,12 +531,7 @@ function buildSchema(
   }
 
   // Process Subscription fields - use extended if available, otherwise use base
-  if (extendedSubscriptionType) {
-    // Merge extended subscription fields with base subscription fields
-    for (const [fieldName, field] of Object.entries(extendedSubscriptionType.getFields())) {
-      subscriptionFieldsWithResolvers[fieldName] = buildFieldResolver('Subscription', fieldName, field, resolvers, subscriptionConfig, checkPermission);
-    }
-  }
+  processFields('Subscription', extendedSubscriptionType, subscriptionFieldsWithResolvers);
   // Always include base subscription fields (health, logs)
   for (const [fieldName, field] of Object.entries(subscriptionFields)) {
     if (!subscriptionFieldsWithResolvers[fieldName]) {
@@ -661,9 +664,22 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
     },
   };
 
+  /**
+   * Helper function to merge resolvers from services
+   */
+  function mergeResolvers(
+    sourceResolvers: Record<string, any> | undefined,
+    targetResolvers: Record<string, any>
+  ): void {
+    if (!sourceResolvers) return;
+    for (const [key, resolver] of Object.entries(sourceResolvers)) {
+      targetResolvers[key] = resolver;
+    }
+  }
+
   for (const svc of services) {
-    for (const [key, resolver] of Object.entries(svc.resolvers.Query || {})) resolvers[key] = resolver;
-    for (const [key, resolver] of Object.entries(svc.resolvers.Mutation || {})) resolvers[key] = resolver;
+    mergeResolvers(svc.resolvers.Query, resolvers);
+    mergeResolvers(svc.resolvers.Mutation, resolvers);
   }
 
   // All subscriptions
@@ -763,31 +779,32 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
   }
 
   // SSE push helpers
-  function ssePush(event: string, data: unknown) {
+  /**
+   * Helper function to push SSE events to connections with optional filtering
+   */
+  function pushToSSEConnections(
+    event: string,
+    data: unknown,
+    filter?: (conn: SSEConnection) => boolean
+  ): void {
     const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
     for (const [, conn] of sseConnections) {
-      if (!conn.res.writableEnded) {
+      if (!conn.res.writableEnded && (!filter || filter(conn))) {
         conn.res.write(payload);
       }
     }
+  }
+
+  function ssePush(event: string, data: unknown) {
+    pushToSSEConnections(event, data);
   }
 
   function ssePushToUser(userId: string, event: string, data: unknown) {
-    const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-    for (const [, conn] of sseConnections) {
-      if (conn.userId === userId && !conn.res.writableEnded) {
-        conn.res.write(payload);
-      }
-    }
+    pushToSSEConnections(event, data, (conn) => conn.userId === userId);
   }
 
   function ssePushToTenant(tenantId: string, event: string, data: unknown) {
-    const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-    for (const [, conn] of sseConnections) {
-      if (conn.tenantId === tenantId && !conn.res.writableEnded) {
-        conn.res.write(payload);
-      }
-    }
+    pushToSSEConnections(event, data, (conn) => conn.tenantId === tenantId);
   }
 
   // ─────────────────────────────────────────────────────────────────

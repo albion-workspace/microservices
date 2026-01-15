@@ -105,6 +105,9 @@ export type { ShutdownOptions } from './common/lifecycle.js';
 export { setupCleanupTask, setupCleanupTasks, setupEventListener } from './common/service-lifecycle.js';
 export type { CleanupTask, EventListenerConfig } from './common/service-lifecycle.js';
 
+// Validation
+export { validateInput } from './common/validation.js';
+
 // ═══════════════════════════════════════════════════════════════════
 // Types (from src/types/)
 // ═══════════════════════════════════════════════════════════════════

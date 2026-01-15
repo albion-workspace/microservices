@@ -2,7 +2,7 @@
  * Bonus Service - Saga-based bonus management
  */
 
-import { createService, generateId, type, type Repository, type SagaContext } from 'core-service';
+import { createService, generateId, type, type Repository, type SagaContext, validateInput } from 'core-service';
 import type { BonusTemplate, UserBonus, BonusTransaction, BonusStatus } from '../types.js';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -147,8 +147,7 @@ export const bonusTemplateService = createService<BonusTemplate, CreateBonusTemp
     graphqlInput: `input CreateBonusTemplateInput { name: String! code: String! type: String! domain: String! valueType: String! value: Float! currency: String! supportedCurrencies: [String!] maxValue: Float minDeposit: Float turnoverMultiplier: Float! validFrom: String! validUntil: String! eligibleTiers: [String!] minSelections: Int maxSelections: Int priority: Int }`,
     validateInput: (input) => {
       const result = bonusTemplateSchema(input);
-      if (result instanceof type.errors) return { errors: [result.summary] };
-      return result as CreateBonusTemplateInput;
+      return validateInput(result) as CreateBonusTemplateInput | { errors: string[] };
     },
     indexes: [
       { fields: { code: 1 }, options: { unique: true } },
@@ -260,8 +259,7 @@ export const userBonusService = createService<UserBonus, CreateUserBonusSagaInpu
     graphqlInput: `input CreateUserBonusInput { userId: String! templateCode: String! currency: String! tenantId: String depositAmount: Float }`,
     validateInput: (input) => {
       const result = claimBonusSchema(input);
-      if (result instanceof type.errors) return { errors: [result.summary] };
-      return result as CreateUserBonusSagaInput;
+      return validateInput(result) as CreateUserBonusSagaInput | { errors: string[] };
     },
     indexes: [
       { fields: { userId: 1, status: 1 } },
@@ -366,8 +364,7 @@ export const bonusTransactionService = createService<BonusTransaction, CreateBon
     graphqlInput: `input CreateBonusTransactionInput { userBonusId: String! userId: String! type: String! currency: String! amount: Float! originalCurrency: String originalAmount: Float exchangeRate: Float relatedTransactionId: String }`,
     validateInput: (input) => {
       const result = bonusTxSchema(input);
-      if (result instanceof type.errors) return { errors: [result.summary] };
-      return result as CreateBonusTransactionInput;
+      return validateInput(result) as CreateBonusTransactionInput | { errors: string[] };
     },
     indexes: [
       { fields: { userBonusId: 1, createdAt: -1 } },
