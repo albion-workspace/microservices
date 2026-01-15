@@ -1112,13 +1112,14 @@ async function testBalanceSynchronization() {
   let realAccountExists = false;
   let bonusAccountExists = false;
   let balancesMatch = false;
+  let walletsData: any = null;
   
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     await sleep(attempt === 0 ? initialDelay : initialDelay * Math.pow(1.5, attempt));
     
     // Get wallet balance - use main wallet only (ledger tracks main wallet's real balance)
     // userWallets totals sum ALL wallets (main + sports + casino), but ledger only tracks main wallet
-    const walletsData = await graphql(`
+    walletsData = await graphql(`
       query GetUserWallets($input: JSON) {
         userWallets(input: $input) {
           totals {
@@ -1128,7 +1129,7 @@ async function testBalanceSynchronization() {
           wallets {
             id
             category
-            balance
+            realBalance
             bonusBalance
           }
         }
@@ -1142,7 +1143,7 @@ async function testBalanceSynchronization() {
     
     // Get main wallet balance (ledger tracks main wallet only)
     const mainWallet = walletsData?.userWallets?.wallets?.find((w: any) => w.category === 'main');
-    walletBalance = mainWallet?.balance || 0;
+    walletBalance = mainWallet?.realBalance || 0;
     walletBonusBalance = mainWallet?.bonusBalance || 0;
     
     // Get ledger balances (may not exist yet - created lazily)
@@ -1193,14 +1194,21 @@ async function testBalanceSynchronization() {
     }
     
     // Check if balances match (allow 1 cent difference for rounding)
-    if (realAccountExists) {
+    if (realAccountExists && walletBalance > 0) {
       const realDiff = Math.abs(walletBalance - ledgerRealBalance);
       if (realDiff <= 1) {
         balancesMatch = true;
         break; // Success - balances match!
       }
+    } else if (realAccountExists && walletBalance === 0 && ledgerRealBalance === 0) {
+      // Both are zero - match
+      balancesMatch = true;
+      break;
     }
   }
+  
+  // Get totals for informational purposes (after loop to use last walletsData)
+  const totalRealBalance = walletsData?.userWallets?.totals?.realBalance || 0;
   
   console.log(`   → Main Wallet Real Balance: ${formatCurrency(walletBalance)}`);
   console.log(`   → Main Wallet Bonus Balance: ${formatCurrency(walletBonusBalance)}`);

@@ -629,9 +629,9 @@ const walletTxSaga = [
           const syncedWallet = await walletsCollection.findOne({ id: input.walletId });
           balance = (syncedWallet as any)?.[balanceField] || 0;
           
-          logger.info('Provider wallet balance synced from ledger (skipped direct update)', {
+          logger.info('Wallet balance synced from ledger (skipped direct update)', {
             walletId: input.walletId,
-            providerId: input.userId,
+            userId: input.userId,
             balance,
           });
         } catch (syncError) {
