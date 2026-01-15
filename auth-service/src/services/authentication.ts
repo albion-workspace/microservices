@@ -50,6 +50,19 @@ export class AuthenticationService {
         };
       }
       
+      // CRITICAL: Double-check 2FA before generating tokens
+      // This is a safety check in case passport strategy didn't catch it
+      const twoFactorEnabledValue: any = user.twoFactorEnabled;
+      const isTwoFactorEnabled = twoFactorEnabledValue === true || String(twoFactorEnabledValue) === 'true' || Number(twoFactorEnabledValue) === 1;
+      
+      if (isTwoFactorEnabled && !input.twoFactorCode) {
+        return {
+          success: false,
+          message: 'Two-factor authentication code required',
+          requiresOTP: true,
+        };
+      }
+      
       // Authentication successful! Generate tokens and session
       const deviceInfo = this.extractDeviceInfo(input);
       const tokens = await this.createSessionAndTokens(user, deviceInfo);

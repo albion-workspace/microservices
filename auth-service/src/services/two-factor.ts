@@ -17,6 +17,14 @@ export class TwoFactorService {
     const db = getDatabase();
     
     try {
+      // Validate required fields (should be provided by resolver from context)
+      if (!input.userId || !input.tenantId) {
+        return {
+          success: false,
+          message: 'User ID and tenant ID are required',
+        } as TwoFactorSetupResponse;
+      }
+      
       // Get user
       const user = await db.collection('users').findOne({
         id: input.userId,
@@ -96,6 +104,14 @@ export class TwoFactorService {
     const db = getDatabase();
     
     try {
+      // Validate required fields (should be provided by resolver from context)
+      if (!input.userId || !input.tenantId) {
+        return {
+          success: false,
+          message: 'User ID and tenant ID are required',
+        };
+      }
+      
       // Get user
       const user = await db.collection('users').findOne({
         id: input.userId,

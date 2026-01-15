@@ -107,7 +107,10 @@ export function configurePassport(config: AuthConfig) {
           }
           
           // Verify 2FA if enabled
-          if (user.twoFactorEnabled) {
+          const twoFactorEnabledValue: any = user.twoFactorEnabled;
+          const isTwoFactorEnabled = twoFactorEnabledValue === true || String(twoFactorEnabledValue) === 'true' || Number(twoFactorEnabledValue) === 1;
+          
+          if (isTwoFactorEnabled) {
             if (!twoFactorCode) {
               return done(null, false, { 
                 message: 'Two-factor authentication code required',

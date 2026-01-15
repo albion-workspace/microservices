@@ -29,15 +29,21 @@ export default function Login() {
     try {
       const result = await login(identifier, password, twoFactorCode || undefined);
 
-      if (result.success) {
-        navigate('/dashboard');
-      } else if (result.message?.includes('Two-factor')) {
+      // Check if 2FA is required (either from requiresOTP field or message)
+      if (result.requiresOTP || result.message?.includes('Two-factor') || result.message?.includes('two-factor')) {
         setRequires2FA(true);
-        setError(result.message);
+        setError(result.message || 'Two-factor authentication code required');
+        setIsLoading(false);
+        return; // Don't navigate - wait for 2FA code
+      }
+
+      if (result.success && result.user && result.tokens) {
+        navigate('/dashboard');
       } else {
         setError(result.message || 'Login failed');
       }
     } catch (err: any) {
+      console.error('Login error:', err);
       setError(err.message || 'An error occurred');
     } finally {
       setIsLoading(false);

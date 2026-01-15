@@ -214,6 +214,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         login(input: $input) {
           success
           message
+          requiresOTP
           user {
             id
             tenantId
@@ -251,7 +252,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const result = data.login;
 
-    if (result.success && result.user && result.tokens) {
+    // Only save tokens if login is successful AND 2FA is not required
+    // If requiresOTP is true, we should NOT save tokens - user needs to provide 2FA code first
+    if (result.success && result.user && result.tokens && !result.requiresOTP) {
       saveAuth(result.user, result.tokens);
     }
 

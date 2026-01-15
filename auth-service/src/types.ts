@@ -276,14 +276,14 @@ export interface ChangePasswordInput {
 }
 
 export interface Enable2FAInput {
-  userId: string;
-  tenantId: string;
+  userId?: string;
+  tenantId?: string;
   password: string;
 }
 
 export interface Verify2FAInput {
-  userId: string;
-  tenantId: string;
+  userId?: string;
+  tenantId?: string;
   token: string;
 }
 

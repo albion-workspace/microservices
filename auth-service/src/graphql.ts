@@ -153,14 +153,14 @@ export const authGraphQLTypes = `
   }
   
   input Enable2FAInput {
-    userId: String!
-    tenantId: String!
+    userId: String
+    tenantId: String
     password: String!
   }
   
   input Verify2FAInput {
-    userId: String!
-    tenantId: String!
+    userId: String
+    tenantId: String
     token: String!
   }
   

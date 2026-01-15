@@ -7,13 +7,15 @@ import { useAuth, useAuthRequest } from '../lib/auth-context';
 import { User, Shield, Monitor, LogOut, AlertCircle, CheckCircle } from 'lucide-react';
 
 export default function Profile() {
-  const { user, logout, logoutAll } = useAuth();
+  const { user, logout, logoutAll, updateUser } = useAuth();
   const authRequest = useAuthRequest();
 
   const [sessions, setSessions] = useState<any[]>([]);
   const [isLoadingSessions, setIsLoadingSessions] = useState(false);
   const [twoFactorSetup, setTwoFactorSetup] = useState<any>(null);
   const [password, setPassword] = useState('');
+  const [twoFactorCode, setTwoFactorCode] = useState('');
+  const [isVerifying, setIsVerifying] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
@@ -68,9 +70,134 @@ export default function Profile() {
       if (data.enable2FA.success) {
         setTwoFactorSetup(data.enable2FA);
         setSuccess('2FA setup initiated! Scan the QR code with your authenticator app.');
+        setPassword(''); // Clear password
       }
     } catch (err: any) {
       setError(err.message);
+    }
+  };
+
+  // Verify 2FA
+  const handleVerify2FA = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setSuccess('');
+    setIsVerifying(true);
+
+    try {
+      const data = await authRequest(
+        `mutation Verify2FA($input: Verify2FAInput!) {
+          verify2FA(input: $input) {
+            success
+            message
+          }
+        }`,
+        {
+          input: {
+            userId: user?.id,
+            tenantId: user?.tenantId,
+            token: twoFactorCode,
+          },
+        }
+      );
+
+      if (data.verify2FA.success) {
+        setSuccess('2FA enabled successfully!');
+        setTwoFactorSetup(null);
+        setTwoFactorCode('');
+        
+        // Refresh user data to get updated twoFactorEnabled status
+        const userData = await authRequest(`
+          query {
+            me {
+              id
+              tenantId
+              username
+              email
+              phone
+              status
+              emailVerified
+              phoneVerified
+              twoFactorEnabled
+              roles
+              permissions
+              metadata
+              createdAt
+              lastLoginAt
+            }
+          }
+        `);
+        
+        if (userData.me) {
+          updateUser(userData.me);
+        }
+      } else {
+        setError(data.verify2FA.message || 'Failed to verify 2FA');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to verify 2FA');
+    } finally {
+      setIsVerifying(false);
+    }
+  };
+
+  // Disable 2FA
+  const handleDisable2FA = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setSuccess('');
+
+    if (!confirm('Are you sure you want to disable two-factor authentication? This will make your account less secure.')) {
+      return;
+    }
+
+    try {
+      const data = await authRequest(
+        `mutation Disable2FA($password: String!) {
+          disable2FA(password: $password) {
+            success
+            message
+          }
+        }`,
+        {
+          password,
+        }
+      );
+
+      if (data.disable2FA.success) {
+        setSuccess('2FA disabled successfully!');
+        setPassword('');
+        
+        // Refresh user data to get updated twoFactorEnabled status
+        const userData = await authRequest(`
+          query {
+            me {
+              id
+              tenantId
+              username
+              email
+              phone
+              status
+              emailVerified
+              phoneVerified
+              twoFactorEnabled
+              roles
+              permissions
+              metadata
+              createdAt
+              lastLoginAt
+            }
+          }
+        `);
+        
+        if (userData.me) {
+          updateUser(userData.me);
+        }
+      } else {
+        setError(data.disable2FA.message || 'Failed to disable 2FA');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to disable 2FA');
     }
   };
 
@@ -172,7 +299,7 @@ export default function Profile() {
             </form>
           )}
 
-          {twoFactorSetup && (
+          {twoFactorSetup && !user.twoFactorEnabled && (
             <div className="space-y-4">
               <div className="bg-gray-50 p-4 rounded-lg">
                 <p className="text-sm font-medium text-gray-700 mb-2">1. Scan this QR code:</p>
@@ -190,17 +317,71 @@ export default function Profile() {
                   ))}
                 </div>
               </div>
-              <p className="text-sm text-gray-600">
+              <p className="text-sm text-gray-600 mb-4">
                 Store these backup codes in a safe place. You can use them to access your account if you lose your authenticator device.
               </p>
+              
+              {/* Verify 2FA Form */}
+              <form onSubmit={handleVerify2FA} className="space-y-4 border-t pt-4">
+                <p className="text-sm font-medium text-gray-700">3. Enter the code from your authenticator app:</p>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    6-digit code
+                  </label>
+                  <input
+                    type="text"
+                    value={twoFactorCode}
+                    onChange={(e) => setTwoFactorCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none font-mono text-lg tracking-widest text-center"
+                    placeholder="123456"
+                    maxLength={6}
+                    required
+                    autoFocus
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={isVerifying || twoFactorCode.length !== 6}
+                  className="w-full px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isVerifying ? 'Verifying...' : 'Verify and Enable 2FA'}
+                </button>
+              </form>
             </div>
           )}
 
           {user.twoFactorEnabled && (
-            <p className="text-green-600 flex items-center gap-2">
-              <CheckCircle className="w-5 h-5" />
-              Two-factor authentication is enabled
-            </p>
+            <div className="space-y-4">
+              <div className="flex items-center gap-2 text-green-600">
+                <CheckCircle className="w-5 h-5" />
+                <p className="font-medium">Two-factor authentication is enabled</p>
+              </div>
+              
+              <form onSubmit={handleDisable2FA} className="border-t pt-4 space-y-4">
+                <p className="text-sm text-gray-600">
+                  To disable two-factor authentication, please confirm your password.
+                </p>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Confirm your password
+                  </label>
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-transparent outline-none"
+                    placeholder="Enter your password"
+                    required
+                  />
+                </div>
+                <button
+                  type="submit"
+                  className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition"
+                >
+                  Disable 2FA
+                </button>
+              </form>
+            </div>
           )}
         </div>
 
