@@ -123,7 +123,7 @@ function WalletsTab() {
   const [activeSection, setActiveSection] = useState<'system' | 'provider' | 'user'>('system')
   
   // System funding form
-  const [systemFundForm, setSystemFundForm] = useState({ provider: 'provider-stripe', amount: '10000', currency: 'EUR' })
+  const [systemFundForm, setSystemFundForm] = useState({ provider: 'provider-stripe', amount: '10000', currency: 'USD' })
   
   // Provider to User form  
   const [providerToUserForm, setProviderToUserForm] = useState({ 
@@ -151,14 +151,20 @@ function WalletsTab() {
   
   // Ledger balances state
   const [providerLedgerBalances, setProviderLedgerBalances] = useState<Record<string, number>>({})
+  const [systemHouseBalance, setSystemHouseBalance] = useState<number | null>(null)
+  const [systemHouseBalancesByCurrency, setSystemHouseBalancesByCurrency] = useState<Record<string, number>>({})
+  const [systemPrimaryCurrency, setSystemPrimaryCurrency] = useState<string>('EUR')
+  const [systemBalanceFetched, setSystemBalanceFetched] = useState(false)
   const [ledgerBalancesLoading, setLedgerBalancesLoading] = useState(false)
   
   // Fetch wallets function - returns the wallets directly
+  // Use both wallets query and userWallets query to get all wallets with synced balances
   const fetchWallets = async (): Promise<any[]> => {
     console.log('[Wallets] Fetching from API...')
     setWalletsLoading(true)
     try {
-      const result = await graphqlWithAuth(`
+      // Fetch all wallets
+      const walletsResult = await graphqlWithAuth(`
         query ListWallets($first: Int) {
           wallets(first: $first) {
             nodes {
@@ -175,10 +181,11 @@ function WalletsTab() {
           }
         }
       `, { first: 100 }, authToken)
-      console.log('[Wallets] API Response:', JSON.stringify(result, null, 2))
-      const wallets = result?.wallets?.nodes || []
+      
+      const wallets = walletsResult?.wallets?.nodes || []
+      
       console.log('[Wallets] Parsed wallets:', wallets.length, 'wallets')
-      wallets.forEach((w: any) => console.log(`  - ${w.userId}: balance=${w.balance}`))
+      wallets.forEach((w: any) => console.log(`  - ${w.userId}: balance=${w.balance}, currency=${w.currency}`))
       return wallets
     } catch (err) {
       console.error('[Wallets] Fetch error:', err)
@@ -235,6 +242,50 @@ function WalletsTab() {
       }
       
       setProviderLedgerBalances(balances)
+      
+      // Fetch system house account balances (Platform Reserve)
+      try {
+        const systemBalanceResult = await graphqlWithAuth(`
+          query GetSystemHouseBalance($currencies: [String!]) {
+            systemHouseBalance(currencies: $currencies) {
+              totalBalance
+              balancesByCurrency
+              tenantId
+              currencies
+              primaryCurrency
+            }
+          }
+        `, { 
+          currencies: ['USD', 'EUR', 'GBP']
+        }, authToken)
+        
+        if (systemBalanceResult?.systemHouseBalance) {
+          const result = systemBalanceResult.systemHouseBalance
+          // Store balances by currency
+          const balancesByCurrency = result.balancesByCurrency || {}
+          setSystemHouseBalancesByCurrency(balancesByCurrency)
+          
+          // Set primary currency
+          const primaryCurrency = result.primaryCurrency || 'EUR'
+          setSystemPrimaryCurrency(primaryCurrency)
+          
+          // Use totalBalance which is in primaryCurrency
+          const balance = result.totalBalance ?? 0
+          setSystemHouseBalance(balance)
+          setSystemBalanceFetched(true)
+          
+          console.log('[Ledger] System house balance (primary):', balance, primaryCurrency)
+          console.log('[Ledger] Balances by currency:', balancesByCurrency)
+        }
+      } catch (err: any) {
+        // Silently handle errors - might not have permission or resolver not available yet
+        const isAuthError = err?.message?.includes('Not authorized') || err?.message?.includes('authorized')
+        if (!isAuthError) {
+          console.debug('[Ledger] Failed to fetch system house balance (may need to rebuild service):', err)
+        }
+        // Fall back to wallet balance if query fails
+        setSystemHouseBalance(0)
+      }
     } catch (err) {
       // Silently handle errors - user might not have permission
       const isAuthError = (err as any)?.message?.includes('Not authorized') || (err as any)?.message?.includes('authorized')
@@ -284,12 +335,13 @@ function WalletsTab() {
   // System wallets are wallets belonging to users with 'system' role
   const systemWallet = allWallets.find((w: any) => {
     // Check if wallet belongs to current user and user has 'system' role
-    return w.userId === user?.userId && user?.roles?.includes('system');
+    // User object has 'id' field, not 'userId'
+    return w.userId === user?.id && user?.roles?.includes('system');
   });
   const providerWallets = allWallets.filter((w: any) => w.userId?.startsWith('provider-'));
   const userWallets = allWallets.filter((w: any) => {
     // Exclude provider wallets and system wallets
-    return !w.userId?.startsWith('provider-') && !(w.userId === user?.userId && user?.roles?.includes('system'));
+    return !w.userId?.startsWith('provider-') && !(w.userId === user?.id && user?.roles?.includes('system'));
   });
   
   console.log('[Wallets] Current state - version:', walletsVersion, 'total:', allWallets.length, 'providers:', providerWallets.length)
@@ -323,13 +375,14 @@ function WalletsTab() {
     },
   })
 
-  // Fund wallet mutation (wallet transaction) - admin only
+  // Fund wallet mutation (wallet transaction) - admin/system only
   const fundWalletMutation = useMutation({
     mutationFn: async (input: { walletId: string; userId: string; type: string; amount: number; currency: string; description?: string }) => {
-      // Check if user is admin before attempting to create wallet transaction
+      // Check if user is admin or system before attempting to create wallet transaction
       const isAdmin = user?.roles?.includes('admin')
-      if (!isAdmin) {
-        throw new Error('Only administrators can fund wallets')
+      const isSystem = user?.roles?.includes('system')
+      if (!isAdmin && !isSystem) {
+        throw new Error('Only administrators or system users can fund wallets')
       }
       
       console.log('[Fund] Creating wallet transaction:', input)
@@ -358,12 +411,18 @@ function WalletsTab() {
           } 
         }, authToken)
         console.log('[Fund] Transaction result:', result)
+        
+        if (result?.createWalletTransaction?.errors && result.createWalletTransaction.errors.length > 0) {
+          throw new Error(result.createWalletTransaction.errors.join(', '))
+        }
+        
         return result
       } catch (err: any) {
+        console.error('[Fund] Error:', err)
         // Handle authorization errors gracefully
         const isAuthError = err?.message?.includes('Not authorized') || err?.message?.includes('authorized')
         if (isAuthError) {
-          throw new Error('You do not have permission to perform this action. Administrator access required.')
+          throw new Error('You do not have permission to perform this action. Administrator or system access required.')
         }
         throw err
       }
@@ -539,15 +598,47 @@ function WalletsTab() {
   })
 
   // Initialize system wallet if needed
+  // System wallet is for the logged-in user who has system role
   const initializeSystem = async () => {
     if (!systemWallet) {
-      await createWalletMutation.mutateAsync({ 
-        userId: 'system', 
-        currency: 'EUR', 
-        category: 'main',
-        tenantId: 'default-tenant'
-      })
-      await refetchWallets()
+      // User object has 'id' field, not 'userId'
+      if (!user?.id) {
+        alert('User not logged in. Please login first.')
+        return
+      }
+      
+      if (!user?.roles?.includes('system')) {
+        alert('You need system role to initialize system wallet.')
+        return
+      }
+      
+      try {
+        console.log('[InitializeSystem] Creating wallet for user:', user.id)
+        // Use USD as default (can be changed if needed)
+        const result = await createWalletMutation.mutateAsync({ 
+          userId: user.id, // Use actual user ID (user has system role) - user object has 'id' field
+          currency: 'USD', // Use USD as default for system wallet
+          category: 'main',
+          tenantId: 'default-tenant'
+        })
+        
+        console.log('[InitializeSystem] Result:', result)
+        
+        if (result?.createWallet?.success) {
+          // Wait a moment for wallet to be created
+          await new Promise(resolve => setTimeout(resolve, 500))
+          await refetchWallets()
+          alert('System wallet initialized successfully!')
+        } else {
+          const errors = result?.createWallet?.errors || ['Unknown error']
+          alert(`Failed to initialize system wallet: ${errors.join(', ')}`)
+        }
+      } catch (error: any) {
+        console.error('[initializeSystem] Error:', error)
+        alert(`Failed to initialize system wallet: ${error?.message || 'Unknown error'}`)
+      }
+    } else {
+      alert('System wallet already exists!')
     }
   }
 
@@ -592,10 +683,12 @@ function WalletsTab() {
     try {
       let walletId: string | null = null
 
-      // Check if provider wallet exists
-      console.log('[FundProvider] Looking for provider wallet:', systemFundForm.provider)
+      // Check if provider wallet exists (must match both userId and currency)
+      console.log('[FundProvider] Looking for provider wallet:', systemFundForm.provider, systemFundForm.currency)
       console.log('[FundProvider] Current provider wallets:', providerWallets)
-      const existingWallet = providerWallets.find((w: any) => w.userId === systemFundForm.provider)
+      const existingWallet = providerWallets.find(
+        (w: any) => w.userId === systemFundForm.provider && w.currency === systemFundForm.currency
+      )
 
       if (existingWallet) {
         console.log('[FundProvider] Found existing wallet:', existingWallet)
@@ -605,7 +698,7 @@ function WalletsTab() {
         // Create the provider wallet first and get the ID from response
         const createResult = await createWalletMutation.mutateAsync({
           userId: systemFundForm.provider,
-          currency: 'EUR',
+          currency: systemFundForm.currency, // Use selected currency, not hardcoded EUR
           category: 'main',
           tenantId: 'default-tenant'
         })
@@ -619,7 +712,9 @@ function WalletsTab() {
           // Refetch to find the new wallet
           console.log('[FundProvider] Refetching to find new wallet...')
           const refreshedWallets = await refetchWallets() // Now returns array directly
-          const newWallet = refreshedWallets.find((w: any) => w.userId === systemFundForm.provider)
+          const newWallet = refreshedWallets.find(
+            (w: any) => w.userId === systemFundForm.provider && w.currency === systemFundForm.currency
+          )
           walletId = newWallet?.id
           console.log('[FundProvider] Found wallet after refetch:', newWallet)
         }
@@ -631,29 +726,41 @@ function WalletsTab() {
       }
 
       console.log('[FundProvider] Funding wallet:', walletId)
-      // Fund the wallet
+      // Fund the wallet - userId should be the provider ID (not the system user ID)
+      // The backend handles the system house account automatically
       const fundResult = await fundWalletMutation.mutateAsync({
         walletId,
-        userId: 'system',
+        userId: systemFundForm.provider, // Provider ID (e.g., 'provider-stripe')
         type: 'deposit',
         amount: parseFloat(systemFundForm.amount) * 100,
         currency: systemFundForm.currency,
         description: `System funding to ${PROVIDERS.find(p => p.id === systemFundForm.provider)?.name}`,
       })
       console.log('[FundProvider] Fund result:', fundResult)
+      
+      if (!fundResult?.createWalletTransaction?.success) {
+        throw new Error(fundResult?.createWalletTransaction?.errors?.join(', ') || 'Failed to fund provider')
+      }
 
+      // Wait for ledger sync to complete (provider funding uses ledger)
+      console.log('[FundProvider] Waiting for ledger sync...')
+      await new Promise(resolve => setTimeout(resolve, 2000))
+      
       // Refetch to update UI with new balance
       console.log('[FundProvider] Refetching wallets to update UI...')
       const updatedWallets = await refetchWallets() // Now returns array directly
       console.log('[FundProvider] Updated wallets:', updatedWallets)
-      const updatedProvider = updatedWallets.find((w: any) => w.userId === systemFundForm.provider)
+      const updatedProvider = updatedWallets.find((w: any) => w.userId === systemFundForm.provider && w.currency === systemFundForm.currency)
       console.log('[FundProvider] Updated provider balance:', updatedProvider?.balance)
       
       // Refresh ledger balances
       await fetchProviderLedgerBalances()
       
       console.log('[FundProvider] Done!')
-      alert('Provider funded successfully!')
+      const balanceDisplay = updatedProvider?.balance !== undefined 
+        ? formatCurrency(updatedProvider.balance, systemFundForm.currency)
+        : 'checking...'
+      alert(`Provider funded successfully! New balance: ${balanceDisplay}`)
     } catch (err: any) {
       console.error('[FundProvider] Error:', err)
       const errorMessage = err?.message || 'Failed to fund provider'
@@ -668,25 +775,34 @@ function WalletsTab() {
     setIsFundingUser(true)
     
     try {
-      const userWallet = userWallets.find((w: any) => w.userId === providerToUserForm.userId)
+      const userWallet = userWallets.find((w: any) => w.userId === providerToUserForm.userId && w.currency === providerToUserForm.currency)
       if (!userWallet) {
         alert('User wallet not found. Create user wallet first.')
         return
       }
       
-      await fundWalletMutation.mutateAsync({
+      const result = await fundWalletMutation.mutateAsync({
         walletId: userWallet.id,
-        userId: providerToUserForm.provider,
+        userId: providerToUserForm.provider, // Provider ID
         type: 'deposit',
         amount: parseFloat(providerToUserForm.amount) * 100,
         currency: providerToUserForm.currency,
         description: `Deposit via ${PROVIDERS.find(p => p.id === providerToUserForm.provider)?.name}`,
       })
       
+      if (!result?.createWalletTransaction?.success) {
+        throw new Error(result?.createWalletTransaction?.errors?.join(', ') || 'Failed to fund user')
+      }
+      
+      // Wait for ledger sync
+      await new Promise(resolve => setTimeout(resolve, 1500))
+      
       // Refetch to update UI with new balance
       await refetchWallets()
       // Refresh ledger balances
       await fetchProviderLedgerBalances()
+      
+      alert('User wallet credited successfully!')
     } catch (err: any) {
       console.error('Error funding user:', err)
       const errorMsg = err.message || 'Unknown error'
@@ -703,49 +819,82 @@ function WalletsTab() {
   // User deposit request
   const handleUserDeposit = async () => {
     try {
-      await createDepositMutation.mutateAsync({
+      const result = await createDepositMutation.mutateAsync({
         userId: userDepositForm.userId,
         amount: parseFloat(userDepositForm.amount) * 100,
         currency: userDepositForm.currency,
         method: 'card',
       })
-      alert('Deposit request created successfully!')
-    } catch (error) {
+      
+      if (result?.createDeposit?.success) {
+        alert('Deposit created and approved successfully! Balance will update shortly.')
+        // Wait for sync and refresh
+        setTimeout(() => {
+          refetchWallets()
+        }, 1500)
+      } else {
+        alert('Deposit created but may need approval. Check transactions tab.')
+      }
+    } catch (error: any) {
       console.error('[handleUserDeposit] Error:', error)
+      alert(`Deposit failed: ${error?.message || 'Unknown error'}`)
     }
   }
 
   // User withdrawal request
   const handleUserWithdraw = async () => {
     try {
-      await createWithdrawalMutation.mutateAsync({
+      const result = await createWithdrawalMutation.mutateAsync({
         userId: userWithdrawForm.userId,
         amount: parseFloat(userWithdrawForm.amount) * 100,
         currency: userWithdrawForm.currency,
         method: 'bank_transfer',
         bankAccount: userWithdrawForm.bankAccount,
       })
-      alert('Withdrawal request created successfully!')
-    } catch (error) {
+      
+      if (result?.createWithdrawal?.success) {
+        alert('Withdrawal created and approved successfully! Balance will update shortly.')
+        // Wait for sync and refresh
+        setTimeout(() => {
+          refetchWallets()
+        }, 1500)
+      } else {
+        alert('Withdrawal created but may need approval. Check transactions tab.')
+      }
+    } catch (error: any) {
       console.error('[handleUserWithdraw] Error:', error)
+      alert(`Withdrawal failed: ${error?.message || 'Unknown error'}`)
     }
   }
 
   // Create user wallet
   const handleCreateUserWallet = async () => {
-    await createWalletMutation.mutateAsync({
-      userId: newUserForm.userId,
-      currency: newUserForm.currency,
-      category: 'main',
-      tenantId: 'default-tenant',
-    })
-    setNewUserForm({ userId: '', currency: 'EUR' })
-    // Refetch to show new wallet
-    await refetchWallets()
+    try {
+      const result = await createWalletMutation.mutateAsync({
+        userId: newUserForm.userId,
+        currency: newUserForm.currency,
+        category: 'main',
+        tenantId: 'default-tenant',
+      })
+      
+      if (result?.createWallet?.success) {
+        setNewUserForm({ userId: '', currency: 'EUR' })
+        // Refetch to show new wallet
+        await refetchWallets()
+        alert('Wallet created successfully!')
+      } else {
+        alert(`Wallet creation failed: ${result?.createWallet?.errors?.join(', ') || 'Unknown error'}`)
+      }
+    } catch (error: any) {
+      console.error('[handleCreateUserWallet] Error:', error)
+      alert(`Failed to create wallet: ${error?.message || 'Unknown error'}`)
+    }
   }
 
   // Calculate totals
-  const systemBalance = systemWallet?.balance || 0
+  // System Reserve should show the ledger system house account balance (Platform Reserve)
+  // Use systemHouseBalance from ledger if it has been fetched (can be negative), otherwise fall back to wallet balance
+  const systemBalance = systemBalanceFetched && systemHouseBalance !== null ? systemHouseBalance : (systemWallet?.balance || 0)
   const providerTotalBalance = providerWallets.reduce((sum: number, w: any) => sum + (w.balance || 0), 0)
   const userTotalBalance = userWallets.reduce((sum: number, w: any) => sum + (w.balance || 0), 0)
 
@@ -790,9 +939,42 @@ function WalletsTab() {
               <div style={{ fontSize: 24, marginBottom: 4 }}>🏛️</div>
               <div style={{ fontWeight: 600, color: activeSection === 'system' ? 'white' : 'var(--text-primary)' }}>System</div>
               <div style={{ fontSize: 12, color: activeSection === 'system' ? 'rgba(255,255,255,0.8)' : 'var(--text-muted)' }}>Platform Reserve</div>
-              <div style={{ fontSize: 16, fontWeight: 700, marginTop: 8, fontFamily: 'var(--font-mono)', color: activeSection === 'system' ? 'white' : 'var(--accent-cyan)' }}>
-                {formatCurrency(systemBalance)}
+              <div style={{ 
+                fontSize: 16, 
+                fontWeight: 700, 
+                marginTop: 8, 
+                fontFamily: 'var(--font-mono)', 
+                color: systemBalance < 0 
+                  ? (activeSection === 'system' ? '#ff6b6b' : '#ff6b6b')
+                  : (activeSection === 'system' ? 'white' : 'var(--accent-cyan)')
+              }}>
+                {formatCurrency(systemBalance, systemPrimaryCurrency)}
               </div>
+              {/* Show breakdown of all currencies */}
+              {systemBalanceFetched && Object.keys(systemHouseBalancesByCurrency).length > 0 && (
+                <div style={{ 
+                  fontSize: 10, 
+                  marginTop: 4, 
+                  color: activeSection === 'system' ? 'rgba(255,255,255,0.7)' : 'var(--text-muted)',
+                  lineHeight: 1.4
+                }}>
+                  {Object.entries(systemHouseBalancesByCurrency)
+                    .sort(([a], [b]) => {
+                      // Sort: primary currency first, then others
+                      if (a === systemPrimaryCurrency) return -1
+                      if (b === systemPrimaryCurrency) return 1
+                      return a.localeCompare(b)
+                    })
+                    .map(([currency, balance]) => (
+                      <div key={currency} style={{ 
+                        opacity: balance === 0 ? 0.5 : 1,
+                        fontWeight: currency === systemPrimaryCurrency ? 600 : 400
+                      }}>
+                        {currency}: {formatCurrency(balance, currency)}
+                      </div>
+                    ))}
+                </div>
+              )}
             </div>
 
             {/* Arrow */}

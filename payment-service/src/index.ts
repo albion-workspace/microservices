@@ -105,7 +105,7 @@ const config = {
             // Call the default wallets resolver
             const result: any = await walletService.resolvers.Query.wallets(args, ctx);
             
-            // Sync system and provider wallets from ledger before returning
+            // Sync ALL wallets from ledger before returning (provider, system, and regular user wallets)
             if (result && result.nodes && Array.isArray(result.nodes)) {
               const db = getDatabase();
               const syncPromises = result.nodes.map(async (wallet: any) => {
@@ -121,29 +121,30 @@ const config = {
                   isSystemWallet = user?.roles?.includes(SYSTEM_ROLE) || false;
                 }
                 
-                // Sync provider wallets and system user wallets
-                if (isProviderWallet || isSystemWallet) {
-                  try {
-                    const { syncWalletBalanceFromLedger } = await import('./services/ledger-service.js');
-                    await syncWalletBalanceFromLedger(wallet.userId, wallet.id, wallet.currency);
-                    // Re-fetch wallet to get updated balance (optimized: only fetch balance fields)
-                    const syncedWallet = await db.collection('wallets').findOne(
-                      { id: wallet.id },
-                      { projection: { balance: 1, bonusBalance: 1, lockedBalance: 1 } }
-                    );
-                    if (syncedWallet) {
-                      wallet.balance = syncedWallet.balance ?? wallet.balance;
-                      wallet.bonusBalance = syncedWallet.bonusBalance ?? wallet.bonusBalance;
-                      wallet.lockedBalance = syncedWallet.lockedBalance ?? wallet.lockedBalance;
-                    }
-                  } catch (syncError) {
-                    // Don't fail the query if sync fails
-                    logger.debug('Could not sync wallet in query', { 
-                      walletId: wallet.id, 
-                      userId: wallet.userId,
-                      error: syncError instanceof Error ? syncError.message : String(syncError)
-                    });
+                // Sync ALL wallets from ledger (provider, system, and regular user wallets)
+                // This ensures balances are always up-to-date from the ledger (source of truth)
+                try {
+                  const { syncWalletBalanceFromLedger } = await import('./services/ledger-service.js');
+                  await syncWalletBalanceFromLedger(wallet.userId, wallet.id, wallet.currency);
+                  // Re-fetch wallet to get updated balance (optimized: only fetch balance fields)
+                  const syncedWallet = await db.collection('wallets').findOne(
+                    { id: wallet.id },
+                    { projection: { balance: 1, bonusBalance: 1, lockedBalance: 1 } }
+                  );
+                  if (syncedWallet) {
+                    wallet.balance = syncedWallet.balance ?? wallet.balance;
+                    wallet.bonusBalance = syncedWallet.bonusBalance ?? wallet.bonusBalance;
+                    wallet.lockedBalance = syncedWallet.lockedBalance ?? wallet.lockedBalance;
                   }
+                } catch (syncError) {
+                  // Don't fail the query if sync fails - log at debug level
+                  logger.debug('Could not sync wallet in query', { 
+                    walletId: wallet.id, 
+                    userId: wallet.userId,
+                    isProvider: isProviderWallet,
+                    isSystem: isSystemWallet,
+                    error: syncError instanceof Error ? syncError.message : String(syncError)
+                  });
                 }
               });
               
@@ -171,43 +172,29 @@ const config = {
               return wallet;
             }
             
-            // Sync system and provider wallets from ledger before returning
-            const db = getDatabase();
-            const isProviderWallet = wallet.userId?.startsWith('provider-');
-            
-            // Check if wallet belongs to a user with 'system' role (optimized: only fetch roles)
-            let isSystemWallet = false;
-            if (!isProviderWallet && wallet.userId) {
-              const user = await db.collection('users').findOne(
-                { id: wallet.userId },
-                { projection: { roles: 1 } } // Only fetch roles field for performance
+            // Sync ALL wallets from ledger before returning (provider, system, and regular user wallets)
+            // This ensures balances are always up-to-date from the ledger (source of truth)
+            try {
+              const { syncWalletBalanceFromLedger } = await import('./services/ledger-service.js');
+              await syncWalletBalanceFromLedger(wallet.userId, wallet.id, wallet.currency);
+              // Re-fetch wallet to get updated balance (optimized: only fetch balance fields)
+              const db = getDatabase();
+              const syncedWallet = await db.collection('wallets').findOne(
+                { id: wallet.id },
+                { projection: { balance: 1, bonusBalance: 1, lockedBalance: 1 } }
               );
-              isSystemWallet = user?.roles?.includes(SYSTEM_ROLE) || false;
-            }
-            
-            // Sync provider wallets and system user wallets
-            if (isProviderWallet || isSystemWallet) {
-              try {
-                const { syncWalletBalanceFromLedger } = await import('./services/ledger-service.js');
-                await syncWalletBalanceFromLedger(wallet.userId, wallet.id, wallet.currency);
-                // Re-fetch wallet to get updated balance (optimized: only fetch balance fields)
-                const syncedWallet = await db.collection('wallets').findOne(
-                  { id: wallet.id },
-                  { projection: { balance: 1, bonusBalance: 1, lockedBalance: 1 } }
-                );
-                if (syncedWallet) {
-                  wallet.balance = syncedWallet.balance ?? wallet.balance;
-                  wallet.bonusBalance = syncedWallet.bonusBalance ?? wallet.bonusBalance;
-                  wallet.lockedBalance = syncedWallet.lockedBalance ?? wallet.lockedBalance;
-                }
-              } catch (syncError) {
-                // Don't fail the query if sync fails
-                logger.debug('Could not sync wallet in query', { 
-                  walletId: wallet.id, 
-                  userId: wallet.userId,
-                  error: syncError instanceof Error ? syncError.message : String(syncError)
-                });
+              if (syncedWallet) {
+                wallet.balance = syncedWallet.balance ?? wallet.balance;
+                wallet.bonusBalance = syncedWallet.bonusBalance ?? wallet.bonusBalance;
+                wallet.lockedBalance = syncedWallet.lockedBalance ?? wallet.lockedBalance;
               }
+            } catch (syncError) {
+              // Don't fail the query if sync fails - log at debug level
+              logger.debug('Could not sync wallet in query', { 
+                walletId: wallet.id, 
+                userId: wallet.userId,
+                error: syncError instanceof Error ? syncError.message : String(syncError)
+              });
             }
             
             // Normalize null values to 0 for bonusBalance and lockedBalance
@@ -315,6 +302,7 @@ const config = {
       ledgerAccountBalance: isAuthenticated,
       providerLedgerBalance: hasRole('admin'),
       bonusPoolBalance: hasRole('admin'),
+      systemHouseBalance: hasRole('admin'),
       // Webhooks (admin only)
       webhooks: hasRole('admin'),
       webhook: hasRole('admin'),

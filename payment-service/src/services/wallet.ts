@@ -504,12 +504,15 @@ const walletTxSaga = [
             if (isCredit && input.type === 'deposit') {
               try {
                 // Record system funding in ledger BEFORE updating wallet
+                // Generate a unique wallet transaction ID to use as externalRef
+                const walletTxId = `wallet-tx-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
                 const ledgerTxId = await recordSystemFundProviderLedgerEntry(
                   input.userId, // providerId
                   input.amount,
                   input.currency,
                   wallet?.tenantId || 'default',
-                  input.description || `System funding to provider ${input.userId}`
+                  input.description || `System funding to provider ${input.userId}`,
+                  walletTxId // Pass wallet transaction ID as externalRef
                 );
                 logger.info('Provider funding recorded in ledger', {
                   providerId: input.userId,

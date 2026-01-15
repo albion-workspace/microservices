@@ -177,6 +177,58 @@ export const ledgerResolvers = {
         throw new Error(`Failed to get bonus pool balance: ${error instanceof Error ? error.message : String(error)}`);
       }
     },
+    
+    /**
+     * Get system house account balance (Platform Reserve)
+     * Returns balances per currency (cannot sum different currencies)
+     */
+    systemHouseBalance: async (
+      args: Record<string, unknown>,
+      ctx: ResolverContext
+    ) => {
+      requireAuth(ctx);
+      const tenantId = getTenantId(ctx) || 'default-tenant';
+      const currencies = (args.currencies as string[]) || ['USD', 'EUR', 'GBP'];
+      
+      try {
+        const ledger = getLedger();
+        const balancesByCurrency: Record<string, number> = {};
+        
+        // Get balances from all currency-specific system house accounts
+        for (const currency of currencies) {
+          try {
+            const accountId = `system:house:${currency.toLowerCase()}:${tenantId}`;
+            const account = await ledger.getAccount(accountId);
+            if (account) {
+              const balance = await ledger.getBalance(accountId);
+              balancesByCurrency[currency] = balance.balance;
+            } else {
+              balancesByCurrency[currency] = 0;
+            }
+          } catch (err) {
+            // Account might not exist for this currency - set to 0
+            balancesByCurrency[currency] = 0;
+            logger.debug('System house account not found for currency', { currency, tenantId });
+          }
+        }
+        
+        // Calculate total in primary currency (EUR) for display
+        // Note: In a real system, you'd want to convert currencies, but for now we'll use EUR as base
+        const primaryCurrency = 'EUR';
+        const totalBalance = balancesByCurrency[primaryCurrency] || 0;
+        
+        return {
+          totalBalance,
+          balancesByCurrency,
+          tenantId,
+          currencies,
+          primaryCurrency,
+        };
+      } catch (error) {
+        logger.error('Failed to get system house balance', { error, tenantId });
+        throw new Error(`Failed to get system house balance: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    },
   },
   Mutation: {},
 };
@@ -204,6 +256,14 @@ export const ledgerTypes = `
     availableBalance: Float!
   }
   
+  type SystemHouseBalance {
+    totalBalance: Float!
+    balancesByCurrency: JSON!
+    tenantId: String!
+    currencies: [String!]!
+    primaryCurrency: String!
+  }
+  
   extend type Query {
     """
     Get user's ledger account balance (real, bonus, or locked)
@@ -227,5 +287,11 @@ export const ledgerTypes = `
     Get bonus pool balance
     """
     bonusPoolBalance(currency: String): BonusPoolBalance
+    
+    """
+    Get system house account balance (Platform Reserve)
+    Sum of all currency-specific system house accounts
+    """
+    systemHouseBalance(currencies: [String!]): SystemHouseBalance
   }
 `;

@@ -512,22 +512,23 @@ export async function recordSystemFundProviderLedgerEntry(
   amount: number,
   currency: string,
   tenantId: string,
-  description?: string
+  description?: string,
+  walletTransactionId?: string
 ): Promise<string> {
   const ledger = getLedger();
   
   // Get or create provider account
   const providerAccountId = await getOrCreateProviderAccount(providerId, 'deposit', currency);
   
-  // Get system house account ID (default format)
-  const defaultSystemAccountId = ledger.getSystemAccountId('house');
+  // Always use currency-specific system house account to avoid currency mismatches
+  // Format: system:house:{currency}:{tenantId}
+  const systemAccountId = `system:house:${currency.toLowerCase()}:${tenantId}`;
   
-  // Check if system account exists and matches currency
-  let systemAccount = await ledger.getAccount(defaultSystemAccountId);
-  let systemAccountId = defaultSystemAccountId;
+  // Check if currency-specific system account exists
+  let systemAccount = await ledger.getAccount(systemAccountId);
   
   if (!systemAccount) {
-    // Create system house account with the funding currency
+    // Create currency-specific system house account
     // Use upsert to handle race conditions
     const db = getDatabase();
     try {
@@ -556,68 +557,24 @@ export async function recordSystemFundProviderLedgerEntry(
       // Re-fetch to get the created account
       systemAccount = await ledger.getAccount(systemAccountId);
       if (systemAccount) {
-        logger.info('Created system house account', { currency, accountId: systemAccountId });
+        logger.info('Created currency-specific system house account', { currency, accountId: systemAccountId });
       }
     } catch (upsertError: any) {
       // If duplicate key error, account was created by another request
       if (upsertError.code === 11000 || upsertError.message?.includes('duplicate key') || upsertError.message?.includes('E11000')) {
         systemAccount = await ledger.getAccount(systemAccountId);
         if (systemAccount) {
-          logger.debug('System house account already exists (race condition)', { currency, accountId: systemAccountId });
+          logger.debug('Currency-specific system house account already exists (race condition)', { currency, accountId: systemAccountId });
         }
       } else {
         throw upsertError;
       }
     }
-  } else if (systemAccount.currency !== currency) {
-    // Currency mismatch - create currency-specific account
-    systemAccountId = `system:house:${currency.toLowerCase()}:${tenantId}`;
-    systemAccount = await ledger.getAccount(systemAccountId);
-    
-    if (!systemAccount) {
-      // Create currency-specific system account
-      // Use upsert to handle race conditions
-      const db = getDatabase();
-      try {
-        await db.collection('ledger_accounts').updateOne(
-          { _id: systemAccountId as any },
-          {
-            $setOnInsert: {
-              _id: systemAccountId as any,
-              tenantId,
-              type: 'system',
-              subtype: 'house',
-              currency,
-              balance: 0,
-              availableBalance: 0,
-              pendingIn: 0,
-              pendingOut: 0,
-              allowNegative: true,
-              status: 'active',
-              lastEntrySequence: 0,
-              createdAt: new Date(),
-              updatedAt: new Date(),
-            },
-          },
-          { upsert: true }
-        );
-        // Re-fetch to ensure we have the correct format
-        systemAccount = await ledger.getAccount(systemAccountId);
-        if (systemAccount) {
-          logger.info('Created currency-specific system house account', { currency, accountId: systemAccountId });
-        }
-      } catch (upsertError: any) {
-        // If duplicate key error, account was created by another request
-        if (upsertError.code === 11000 || upsertError.message?.includes('duplicate key') || upsertError.message?.includes('E11000')) {
-          systemAccount = await ledger.getAccount(systemAccountId);
-          if (systemAccount) {
-            logger.debug('Currency-specific system house account already exists (race condition)', { currency, accountId: systemAccountId });
-          }
-        } else {
-          throw upsertError;
-        }
-      }
-    }
+  }
+  
+  // Verify the account currency matches (safety check)
+  if (systemAccount && systemAccount.currency !== currency) {
+    throw new Error(`System house account currency mismatch: expected ${currency}, got ${systemAccount.currency}`);
   }
   
   if (!systemAccount) {
@@ -640,6 +597,9 @@ export async function recordSystemFundProviderLedgerEntry(
   });
   
   // Record funding: System House -> Provider
+  // Always provide externalRef to avoid duplicate key errors
+  const externalRef = walletTransactionId || `provider-funding-${providerId}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  
   let fundingTx;
   try {
     fundingTx = await ledger.createTransaction({
@@ -649,11 +609,13 @@ export async function recordSystemFundProviderLedgerEntry(
       amount,
       currency,
       description: description || `System funding to provider ${providerId}`,
+      externalRef, // Always provide externalRef to avoid duplicate key errors
       initiatedBy: 'system',
       metadata: {
         providerId,
         tenantId,
         fundingType: 'provider',
+        walletTransactionId,
       },
     });
     
