@@ -2,7 +2,7 @@
  * Notification Service GraphQL Schema & Resolvers
  */
 
-import { logger } from 'core-service';
+import { logger, requireAuth, getUserId, getErrorMessage } from 'core-service';
 import type { ResolverContext } from 'core-service';
 import type { NotificationService } from './notification-service.js';
 
@@ -109,16 +109,14 @@ export function createNotificationResolvers(notificationService: NotificationSer
         args: Record<string, any>,
         context: ResolverContext
       ) => {
-        if (!context.user) {
-          throw new Error('Authentication required');
-        }
+        requireAuth(context);
         
         const { getDatabase } = await import('core-service');
         const db = getDatabase();
         
         const notifications = await db
           .collection('notifications')
-          .find({ userId: context.user.userId })
+          .find({ userId: getUserId(context) })
           .sort({ createdAt: -1 })
           .limit(args.limit || 50)
           .skip(args.offset || 0)
@@ -128,7 +126,7 @@ export function createNotificationResolvers(notificationService: NotificationSer
       },
       
       notificationStats: async (args: any, context: ResolverContext) => {
-        if (!context.user?.roles?.includes('admin')) {
+        if (!context.user!.roles?.includes('admin')) {
           throw new Error('Admin access required');
         }
         
@@ -181,7 +179,7 @@ export function createNotificationResolvers(notificationService: NotificationSer
             ...input,
             channel: input.channel.toLowerCase(),
             priority: input.priority?.toLowerCase() || 'normal',
-            userId: input.userId || context.user?.userId, // Use provided userId or context userId
+            userId: input.userId || (context.user ? getUserId(context) : undefined), // Use provided userId or context userId
           });
           
           return {
@@ -190,12 +188,13 @@ export function createNotificationResolvers(notificationService: NotificationSer
             notificationId: result.id,
             status: result.status.toUpperCase(),
           };
-        } catch (error: any) {
-          logger.error('Failed to send notification', { error: error.message });
+        } catch (e: any) {
+          const error = getErrorMessage(e);
+          logger.error('Failed to send notification', { error });
           
           return {
             success: false,
-            message: error.message,
+            message: error
           };
         }
       },

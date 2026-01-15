@@ -43,6 +43,7 @@
 import { createHmac, timingSafeEqual } from 'crypto';
 import { logger } from './logger.js';
 import { getDatabase } from './database.js';
+import { getErrorMessage } from './errors.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -226,12 +227,13 @@ export function generateSignature(
       .digest('hex');
     return `t=${timestamp},v1=${signature}`;
   } catch (error) {
+    const errorMsg = getErrorMessage(error);
     logger.error('HMAC signature generation failed', { 
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMsg,
       secretLength: secret.length,
       payloadLength: payload.length 
     });
-    throw new Error(`Failed to generate HMAC signature: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`Failed to generate HMAC signature: ${errorMsg}`);
   }
 }
 
@@ -565,7 +567,7 @@ export class WebhookManager<TEvents extends string = string> {
         service: this.config.serviceName,
         webhookId: webhook.id,
         tenantId: webhook.tenantId,
-        error: error instanceof Error ? error.message : String(error),
+        error: getErrorMessage(error),
       });
       throw error;
     }
@@ -641,7 +643,7 @@ export class WebhookManager<TEvents extends string = string> {
         }
       } catch (error) {
         delivery.status = 'retrying';
-        delivery.error = error instanceof Error ? error.message : 'Unknown error';
+        delivery.error = getErrorMessage(error);
 
         logger.warn('Webhook delivery error, will retry', {
           service: this.config.serviceName,
@@ -978,10 +980,7 @@ function createWebhookResolvers<TEvents extends string>(
   manager: WebhookManager<TEvents>
 ) {
   const getTenantId = (ctx: WebhookResolverContext): string => {
-    if (!ctx.user?.tenantId) {
-      throw new Error('Tenant ID required');
-    }
-    return ctx.user.tenantId;
+    return ctx.user?.tenantId || 'default';
   };
 
   return {

@@ -7,7 +7,7 @@
  * - Microservices (cross-service references)
  */
 
-import { getDatabase } from 'core-service';
+import { getDatabase, logger } from 'core-service';
 
 /**
  * Collection mapping for reference types
@@ -57,8 +57,8 @@ export async function resolveReference(
   
   try {
     return await collection.findOne({ id: refId }, { projection: { _id: 0 } });
-  } catch (err) {
-    console.error(`Failed to resolve reference ${refType}:${refId}`, err);
+  } catch (error) {
+    logger.error(`Failed to resolve reference ${refType}:${refId}`, { error });
     return null;
   }
 }
@@ -141,7 +141,7 @@ export async function batchResolveReferences<T extends Record<string, any>>(
         refCache.set(`${refType}:${ref.id}`, ref);
       }
     } catch (err) {
-      console.error(`Failed to batch resolve ${refType} references`, err);
+      logger.error(`Failed to batch resolve ${refType} references`, { error: err });
     }
   }
   

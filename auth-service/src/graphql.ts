@@ -3,6 +3,7 @@
  */
 
 import type { ResolverContext } from 'core-service';
+import { requireAuth, getUserId, getTenantId } from 'core-service';
 import type { 
   RegisterInput, 
   LoginInput, 
@@ -269,15 +270,13 @@ export function createAuthResolvers(
        * Get current authenticated user
        */
       me: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-        if (!ctx.user) {
-          throw new Error('Not authenticated');
-        }
+        requireAuth(ctx);
         
         const { getDatabase } = await import('core-service');
         const db = getDatabase();
         return await db.collection('users').findOne({
-          id: ctx.user.userId,
-          tenantId: ctx.user.tenantId,
+          id: getUserId(ctx),
+          tenantId: getTenantId(ctx),
         });
       },
       
@@ -285,12 +284,10 @@ export function createAuthResolvers(
        * Get user by ID (admin only)
        */
       getUser: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-        if (!ctx.user) {
-          throw new Error('Not authenticated');
-        }
+        requireAuth(ctx);
         
         // Check if user is admin
-        if (!ctx.user.roles.includes('admin')) {
+        if (!ctx.user!.roles.includes('admin')) {
           throw new Error('Unauthorized');
         }
         
@@ -306,12 +303,10 @@ export function createAuthResolvers(
        * List all users (admin only)
        */
       users: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-        if (!ctx.user) {
-          throw new Error('Not authenticated');
-        }
+        requireAuth(ctx);
         
         // Check if user is admin
-        if (!ctx.user.roles.includes('admin')) {
+        if (!ctx.user!.roles.includes('admin')) {
           throw new Error('Unauthorized');
         }
         
@@ -348,16 +343,14 @@ export function createAuthResolvers(
        * Get user's active sessions
        */
       mySessions: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-        if (!ctx.user) {
-          throw new Error('Not authenticated');
-        }
+        requireAuth(ctx);
         
         const { getDatabase } = await import('core-service');
         const db = getDatabase();
         const sessions = await db.collection('sessions')
           .find({
-            userId: ctx.user.userId,
-            tenantId: ctx.user.tenantId,
+            userId: getUserId(ctx),
+            tenantId: getTenantId(ctx),
             isValid: true,
           })
           .sort({ lastAccessedAt: -1 })
@@ -391,22 +384,18 @@ export function createAuthResolvers(
        * Logout user
        */
       logout: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-        if (!ctx.user) {
-          throw new Error('Not authenticated');
-        }
+        requireAuth(ctx);
         
-        return await authenticationService.logout(ctx.user.userId, (args as any).refreshToken);
+        return await authenticationService.logout(getUserId(ctx), (args as any).refreshToken);
       },
       
       /**
        * Logout from all devices
        */
       logoutAll: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-        if (!ctx.user) {
-          throw new Error('Not authenticated');
-        }
+        requireAuth(ctx);
         
-        return await authenticationService.logoutAll(ctx.user.userId);
+        return await authenticationService.logoutAll(getUserId(ctx));
       },
       
       /**
@@ -457,14 +446,12 @@ export function createAuthResolvers(
        * Change password
        */
       changePassword: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-        if (!ctx.user) {
-          throw new Error('Not authenticated');
-        }
+        requireAuth(ctx);
         
         return await passwordService.changePassword({
           ...(args as any).input,
-          userId: ctx.user.userId,
-          tenantId: ctx.user.tenantId,
+          userId: getUserId(ctx),
+          tenantId: getTenantId(ctx),
         });
       },
       
@@ -472,14 +459,12 @@ export function createAuthResolvers(
        * Enable 2FA
        */
       enable2FA: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-        if (!ctx.user) {
-          throw new Error('Not authenticated');
-        }
+        requireAuth(ctx);
         
         return await twoFactorService.enable2FA({
           ...(args as any).input,
-          userId: ctx.user.userId,
-          tenantId: ctx.user.tenantId,
+          userId: getUserId(ctx),
+          tenantId: getTenantId(ctx),
         });
       },
       
@@ -487,14 +472,12 @@ export function createAuthResolvers(
        * Verify 2FA
        */
       verify2FA: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-        if (!ctx.user) {
-          throw new Error('Not authenticated');
-        }
+        requireAuth(ctx);
         
         return await twoFactorService.verify2FA({
           ...(args as any).input,
-          userId: ctx.user.userId,
-          tenantId: ctx.user.tenantId,
+          userId: getUserId(ctx),
+          tenantId: getTenantId(ctx),
         });
       },
       
@@ -502,24 +485,20 @@ export function createAuthResolvers(
        * Disable 2FA
        */
       disable2FA: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-        if (!ctx.user) {
-          throw new Error('Not authenticated');
-        }
+        requireAuth(ctx);
         
-        return await twoFactorService.disable2FA(ctx.user.userId, ctx.user.tenantId, (args as any).password);
+        return await twoFactorService.disable2FA(getUserId(ctx), getTenantId(ctx), (args as any).password);
       },
       
       /**
        * Regenerate backup codes
        */
       regenerateBackupCodes: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-        if (!ctx.user) {
-          throw new Error('Not authenticated');
-        }
+        requireAuth(ctx);
         
         return await twoFactorService.regenerateBackupCodes({
-          userId: ctx.user.userId,
-          tenantId: ctx.user.tenantId,
+          userId: getUserId(ctx),
+          tenantId: getTenantId(ctx),
           password: (args as any).password,
         });
       },
@@ -528,11 +507,9 @@ export function createAuthResolvers(
        * Update user roles (admin only)
        */
       updateUserRoles: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-        if (!ctx.user) {
-          throw new Error('Not authenticated');
-        }
+        requireAuth(ctx);
         
-        if (!ctx.user.roles.includes('admin')) {
+        if (!ctx.user!.roles.includes('admin')) {
           throw new Error('Unauthorized');
         }
         
@@ -562,11 +539,9 @@ export function createAuthResolvers(
        * Update user permissions (admin only)
        */
       updateUserPermissions: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-        if (!ctx.user) {
-          throw new Error('Not authenticated');
-        }
+        requireAuth(ctx);
         
-        if (!ctx.user.roles.includes('admin')) {
+        if (!ctx.user!.roles.includes('admin')) {
           throw new Error('Unauthorized');
         }
         
@@ -596,11 +571,9 @@ export function createAuthResolvers(
        * Update user status (admin only)
        */
       updateUserStatus: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-        if (!ctx.user) {
-          throw new Error('Not authenticated');
-        }
+        requireAuth(ctx);
         
-        if (!ctx.user.roles.includes('admin')) {
+        if (!ctx.user!.roles.includes('admin')) {
           throw new Error('Unauthorized');
         }
         

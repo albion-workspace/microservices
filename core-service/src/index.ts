@@ -108,6 +108,12 @@ export type { CleanupTask, EventListenerConfig } from './common/service-lifecycl
 // Validation
 export { validateInput } from './common/validation.js';
 
+// Error Utilities
+export { getErrorMessage, normalizeError } from './common/errors.js';
+
+// Resolver Utilities
+export { requireAuth, getTenantId, getUserId } from './common/resolvers.js';
+
 // ═══════════════════════════════════════════════════════════════════
 // Types (from src/types/)
 // ═══════════════════════════════════════════════════════════════════

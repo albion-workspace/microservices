@@ -9,6 +9,7 @@
 import type { ClientSession } from 'mongodb';
 import { logger } from '../common/logger.js';
 import { getClient } from '../common/database.js';
+import { getErrorMessage } from '../common/errors.js';
 import type { SagaStep, SagaContext, SagaResult, SagaOptions } from './types.js';
 
 export interface ExecuteSagaOptions {
@@ -77,7 +78,7 @@ async function executeSagaWithTransaction<TEntity, TInput>(
         return { success: true, context, completedSteps };
         
       } catch (error) {
-        const errorMsg = error instanceof Error ? error.message : String(error);
+        const errorMsg = getErrorMessage(error);
         
         // Check for transient errors (can retry)
         if (isTransientError(error) && retries < maxRetries - 1) {
@@ -124,7 +125,7 @@ async function executeSagaWithCompensation<TEntity, TInput>(
         context = await step.execute(context);
         completedSteps.push(step.name);
       } catch (error) {
-        const errorMsg = error instanceof Error ? error.message : String(error);
+        const errorMsg = getErrorMessage(error);
         logger.error(`Saga ${sagaId} failed at ${step.name}`, { error: errorMsg });
         
         if (step.critical !== false) {
@@ -138,7 +139,7 @@ async function executeSagaWithCompensation<TEntity, TInput>(
     logger.info(`Saga ${sagaId} completed`);
     return { success: true, context, completedSteps };
   } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
+    const errorMsg = getErrorMessage(error);
     return { success: false, context: { ...context, error: errorMsg }, error: errorMsg, completedSteps };
   }
 }
