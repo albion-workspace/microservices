@@ -116,7 +116,7 @@ const PROVIDERS = [
 
 function WalletsTab() {
   const queryClient = useQueryClient()
-  const { tokens } = useAuth()
+  const { tokens, user } = useAuth()
   const authToken = tokens?.accessToken
   
   // Active section
@@ -148,6 +148,10 @@ function WalletsTab() {
   const [walletsList, setWalletsList] = useState<any[]>([])
   const [walletsLoading, setWalletsLoading] = useState(false)
   const [walletsVersion, setWalletsVersion] = useState(0) // Force re-render trigger
+  
+  // Ledger balances state
+  const [providerLedgerBalances, setProviderLedgerBalances] = useState<Record<string, number>>({})
+  const [ledgerBalancesLoading, setLedgerBalancesLoading] = useState(false)
   
   // Fetch wallets function - returns the wallets directly
   const fetchWallets = async (): Promise<any[]> => {
@@ -184,6 +188,64 @@ function WalletsTab() {
     }
   }
   
+  // Fetch provider ledger balances (admin only)
+  const fetchProviderLedgerBalances = async () => {
+    if (!authToken || !user) return
+    
+    // Only fetch ledger balances if user is admin
+    const isAdmin = user.roles?.includes('admin')
+    if (!isAdmin) {
+      setLedgerBalancesLoading(false)
+      return
+    }
+    
+    setLedgerBalancesLoading(true)
+    try {
+      const balances: Record<string, number> = {}
+      
+      // Fetch ledger balances for each provider
+      for (const provider of PROVIDERS) {
+        try {
+          const result = await graphqlWithAuth(`
+            query GetProviderLedgerBalance($providerId: String!, $subtype: String!, $currency: String!) {
+              providerLedgerBalance(providerId: $providerId, subtype: $subtype, currency: $currency) {
+                accountId
+                providerId
+                balance
+                availableBalance
+              }
+            }
+          `, {
+            providerId: provider.id,
+            subtype: 'deposit',
+            currency: 'EUR'
+          }, authToken)
+          
+          if (result?.providerLedgerBalance) {
+            balances[provider.id] = result.providerLedgerBalance.balance || 0
+          }
+        } catch (err: any) {
+          // Silently skip authorization errors (user might not be admin)
+          const isAuthError = err?.message?.includes('Not authorized') || err?.message?.includes('authorized')
+          if (!isAuthError) {
+            console.warn(`Failed to fetch ledger balance for ${provider.id}:`, err)
+          }
+          // Continue - ledger might not be initialized yet or user doesn't have permission
+        }
+      }
+      
+      setProviderLedgerBalances(balances)
+    } catch (err) {
+      // Silently handle errors - user might not have permission
+      const isAuthError = (err as any)?.message?.includes('Not authorized') || (err as any)?.message?.includes('authorized')
+      if (!isAuthError) {
+        console.error('[Ledger] Failed to fetch provider balances:', err)
+      }
+    } finally {
+      setLedgerBalancesLoading(false)
+    }
+  }
+  
   // Load wallets and update state
   const loadWallets = async () => {
     const wallets = await fetchWallets()
@@ -202,6 +264,9 @@ function WalletsTab() {
       return newVersion
     })
     
+    // Fetch ledger balances
+    await fetchProviderLedgerBalances()
+    
     // Small delay to ensure state is flushed
     await new Promise(resolve => setTimeout(resolve, 100))
     console.log('[Wallets] State update complete')
@@ -216,9 +281,16 @@ function WalletsTab() {
   
   // Categorize wallets from state
   const allWallets = walletsList
-  const systemWallet = allWallets.find((w: any) => w.userId === 'system')
-  const providerWallets = allWallets.filter((w: any) => w.userId?.startsWith('provider-'))
-  const userWallets = allWallets.filter((w: any) => !w.userId?.startsWith('provider-') && w.userId !== 'system')
+  // System wallets are wallets belonging to users with 'system' role
+  const systemWallet = allWallets.find((w: any) => {
+    // Check if wallet belongs to current user and user has 'system' role
+    return w.userId === user?.userId && user?.roles?.includes('system');
+  });
+  const providerWallets = allWallets.filter((w: any) => w.userId?.startsWith('provider-'));
+  const userWallets = allWallets.filter((w: any) => {
+    // Exclude provider wallets and system wallets
+    return !w.userId?.startsWith('provider-') && !(w.userId === user?.userId && user?.roles?.includes('system'));
+  });
   
   console.log('[Wallets] Current state - version:', walletsVersion, 'total:', allWallets.length, 'providers:', providerWallets.length)
 
@@ -251,35 +323,50 @@ function WalletsTab() {
     },
   })
 
-  // Fund wallet mutation (wallet transaction)
+  // Fund wallet mutation (wallet transaction) - admin only
   const fundWalletMutation = useMutation({
     mutationFn: async (input: { walletId: string; userId: string; type: string; amount: number; currency: string; description?: string }) => {
+      // Check if user is admin before attempting to create wallet transaction
+      const isAdmin = user?.roles?.includes('admin')
+      if (!isAdmin) {
+        throw new Error('Only administrators can fund wallets')
+      }
+      
       console.log('[Fund] Creating wallet transaction:', input)
-      const result = await graphqlWithAuth(`
-        mutation FundWallet($input: CreateWalletTransactionInput!) {
-          createWalletTransaction(input: $input) {
-            success
-            walletTransaction {
-              id
-              walletId
-              userId
-              type
-              amount
-              currency
-              balance
+      try {
+        const result = await graphqlWithAuth(`
+          mutation FundWallet($input: CreateWalletTransactionInput!) {
+            createWalletTransaction(input: $input) {
+              success
+              walletTransaction {
+                id
+                walletId
+                userId
+                type
+                amount
+                currency
+                balance
+              }
+              errors
             }
-            errors
           }
+        `, { 
+          input: { 
+            ...input, 
+            balanceType: 'real',
+            description: input.description || 'Wallet funding'
+          } 
+        }, authToken)
+        console.log('[Fund] Transaction result:', result)
+        return result
+      } catch (err: any) {
+        // Handle authorization errors gracefully
+        const isAuthError = err?.message?.includes('Not authorized') || err?.message?.includes('authorized')
+        if (isAuthError) {
+          throw new Error('You do not have permission to perform this action. Administrator access required.')
         }
-      `, { 
-        input: { 
-          ...input, 
-          balanceType: 'real',
-          description: input.description || 'Wallet funding'
-        } 
-      }, authToken)
-      console.log('[Fund] Transaction result:', result)
-      return result
+        throw err
+      }
     },
   })
 
@@ -287,37 +374,53 @@ function WalletsTab() {
   const createDepositMutation = useMutation({
     mutationFn: async (input: { userId: string; amount: number; currency: string; method?: string; tenantId?: string }) => {
       console.log('[Deposit] Creating deposit:', input)
-      const result = await graphqlWithAuth(`
-        mutation CreateDeposit($input: CreateDepositInput!) {
-          createDeposit(input: $input) {
-            success
-            deposit {
-              id
-              userId
-              type
-              status
-              amount
-              currency
+      try {
+        const result = await graphqlWithAuth(`
+          mutation CreateDeposit($input: CreateDepositInput!) {
+            createDeposit(input: $input) {
+              success
+              deposit {
+                id
+                userId
+                type
+                status
+                amount
+                currency
+              }
+              errors
             }
-            errors
           }
+        `, { 
+          input: {
+            ...input,
+            tenantId: input.tenantId || 'default-tenant'
+          }
+        }, authToken)
+        console.log('[Deposit] Result:', result)
+        
+        if (result?.createDeposit?.errors && result.createDeposit.errors.length > 0) {
+          throw new Error(result.createDeposit.errors.join(', '))
         }
-      `, { 
-        input: {
-          ...input,
-          tenantId: input.tenantId || 'default-tenant'
+        
+        return result
+      } catch (error: any) {
+        // Check if error is related to ledger
+        const errorMsg = error.message || String(error)
+        if (errorMsg.includes('ledger') || errorMsg.includes('Insufficient') || errorMsg.includes('balance')) {
+          throw new Error(`Ledger Error: ${errorMsg}. Please check provider account balance.`)
         }
-      }, authToken)
-      console.log('[Deposit] Result:', result)
-      return result
+        throw error
+      }
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['deposits'] })
       refetchWallets()
+      fetchProviderLedgerBalances() // Refresh ledger balances
     },
-    onError: (error) => {
+    onError: (error: any) => {
       console.error('[Deposit] Error:', error)
-      alert(`Deposit failed: ${error.message || 'Unknown error'}`)
+      const errorMsg = error.message || 'Unknown error'
+      alert(`Deposit failed: ${errorMsg}`)
     },
   })
 
@@ -325,37 +428,53 @@ function WalletsTab() {
   const createWithdrawalMutation = useMutation({
     mutationFn: async (input: { userId: string; amount: number; currency: string; method: string; tenantId?: string; bankAccount?: string; walletAddress?: string }) => {
       console.log('[Withdrawal] Creating withdrawal:', input)
-      const result = await graphqlWithAuth(`
-        mutation CreateWithdrawal($input: CreateWithdrawalInput!) {
-          createWithdrawal(input: $input) {
-            success
-            withdrawal {
-              id
-              userId
-              type
-              status
-              amount
-              currency
+      try {
+        const result = await graphqlWithAuth(`
+          mutation CreateWithdrawal($input: CreateWithdrawalInput!) {
+            createWithdrawal(input: $input) {
+              success
+              withdrawal {
+                id
+                userId
+                type
+                status
+                amount
+                currency
+              }
+              errors
             }
-            errors
           }
+        `, { 
+          input: {
+            ...input,
+            tenantId: input.tenantId || 'default-tenant'
+          }
+        }, authToken)
+        console.log('[Withdrawal] Result:', result)
+        
+        if (result?.createWithdrawal?.errors && result.createWithdrawal.errors.length > 0) {
+          throw new Error(result.createWithdrawal.errors.join(', '))
         }
-      `, { 
-        input: {
-          ...input,
-          tenantId: input.tenantId || 'default-tenant'
+        
+        return result
+      } catch (error: any) {
+        // Check if error is related to ledger
+        const errorMsg = error.message || String(error)
+        if (errorMsg.includes('ledger') || errorMsg.includes('Insufficient') || errorMsg.includes('balance')) {
+          throw new Error(`Ledger Error: ${errorMsg}. Please check user account balance in ledger.`)
         }
-      }, authToken)
-      console.log('[Withdrawal] Result:', result)
-      return result
+        throw error
+      }
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['withdrawals'] })
       refetchWallets()
+      fetchProviderLedgerBalances() // Refresh ledger balances
     },
-    onError: (error) => {
+    onError: (error: any) => {
       console.error('[Withdrawal] Error:', error)
-      alert(`Withdrawal failed: ${error.message || 'Unknown error'}`)
+      const errorMsg = error.message || 'Unknown error'
+      alert(`Withdrawal failed: ${errorMsg}`)
     },
   })
 
@@ -469,10 +588,16 @@ function WalletsTab() {
       console.log('[FundProvider] Updated wallets:', updatedWallets)
       const updatedProvider = updatedWallets.find((w: any) => w.userId === systemFundForm.provider)
       console.log('[FundProvider] Updated provider balance:', updatedProvider?.balance)
+      
+      // Refresh ledger balances
+      await fetchProviderLedgerBalances()
+      
       console.log('[FundProvider] Done!')
-    } catch (err) {
+      alert('Provider funded successfully!')
+    } catch (err: any) {
       console.error('[FundProvider] Error:', err)
-      alert('Failed to fund provider. Check console for details.')
+      const errorMessage = err?.message || 'Failed to fund provider'
+      alert(errorMessage)
     } finally {
       setIsFundingProvider(false)
     }
@@ -500,9 +625,16 @@ function WalletsTab() {
       
       // Refetch to update UI with new balance
       await refetchWallets()
-    } catch (err) {
+      // Refresh ledger balances
+      await fetchProviderLedgerBalances()
+    } catch (err: any) {
       console.error('Error funding user:', err)
-      alert('Failed to credit user. Check console for details.')
+      const errorMsg = err.message || 'Unknown error'
+      if (errorMsg.includes('ledger') || errorMsg.includes('Insufficient')) {
+        alert(`Ledger Error: ${errorMsg}. Please check provider account balance in ledger.`)
+      } else {
+        alert(`Failed to credit user: ${errorMsg}`)
+      }
     } finally {
       setIsFundingUser(false)
     }
@@ -728,10 +860,17 @@ function WalletsTab() {
               </div>
 
               <div>
-                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: 'var(--text-muted)' }}>PROVIDER BALANCES</div>
+                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: 'var(--text-muted)' }}>
+                  PROVIDER BALANCES {ledgerBalancesLoading && <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>(Loading ledger...)</span>}
+                </div>
                 {PROVIDERS.map(provider => {
                   const wallet = providerWallets.find((w: any) => w.userId === provider.id)
-                  const balanceKey = `${provider.id}-${wallet?.balance || 0}-${wallet?.updatedAt || 'none'}`
+                  const ledgerBalance = providerLedgerBalances[provider.id]
+                  const balanceKey = `${provider.id}-${wallet?.balance || 0}-${ledgerBalance || 0}-${wallet?.updatedAt || 'none'}`
+                  const hasLedgerBalance = ledgerBalance !== undefined && ledgerBalance !== null
+                  const walletBalance = wallet?.balance || 0
+                  const balanceMismatch = hasLedgerBalance && Math.abs(walletBalance - ledgerBalance) > 0.01
+                  
                   return (
                     <div
                       key={balanceKey}
@@ -744,6 +883,7 @@ function WalletsTab() {
                         borderRadius: 8,
                         marginBottom: 8,
                         borderLeft: `4px solid ${provider.color}`,
+                        border: balanceMismatch ? `2px solid var(--accent-orange)` : undefined,
                       }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -754,9 +894,32 @@ function WalletsTab() {
                         </div>
                       </div>
                       <div style={{ textAlign: 'right' }}>
-                        <div style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, color: wallet?.balance ? 'var(--accent-green)' : 'var(--text-muted)' }}>
-                          {wallet ? formatCurrency(wallet.balance) : '—'}
-                        </div>
+                        {hasLedgerBalance ? (
+                          <>
+                            <div style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, color: 'var(--accent-green)', fontSize: 14 }}>
+                              {formatCurrency(ledgerBalance)}
+                            </div>
+                            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>
+                              Ledger Balance
+                            </div>
+                            {balanceMismatch && (
+                              <div style={{ fontSize: 10, color: 'var(--accent-orange)', marginTop: 2 }}>
+                                Wallet: {formatCurrency(walletBalance)} ⚠️
+                              </div>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            <div style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, color: wallet?.balance ? 'var(--accent-green)' : 'var(--text-muted)' }}>
+                              {wallet ? formatCurrency(wallet.balance) : '—'}
+                            </div>
+                            {wallet && (
+                              <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>
+                                Wallet Balance
+                              </div>
+                            )}
+                          </>
+                        )}
                         {!wallet && (
                           <button 
                             className="btn btn-sm btn-secondary"
@@ -1174,45 +1337,95 @@ function TransactionsTab() {
   const depositsQuery = useQuery({
     queryKey: ['deposits', pagination, filters],
     queryFn: () => graphql(`
-      query ListDeposits($input: JSON) {
-        deposits(input: $input)
+      query ListDeposits($first: Int, $skip: Int, $filter: JSON) {
+        deposits(first: $first, skip: $skip, filter: $filter) {
+          nodes {
+            id
+            userId
+            type
+            status
+            amount
+            currency
+            feeAmount
+            netAmount
+            providerName
+            createdAt
+          }
+          totalCount
+          pageInfo {
+            hasNextPage
+            hasPreviousPage
+          }
+        }
       }
     `, { 
-      input: { 
-        first: pagination.pageSize, 
-        skip: pagination.page * pagination.pageSize,
-        filter: buildApiFilter()
-      } 
+      first: pagination.pageSize, 
+      skip: pagination.page * pagination.pageSize,
+      filter: buildApiFilter()
     }),
   })
 
   const withdrawalsQuery = useQuery({
     queryKey: ['withdrawals', pagination, filters],
     queryFn: () => graphql(`
-      query ListWithdrawals($input: JSON) {
-        withdrawals(input: $input)
+      query ListWithdrawals($first: Int, $skip: Int, $filter: JSON) {
+        withdrawals(first: $first, skip: $skip, filter: $filter) {
+          nodes {
+            id
+            userId
+            type
+            status
+            amount
+            currency
+            feeAmount
+            netAmount
+            providerName
+            createdAt
+          }
+          totalCount
+          pageInfo {
+            hasNextPage
+            hasPreviousPage
+          }
+        }
       }
     `, { 
-      input: { 
-        first: pagination.pageSize, 
-        skip: pagination.page * pagination.pageSize,
-        filter: buildApiFilter()
-      } 
+      first: pagination.pageSize, 
+      skip: pagination.page * pagination.pageSize,
+      filter: buildApiFilter()
     }),
   })
 
   const walletTxQuery = useQuery({
     queryKey: ['walletTransactions', pagination, filters],
     queryFn: () => graphql(`
-      query ListWalletTransactions($input: JSON) {
-        walletTransactions(input: $input)
+      query ListWalletTransactions($first: Int, $skip: Int, $filter: JSON) {
+        walletTransactions(first: $first, skip: $skip, filter: $filter) {
+          nodes {
+            id
+            walletId
+            userId
+            type
+            balanceType
+            currency
+            amount
+            balance
+            refId
+            refType
+            description
+            createdAt
+          }
+          totalCount
+          pageInfo {
+            hasNextPage
+            hasPreviousPage
+          }
+        }
       }
     `, { 
-      input: { 
-        first: pagination.pageSize * 2, 
-        skip: pagination.page * pagination.pageSize * 2,
-        filter: buildApiFilter()
-      } 
+      first: pagination.pageSize * 2, 
+      skip: pagination.page * pagination.pageSize * 2,
+      filter: buildApiFilter()
     }),
   })
 
@@ -1796,17 +2009,45 @@ function TransactionsTab() {
 function ReconciliationTab() {
   const [dateRange, setDateRange] = useState('today')
 
-  // Fetch all transactions for reconciliation - API uses JSON input/output
+  // Fetch all transactions for reconciliation
   const txQuery = useQuery({
     queryKey: ['reconciliation', dateRange],
     queryFn: () => graphql(`
-      query GetReconciliationData($txInput: JSON, $walletInput: JSON) {
-        walletTransactions(input: $txInput)
-        wallets(input: $walletInput)
+      query GetReconciliationData($txFirst: Int, $walletFirst: Int) {
+        walletTransactions(first: $txFirst) {
+          nodes {
+            id
+            walletId
+            userId
+            type
+            balanceType
+            currency
+            amount
+            balance
+            refId
+            refType
+            description
+            createdAt
+          }
+          totalCount
+        }
+        wallets(first: $walletFirst) {
+          nodes {
+            id
+            userId
+            currency
+            category
+            balance
+            bonusBalance
+            lockedBalance
+            status
+          }
+          totalCount
+        }
       }
     `, { 
-      txInput: { first: 500 },
-      walletInput: { first: 100 }
+      txFirst: 500,
+      walletFirst: 100
     }),
   })
 

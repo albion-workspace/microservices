@@ -49,6 +49,27 @@ export interface DockerComposeConfig extends ServiceConfig {
   /** Include Redis service */
   includeRedis?: boolean;
   
+  /** Namespace/project name for grouping containers in Docker Desktop (default: ms) */
+  namespace?: string;
+  
+  /** MongoDB container name (default: {namespace}-mongo) */
+  mongoContainerName?: string;
+  
+  /** Redis container name (default: {namespace}-redis) */
+  redisContainerName?: string;
+  
+  /** MongoDB image version (default: latest) */
+  mongoImageVersion?: string;
+  
+  /** Redis image version (default: latest) */
+  redisImageVersion?: string;
+  
+  /** MongoDB port (default: 27017) */
+  mongoPort?: number;
+  
+  /** Redis port (default: 6379) */
+  redisPort?: number;
+  
   /** Additional environment variables */
   envVars?: Record<string, string>;
 }

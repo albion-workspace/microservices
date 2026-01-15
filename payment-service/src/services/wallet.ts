@@ -133,16 +133,19 @@ export const userWalletResolvers = {
       const db = getDatabase();
       const walletsCollection = db.collection('wallets');
       
+      // Handle JSON input (args.input) or direct args
+      const input = (args.input as Record<string, unknown>) || args;
+      
       // Use authenticated user's ID if not provided (self-service)
-      const userId = (args.userId as string) || ctx.user?.userId;
+      const userId = (input.userId as string) || ctx.user?.userId;
       if (!userId) {
         throw new Error('userId is required');
       }
       
       // Build query
       const query: Record<string, unknown> = { userId };
-      if (args.currency) query.currency = args.currency as string;
-      if (args.category) query.category = args.category as string;
+      if (input.currency) query.currency = input.currency as string;
+      if (input.category) query.category = input.category as string;
       
       // Fetch wallets for this user (filtered by category if specified)
       const walletDocs = await walletsCollection.find(query).toArray();
@@ -184,7 +187,7 @@ export const userWalletResolvers = {
       
       return {
         userId,
-        currency: args.currency || walletDocs[0]?.currency || 'EUR',
+        currency: (input.currency as string) || walletDocs[0]?.currency || 'EUR',
         totals,
         wallets,
       };
@@ -209,20 +212,23 @@ export const userWalletResolvers = {
       const db = getDatabase();
       const walletsCollection = db.collection('wallets');
       
+      // Handle JSON input (args.input) or direct args
+      const input = (args.input as Record<string, unknown>) || args;
+      
       let wallet: any;
       
-      if (args.walletId) {
+      if (input.walletId) {
         // Direct lookup by ID
-        wallet = await walletsCollection.findOne({ id: args.walletId as string });
+        wallet = await walletsCollection.findOne({ id: input.walletId as string });
       } else {
         // Lookup by user + category + currency
-        const userId = (args.userId as string) || ctx.user?.userId;
+        const userId = (input.userId as string) || ctx.user?.userId;
         if (!userId) throw new Error('userId or walletId is required');
         
         wallet = await walletsCollection.findOne({
           userId,
-          category: (args.category as string) || 'main',
-          currency: (args.currency as string) || 'EUR',
+          category: (input.category as string) || 'main',
+          currency: (input.currency as string) || 'EUR',
         });
       }
       
@@ -477,39 +483,260 @@ const walletTxSaga = [
       const isCredit = data.isCredit as boolean;
       const balanceField = data.balanceField as string;
       
-      // Calculate the delta (positive for credit, negative for debit)
-      const delta = isCredit ? input.amount : -input.amount;
-      
-      // Use atomic $inc for concurrency safety
-      const incUpdate: Record<string, number> = { [balanceField]: delta };
-      
-      // Update lifetime stats atomically
-      if (input.type === 'deposit') incUpdate.lifetimeDeposits = input.amount;
-      else if (input.type === 'withdrawal') incUpdate.lifetimeWithdrawals = input.amount;
-      
-      // Build query - for debits, add balance check condition
-      const query: Record<string, unknown> = { id: input.walletId };
-      if (!isCredit) query[balanceField] = { $gte: input.amount };
-      
-      // Atomic update
-      const result = await walletsCollection.findOneAndUpdate(
-        query,
-        { 
-          $inc: incUpdate,
-          $set: { lastActivityAt: new Date(), updatedAt: new Date() } 
-        },
-        { returnDocument: 'after' }
-      );
-      
-      if (!result) {
-        throw new Error(
-          !isCredit 
-            ? `Insufficient funds for ${input.type}. Required: ${input.amount}`
-            : `Failed to update wallet balance`
-        );
+      // For real balance operations, use ledger (source of truth)
+      if (balanceField === 'balance') {
+        try {
+          const { 
+            getLedger, 
+            getOrCreateUserAccount, 
+            getOrCreateProviderAccount,
+            recordSystemFundProviderLedgerEntry,
+            syncWalletBalanceFromLedger 
+          } = await import('./ledger-service.js');
+          const ledger = getLedger();
+          const wallet = data.wallet as any;
+          
+          // Check if this is a provider wallet (userId starts with "provider-")
+          const isProviderWallet = input.userId.startsWith('provider-');
+          
+          if (isProviderWallet) {
+            // Provider wallet funding: System House -> Provider Account
+            if (isCredit && input.type === 'deposit') {
+              try {
+                // Record system funding in ledger BEFORE updating wallet
+                const ledgerTxId = await recordSystemFundProviderLedgerEntry(
+                  input.userId, // providerId
+                  input.amount,
+                  input.currency,
+                  wallet?.tenantId || 'default',
+                  input.description || `System funding to provider ${input.userId}`
+                );
+                logger.info('Provider funding recorded in ledger', {
+                  providerId: input.userId,
+                  amount: input.amount,
+                  currency: input.currency,
+                  ledgerTxId,
+                });
+                // Mark that we should sync from ledger instead of direct update
+                (data as any).syncFromLedger = true;
+                // For provider funding, we'll sync from ledger instead of updating directly
+                // Set a flag to skip the direct wallet update
+                (data as any).skipDirectUpdate = true;
+              } catch (ledgerError: any) {
+                const errorMessage = ledgerError?.message || String(ledgerError);
+                const errorStack = ledgerError?.stack;
+                logger.error('Failed to record provider funding in ledger', {
+                  error: errorMessage,
+                  stack: errorStack,
+                  providerId: input.userId,
+                  amount: input.amount,
+                  currency: input.currency,
+                });
+                // Don't fail the transaction - allow direct wallet update as fallback
+                (data as any).skipDirectUpdate = false;
+              }
+            } else if (!isCredit) {
+              // Debit from provider account - check balance
+              const providerAccountId = await getOrCreateProviderAccount(input.userId, 'deposit', input.currency);
+              const balance = await ledger.getBalance(providerAccountId);
+              if (balance.balance < input.amount) {
+                throw new Error(
+                  `Insufficient balance in provider ledger. Available: ${balance.balance}, Required: ${input.amount}`
+                );
+              }
+            }
+          } else {
+            // User wallet operations - record in ledger FIRST (ledger is source of truth)
+            // For wallet transactions like bet, win, etc., we need to record them in ledger
+            // Skip ledger recording for deposit/withdrawal (handled by their own sagas)
+            const skipLedgerTypes = ['deposit', 'withdrawal'];
+            if (!skipLedgerTypes.includes(input.type)) {
+              try {
+                const { recordWalletTransactionLedgerEntry } = await import('./ledger-service.js');
+                const wallet = data.wallet as any;
+                const tenantId = wallet?.tenantId || 'default';
+                
+                // Record wallet transaction in ledger BEFORE updating wallet
+                // This ensures ledger is always the source of truth
+                await recordWalletTransactionLedgerEntry(
+                  input.userId,
+                  input.type,
+                  input.amount,
+                  input.currency,
+                  tenantId,
+                  undefined, // walletTransactionId will be set after creation
+                  input.description
+                );
+                
+                // Mark that we should sync from ledger instead of direct update
+                (data as any).syncFromLedger = true;
+                (data as any).skipDirectUpdate = true;
+                
+                logger.info('Wallet transaction recorded in ledger', {
+                  userId: input.userId,
+                  type: input.type,
+                  amount: input.amount,
+                  currency: input.currency,
+                });
+              } catch (ledgerError: any) {
+                // If ledger recording fails, log error but allow wallet update as fallback
+                // This ensures backward compatibility
+                logger.error('Failed to record wallet transaction in ledger', {
+                  error: ledgerError?.message || String(ledgerError),
+                  stack: ledgerError?.stack,
+                  userId: input.userId,
+                  type: input.type,
+                  amount: input.amount,
+                });
+                // Don't fail - allow direct wallet update as fallback
+                (data as any).skipDirectUpdate = false;
+              }
+            } else {
+              // For deposit/withdrawal, just check balance (ledger entry created by their sagas)
+              const userAccountId = await getOrCreateUserAccount(input.userId, 'real', input.currency);
+              
+              // Check balance for debits
+              if (!isCredit) {
+                const balance = await ledger.getBalance(userAccountId);
+                if (balance.balance < input.amount) {
+                  throw new Error(
+                    `Insufficient balance in ledger. Available: ${balance.balance}, Required: ${input.amount}`
+                  );
+                }
+              }
+            }
+          }
+        } catch (ledgerError) {
+          // If ledger check fails, fall back to wallet check (for backward compatibility)
+          logger.warn('Ledger check failed, using wallet balance', { error: ledgerError });
+        }
       }
       
-      const balance = (result as any)[balanceField] || 0;
+      // Check if we should skip direct update (for provider funding via ledger)
+      let skipDirectUpdate = (data as any).skipDirectUpdate === true;
+      let balance: number = 0;
+      
+      if (skipDirectUpdate && balanceField === 'balance') {
+        // For provider funding, sync directly from ledger (don't update wallet directly)
+        // Wait for ledger transaction to be committed
+        await new Promise(resolve => setTimeout(resolve, 300));
+        
+        try {
+          const { syncWalletBalanceFromLedger } = await import('./ledger-service.js');
+          await syncWalletBalanceFromLedger(input.userId, input.walletId, input.currency);
+          
+          // Get the updated balance from wallet after sync
+          const syncedWallet = await walletsCollection.findOne({ id: input.walletId });
+          balance = (syncedWallet as any)?.[balanceField] || 0;
+          
+          logger.info('Provider wallet balance synced from ledger (skipped direct update)', {
+            walletId: input.walletId,
+            providerId: input.userId,
+            balance,
+          });
+        } catch (syncError) {
+          logger.error('Failed to sync provider wallet balance from ledger', { 
+            error: syncError,
+            walletId: input.walletId,
+            providerId: input.userId,
+          });
+          // Fall back to direct update if sync fails
+          skipDirectUpdate = false;
+        }
+      }
+      
+      if (!skipDirectUpdate) {
+        // Calculate the delta (positive for credit, negative for debit)
+        const delta = isCredit ? input.amount : -input.amount;
+        
+        // Use atomic $inc for concurrency safety
+        const incUpdate: Record<string, number> = { [balanceField]: delta };
+        
+        // Update lifetime stats atomically
+        if (input.type === 'deposit') incUpdate.lifetimeDeposits = input.amount;
+        else if (input.type === 'withdrawal') incUpdate.lifetimeWithdrawals = input.amount;
+        
+        // Build query - for debits, add balance check condition
+        const query: Record<string, unknown> = { id: input.walletId };
+        if (!isCredit) query[balanceField] = { $gte: input.amount };
+        
+        // Atomic update
+        const result = await walletsCollection.findOneAndUpdate(
+          query,
+          { 
+            $inc: incUpdate,
+            $set: { lastActivityAt: new Date(), updatedAt: new Date() } 
+          },
+          { returnDocument: 'after' }
+        );
+        
+        if (!result) {
+          throw new Error(
+            !isCredit 
+              ? `Insufficient funds for ${input.type}. Required: ${input.amount}`
+              : `Failed to update wallet balance`
+          );
+        }
+        
+        balance = (result as any)[balanceField] || 0;
+        
+        // Sync wallet balance from ledger for real balance (if not already synced)
+        // IMPORTANT: Sync AFTER wallet update to ensure ledger transaction is complete
+        if (balanceField === 'balance') {
+          try {
+            const { syncWalletBalanceFromLedger } = await import('./ledger-service.js');
+            // Small delay to ensure ledger transaction is committed
+            await new Promise(resolve => setTimeout(resolve, 100));
+            await syncWalletBalanceFromLedger(input.userId, input.walletId, input.currency);
+            // Re-read balance after sync to get the correct value
+            const syncedWallet = await walletsCollection.findOne({ id: input.walletId });
+            if (syncedWallet) {
+              balance = (syncedWallet as any)[balanceField] || balance;
+            }
+          } catch (syncError) {
+            logger.warn('Could not sync wallet balance from ledger', { error: syncError });
+            // Don't fail the transaction if sync fails - wallet balance was already updated
+          }
+        }
+      } else {
+        // For ledger-recorded transactions, sync wallet from ledger (don't update directly)
+        // Wait for ledger transaction to be committed
+        await new Promise(resolve => setTimeout(resolve, 200));
+        
+        try {
+          const { syncWalletBalanceFromLedger } = await import('./ledger-service.js');
+          await syncWalletBalanceFromLedger(input.userId, input.walletId, input.currency);
+          
+          // Get the updated balance from wallet after sync
+          const syncedWallet = await walletsCollection.findOne({ id: input.walletId });
+          balance = (syncedWallet as any)?.[balanceField] || 0;
+          
+          logger.info('Wallet balance synced from ledger (ledger-recorded transaction)', {
+            walletId: input.walletId,
+            userId: input.userId,
+            type: input.type,
+            balance,
+          });
+        } catch (syncError) {
+          logger.error('Failed to sync wallet balance from ledger after ledger transaction', { 
+            error: syncError,
+            walletId: input.walletId,
+            userId: input.userId,
+            type: input.type,
+          });
+          // Fall back to direct update if sync fails
+          const delta = isCredit ? input.amount : -input.amount;
+          const result = await walletsCollection.findOneAndUpdate(
+            { id: input.walletId },
+            { 
+              $inc: { [balanceField]: delta },
+              $set: { lastActivityAt: new Date(), updatedAt: new Date() } 
+            },
+            { returnDocument: 'after' }
+          );
+          balance = result ? ((result as any)[balanceField] || 0) : 0;
+        }
+      }
       
       // Update input with calculated balance (will be stored in transaction)
       input.balance = balance;

@@ -103,6 +103,7 @@ export type { ShutdownOptions } from './common/lifecycle.js';
 
 // Service Lifecycle (cleanup tasks, event listeners)
 export { setupCleanupTask, setupCleanupTasks, setupEventListener } from './common/service-lifecycle.js';
+export { initializeService, initializeDatabase, initializeRedis, safeInitialize } from './common/startup-helpers.js';
 export type { CleanupTask, EventListenerConfig } from './common/service-lifecycle.js';
 
 // Validation

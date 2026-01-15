@@ -1,7 +1,8 @@
-import { useState } from 'react'
-import { useMutation } from '@tanstack/react-query'
-import { Gift, Plus, Award, Search } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { useMutation, useQuery } from '@tanstack/react-query'
+import { Gift, Plus, Award, Search, TrendingUp, AlertCircle } from 'lucide-react'
 import { graphql as gql } from '../lib/auth'
+import { useAuth } from '../lib/auth-context'
 
 // Wrapper for bonus service GraphQL
 async function graphql(query: string, variables?: Record<string, unknown>) {
@@ -9,34 +10,95 @@ async function graphql(query: string, variables?: Record<string, unknown>) {
 }
 
 export default function BonusService() {
+  const { tokens } = useAuth()
+  const authToken = tokens?.accessToken
   const [userId, setUserId] = useState(`user-${Date.now().toString(36)}`)
   const [amount, setAmount] = useState('100')
   const [bonusType, setBonusType] = useState('deposit')
   const [result, setResult] = useState<unknown>(null)
+  
+  // Fetch bonus pool balance
+  const bonusPoolQuery = useQuery({
+    queryKey: ['bonusPoolBalance'],
+    queryFn: async () => {
+      if (!authToken) return null
+      try {
+        const { graphql: gqlWithAuth } = await import('../lib/auth')
+        const SERVICE_URLS = (await import('../lib/auth')).SERVICE_URLS
+        const res = await fetch(SERVICE_URLS.payment, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${authToken}`,
+          },
+          body: JSON.stringify({
+            query: `
+              query GetBonusPoolBalance($currency: String) {
+                bonusPoolBalance(currency: $currency) {
+                  accountId
+                  currency
+                  balance
+                  availableBalance
+                }
+              }
+            `,
+            variables: { currency: 'USD' }
+          }),
+        })
+        const data = await res.json()
+        return data.data?.bonusPoolBalance
+      } catch (err) {
+        console.error('Failed to fetch bonus pool balance:', err)
+        return null
+      }
+    },
+    enabled: !!authToken,
+    refetchInterval: 30000, // Refresh every 30 seconds
+  })
 
   const createBonusMutation = useMutation({
     mutationFn: async () => {
-      return graphql(`
-        mutation CreateBonus($input: JSON) {
-          createBonus(input: $input)
-        }
-      `, {
-        input: {
-          userId,
-          type: bonusType,
-          amount: parseFloat(amount),
-          currency: 'EUR',
-          wageringRequirement: 35,
-          validDays: 30,
-          metadata: {
-            source: 'dashboard-test',
-            createdAt: new Date().toISOString(),
+      try {
+        const result = await graphql(`
+          mutation CreateBonus($input: JSON) {
+            createBonus(input: $input)
           }
+        `, {
+          input: {
+            userId,
+            type: bonusType,
+            amount: parseFloat(amount),
+            currency: 'EUR',
+            wageringRequirement: 35,
+            validDays: 30,
+            metadata: {
+              source: 'dashboard-test',
+              createdAt: new Date().toISOString(),
+            }
+          }
+        })
+        
+        // Check for errors
+        if (result?.createBonus?.errors && result.createBonus.errors.length > 0) {
+          throw new Error(result.createBonus.errors.join(', '))
         }
-      })
+        
+        return result
+      } catch (error: any) {
+        const errorMsg = error.message || String(error)
+        if (errorMsg.includes('ledger') || errorMsg.includes('Insufficient') || errorMsg.includes('bonus pool')) {
+          throw new Error(`Ledger Error: ${errorMsg}. Please check bonus pool balance.`)
+        }
+        throw error
+      }
     },
-    onSuccess: (data) => setResult(data),
-    onError: (err) => setResult({ error: err.message }),
+    onSuccess: (data) => {
+      setResult(data)
+      bonusPoolQuery.refetch() // Refresh bonus pool balance
+    },
+    onError: (err: any) => {
+      setResult({ error: err.message || 'Unknown error' })
+    },
   })
 
   const getUserBonusesMutation = useMutation({
@@ -91,6 +153,48 @@ export default function BonusService() {
         <h1 className="page-title">Bonus Service</h1>
         <p className="page-subtitle">Manage bonuses, eligibility, and wagering</p>
       </div>
+
+      {/* Bonus Pool Balance Card */}
+      {bonusPoolQuery.data && (
+        <div className="card" style={{ marginBottom: 24 }}>
+          <div className="card-header">
+            <h3 className="card-title">
+              <TrendingUp size={18} style={{ marginRight: 8 }} />
+              Bonus Pool Balance (Ledger)
+            </h3>
+          </div>
+          <div style={{ padding: 16 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 4 }}>Available Balance</div>
+                <div style={{ fontSize: 24, fontWeight: 700, fontFamily: 'var(--font-mono)', color: 'var(--accent-green)' }}>
+                  ${((bonusPoolQuery.data.balance || 0) / 100).toFixed(2)}
+                </div>
+              </div>
+              <div style={{ textAlign: 'right' }}>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 4 }}>Currency</div>
+                <div style={{ fontSize: 14, fontWeight: 500 }}>{bonusPoolQuery.data.currency || 'USD'}</div>
+              </div>
+            </div>
+            {bonusPoolQuery.data.balance < parseFloat(amount) * 100 && (
+              <div style={{ 
+                marginTop: 12, 
+                padding: 12, 
+                background: 'var(--accent-orange-glow)', 
+                borderRadius: 8,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+              }}>
+                <AlertCircle size={16} style={{ color: 'var(--accent-orange)' }} />
+                <span style={{ fontSize: 12, color: 'var(--accent-orange)' }}>
+                  Warning: Bonus pool balance ({((bonusPoolQuery.data.balance || 0) / 100).toFixed(2)}) is less than requested amount ({amount}). Bonus may fail.
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="grid-2">
         <div className="card">

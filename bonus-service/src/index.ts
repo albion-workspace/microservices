@@ -28,6 +28,7 @@ import {
   type IntegrationEvent,
   type ResolverContext,
 } from 'core-service';
+import { initializeLedger } from './services/ledger-service.js';
 
 // Import unified event dispatcher (handles both internal events + webhooks)
 import {
@@ -215,8 +216,10 @@ const config = {
       testWebhook: hasRole('admin'),
     },
   },
-  mongoUri: process.env.MONGO_URI || 'mongodb://localhost:27017/bonus_service',
-  redisUrl: process.env.REDIS_URL,
+  // Note: When connecting from localhost, directConnection=true prevents replica set member discovery
+  mongoUri: process.env.MONGO_URI || 'mongodb://localhost:27017/bonus_service?directConnection=true',
+  // Redis password: default is redis123 (from Docker container), can be overridden via REDIS_PASSWORD env var
+  redisUrl: process.env.REDIS_URL || `redis://:${process.env.REDIS_PASSWORD || 'redis123'}@localhost:6379`,
   defaultPermission: 'deny' as const, // Secure default
 };
 
@@ -528,12 +531,30 @@ async function main() {
   // Register event handlers before starting gateway
   setupEventHandlers();
 
+  // Create gateway first (this connects to database)
   await createGateway({
     ...config,
   });
+
+  // Initialize bonus webhooks AFTER database connection is established
+  try {
+    await initializeBonusWebhooks();
+  } catch (error) {
+    logger.error('Failed to initialize bonus webhooks', { error });
+    // Continue - webhooks are optional
+  }
   
-  // Initialize bonus webhooks (unified event dispatcher)
-  await initializeBonusWebhooks();
+  // Initialize ledger system AFTER database connection is established
+  const tenantId = 'default'; // Could be multi-tenant in future
+  try {
+    await initializeLedger(tenantId);
+    logger.info('Ledger system initialized for bonus service');
+  } catch (error) {
+    logger.error('Failed to initialize ledger system', { error });
+    // Ledger is critical - but we'll let it fail gracefully and log
+    // The service can still run, but ledger operations will fail
+    throw error; // Re-throw as ledger is critical for bonus service
+  }
   
   // Cleanup old webhook deliveries daily
   setInterval(async () => {
@@ -583,8 +604,28 @@ async function main() {
 export { bonusWebhooks };
 
 main().catch((err) => {
-  logger.error('Failed to start bonus-service', { error: err.message });
+  logger.error('Failed to start bonus-service', {
+    error: err instanceof Error ? err.message : String(err),
+    stack: err instanceof Error ? err.stack : undefined,
+  });
   process.exit(1);
+});
+
+// Setup process-level error handlers
+process.on('uncaughtException', (error) => {
+  logger.error('Uncaught exception in bonus-service', {
+    error: error.message,
+    stack: error.stack,
+  });
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  logger.error('Unhandled rejection in bonus-service', {
+    reason: reason instanceof Error ? reason.message : String(reason),
+    stack: reason instanceof Error ? reason.stack : undefined,
+  });
+  // Don't exit - log and continue (some rejections are acceptable)
 });
 
 // Export types for consumers

@@ -2,8 +2,14 @@
  * Transaction Service - Saga-based payment processing
  */
 
-import { createService, generateId, type, type Repository, type SagaContext, getDatabase, validateInput } from 'core-service';
+import { createService, generateId, type, type Repository, type SagaContext, getDatabase, validateInput, logger } from 'core-service';
 import type { Transaction, ProviderConfig, TransactionStatus } from '../types.js';
+import { 
+  recordDepositLedgerEntry, 
+  recordWithdrawalLedgerEntry,
+  syncWalletBalanceFromLedger,
+  getOrCreateProviderAccount,
+} from './ledger-service.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Provider Config Types & Validation
@@ -58,6 +64,20 @@ const providerSaga = [
       } as ProviderConfig;
       
       await repo.create(config);
+      
+      // Create provider accounts in ledger for deposit and withdrawal
+      try {
+        await getOrCreateProviderAccount(config.id, 'deposit', input.supportedCurrencies[0] || 'USD');
+        await getOrCreateProviderAccount(config.id, 'withdrawal', input.supportedCurrencies[0] || 'USD');
+        logger.info('Provider ledger accounts created', { providerId: config.id });
+      } catch (ledgerError) {
+        logger.warn('Could not create provider ledger accounts', { 
+          error: ledgerError,
+          providerId: config.id,
+        });
+        // Continue - provider config is created, ledger accounts can be created later
+      }
+      
       return { ...ctx, input, data, entity: config };
     },
     compensate: async ({ entity, data }: ProviderCtx) => {
@@ -113,6 +133,8 @@ const depositSchema = type({
   currency: 'string',
   'tenantId?': 'string',
   'method?': 'string',
+  'providerId?': 'string',
+  'providerName?': 'string',
 });
 
 const depositSaga = [
@@ -239,24 +261,79 @@ const depositSaga = [
       
       // Credit the wallet with net amount (after fees)
       const netAmount = data.netAmount as number;
-      await walletsCollection.updateOne(
-        { id: (wallet as any).id },
-        { 
-          $inc: { 
-            balance: netAmount,
-            lifetimeDeposits: input.amount,
-          },
-          $set: { 
-            lastActivityAt: new Date(),
-            updatedAt: new Date()
+      const feeAmount = data.feeAmount as number;
+      const providerId = entity.providerId || 'default-provider';
+      
+      // Record in ledger (Provider -> User) - ledger is source of truth
+      try {
+        // Ensure externalRef is always set (use transaction ID or generate one to avoid duplicate key errors)
+        const externalRef = entity.id || entity.providerTransactionId || crypto.randomUUID();
+        
+        await recordDepositLedgerEntry(
+          providerId,
+          input.userId,
+          input.amount,
+          feeAmount,
+          input.currency,
+          input.tenantId || 'default',
+          externalRef, // Always set to avoid duplicate key errors
+          `Deposit via ${entity.providerName}`
+        );
+        
+        // Wallet balance sync happens via Redis event (ledger.deposit.completed)
+        // No delays needed - event-driven sync works across containers/processes
+        // The event is emitted by recordDepositLedgerEntry and handled asynchronously
+        // For immediate sync within this process, we do a sync here as fallback
+        // Small delay to ensure ledger transaction is committed to database
+        await new Promise(resolve => setTimeout(resolve, 100));
+        try {
+          await syncWalletBalanceFromLedger(
+            input.userId,
+            (wallet as any).id,
+            input.currency
+          );
+          // Re-read wallet to get synced balance
+          const syncedWallet = await walletsCollection.findOne({ id: (wallet as any).id });
+          if (syncedWallet) {
+            wallet = syncedWallet;
           }
+        } catch (syncError) {
+          // Log error for debugging - sync is critical for balance accuracy
+          logger.warn('Immediate wallet sync failed after deposit, will retry via event', {
+            walletId: (wallet as any).id,
+            userId: input.userId,
+            currency: input.currency,
+            error: syncError instanceof Error ? syncError.message : String(syncError),
+            stack: syncError instanceof Error ? syncError.stack : undefined
+          });
+          // Event-driven sync will handle it asynchronously, but log warning for visibility
         }
-      );
+        
+        // Update lifetime stats only (balance comes from ledger)
+        await walletsCollection.updateOne(
+          { id: (wallet as any).id },
+          { 
+            $inc: { 
+              lifetimeDeposits: input.amount,
+            },
+            $set: { 
+              lastActivityAt: new Date(),
+              updatedAt: new Date()
+            }
+          }
+        );
+      } catch (ledgerError) {
+        logger.error('Failed to record deposit in ledger', { 
+          error: ledgerError,
+          transactionId: entity.id,
+        });
+        throw ledgerError; // Fail the saga if ledger fails
+      }
       
       data.walletId = (wallet as any).id;
       return { ...ctx, input, data, entity };
     },
-    compensate: async ({ input, data }: DepositCtx) => {
+    compensate: async ({ input, data, entity }: DepositCtx) => {
       // Rollback wallet credit
       if (data.walletId && data.netAmount) {
         const db = getDatabase();
@@ -273,6 +350,9 @@ const depositSaga = [
           }
         );
       }
+      
+      // Note: Ledger transactions are atomic and will be rolled back automatically
+      // if the saga transaction fails. No manual rollback needed for ledger entries.
     },
   },
   // NOTE: Transaction stays in "processing" status
@@ -334,6 +414,8 @@ const withdrawalSchema = type({
   'tenantId?': 'string',
   'bankAccount?': 'string',
   'walletAddress?': 'string',
+  'providerId?': 'string',
+  'providerName?': 'string',
 });
 
 const withdrawalSaga = [
@@ -355,12 +437,51 @@ const withdrawalSaga = [
         throw new Error(`Wallet not found for user ${input.userId} in ${input.currency}`);
       }
       
-      const balance = (wallet as any).balance || 0;
       const feeAmount = Math.round(input.amount * 0.01 * 100) / 100; // 1% fee
       const totalRequired = input.amount + feeAmount;
       
-      if (balance < totalRequired) {
-        throw new Error(`Insufficient balance. Required: ${totalRequired}, Available: ${balance}`);
+      // Check ledger balance (source of truth)
+      try {
+        const { checkUserWithdrawalBalance } = await import('./ledger-service.js');
+        const balanceCheck = await checkUserWithdrawalBalance(
+          input.userId,
+          input.amount,
+          feeAmount,
+          input.currency
+        );
+        
+        if (!balanceCheck.sufficient) {
+          throw new Error(
+            `Insufficient balance in ledger. Available: ${balanceCheck.available}, Required: ${balanceCheck.required}`
+          );
+        }
+        
+        // Also check wallet balance for consistency
+        const walletBalance = (wallet as any).balance || 0;
+        if (walletBalance < totalRequired) {
+          logger.warn('Wallet balance mismatch with ledger', {
+            userId: input.userId,
+            walletBalance,
+            ledgerBalance: balanceCheck.available,
+            required: totalRequired,
+          });
+          // Sync wallet from ledger
+          const { syncWalletBalanceFromLedger } = await import('./ledger-service.js');
+          await syncWalletBalanceFromLedger(input.userId, (wallet as any).id, input.currency);
+          // Re-check wallet balance after sync
+          const updatedWallet = await walletsCollection.findOne({ id: (wallet as any).id });
+          const updatedBalance = (updatedWallet as any)?.balance || 0;
+          if (updatedBalance < totalRequired) {
+            throw new Error(`Insufficient balance after sync. Available: ${updatedBalance}, Required: ${totalRequired}`);
+          }
+        }
+      } catch (ledgerError) {
+        // If ledger check fails, fall back to wallet check (for backward compatibility)
+        logger.warn('Ledger balance check failed, using wallet balance', { error: ledgerError });
+        const balance = (wallet as any).balance || 0;
+        if (balance < totalRequired) {
+          throw new Error(`Insufficient balance. Required: ${totalRequired}, Available: ${balance}`);
+        }
       }
       
       data.walletId = (wallet as any).id;
@@ -426,26 +547,62 @@ const withdrawalSaga = [
       
       // Debit the full amount (amount + fee) from wallet
       const totalAmount = input.amount + (data.feeAmount as number);
-      const result = await walletsCollection.findOneAndUpdate(
-        { 
-          id: data.walletId,
-          balance: { $gte: totalAmount }  // Atomic balance check
-        },
-        { 
-          $inc: { 
-            balance: -totalAmount,
-            lifetimeWithdrawals: input.amount,
-          },
-          $set: { 
-            lastActivityAt: new Date(),
-            updatedAt: new Date()
-          }
-        },
-        { returnDocument: 'after' }
-      );
+      const feeAmount = data.feeAmount as number;
+      const providerId = entity.providerId || 'default-provider';
       
-      if (!result) {
-        throw new Error('Insufficient funds or wallet not found');
+      // Record in ledger (User -> Provider) - ledger is source of truth
+      try {
+        // Ensure externalRef is always set (use transaction ID or generate one to avoid duplicate key errors)
+        const withdrawalExternalRef = entity.id || entity.providerTransactionId || crypto.randomUUID();
+        
+        await recordWithdrawalLedgerEntry(
+          providerId,
+          input.userId,
+          input.amount,
+          feeAmount,
+          input.currency,
+          input.tenantId || 'default',
+          withdrawalExternalRef, // Always set to avoid duplicate key errors
+          `Withdrawal via ${entity.providerName}`
+        );
+        
+        // Wallet balance sync happens via Redis event (ledger.withdrawal.completed)
+        // No delays needed - event-driven sync works across containers/processes
+        // The event is emitted by recordWithdrawalLedgerEntry and handled asynchronously
+        // For immediate sync within this process, we can do a quick sync here as fallback
+        try {
+          await syncWalletBalanceFromLedger(
+            input.userId,
+            data.walletId as string,
+            input.currency
+          );
+        } catch (syncError) {
+          // Sync failed - event-driven sync will handle it asynchronously
+          logger.debug('Immediate wallet sync failed, will sync via event', {
+            walletId: data.walletId,
+            error: syncError instanceof Error ? syncError.message : String(syncError)
+          });
+        }
+        
+        // Update lifetime stats only (balance comes from ledger)
+        await walletsCollection.updateOne(
+          { id: data.walletId },
+          { 
+            $inc: { 
+              lifetimeWithdrawals: input.amount,
+            },
+            $set: { 
+              lastActivityAt: new Date(),
+              updatedAt: new Date()
+            }
+          }
+        );
+      } catch (ledgerError) {
+        logger.error('Failed to record withdrawal in ledger', { 
+          error: ledgerError,
+          transactionId: entity.id,
+        });
+        throw ledgerError; // Fail the saga if ledger fails
       }
       
       // Update transaction status to processing

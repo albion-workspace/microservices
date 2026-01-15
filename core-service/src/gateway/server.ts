@@ -48,7 +48,7 @@ import { createHandler as createSSEHandler } from 'graphql-sse/lib/use/http';
 import type { UserContext, PermissionRule, Resolvers, ResolverContext, JwtConfig, SubscriptionResolver } from '../types/index.js';
 import { extractToken, verifyToken, createToken } from '../common/jwt.js';
 import { connectDatabase, checkDatabaseHealth } from '../common/database.js';
-import { connectRedis, getRedis } from '../common/redis.js';
+import { connectRedis, checkRedisHealth, getRedis } from '../common/redis.js';
 import { getCacheStats } from '../common/cache.js';
 import { logger, subscribeToLogs, type LogEntry } from '../common/logger.js';
 
@@ -639,12 +639,41 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
   const startTime = Date.now();
   logger.info(`Starting ${name}...`);
 
-  // Connect to databases
-  const dbUri = mongoUri || process.env.MONGO_URI || `mongodb://localhost:27017/${name.replace(/-/g, '_')}`;
-  await connectDatabase(dbUri);
+  // Connect to databases with error handling
+  // Note: When connecting from localhost, directConnection=true prevents replica set member discovery
+  const dbUri = mongoUri || process.env.MONGO_URI || `mongodb://localhost:27017/${name.replace(/-/g, '_')}?directConnection=true`;
+  try {
+    await connectDatabase(dbUri);
+    // Verify connection
+    const dbHealth = await checkDatabaseHealth();
+    if (!dbHealth.healthy) {
+      throw new Error('Database health check failed after connection');
+    }
+  } catch (error) {
+    logger.error(`Failed to connect to database for ${name}`, {
+      error: error instanceof Error ? error.message : String(error),
+      uri: dbUri.replace(/:[^:@]+@/, ':***@'), // Hide password
+    });
+    throw error;
+  }
   
-  const redisUri = redisUrl || process.env.REDIS_URL;
-  if (redisUri) await connectRedis(redisUri);
+  // Redis password: default is redis123 (from Docker container), can be overridden via REDIS_PASSWORD env var
+  const redisUri = redisUrl || process.env.REDIS_URL || `redis://:${process.env.REDIS_PASSWORD || 'redis123'}@localhost:6379`;
+  if (redisUri) {
+    try {
+      await connectRedis(redisUri);
+      // Verify connection
+      const redisHealth = await checkRedisHealth();
+      if (!redisHealth.healthy) {
+        logger.warn('Redis health check failed - continuing without Redis');
+      }
+    } catch (error) {
+      logger.warn(`Failed to connect to Redis for ${name} - continuing without Redis`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      // Don't throw - Redis is optional for most services
+    }
+  }
 
   const checkPermission = createPermissionMiddleware(permissions, defaultPermission);
 

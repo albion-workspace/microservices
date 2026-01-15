@@ -65,7 +65,14 @@ export async function connectDatabase(uri: string, config: Partial<MongoConfig> 
     nearest: ReadPreference.NEAREST,
   };
 
-  client = new MongoClient(uri, {
+  // Parse URI to check if we're connecting to localhost
+  const uriObj = new URL(uri);
+  const isLocalhost = uriObj.hostname === 'localhost' || uriObj.hostname === '127.0.0.1';
+  
+  // When connecting from localhost to a Docker container, we need directConnection
+  // to avoid replica set member discovery (which would try to resolve Docker hostnames like ms-mongo)
+  // Even if MongoDB is configured as a replica set inside Docker, we connect directly from outside
+  const clientOptions: any = {
     maxPoolSize: cfg.maxPoolSize,
     minPoolSize: cfg.minPoolSize,
     connectTimeoutMS: cfg.connectTimeoutMS,
@@ -75,7 +82,27 @@ export async function connectDatabase(uri: string, config: Partial<MongoConfig> 
     writeConcern: new WriteConcern(cfg.writeConcern || 'majority'),
     retryWrites: cfg.retryWrites,
     retryReads: cfg.retryReads,
-  });
+  };
+  
+  // Always force direct connection when connecting from localhost (services outside Docker)
+  // This prevents MongoDB driver from trying to discover replica set members (ms-mongo, etc.)
+  if (isLocalhost) {
+    // If URI doesn't have directConnection, add it
+    if (!uri.includes('directConnection=')) {
+      const separator = uri.includes('?') ? '&' : '?';
+      uri = `${uri}${separator}directConnection=true`;
+      logger.debug('Added directConnection=true to MongoDB URI for localhost connection (bypassing replica set discovery)');
+    }
+    // Also set in client options to ensure it's enforced
+    clientOptions.directConnection = true;
+    // Remove any replicaSet parameter from URI if present (we're connecting directly)
+    if (uri.includes('replicaSet=')) {
+      uri = uri.replace(/[?&]replicaSet=[^&]*/, '');
+      logger.debug('Removed replicaSet parameter from URI for direct localhost connection');
+    }
+  }
+
+  client = new MongoClient(uri, clientOptions);
 
   // Connection events
   client.on('connectionPoolCreated', () => logger.debug('MongoDB pool created'));

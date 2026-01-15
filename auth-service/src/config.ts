@@ -41,8 +41,11 @@ export function loadConfig(): AuthConfig {
     serviceName: process.env.SERVICE_NAME || 'auth-service',
     
     // Database
-    mongoUri: process.env.MONGO_URI || 'mongodb://localhost:27017/auth_service',
-    redisUrl: process.env.REDIS_URL,
+    // Note: When connecting from localhost, directConnection=true prevents replica set member discovery
+    // which would try to resolve Docker hostnames like ms-mongo that don't exist on the host machine
+    mongoUri: process.env.MONGO_URI || 'mongodb://localhost:27017/auth_service?directConnection=true',
+    // Redis password: default is redis123 (from Docker container), can be overridden via REDIS_PASSWORD env var
+    redisUrl: process.env.REDIS_URL || `redis://:${process.env.REDIS_PASSWORD || 'redis123'}@localhost:6379`,
     
     // JWT - Use shared secret for all services
     jwtSecret: process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || 'shared-jwt-secret-change-in-production',

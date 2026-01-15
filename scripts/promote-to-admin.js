@@ -5,11 +5,15 @@
 
 import { MongoClient } from 'mongodb';
 
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/auth_service';
+// Note: Use directConnection=true when connecting from outside Docker to avoid replica set discovery
+const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/auth_service?directConnection=true';
 const USER_EMAIL = process.argv[2] || 'admin@test.com';
 
 async function promoteToAdmin() {
-  const client = new MongoClient(MONGO_URI);
+  // Use directConnection option to bypass replica set discovery when connecting from outside Docker
+  const client = new MongoClient(MONGO_URI, {
+    directConnection: true,
+  });
   
   try {
     await client.connect();
@@ -33,22 +37,23 @@ async function promoteToAdmin() {
       process.exit(1);
     }
     
-    // Update user to admin (only roles and permissions, password stays the same)
+    // Update user to admin and system roles (only roles and permissions, password stays the same)
+    // 'system' role allows system operations like funding providers
     await usersCollection.updateOne(
       { id: user.id },
       {
         $set: {
-          roles: ['admin'],
+          roles: ['admin', 'system'],
           permissions: ['*:*:*'],
           updatedAt: new Date(),
         },
       }
     );
     
-    console.log(`✅ User promoted to admin successfully!`);
+    console.log(`✅ User promoted to admin and system roles successfully!`);
     console.log(`   Email: ${user.email || user.username || user.id}`);
     console.log(`   User ID: ${user.id}`);
-    console.log(`   Roles: admin`);
+    console.log(`   Roles: admin, system`);
     console.log(`   Permissions: *:*:*`);
     console.log(`\n   You can now login with this user and use admin operations.`);
     

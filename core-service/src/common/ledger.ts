@@ -408,9 +408,28 @@ export class Ledger implements BalanceCalculator {
       });
       
       return result!;
-    } catch (error) {
-      logger.error('Transaction failed', { error, input });
-      throw error;
+    } catch (error: any) {
+      // Extract meaningful error message from MongoDB transaction error
+      const errorMessage = error?.message || error?.errmsg || String(error);
+      const errorLabels = error?.errorLabels || error?.errorLabelSet || {};
+      const errorName = error?.name || 'UnknownError';
+      
+      logger.error('Transaction failed', { 
+        error: errorMessage,
+        errorName,
+        errorLabels: Object.keys(errorLabels).length > 0 ? errorLabels : undefined,
+        stack: error?.stack,
+        input: {
+          type: input.type,
+          fromAccountId: input.fromAccountId,
+          toAccountId: input.toAccountId,
+          amount: input.amount,
+          currency: input.currency,
+        }
+      });
+      
+      // Re-throw with a more descriptive error
+      throw new Error(`Ledger transaction failed: ${errorMessage} (${errorName})`);
     } finally {
       await session.endSession();
     }
@@ -427,18 +446,45 @@ export class Ledger implements BalanceCalculator {
     const now = new Date();
     
     // Get accounts with session (locked during transaction)
+    // Transactions require readPreference: 'primary' (MongoDB requirement)
     const [fromAccount, toAccount] = await Promise.all([
-      this.accounts.findOne({ _id: input.fromAccountId }, { session }),
-      this.accounts.findOne({ _id: input.toAccountId }, { session }),
+      this.accounts.findOne({ _id: input.fromAccountId }, { session, readPreference: 'primary' }),
+      this.accounts.findOne({ _id: input.toAccountId }, { session, readPreference: 'primary' }),
     ]);
     
     // Validations
     this.validateAccounts(fromAccount, toAccount, input);
     this.validateBalance(fromAccount!, input.amount);
     
-    // Calculate new sequences
-    const fromSeq = fromAccount!.lastEntrySequence + 1;
-    const toSeq = toAccount!.lastEntrySequence + 1;
+    // Calculate new sequences - use actual max sequence from entries to avoid conflicts
+    // This handles cases where lastEntrySequence might be out of sync due to failed transactions or crashes
+    // We check the actual max sequence in entries to ensure we don't create duplicate sequences
+    const [fromMaxSeq, toMaxSeq] = await Promise.all([
+      this.entries.findOne(
+        { accountId: input.fromAccountId },
+        { session, readPreference: 'primary', sort: { sequence: -1 }, projection: { sequence: 1 } }
+      ),
+      this.entries.findOne(
+        { accountId: input.toAccountId },
+        { session, readPreference: 'primary', sort: { sequence: -1 }, projection: { sequence: 1 } }
+      ),
+    ]);
+    
+    // Use the higher of: account's lastEntrySequence or actual max sequence from entries
+    // This ensures we never create duplicate sequences, even if lastEntrySequence is out of sync
+    const fromSeq = Math.max(fromAccount!.lastEntrySequence, fromMaxSeq?.sequence || 0) + 1;
+    const toSeq = Math.max(toAccount!.lastEntrySequence, toMaxSeq?.sequence || 0) + 1;
+    
+    logger.debug('Calculated entry sequences', {
+      fromAccountId: input.fromAccountId,
+      fromLastSeq: fromAccount!.lastEntrySequence,
+      fromMaxSeqInEntries: fromMaxSeq?.sequence || 0,
+      fromSeq,
+      toAccountId: input.toAccountId,
+      toLastSeq: toAccount!.lastEntrySequence,
+      toMaxSeqInEntries: toMaxSeq?.sequence || 0,
+      toSeq,
+    });
     
     // Create transaction record
     const transaction: LedgerTransaction = {
@@ -491,6 +537,7 @@ export class Ledger implements BalanceCalculator {
     };
     
     // Execute ALL operations atomically within the session
+    // Transactions require readPreference: 'primary' (MongoDB requirement)
     await this.transactions.insertOne(transaction, { session });
     await this.entries.insertMany([debitEntry, creditEntry], { session });
     
@@ -504,7 +551,7 @@ export class Ledger implements BalanceCalculator {
         $inc: { balance: -input.amount, availableBalance: -input.amount },
         $set: { lastEntrySequence: fromSeq, updatedAt: now },
       },
-      { session }
+      { session, readPreference: 'primary' }
     );
     
     if (fromUpdate.modifiedCount === 0) {
@@ -520,7 +567,7 @@ export class Ledger implements BalanceCalculator {
         $inc: { balance: input.amount, availableBalance: input.amount },
         $set: { lastEntrySequence: toSeq, updatedAt: now },
       },
-      { session }
+      { session, readPreference: 'primary' }
     );
     
     if (toUpdate.modifiedCount === 0) {
@@ -595,13 +642,14 @@ export class Ledger implements BalanceCalculator {
         await this.transactions.insertOne(transaction, { session });
         
         // Reserve funds: reduce available, increase pending
+        // Transactions require readPreference: 'primary' (MongoDB requirement)
         await this.accounts.updateOne(
           { _id: input.fromAccountId },
           {
             $inc: { availableBalance: -input.amount, pendingOut: input.amount },
             $set: { updatedAt: now },
           },
-          { session }
+          { session, readPreference: 'primary' }
         );
         
         // Mark pending incoming on destination
@@ -611,7 +659,7 @@ export class Ledger implements BalanceCalculator {
             $inc: { pendingIn: input.amount },
             $set: { updatedAt: now },
           },
-          { session }
+          { session, readPreference: 'primary' }
         );
         
         result = transaction;
@@ -633,7 +681,8 @@ export class Ledger implements BalanceCalculator {
       let result: LedgerTransaction;
       
       await session.withTransaction(async () => {
-        const tx = await this.transactions.findOne({ _id: txId }, { session });
+        // Transactions require readPreference: 'primary' (MongoDB requirement)
+        const tx = await this.transactions.findOne({ _id: txId }, { session, readPreference: 'primary' });
         
         if (!tx) throw new Error(`Transaction not found: ${txId}`);
         if (tx.status !== 'pending') throw new Error(`Not pending: ${tx.status}`);
@@ -641,8 +690,8 @@ export class Ledger implements BalanceCalculator {
         const now = new Date();
         
         const [fromAccount, toAccount] = await Promise.all([
-          this.accounts.findOne({ _id: tx.fromAccountId }, { session }),
-          this.accounts.findOne({ _id: tx.toAccountId }, { session }),
+          this.accounts.findOne({ _id: tx.fromAccountId }, { session, readPreference: 'primary' }),
+          this.accounts.findOne({ _id: tx.toAccountId }, { session, readPreference: 'primary' }),
         ]);
         
         if (!fromAccount || !toAccount) throw new Error('Account not found');
@@ -682,10 +731,11 @@ export class Ledger implements BalanceCalculator {
         await this.entries.insertMany([debitEntry, creditEntry], { session });
         
         // Update transaction
+        // Transactions require readPreference: 'primary' (MongoDB requirement)
         await this.transactions.updateOne(
           { _id: txId, version: tx.version },
           { $set: { status: 'completed', completedAt: now }, $inc: { version: 1 } },
-          { session }
+          { session, readPreference: 'primary' }
         );
         
         // Update from account: move from pending to actual debit
@@ -695,7 +745,7 @@ export class Ledger implements BalanceCalculator {
             $inc: { balance: -tx.amount, pendingOut: -tx.amount },
             $set: { lastEntrySequence: fromSeq, updatedAt: now },
           },
-          { session }
+          { session, readPreference: 'primary' }
         );
         
         // Update to account: move from pending to actual credit
@@ -705,7 +755,7 @@ export class Ledger implements BalanceCalculator {
             $inc: { balance: tx.amount, availableBalance: tx.amount, pendingIn: -tx.amount },
             $set: { lastEntrySequence: toSeq, updatedAt: now },
           },
-          { session }
+          { session, readPreference: 'primary' }
         );
         
         result = { ...tx, status: 'completed', completedAt: now };
@@ -727,7 +777,8 @@ export class Ledger implements BalanceCalculator {
       let result: LedgerTransaction;
       
       await session.withTransaction(async () => {
-        const tx = await this.transactions.findOne({ _id: txId }, { session });
+        // Transactions require readPreference: 'primary' (MongoDB requirement)
+        const tx = await this.transactions.findOne({ _id: txId }, { session, readPreference: 'primary' });
         
         if (!tx) throw new Error(`Transaction not found: ${txId}`);
         if (tx.status !== 'pending') throw new Error(`Not pending: ${tx.status}`);
@@ -744,7 +795,7 @@ export class Ledger implements BalanceCalculator {
               errorMessage: reason || 'Cancelled',
             },
           },
-          { session }
+          { session, readPreference: 'primary' }
         );
         
         // Release reserved funds
@@ -754,7 +805,7 @@ export class Ledger implements BalanceCalculator {
             $inc: { availableBalance: tx.amount, pendingOut: -tx.amount },
             $set: { updatedAt: now },
           },
-          { session }
+          { session, readPreference: 'primary' }
         );
         
         // Remove pending incoming
@@ -764,7 +815,7 @@ export class Ledger implements BalanceCalculator {
             $inc: { pendingIn: -tx.amount },
             $set: { updatedAt: now },
           },
-          { session }
+          { session, readPreference: 'primary' }
         );
         
         result = { ...tx, status: 'failed', completedAt: now };
@@ -970,14 +1021,32 @@ export class Ledger implements BalanceCalculator {
     to: LedgerAccount | null,
     input: CreateTransactionInput
   ): void {
-    if (!from) throw new Error(`Source account not found: ${input.fromAccountId}`);
-    if (!to) throw new Error(`Destination account not found: ${input.toAccountId}`);
+    if (!from) {
+      logger.error('Source account not found', { accountId: input.fromAccountId, input });
+      throw new Error(`Source account not found: ${input.fromAccountId}`);
+    }
+    if (!to) {
+      logger.error('Destination account not found', { accountId: input.toAccountId, input });
+      throw new Error(`Destination account not found: ${input.toAccountId}`);
+    }
     
     if (from.currency !== to.currency) {
+      logger.error('Currency mismatch between accounts', {
+        fromAccount: input.fromAccountId,
+        fromCurrency: from.currency,
+        toAccount: input.toAccountId,
+        toCurrency: to.currency,
+        transactionCurrency: input.currency,
+      });
       throw new Error(`Currency mismatch: ${from.currency} vs ${to.currency}`);
     }
     if (from.currency !== input.currency) {
-      throw new Error(`Transaction currency mismatch`);
+      logger.error('Transaction currency mismatch', {
+        accountCurrency: from.currency,
+        transactionCurrency: input.currency,
+        accountId: input.fromAccountId,
+      });
+      throw new Error(`Transaction currency mismatch: account has ${from.currency}, transaction uses ${input.currency}`);
     }
     if (from.status !== 'active') {
       throw new Error(`Source account is ${from.status}`);

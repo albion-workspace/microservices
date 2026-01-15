@@ -51,15 +51,11 @@ scripts/
 │   └── setup-and-test.ps1
 │
 ├── Test Utilities (TypeScript)
-│   ├── payment-gateway-tests.ts
-│   ├── payment-gateway-demo.ts
+│   ├── ledger-payment-tests.ts     # Comprehensive payment tests with ledger integration (consolidated)
+│   ├── ledger-integration-tests.ts # Ledger integration tests (payment + bonus)
+│   ├── payment-gateway-tests.ts    # Payment gateway stress tests
 │   ├── bonus-service-tests.ts
-│   ├── webhook-tests.ts
-│   ├── test-socketio.ts
-│   ├── test-sse.ts
-│   ├── test-ws.ts
-│   ├── test-payment-gateway.ts
-│   ├── test-payment-gateway-real.ts
+│   ├── channels-tests.ts            # Real-time channels (WebSocket, SSE, Socket.IO, Webhooks)
 │   ├── benchmark.ts
 │   └── load-test.ts
 │

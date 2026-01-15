@@ -118,15 +118,25 @@ export async function emit<T = unknown>(
   const channel = options.channel || getChannel(eventType);
   
   try {
-    await publish(channel, JSON.stringify(event));
-    logger.debug(`Emitted ${eventType} to ${channel}`, {
-      eventId: event.eventId,
-      userId: event.userId,
-    });
+    const published = await publish(channel, JSON.stringify(event));
+    if (published) {
+      logger.debug(`Emitted ${eventType} to ${channel}`, {
+        eventId: event.eventId,
+        userId: event.userId,
+      });
+    } else {
+      logger.warn(`Failed to emit ${eventType} - Redis not available`, {
+        eventId: event.eventId,
+        channel,
+      });
+      // Don't throw - allow service to continue even if Redis is down
+      // Events can be queued or retried later
+    }
     return event.eventId;
   } catch (error) {
     logger.error(`Failed to emit ${eventType}`, { error, event });
-    throw error;
+    // Still return eventId even on error - event was created, just not published
+    return event.eventId;
   }
 }
 
@@ -141,14 +151,21 @@ export async function emitEvent<T = unknown>(
   const targetChannel = channel || getChannel(event.eventType);
   
   try {
-    await publish(targetChannel, JSON.stringify(event));
-    logger.debug(`Emitted ${event.eventType} to ${targetChannel}`, {
-      eventId: event.eventId,
-      userId: event.userId,
-    });
+    const published = await publish(targetChannel, JSON.stringify(event));
+    if (published) {
+      logger.debug(`Emitted ${event.eventType} to ${targetChannel}`, {
+        eventId: event.eventId,
+        userId: event.userId,
+      });
+    } else {
+      logger.warn(`Failed to emit ${event.eventType} - Redis not available`, {
+        eventId: event.eventId,
+        channel: targetChannel,
+      });
+    }
   } catch (error) {
     logger.error(`Failed to emit ${event.eventType}`, { error, event });
-    throw error;
+    // Don't throw - allow service to continue
   }
 }
 

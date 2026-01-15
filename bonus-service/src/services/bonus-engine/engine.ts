@@ -265,6 +265,22 @@ export class BonusEngine {
       return null;
     }
 
+    // Record conversion in ledger FIRST
+    try {
+      const { recordBonusConversionLedgerEntry } = await import('../ledger-service.js');
+      await recordBonusConversionLedgerEntry(
+        userId,
+        bonus.currentValue,
+        bonus.currency,
+        bonus.tenantId,
+        bonus.id,
+        `Bonus converted: ${bonus.type}`
+      );
+    } catch (ledgerError) {
+      logger.error('Failed to record bonus conversion in ledger', { error: ledgerError, bonusId });
+      throw new Error('Failed to record bonus conversion in ledger');
+    }
+
     const now = new Date();
     const historyEntry: BonusHistoryEntry = {
       timestamp: now,
@@ -307,6 +323,23 @@ export class BonusEngine {
     const bonus = allBonuses.find(b => b.id === bonusId) || null;
 
     if (!bonus) return null;
+
+    // Record forfeiture in ledger FIRST
+    try {
+      const { recordBonusForfeitLedgerEntry } = await import('../ledger-service.js');
+      await recordBonusForfeitLedgerEntry(
+        userId,
+        bonus.currentValue,
+        bonus.currency,
+        bonus.tenantId,
+        bonus.id,
+        reason,
+        `Bonus forfeited: ${reason}`
+      );
+    } catch (ledgerError) {
+      logger.error('Failed to record bonus forfeiture in ledger', { error: ledgerError, bonusId });
+      throw new Error('Failed to record bonus forfeiture in ledger');
+    }
 
     const now = new Date();
     const historyEntry: BonusHistoryEntry = {
@@ -382,6 +415,23 @@ export class BonusEngine {
     const expiredBonuses = await userBonusPersistence.findExpiring();
 
     for (const bonus of expiredBonuses) {
+      // Record expiration in ledger FIRST (same as forfeiture)
+      try {
+        const { recordBonusForfeitLedgerEntry } = await import('../ledger-service.js');
+        await recordBonusForfeitLedgerEntry(
+          bonus.userId,
+          bonus.currentValue,
+          bonus.currency,
+          bonus.tenantId,
+          bonus.id,
+          'Bonus expired',
+          `Bonus expired: ${bonus.type}`
+        );
+      } catch (ledgerError) {
+        logger.error('Failed to record bonus expiration in ledger', { error: ledgerError, bonusId: bonus.id });
+        // Continue - don't block expiration
+      }
+
       const historyEntry: BonusHistoryEntry = {
         timestamp: now,
         action: 'expired',

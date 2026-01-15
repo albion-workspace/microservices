@@ -243,8 +243,18 @@ async function main() {
   // Register event handlers
   setupEventHandlers();
 
-  // Initialize webhooks
-  await initializeAuthWebhooks();
+  // Create and start gateway first (this connects to database)
+  await createGateway({
+    ...config,
+  });
+
+  // Initialize webhooks AFTER database connection is established
+  try {
+    await initializeAuthWebhooks();
+  } catch (error) {
+    logger.error('Failed to initialize auth webhooks', { error });
+    // Continue - webhooks are optional
+  }
   
   // Cleanup old webhook deliveries daily
   setInterval(async () => {
@@ -281,11 +291,6 @@ async function main() {
       logger.error('Token cleanup failed', { error: err });
     }
   }, 24 * 60 * 60 * 1000); // Daily
-
-  // Create and start gateway
-  await createGateway({
-    ...config,
-  });
   
   // Note: OAuth routes would need to be added via a custom Express middleware
   // For now, OAuth is configured in Passport strategies and can be triggered from frontend
@@ -336,6 +341,26 @@ export type {
 } from './types.js';
 
 main().catch((err) => {
-  logger.error('Failed to start auth-service', { error: err.message });
+  logger.error('Failed to start auth-service', {
+    error: err instanceof Error ? err.message : String(err),
+    stack: err instanceof Error ? err.stack : undefined,
+  });
   process.exit(1);
+});
+
+// Setup process-level error handlers
+process.on('uncaughtException', (error) => {
+  logger.error('Uncaught exception in auth-service', {
+    error: error.message,
+    stack: error.stack,
+  });
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  logger.error('Unhandled rejection in auth-service', {
+    reason: reason instanceof Error ? reason.message : String(reason),
+    stack: reason instanceof Error ? reason.stack : undefined,
+  });
+  // Don't exit - log and continue (some rejections are acceptable)
 });

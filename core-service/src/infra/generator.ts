@@ -136,6 +136,8 @@ export async function loadConfig(configPath: string): Promise<FullInfraConfig> {
  * Create a default configuration template
  */
 export function createDefaultConfig(serviceName: string, port: number = 3000): FullInfraConfig {
+  const namespace = process.env.DOCKER_NAMESPACE || process.env.MS_NAMESPACE || 'ms';
+  
   return {
     service: {
       name: serviceName,
@@ -150,13 +152,15 @@ export function createDefaultConfig(serviceName: string, port: number = 3000): F
     compose: {
       replicas: 3,
       includeMongo: true,
-      includeRedis: true
+      includeRedis: true,
+      namespace
     },
     nginx: {
       rateLimit: 100,
       proxyEndpoints: ['/graphql', '/api']
     },
     k8s: {
+      namespace,
       replicas: 3,
       minReplicas: 3,
       maxReplicas: 20,

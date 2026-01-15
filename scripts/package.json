@@ -4,9 +4,11 @@
   "description": "Utility scripts for microservices platform",
   "type": "module",
   "scripts": {
-    "promote-to-admin": "node promote-to-admin.js"
+    "promote-to-admin": "node promote-to-admin.js",
+    "check-mongodb": "node check-mongodb-transactions.js",
+    "test-ledger": "npx tsx ledger-integration-tests.ts"
   },
-  "devDependencies": {
+  "dependencies": {
     "mongodb": "^7.0.0"
   }
 }

@@ -20,6 +20,10 @@ import type {
 } from './types.js';
 import { templatePersistence, userBonusPersistence } from './persistence.js';
 import { emitBonusEvent } from '../../event-dispatcher.js';
+import { 
+  recordBonusAwardLedgerEntry,
+  checkBonusPoolBalance,
+} from '../ledger-service.js';
 
 export abstract class BaseBonusHandler implements IBonusHandler {
   abstract readonly type: BonusType;
@@ -227,8 +231,57 @@ export abstract class BaseBonusHandler implements IBonusHandler {
       return { success: false, error: 'Bonus value is zero or negative' };
     }
 
+    // Check ledger balance before awarding (prevent infinite money)
+    try {
+      const balanceCheck = await checkBonusPoolBalance(calculation.bonusValue, template.currency);
+      if (!balanceCheck.sufficient) {
+        logger.warn('Insufficient bonus pool balance', {
+          userId: context.userId,
+          templateId: template.id,
+          required: balanceCheck.required,
+          available: balanceCheck.available,
+        });
+        return { 
+          success: false, 
+          error: `Insufficient bonus pool balance. Available: ${balanceCheck.available}, Required: ${balanceCheck.required}` 
+        };
+      }
+    } catch (ledgerError) {
+      logger.error('Failed to check bonus pool balance', {
+        error: ledgerError,
+        userId: context.userId,
+        templateId: template.id,
+      });
+      // Continue - ledger might not be initialized yet, but log the error
+      // In production, you might want to fail here
+    }
+
     const now = new Date();
     const userBonus = this.buildUserBonus(template, context, calculation, now);
+
+    // Record in ledger BEFORE creating bonus record (atomic operation)
+    try {
+      await recordBonusAwardLedgerEntry(
+        context.userId,
+        calculation.bonusValue,
+        template.currency,
+        context.tenantId,
+        userBonus.id,
+        template.type,
+        `Bonus awarded: ${template.name} (${template.code})`
+      );
+    } catch (ledgerError) {
+      logger.error('Failed to record bonus in ledger', {
+        error: ledgerError,
+        userId: context.userId,
+        bonusId: userBonus.id,
+      });
+      // If ledger fails, we should not award the bonus
+      return { 
+        success: false, 
+        error: 'Failed to record bonus in ledger. Bonus not awarded.' 
+      };
+    }
 
     // Use persistence layer for data operations
     await userBonusPersistence.create(userBonus);

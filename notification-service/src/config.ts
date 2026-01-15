@@ -11,8 +11,10 @@ export function loadConfig(): NotificationConfig {
     nodeEnv: process.env.NODE_ENV || 'development',
     
     // Database
-    mongoUri: process.env.MONGO_URI || 'mongodb://localhost:27017/notification_service',
-    redisUrl: process.env.REDIS_URL,
+    // Note: When connecting from localhost, directConnection=true prevents replica set member discovery
+    mongoUri: process.env.MONGO_URI || 'mongodb://localhost:27017/notification_service?directConnection=true',
+    // Redis password: default is redis123 (from Docker container), can be overridden via REDIS_PASSWORD env var
+    redisUrl: process.env.REDIS_URL || `redis://:${process.env.REDIS_PASSWORD || 'redis123'}@localhost:6379`,
     
     // SMTP (Email)
     smtpHost: process.env.SMTP_HOST,

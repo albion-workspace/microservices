@@ -218,6 +218,26 @@ async function loadHandlersFromServices(notificationService: NotificationService
 }
 
 main().catch((err) => {
-  logger.error('Failed to start notification-service', { error: err.message });
+  logger.error('Failed to start notification-service', {
+    error: err instanceof Error ? err.message : String(err),
+    stack: err instanceof Error ? err.stack : undefined,
+  });
   process.exit(1);
+});
+
+// Setup process-level error handlers
+process.on('uncaughtException', (error) => {
+  logger.error('Uncaught exception in notification-service', {
+    error: error.message,
+    stack: error.stack,
+  });
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  logger.error('Unhandled rejection in notification-service', {
+    reason: reason instanceof Error ? reason.message : String(reason),
+    stack: reason instanceof Error ? reason.stack : undefined,
+  });
+  // Don't exit - log and continue (some rejections are acceptable)
 });
