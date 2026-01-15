@@ -15,7 +15,8 @@
     "infra:k8s": "service-infra generate -c infra.config.json --k8s"
   },
   "dependencies": {
-    "core-service": "file:../core-service"
+    "core-service": "file:../core-service",
+    "notification-service": "file:../notification-service"
   },
   "devDependencies": {
     "tsx": "^4.7.0",

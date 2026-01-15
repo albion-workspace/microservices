@@ -29,7 +29,8 @@ import {
 import { loadConfig, validateConfig, printConfigSummary } from './config.js';
 import { NotificationService } from './notification-service.js';
 import { notificationGraphQLTypes, createNotificationResolvers } from './graphql.js';
-import { setupEventHandlers } from './event-handlers.js';
+import { handlerRegistry } from './plugins/index.js';
+import type { NotificationHandlerPlugin } from './plugins/index.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Configuration
@@ -121,11 +122,9 @@ async function main() {
 ║  • Retry logic                                                        ║
 ║  • Delivery tracking                                                  ║
 ║                                                                       ║
-║  Event Listeners:                                                     ║
-║  • Auth events (user.*)                                               ║
-║  • Payment events (payment.*)                                         ║
-║  • Bonus events (bonus.*)                                             ║
-║  • System events (system.*)                                           ║
+║  Extensible Plugin System:                                            ║
+║  • Handlers loaded dynamically from other services                   ║
+║  • Works standalone or with service integrations                     ║
 ║                                                                       ║
 ╚═══════════════════════════════════════════════════════════════════════╝
 `);
@@ -138,22 +137,27 @@ async function main() {
   // Initialize Socket.IO after gateway starts
   notificationService.initializeSocket();
   
-  // Setup event handlers for inter-service communication
-  setupEventHandlers(notificationService);
+  // Dynamically load handlers from other services (if available)
+  // This makes notification-service extensible - services can provide their own handlers
+  await loadHandlersFromServices(notificationService);
   
-  // Start listening to Redis events
+  // Initialize all registered handlers
+  handlerRegistry.initialize(notificationService);
+  
+  // Start listening to Redis events (only for channels that have handlers)
   if (config.redisUrl) {
     try {
-      const channels = [
-        'integration:auth',
-        'integration:payment',
-        'integration:bonus',
-        'integration:system',
-      ];
+      const channels = handlerRegistry.getChannels();
       
-      await startListening(channels);
-      
-      logger.info('Started listening to event channels', { channels });
+      if (channels.length > 0) {
+        await startListening(channels);
+        logger.info('Started listening to event channels', { 
+          channels,
+          plugins: handlerRegistry.getPlugins().map(p => p.name),
+        });
+      } else {
+        logger.info('No handler plugins registered - event listening skipped');
+      }
     } catch (err) {
       logger.warn('Could not start event listener', { error: (err as Error).message });
     }
@@ -162,6 +166,55 @@ async function main() {
   }
   
   logger.info('Notification service started successfully', { port: config.port });
+}
+
+/**
+ * Dynamically load notification handlers from other services
+ * Services export their handlers, and notification-service loads them if available
+ */
+async function loadHandlersFromServices(notificationService: NotificationService): Promise<void> {
+  const handlerModules = [
+    // Try to load handlers from other services
+    { name: 'auth-service', path: '../auth-service/src/notifications/auth-handler.js' },
+    { name: 'payment-service', path: '../payment-service/src/notifications/payment-handler.js' },
+    { name: 'bonus-service', path: '../bonus-service/src/notifications/bonus-handler.js' },
+  ];
+
+  logger.info('Loading notification handlers from services...');
+
+  for (const module of handlerModules) {
+    try {
+      // Try to dynamically import the handler
+      const handlerModule = await import(module.path);
+      
+      // Look for exported handler (could be named differently)
+      const handler = handlerModule.authNotificationHandler || 
+                     handlerModule.paymentNotificationHandler || 
+                     handlerModule.bonusNotificationHandler ||
+                     handlerModule.default;
+      
+      if (handler && typeof handler === 'object' && 'name' in handler) {
+        handlerRegistry.register(handler as NotificationHandlerPlugin);
+        logger.info(`Loaded notification handler from ${module.name}`, { handler: handler.name });
+      } else {
+        logger.debug(`No valid handler found in ${module.name}`);
+      }
+    } catch (error: any) {
+      // Service not available or handler not found - this is OK
+      if (error.code === 'ERR_MODULE_NOT_FOUND' || error.message?.includes('Cannot find module')) {
+        logger.debug(`Handler from ${module.name} not available (service may not be present)`, {
+          path: module.path,
+        });
+      } else {
+        logger.warn(`Failed to load handler from ${module.name}`, { error: error.message });
+      }
+    }
+  }
+
+  const loadedHandlers = handlerRegistry.getPlugins();
+  logger.info(`Loaded ${loadedHandlers.length} notification handler(s)`, {
+    handlers: loadedHandlers.map(h => h.name),
+  });
 }
 
 main().catch((err) => {

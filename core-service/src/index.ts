@@ -101,6 +101,10 @@ export type { LogLevel, LogFormat, LoggerConfig } from './common/logger.js';
 export { onShutdown, offShutdown, shutdown, setupGracefulShutdown, isShutdownInProgress } from './common/lifecycle.js';
 export type { ShutdownOptions } from './common/lifecycle.js';
 
+// Service Lifecycle (cleanup tasks, event listeners)
+export { setupCleanupTask, setupCleanupTasks, setupEventListener } from './common/service-lifecycle.js';
+export type { CleanupTask, EventListenerConfig } from './common/service-lifecycle.js';
+
 // ═══════════════════════════════════════════════════════════════════
 // Types (from src/types/)
 // ═══════════════════════════════════════════════════════════════════

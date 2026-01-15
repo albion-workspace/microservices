@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "core-service": "file:../core-service",
+    "notification-service": "file:../notification-service",
     "passport": "^0.7.0",
     "passport-facebook": "^3.0.0",
     "passport-google-oauth20": "^2.0.0",

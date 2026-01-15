@@ -16,7 +16,8 @@
   },
   "dependencies": {
     "core-service": "file:../core-service",
-    "bonus-shared": "file:../bonus-shared"
+    "bonus-shared": "file:../bonus-shared",
+    "notification-service": "file:../notification-service"
   },
   "devDependencies": {
     "tsx": "^4.7.0",
