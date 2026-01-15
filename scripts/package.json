@@ -1,0 +1,12 @@
+{
+  "name": "microservices-scripts",
+  "version": "1.0.0",
+  "description": "Utility scripts for microservices platform",
+  "type": "module",
+  "scripts": {
+    "promote-to-admin": "node promote-to-admin.js"
+  },
+  "devDependencies": {
+    "mongodb": "^7.0.0"
+  }
+}

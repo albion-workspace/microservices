@@ -1,0 +1,42 @@
+{
+  "name": "core-service",
+  "version": "1.0.0",
+  "description": "Core service library: Saga pattern + API Gateway + GraphQL + Infrastructure + Access Control",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "service-infra": "./dist/infra/cli.js"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./saga": "./dist/saga/index.js",
+    "./gateway": "./dist/gateway/index.js",
+    "./infra": "./dist/infra/index.js",
+    "./access": "./dist/access/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "infra": "node dist/infra/cli.js"
+  },
+  "dependencies": {
+    "access-engine": "file:../access-engine",
+    "arktype": "^2.1.29",
+    "graphql": "^16.12.0",
+    "graphql-http": "^1.22.4",
+    "graphql-sse": "^2.5.3",
+    "jsonwebtoken": "^9.0.3",
+    "mongodb": "^7.0.0",
+    "redis": "^5.10.0",
+    "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^25.0.3",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

@@ -1,0 +1,1074 @@
+/**
+ * Double-Entry Ledger System (Financial Grade)
+ * 
+ * Features:
+ * - TRUE ATOMIC transactions using MongoDB sessions
+ * - Double-entry bookkeeping (every tx has debit + credit)
+ * - Balance Mode: Fast reads from cached balance
+ * - Transaction Mode: Calculate from entries (always accurate)
+ * - Configurable negative balance rules per account type
+ * - Full audit trail for reconciliation
+ * - Two-phase commits for async operations
+ * 
+ * Account Types:
+ * - System: House, pools (CAN go negative)
+ * - Provider: Payment providers (CAN go negative - receivables)
+ * - User: End users (CANNOT go negative by default)
+ */
+
+import { Db, Collection, ClientSession, MongoClient } from 'mongodb';
+import { randomUUID } from 'crypto';
+import { logger } from './logger.js';
+
+// ═══════════════════════════════════════════════════════════════════
+// Types
+// ═══════════════════════════════════════════════════════════════════
+
+export type AccountType = 'system' | 'provider' | 'user' | 'merchant';
+
+export type AccountSubtype = 
+  | 'house' | 'bonus_pool' | 'fee_collection' | 'pending' | 'suspense'
+  | 'deposit' | 'withdrawal'
+  | 'real' | 'bonus' | 'locked' | 'cashback';
+
+export interface LedgerAccount {
+  _id: string;
+  tenantId: string;
+  type: AccountType;
+  subtype: AccountSubtype;
+  ownerId?: string;
+  currency: string;
+  
+  // Balance Mode: Cached balances (fast reads)
+  balance: number;
+  availableBalance: number;
+  pendingIn: number;
+  pendingOut: number;
+  
+  // Negative balance rules
+  allowNegative: boolean;
+  creditLimit?: number;          // Max negative allowed (if allowNegative)
+  
+  // Metadata
+  metadata?: Record<string, unknown>;
+  status: 'active' | 'frozen' | 'closed';
+  
+  // Audit
+  lastEntrySequence: number;     // For optimistic locking
+  lastReconciledAt?: Date;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export type TransactionStatus = 'pending' | 'completed' | 'failed' | 'reversed' | 'expired';
+
+export type TransactionType =
+  | 'deposit' | 'withdrawal' | 'transfer'
+  | 'bonus_credit' | 'bonus_convert' | 'bonus_forfeit'
+  | 'fee' | 'refund' | 'adjustment' | 'reversal';
+
+export interface LedgerTransaction {
+  _id: string;
+  tenantId: string;
+  type: TransactionType;
+  status: TransactionStatus;
+  amount: number;
+  currency: string;
+  fromAccountId: string;
+  toAccountId: string;
+  
+  // References
+  externalRef?: string;
+  parentTxId?: string;
+  orderId?: string;
+  
+  // Metadata
+  description?: string;
+  metadata?: Record<string, unknown>;
+  
+  // Audit
+  initiatedBy: string;
+  approvedBy?: string;
+  
+  // Timestamps
+  createdAt: Date;
+  completedAt?: Date;
+  expiresAt?: Date;
+  
+  // Error
+  errorCode?: string;
+  errorMessage?: string;
+  
+  // Version for optimistic locking
+  version: number;
+}
+
+export interface LedgerEntry {
+  _id: string;
+  tenantId: string;
+  transactionId: string;
+  accountId: string;
+  type: 'debit' | 'credit';
+  amount: number;
+  currency: string;
+  
+  // Balance snapshots (for reconciliation)
+  balanceBefore: number;
+  balanceAfter: number;
+  
+  // Sequence for ordering and optimistic locking
+  sequence: number;
+  
+  createdAt: Date;
+}
+
+export interface CreateTransactionInput {
+  type: TransactionType;
+  fromAccountId: string;
+  toAccountId: string;
+  amount: number;
+  currency: string;
+  description?: string;
+  metadata?: Record<string, unknown>;
+  externalRef?: string;
+  orderId?: string;
+  initiatedBy: string;
+  expiresAt?: Date;
+}
+
+export interface LedgerConfig {
+  tenantId: string;
+  db: Db;
+  client: MongoClient;  // Required for transactions
+  
+  /** Default accounts to create */
+  systemAccounts?: Array<{
+    subtype: AccountSubtype;
+    name: string;
+    currency: string;
+    allowNegative?: boolean;
+  }>;
+  
+  /** Mode for balance calculations */
+  balanceMode?: 'cached' | 'calculated' | 'hybrid';
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Balance Calculator (Transaction Mode)
+// ═══════════════════════════════════════════════════════════════════
+
+export interface BalanceCalculator {
+  /** Get balance calculated from all entries */
+  getCalculatedBalance(accountId: string): Promise<number>;
+  
+  /** Get balance at a specific point in time */
+  getBalanceAtTime(accountId: string, timestamp: Date): Promise<number>;
+  
+  /** Get balance after specific sequence */
+  getBalanceAtSequence(accountId: string, sequence: number): Promise<number>;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Ledger Implementation
+// ═══════════════════════════════════════════════════════════════════
+
+export class Ledger implements BalanceCalculator {
+  private accounts: Collection<LedgerAccount>;
+  private transactions: Collection<LedgerTransaction>;
+  private entries: Collection<LedgerEntry>;
+  private client: MongoClient;
+  private config: Required<LedgerConfig>;
+  
+  constructor(config: LedgerConfig) {
+    this.config = {
+      balanceMode: 'hybrid',
+      systemAccounts: [
+        { subtype: 'house', name: 'House Account', currency: 'USD', allowNegative: true },
+        { subtype: 'bonus_pool', name: 'Bonus Pool', currency: 'USD', allowNegative: true },
+        { subtype: 'fee_collection', name: 'Fees', currency: 'USD', allowNegative: false },
+        { subtype: 'pending', name: 'Pending', currency: 'USD', allowNegative: true },
+        { subtype: 'suspense', name: 'Suspense', currency: 'USD', allowNegative: true },
+      ],
+      ...config,
+    };
+    
+    this.client = config.client;
+    this.accounts = config.db.collection('ledger_accounts');
+    this.transactions = config.db.collection('ledger_transactions');
+    this.entries = config.db.collection('ledger_entries');
+  }
+  
+  // ─────────────────────────────────────────────────────────────────
+  // Initialization
+  // ─────────────────────────────────────────────────────────────────
+  
+  async initialize(): Promise<void> {
+    // ═══════════════════════════════════════════════════════════════════
+    // SHARDING-READY INDEXES
+    // ═══════════════════════════════════════════════════════════════════
+    // 
+    // Shard Keys (when sharding is enabled):
+    // - ledger_accounts: { tenantId: 1, _id: 1 }  → Range sharding by tenant
+    // - ledger_transactions: { tenantId: 1, createdAt: 1 } → Time-range sharding
+    // - ledger_entries: { accountId: "hashed" } → Hashed sharding by account
+    //
+    // All compound indexes include shard key prefix for query efficiency
+    // ═══════════════════════════════════════════════════════════════════
+    
+    await Promise.all([
+      // ─────────────────────────────────────────────────────────────────
+      // ACCOUNTS - Shard key: { tenantId: 1, _id: 1 }
+      // ─────────────────────────────────────────────────────────────────
+      // Primary lookup: account by ID (most frequent)
+      this.accounts.createIndex({ _id: 1 }), // Already primary index, but explicit
+      // Find accounts by owner
+      this.accounts.createIndex({ tenantId: 1, ownerId: 1, subtype: 1 }),
+      // Find accounts by type (admin queries)
+      this.accounts.createIndex({ tenantId: 1, type: 1, subtype: 1, status: 1 }),
+      // Find by currency (reporting)
+      this.accounts.createIndex({ tenantId: 1, currency: 1 }),
+      
+      // ─────────────────────────────────────────────────────────────────
+      // TRANSACTIONS - Shard key: { tenantId: 1, createdAt: 1 }
+      // Time-series pattern: recent transactions are "hot", old are archived
+      // ─────────────────────────────────────────────────────────────────
+      // Primary queries: by tenant + time range (reports, lists)
+      this.transactions.createIndex({ tenantId: 1, createdAt: -1 }),
+      // Status queries with time
+      this.transactions.createIndex({ tenantId: 1, status: 1, createdAt: -1 }),
+      // Find by account (both directions)
+      this.transactions.createIndex({ tenantId: 1, fromAccountId: 1, createdAt: -1 }),
+      this.transactions.createIndex({ tenantId: 1, toAccountId: 1, createdAt: -1 }),
+      // Type + status (filtered queries)
+      this.transactions.createIndex({ tenantId: 1, type: 1, status: 1, createdAt: -1 }),
+      // External reference lookup (idempotency)
+      this.transactions.createIndex(
+        { externalRef: 1 }, 
+        { sparse: true, unique: true }
+      ),
+      // Order reference lookup
+      this.transactions.createIndex(
+        { orderId: 1 }, 
+        { sparse: true }
+      ),
+      // Pending transactions needing completion (background job)
+      this.transactions.createIndex(
+        { status: 1, updatedAt: 1 },
+        { partialFilterExpression: { status: 'pending' } }
+      ),
+      
+      // ─────────────────────────────────────────────────────────────────
+      // ENTRIES - Shard key: { accountId: "hashed" }
+      // Hashed sharding distributes load evenly across shards
+      // ─────────────────────────────────────────────────────────────────
+      // Primary query: entries by account + sequence (statement generation)
+      this.entries.createIndex({ accountId: 1, sequence: 1 }, { unique: true }),
+      // Entries by account + time (date-range queries)
+      this.entries.createIndex({ accountId: 1, createdAt: -1 }),
+      // Find entries by transaction (joining)
+      this.entries.createIndex({ transactionId: 1 }),
+      // Entry type queries (debits vs credits analysis)
+      this.entries.createIndex({ accountId: 1, type: 1, createdAt: -1 }),
+      // Balance at sequence lookup
+      this.entries.createIndex({ accountId: 1, sequence: -1, balanceAfter: 1 }),
+    ]);
+    
+    // Create system accounts
+    for (const sys of this.config.systemAccounts) {
+      const accountId = this.getSystemAccountId(sys.subtype);
+      await this.accounts.updateOne(
+        { _id: accountId },
+        {
+          $setOnInsert: this.createAccountDocument({
+            _id: accountId,
+            type: 'system',
+            subtype: sys.subtype,
+            currency: sys.currency,
+            allowNegative: sys.allowNegative ?? true,
+            metadata: { name: sys.name },
+          }),
+        },
+        { upsert: true }
+      );
+    }
+    
+    logger.info('Ledger initialized', { tenantId: this.config.tenantId });
+  }
+  
+  // ─────────────────────────────────────────────────────────────────
+  // Account Management
+  // ─────────────────────────────────────────────────────────────────
+  
+  private createAccountDocument(partial: Partial<LedgerAccount> & { 
+    _id: string; 
+    type: AccountType; 
+    subtype: AccountSubtype;
+    currency: string;
+    allowNegative: boolean;
+  }): LedgerAccount {
+    return {
+      tenantId: this.config.tenantId,
+      balance: 0,
+      availableBalance: 0,
+      pendingIn: 0,
+      pendingOut: 0,
+      status: 'active',
+      lastEntrySequence: 0,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      ...partial,
+    };
+  }
+  
+  async createUserAccount(
+    userId: string,
+    subtype: AccountSubtype,
+    currency: string = 'USD',
+    options: { allowNegative?: boolean; creditLimit?: number } = {}
+  ): Promise<LedgerAccount> {
+    const accountId = this.getUserAccountId(userId, subtype);
+    
+    const account = this.createAccountDocument({
+      _id: accountId,
+      type: 'user',
+      subtype,
+      ownerId: userId,
+      currency,
+      allowNegative: options.allowNegative ?? false, // Users default to NO negative
+      creditLimit: options.creditLimit,
+    });
+    
+    await this.accounts.insertOne(account);
+    return account;
+  }
+  
+  async createProviderAccount(
+    providerId: string,
+    subtype: 'deposit' | 'withdrawal',
+    currency: string = 'USD'
+  ): Promise<LedgerAccount> {
+    const accountId = this.getProviderAccountId(providerId, subtype);
+    
+    const account = this.createAccountDocument({
+      _id: accountId,
+      type: 'provider',
+      subtype,
+      ownerId: providerId,
+      currency,
+      allowNegative: true, // Providers can go negative (receivables)
+    });
+    
+    await this.accounts.insertOne(account);
+    return account;
+  }
+  
+  async getAccount(accountId: string): Promise<LedgerAccount | null> {
+    return this.accounts.findOne({ _id: accountId });
+  }
+  
+  async getUserAccounts(userId: string): Promise<LedgerAccount[]> {
+    return this.accounts.find({
+      tenantId: this.config.tenantId,
+      type: 'user',
+      ownerId: userId,
+    }).toArray();
+  }
+  
+  async getOrCreateUserAccount(
+    userId: string,
+    subtype: AccountSubtype,
+    currency: string = 'USD'
+  ): Promise<LedgerAccount> {
+    const accountId = this.getUserAccountId(userId, subtype);
+    let account = await this.getAccount(accountId);
+    
+    if (!account) {
+      account = await this.createUserAccount(userId, subtype, currency);
+    }
+    
+    return account;
+  }
+  
+  // ─────────────────────────────────────────────────────────────────
+  // ATOMIC Transaction Execution
+  // ─────────────────────────────────────────────────────────────────
+  
+  /**
+   * Execute a transaction ATOMICALLY using MongoDB session
+   * This is the ONLY way money should move in the system
+   */
+  async createTransaction(input: CreateTransactionInput): Promise<LedgerTransaction> {
+    const session = this.client.startSession();
+    
+    try {
+      let result: LedgerTransaction;
+      
+      await session.withTransaction(async () => {
+        result = await this.executeTransaction(input, session);
+      });
+      
+      return result!;
+    } catch (error) {
+      logger.error('Transaction failed', { error, input });
+      throw error;
+    } finally {
+      await session.endSession();
+    }
+  }
+  
+  /**
+   * Internal transaction execution (within session)
+   */
+  private async executeTransaction(
+    input: CreateTransactionInput,
+    session: ClientSession
+  ): Promise<LedgerTransaction> {
+    const txId = randomUUID();
+    const now = new Date();
+    
+    // Get accounts with session (locked during transaction)
+    const [fromAccount, toAccount] = await Promise.all([
+      this.accounts.findOne({ _id: input.fromAccountId }, { session }),
+      this.accounts.findOne({ _id: input.toAccountId }, { session }),
+    ]);
+    
+    // Validations
+    this.validateAccounts(fromAccount, toAccount, input);
+    this.validateBalance(fromAccount!, input.amount);
+    
+    // Calculate new sequences
+    const fromSeq = fromAccount!.lastEntrySequence + 1;
+    const toSeq = toAccount!.lastEntrySequence + 1;
+    
+    // Create transaction record
+    const transaction: LedgerTransaction = {
+      _id: txId,
+      tenantId: this.config.tenantId,
+      type: input.type,
+      status: 'completed',
+      amount: input.amount,
+      currency: input.currency,
+      fromAccountId: input.fromAccountId,
+      toAccountId: input.toAccountId,
+      externalRef: input.externalRef,
+      orderId: input.orderId,
+      description: input.description,
+      metadata: input.metadata,
+      initiatedBy: input.initiatedBy,
+      createdAt: now,
+      completedAt: now,
+      version: 1,
+    };
+    
+    // Create DEBIT entry (from account)
+    const debitEntry: LedgerEntry = {
+      _id: randomUUID(),
+      tenantId: this.config.tenantId,
+      transactionId: txId,
+      accountId: input.fromAccountId,
+      type: 'debit',
+      amount: input.amount,
+      currency: input.currency,
+      balanceBefore: fromAccount!.balance,
+      balanceAfter: fromAccount!.balance - input.amount,
+      sequence: fromSeq,
+      createdAt: now,
+    };
+    
+    // Create CREDIT entry (to account)
+    const creditEntry: LedgerEntry = {
+      _id: randomUUID(),
+      tenantId: this.config.tenantId,
+      transactionId: txId,
+      accountId: input.toAccountId,
+      type: 'credit',
+      amount: input.amount,
+      currency: input.currency,
+      balanceBefore: toAccount!.balance,
+      balanceAfter: toAccount!.balance + input.amount,
+      sequence: toSeq,
+      createdAt: now,
+    };
+    
+    // Execute ALL operations atomically within the session
+    await this.transactions.insertOne(transaction, { session });
+    await this.entries.insertMany([debitEntry, creditEntry], { session });
+    
+    // Update balances with optimistic locking
+    const fromUpdate = await this.accounts.updateOne(
+      { 
+        _id: input.fromAccountId,
+        lastEntrySequence: fromAccount!.lastEntrySequence, // Optimistic lock
+      },
+      {
+        $inc: { balance: -input.amount, availableBalance: -input.amount },
+        $set: { lastEntrySequence: fromSeq, updatedAt: now },
+      },
+      { session }
+    );
+    
+    if (fromUpdate.modifiedCount === 0) {
+      throw new Error('Concurrent modification on source account');
+    }
+    
+    const toUpdate = await this.accounts.updateOne(
+      { 
+        _id: input.toAccountId,
+        lastEntrySequence: toAccount!.lastEntrySequence,
+      },
+      {
+        $inc: { balance: input.amount, availableBalance: input.amount },
+        $set: { lastEntrySequence: toSeq, updatedAt: now },
+      },
+      { session }
+    );
+    
+    if (toUpdate.modifiedCount === 0) {
+      throw new Error('Concurrent modification on destination account');
+    }
+    
+    logger.info('Transaction completed', { 
+      txId, 
+      type: input.type,
+      amount: input.amount,
+      from: input.fromAccountId,
+      to: input.toAccountId,
+    });
+    
+    return transaction;
+  }
+  
+  // ─────────────────────────────────────────────────────────────────
+  // Two-Phase Transactions (Pending → Complete/Cancel)
+  // ─────────────────────────────────────────────────────────────────
+  
+  /**
+   * Create a PENDING transaction (reserves funds but doesn't move them)
+   * Use for: withdrawals awaiting provider confirmation, escrow, etc.
+   */
+  async createPendingTransaction(input: CreateTransactionInput): Promise<LedgerTransaction> {
+    const session = this.client.startSession();
+    
+    try {
+      let result: LedgerTransaction;
+      
+      await session.withTransaction(async () => {
+        const txId = randomUUID();
+        const now = new Date();
+        
+        const fromAccount = await this.accounts.findOne(
+          { _id: input.fromAccountId },
+          { session }
+        );
+        
+        if (!fromAccount) {
+          throw new Error(`Account not found: ${input.fromAccountId}`);
+        }
+        
+        // Check AVAILABLE balance (not total balance)
+        if (!fromAccount.allowNegative && fromAccount.availableBalance < input.amount) {
+          throw new Error(
+            `Insufficient available balance: ${fromAccount.availableBalance} < ${input.amount}`
+          );
+        }
+        
+        // Create pending transaction
+        const transaction: LedgerTransaction = {
+          _id: txId,
+          tenantId: this.config.tenantId,
+          type: input.type,
+          status: 'pending',
+          amount: input.amount,
+          currency: input.currency,
+          fromAccountId: input.fromAccountId,
+          toAccountId: input.toAccountId,
+          externalRef: input.externalRef,
+          orderId: input.orderId,
+          description: input.description,
+          metadata: input.metadata,
+          initiatedBy: input.initiatedBy,
+          createdAt: now,
+          expiresAt: input.expiresAt || new Date(Date.now() + 24 * 60 * 60 * 1000),
+          version: 1,
+        };
+        
+        await this.transactions.insertOne(transaction, { session });
+        
+        // Reserve funds: reduce available, increase pending
+        await this.accounts.updateOne(
+          { _id: input.fromAccountId },
+          {
+            $inc: { availableBalance: -input.amount, pendingOut: input.amount },
+            $set: { updatedAt: now },
+          },
+          { session }
+        );
+        
+        // Mark pending incoming on destination
+        await this.accounts.updateOne(
+          { _id: input.toAccountId },
+          {
+            $inc: { pendingIn: input.amount },
+            $set: { updatedAt: now },
+          },
+          { session }
+        );
+        
+        result = transaction;
+      });
+      
+      return result!;
+    } finally {
+      await session.endSession();
+    }
+  }
+  
+  /**
+   * Complete a pending transaction (actually moves the money)
+   */
+  async completeTransaction(txId: string): Promise<LedgerTransaction> {
+    const session = this.client.startSession();
+    
+    try {
+      let result: LedgerTransaction;
+      
+      await session.withTransaction(async () => {
+        const tx = await this.transactions.findOne({ _id: txId }, { session });
+        
+        if (!tx) throw new Error(`Transaction not found: ${txId}`);
+        if (tx.status !== 'pending') throw new Error(`Not pending: ${tx.status}`);
+        
+        const now = new Date();
+        
+        const [fromAccount, toAccount] = await Promise.all([
+          this.accounts.findOne({ _id: tx.fromAccountId }, { session }),
+          this.accounts.findOne({ _id: tx.toAccountId }, { session }),
+        ]);
+        
+        if (!fromAccount || !toAccount) throw new Error('Account not found');
+        
+        const fromSeq = fromAccount.lastEntrySequence + 1;
+        const toSeq = toAccount.lastEntrySequence + 1;
+        
+        // Create entries
+        const debitEntry: LedgerEntry = {
+          _id: randomUUID(),
+          tenantId: this.config.tenantId,
+          transactionId: txId,
+          accountId: tx.fromAccountId,
+          type: 'debit',
+          amount: tx.amount,
+          currency: tx.currency,
+          balanceBefore: fromAccount.balance,
+          balanceAfter: fromAccount.balance - tx.amount,
+          sequence: fromSeq,
+          createdAt: now,
+        };
+        
+        const creditEntry: LedgerEntry = {
+          _id: randomUUID(),
+          tenantId: this.config.tenantId,
+          transactionId: txId,
+          accountId: tx.toAccountId,
+          type: 'credit',
+          amount: tx.amount,
+          currency: tx.currency,
+          balanceBefore: toAccount.balance,
+          balanceAfter: toAccount.balance + tx.amount,
+          sequence: toSeq,
+          createdAt: now,
+        };
+        
+        await this.entries.insertMany([debitEntry, creditEntry], { session });
+        
+        // Update transaction
+        await this.transactions.updateOne(
+          { _id: txId, version: tx.version },
+          { $set: { status: 'completed', completedAt: now }, $inc: { version: 1 } },
+          { session }
+        );
+        
+        // Update from account: move from pending to actual debit
+        await this.accounts.updateOne(
+          { _id: tx.fromAccountId, lastEntrySequence: fromAccount.lastEntrySequence },
+          {
+            $inc: { balance: -tx.amount, pendingOut: -tx.amount },
+            $set: { lastEntrySequence: fromSeq, updatedAt: now },
+          },
+          { session }
+        );
+        
+        // Update to account: move from pending to actual credit
+        await this.accounts.updateOne(
+          { _id: tx.toAccountId, lastEntrySequence: toAccount.lastEntrySequence },
+          {
+            $inc: { balance: tx.amount, availableBalance: tx.amount, pendingIn: -tx.amount },
+            $set: { lastEntrySequence: toSeq, updatedAt: now },
+          },
+          { session }
+        );
+        
+        result = { ...tx, status: 'completed', completedAt: now };
+      });
+      
+      return result!;
+    } finally {
+      await session.endSession();
+    }
+  }
+  
+  /**
+   * Cancel a pending transaction (releases reserved funds)
+   */
+  async cancelTransaction(txId: string, reason?: string): Promise<LedgerTransaction> {
+    const session = this.client.startSession();
+    
+    try {
+      let result: LedgerTransaction;
+      
+      await session.withTransaction(async () => {
+        const tx = await this.transactions.findOne({ _id: txId }, { session });
+        
+        if (!tx) throw new Error(`Transaction not found: ${txId}`);
+        if (tx.status !== 'pending') throw new Error(`Not pending: ${tx.status}`);
+        
+        const now = new Date();
+        
+        // Update transaction
+        await this.transactions.updateOne(
+          { _id: txId },
+          {
+            $set: { 
+              status: 'failed', 
+              completedAt: now,
+              errorMessage: reason || 'Cancelled',
+            },
+          },
+          { session }
+        );
+        
+        // Release reserved funds
+        await this.accounts.updateOne(
+          { _id: tx.fromAccountId },
+          {
+            $inc: { availableBalance: tx.amount, pendingOut: -tx.amount },
+            $set: { updatedAt: now },
+          },
+          { session }
+        );
+        
+        // Remove pending incoming
+        await this.accounts.updateOne(
+          { _id: tx.toAccountId },
+          {
+            $inc: { pendingIn: -tx.amount },
+            $set: { updatedAt: now },
+          },
+          { session }
+        );
+        
+        result = { ...tx, status: 'failed', completedAt: now };
+      });
+      
+      return result!;
+    } finally {
+      await session.endSession();
+    }
+  }
+  
+  /**
+   * Reverse a completed transaction (creates reversal tx)
+   */
+  async reverseTransaction(txId: string, reason: string, initiatedBy: string): Promise<LedgerTransaction> {
+    const original = await this.transactions.findOne({ _id: txId });
+    
+    if (!original) throw new Error(`Transaction not found: ${txId}`);
+    if (original.status !== 'completed') throw new Error(`Can only reverse completed: ${original.status}`);
+    
+    // Create reversal (swap from/to)
+    const reversal = await this.createTransaction({
+      type: 'reversal',
+      fromAccountId: original.toAccountId,
+      toAccountId: original.fromAccountId,
+      amount: original.amount,
+      currency: original.currency,
+      description: `Reversal: ${reason}`,
+      metadata: { originalTxId: txId, reason },
+      initiatedBy,
+    });
+    
+    // Mark original as reversed
+    await this.transactions.updateOne(
+      { _id: txId },
+      { $set: { status: 'reversed' } }
+    );
+    
+    return reversal;
+  }
+  
+  // ─────────────────────────────────────────────────────────────────
+  // Balance Mode: Cached Balance (Fast Reads)
+  // ─────────────────────────────────────────────────────────────────
+  
+  /**
+   * Get cached balance (FAST - use for UI/API responses)
+   */
+  async getBalance(accountId: string): Promise<{
+    balance: number;
+    availableBalance: number;
+    pendingIn: number;
+    pendingOut: number;
+  }> {
+    const account = await this.getAccount(accountId);
+    if (!account) throw new Error(`Account not found: ${accountId}`);
+    
+    return {
+      balance: account.balance,
+      availableBalance: account.availableBalance,
+      pendingIn: account.pendingIn,
+      pendingOut: account.pendingOut,
+    };
+  }
+  
+  // ─────────────────────────────────────────────────────────────────
+  // Transaction Mode: Calculated Balance (Always Accurate)
+  // ─────────────────────────────────────────────────────────────────
+  
+  /**
+   * Calculate balance from entries (ACCURATE - use for reconciliation)
+   */
+  async getCalculatedBalance(accountId: string): Promise<number> {
+    const result = await this.entries.aggregate([
+      { $match: { accountId } },
+      {
+        $group: {
+          _id: null,
+          credits: { $sum: { $cond: [{ $eq: ['$type', 'credit'] }, '$amount', 0] } },
+          debits: { $sum: { $cond: [{ $eq: ['$type', 'debit'] }, '$amount', 0] } },
+        },
+      },
+    ]).toArray();
+    
+    if (result.length === 0) return 0;
+    return result[0].credits - result[0].debits;
+  }
+  
+  /**
+   * Get balance at a specific point in time
+   */
+  async getBalanceAtTime(accountId: string, timestamp: Date): Promise<number> {
+    const result = await this.entries.aggregate([
+      { $match: { accountId, createdAt: { $lte: timestamp } } },
+      {
+        $group: {
+          _id: null,
+          credits: { $sum: { $cond: [{ $eq: ['$type', 'credit'] }, '$amount', 0] } },
+          debits: { $sum: { $cond: [{ $eq: ['$type', 'debit'] }, '$amount', 0] } },
+        },
+      },
+    ]).toArray();
+    
+    if (result.length === 0) return 0;
+    return result[0].credits - result[0].debits;
+  }
+  
+  /**
+   * Get balance at specific sequence
+   */
+  async getBalanceAtSequence(accountId: string, sequence: number): Promise<number> {
+    const entry = await this.entries.findOne({ accountId, sequence });
+    return entry?.balanceAfter ?? 0;
+  }
+  
+  // ─────────────────────────────────────────────────────────────────
+  // Reconciliation
+  // ─────────────────────────────────────────────────────────────────
+  
+  /**
+   * Reconcile single account (compare cached vs calculated)
+   */
+  async reconcileAccount(accountId: string): Promise<{
+    accountId: string;
+    cachedBalance: number;
+    calculatedBalance: number;
+    difference: number;
+    isBalanced: boolean;
+  }> {
+    const [account, calculated] = await Promise.all([
+      this.getAccount(accountId),
+      this.getCalculatedBalance(accountId),
+    ]);
+    
+    if (!account) throw new Error(`Account not found: ${accountId}`);
+    
+    const difference = Math.abs(account.balance - calculated);
+    const isBalanced = difference < 0.01;
+    
+    if (!isBalanced) {
+      logger.error('Account balance mismatch!', {
+        accountId,
+        cached: account.balance,
+        calculated,
+        difference,
+      });
+    }
+    
+    return {
+      accountId,
+      cachedBalance: account.balance,
+      calculatedBalance: calculated,
+      difference,
+      isBalanced,
+    };
+  }
+  
+  /**
+   * Global reconciliation (all debits = all credits)
+   */
+  async globalReconciliation(): Promise<{
+    totalDebits: number;
+    totalCredits: number;
+    difference: number;
+    isBalanced: boolean;
+  }> {
+    const result = await this.entries.aggregate([
+      { $match: { tenantId: this.config.tenantId } },
+      {
+        $group: {
+          _id: null,
+          totalCredits: { $sum: { $cond: [{ $eq: ['$type', 'credit'] }, '$amount', 0] } },
+          totalDebits: { $sum: { $cond: [{ $eq: ['$type', 'debit'] }, '$amount', 0] } },
+        },
+      },
+    ]).toArray();
+    
+    if (result.length === 0) {
+      return { totalDebits: 0, totalCredits: 0, difference: 0, isBalanced: true };
+    }
+    
+    const { totalDebits, totalCredits } = result[0];
+    const difference = Math.abs(totalDebits - totalCredits);
+    const isBalanced = difference < 0.01;
+    
+    if (!isBalanced) {
+      logger.error('CRITICAL: Global ledger imbalance!', {
+        totalDebits,
+        totalCredits,
+        difference,
+      });
+    }
+    
+    return { totalDebits, totalCredits, difference, isBalanced };
+  }
+  
+  // ─────────────────────────────────────────────────────────────────
+  // Validation Helpers
+  // ─────────────────────────────────────────────────────────────────
+  
+  private validateAccounts(
+    from: LedgerAccount | null,
+    to: LedgerAccount | null,
+    input: CreateTransactionInput
+  ): void {
+    if (!from) throw new Error(`Source account not found: ${input.fromAccountId}`);
+    if (!to) throw new Error(`Destination account not found: ${input.toAccountId}`);
+    
+    if (from.currency !== to.currency) {
+      throw new Error(`Currency mismatch: ${from.currency} vs ${to.currency}`);
+    }
+    if (from.currency !== input.currency) {
+      throw new Error(`Transaction currency mismatch`);
+    }
+    if (from.status !== 'active') {
+      throw new Error(`Source account is ${from.status}`);
+    }
+    if (to.status !== 'active') {
+      throw new Error(`Destination account is ${to.status}`);
+    }
+  }
+  
+  private validateBalance(account: LedgerAccount, amount: number): void {
+    if (account.allowNegative) {
+      // Check credit limit if set
+      if (account.creditLimit !== undefined) {
+        const newBalance = account.availableBalance - amount;
+        if (newBalance < -account.creditLimit) {
+          throw new Error(
+            `Would exceed credit limit: ${newBalance} < -${account.creditLimit}`
+          );
+        }
+      }
+      return; // Allow negative
+    }
+    
+    // Cannot go negative
+    if (account.availableBalance < amount) {
+      throw new Error(
+        `Insufficient balance: ${account.availableBalance} < ${amount}`
+      );
+    }
+  }
+  
+  // ─────────────────────────────────────────────────────────────────
+  // Query Helpers
+  // ─────────────────────────────────────────────────────────────────
+  
+  async getTransaction(txId: string): Promise<LedgerTransaction | null> {
+    return this.transactions.findOne({ _id: txId });
+  }
+  
+  async getAccountTransactions(
+    accountId: string,
+    options: { limit?: number; offset?: number; status?: TransactionStatus } = {}
+  ): Promise<LedgerTransaction[]> {
+    const filter: Record<string, unknown> = {
+      tenantId: this.config.tenantId,
+      $or: [{ fromAccountId: accountId }, { toAccountId: accountId }],
+    };
+    
+    if (options.status) filter.status = options.status;
+    
+    return this.transactions
+      .find(filter)
+      .sort({ createdAt: -1 })
+      .skip(options.offset || 0)
+      .limit(options.limit || 50)
+      .toArray();
+  }
+  
+  async getAccountEntries(
+    accountId: string,
+    options: { limit?: number; offset?: number } = {}
+  ): Promise<LedgerEntry[]> {
+    return this.entries
+      .find({ accountId })
+      .sort({ sequence: -1 })
+      .skip(options.offset || 0)
+      .limit(options.limit || 100)
+      .toArray();
+  }
+  
+  // ─────────────────────────────────────────────────────────────────
+  // ID Helpers
+  // ─────────────────────────────────────────────────────────────────
+  
+  getSystemAccountId(subtype: AccountSubtype): string {
+    return `system:${subtype}:${this.config.tenantId}`;
+  }
+  
+  getUserAccountId(userId: string, subtype: AccountSubtype): string {
+    return `user:${userId}:${subtype}`;
+  }
+  
+  getProviderAccountId(providerId: string, subtype: 'deposit' | 'withdrawal'): string {
+    return `provider:${providerId}:${subtype}`;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Factory
+// ═══════════════════════════════════════════════════════════════════
+
+export function createLedger(config: LedgerConfig): Ledger {
+  return new Ledger(config);
+}

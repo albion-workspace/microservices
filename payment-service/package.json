@@ -1,0 +1,25 @@
+{
+  "name": "payment-service",
+  "version": "1.0.0",
+  "description": "Payment Service - Multi-provider payment processing microservice",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "build:run": "npm run build && npm start",
+    "test": "tsx src/test.ts",
+    "infra:generate": "service-infra generate -c infra.config.json --all",
+    "infra:preview": "service-infra generate -c infra.config.json --all --dry-run",
+    "infra:docker": "service-infra generate -c infra.config.json --dockerfile --compose",
+    "infra:k8s": "service-infra generate -c infra.config.json --k8s"
+  },
+  "dependencies": {
+    "core-service": "file:../core-service"
+  },
+  "devDependencies": {
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  }
+}
+

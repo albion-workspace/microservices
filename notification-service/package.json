@@ -1,0 +1,24 @@
+{
+  "name": "notification-service",
+  "version": "1.0.0",
+  "description": "Notification Service - Multi-channel notifications (Email, SMS, WhatsApp, Push, SSE, Socket.IO) with webhook support",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "build:run": "npm run build && npm start"
+  },
+  "dependencies": {
+    "core-service": "file:../core-service",
+    "nodemailer": "^6.9.16",
+    "twilio": "^5.3.5",
+    "bullmq": "^5.28.2"
+  },
+  "devDependencies": {
+    "@types/nodemailer": "^6.4.16",
+    "@types/node": "^20.11.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  }
+}

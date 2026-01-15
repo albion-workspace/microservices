@@ -1,0 +1,223 @@
+/**
+ * Generic Reference Resolver
+ * 
+ * Inspired by Mongoose's refPath/populate, but optimized for:
+ * - MongoDB driver (no Mongoose overhead)
+ * - UUIDs (not ObjectIds)
+ * - Microservices (cross-service references)
+ */
+
+import { getDatabase } from 'core-service';
+
+/**
+ * Collection mapping for reference types
+ * Add new entity types here as your system grows
+ */
+const COLLECTION_MAP: Record<string, string> = {
+  // Bonuses
+  'bonus': 'bonuses',
+  
+  // Gaming
+  'bet': 'bets',
+  'game': 'game_rounds',
+  'jackpot': 'jackpots',
+  
+  // Payments
+  'transaction': 'deposits',  // Could also be 'withdrawals'
+  'deposit': 'deposits',
+  'withdrawal': 'withdrawals',
+  
+  // Marketing
+  'promotion': 'promotions',
+  'promo': 'promotions',
+  'campaign': 'campaigns',
+  
+  // Users
+  'user': 'users',
+  'player': 'users',
+};
+
+/**
+ * Resolve a single reference
+ * Like Mongoose populate but for MongoDB driver + UUIDs
+ * 
+ * @example
+ * const tx = await txRepo.findById('tx-id');
+ * const bonus = await resolveReference(tx.refId, tx.refType);
+ */
+export async function resolveReference(
+  refId: string | undefined | null,
+  refType: string | undefined | null
+): Promise<any | null> {
+  if (!refId || !refType) return null;
+  
+  const db = getDatabase();
+  const collectionName = COLLECTION_MAP[refType] || refType;
+  const collection = db.collection(collectionName);
+  
+  try {
+    return await collection.findOne({ id: refId }, { projection: { _id: 0 } });
+  } catch (err) {
+    console.error(`Failed to resolve reference ${refType}:${refId}`, err);
+    return null;
+  }
+}
+
+/**
+ * Resolve multiple references in parallel
+ * 
+ * @example
+ * const transactions = await txRepo.findMany({ userId: 'user-123' });
+ * const populated = await resolveReferences(transactions, 'refId', 'refType');
+ */
+export async function resolveReferences<T extends Record<string, any>>(
+  documents: T[],
+  refIdField: keyof T = 'refId',
+  refTypeField: keyof T = 'refType'
+): Promise<(T & { _ref?: any })[]> {
+  if (!documents.length) return [];
+  
+  // Resolve all references in parallel
+  const results = await Promise.all(
+    documents.map(async (doc) => {
+      const ref = await resolveReference(
+        doc[refIdField] as string,
+        doc[refTypeField] as string
+      );
+      return { ...doc, _ref: ref };
+    })
+  );
+  
+  return results;
+}
+
+/**
+ * Batch resolve references by type for efficiency
+ * Groups by refType and fetches in batches
+ * 
+ * @example
+ * const transactions = await txRepo.findMany({ userId: 'user-123' });
+ * const populated = await batchResolveReferences(transactions);
+ */
+export async function batchResolveReferences<T extends Record<string, any>>(
+  documents: T[],
+  refIdField: keyof T = 'refId',
+  refTypeField: keyof T = 'refType'
+): Promise<(T & { _ref?: any })[]> {
+  if (!documents.length) return [];
+  
+  const db = getDatabase();
+  
+  // Group by refType
+  const grouped = new Map<string, Array<{ doc: T; refId: string }>>();
+  
+  for (const doc of documents) {
+    const refType = doc[refTypeField] as string;
+    const refId = doc[refIdField] as string;
+    
+    if (!refType || !refId) continue;
+    
+    if (!grouped.has(refType)) {
+      grouped.set(refType, []);
+    }
+    grouped.get(refType)!.push({ doc, refId });
+  }
+  
+  // Fetch each type in batch
+  const refCache = new Map<string, any>();
+  
+  for (const [refType, items] of grouped.entries()) {
+    const collectionName = COLLECTION_MAP[refType] || refType;
+    const collection = db.collection(collectionName);
+    const ids = items.map(item => item.refId);
+    
+    try {
+      const refs = await collection
+        .find({ id: { $in: ids } }, { projection: { _id: 0 } })
+        .toArray();
+      
+      // Cache by ID
+      for (const ref of refs) {
+        refCache.set(`${refType}:${ref.id}`, ref);
+      }
+    } catch (err) {
+      console.error(`Failed to batch resolve ${refType} references`, err);
+    }
+  }
+  
+  // Attach refs to docs
+  return documents.map(doc => {
+    const refType = doc[refTypeField] as string;
+    const refId = doc[refIdField] as string;
+    const key = `${refType}:${refId}`;
+    
+    return {
+      ...doc,
+      _ref: refCache.get(key) || null
+    };
+  });
+}
+
+/**
+ * Check if a reference exists (efficient)
+ * 
+ * @example
+ * const exists = await referenceExists('bonus-123', 'bonus');
+ */
+export async function referenceExists(
+  refId: string,
+  refType: string
+): Promise<boolean> {
+  if (!refId || !refType) return false;
+  
+  const db = getDatabase();
+  const collectionName = COLLECTION_MAP[refType] || refType;
+  const collection = db.collection(collectionName);
+  
+  try {
+    const doc = await collection.findOne(
+      { id: refId },
+      { projection: { id: 1 } }
+    );
+    return doc !== null;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Validate references before creating a transaction
+ * 
+ * @example
+ * await validateReference('bonus-123', 'bonus'); // throws if not found
+ */
+export async function validateReference(
+  refId: string,
+  refType: string
+): Promise<void> {
+  const exists = await referenceExists(refId, refType);
+  if (!exists) {
+    throw new Error(`Reference not found: ${refType}:${refId}`);
+  }
+}
+
+/**
+ * Register a new reference type dynamically
+ * Useful for plugins/extensions
+ * 
+ * @example
+ * registerReferenceType('tournament', 'tournaments');
+ */
+export function registerReferenceType(
+  refType: string,
+  collectionName: string
+): void {
+  COLLECTION_MAP[refType] = collectionName;
+}
+
+/**
+ * Get all registered reference types
+ */
+export function getRegisteredReferenceTypes(): string[] {
+  return Object.keys(COLLECTION_MAP);
+}
