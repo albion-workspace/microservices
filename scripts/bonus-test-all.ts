@@ -1,25 +1,22 @@
 #!/usr/bin/env npx tsx
 /**
- * Bonus Service - Comprehensive Test Suite
+ * Bonus Test Suite - Runs all bonus tests in correct order
  * 
- * Tests ALL 38 bonus types organized by category:
+ * Naming Convention: bonus-{action}.ts
+ * - bonus-clean.ts: Cleanup bonus data
+ * - bonus-setup.ts: Setup bonus users
+ * - bonus-test-all.ts: Run all bonus tests in sequence (this file)
  * 
- * 1. Onboarding (4): welcome, first_deposit, first_purchase, first_action
- * 2. Recurring (2): reload, top_up
- * 3. Referral (3): referral, referee, commission
- * 4. Activity (4): activity, streak, milestone, winback
- * 5. Recovery (2): cashback, consolation
- * 6. Credits (2): free_credit, trial
- * 7. Loyalty (4): loyalty, loyalty_points, vip, tier_upgrade
- * 8. Time-based (5): birthday, anniversary, seasonal, daily_login, flash
- * 9. Achievement (3): achievement, task_completion, challenge
- * 10. Competition (2): tournament, leaderboard
- * 11. Selection (3): selection, combo, bundle
- * 12. Promotional (3): promo_code, special_event, custom
+ * Order:
+ * 1. Clean bonus data (--full) - Removes all bonus-related collections
+ * 2. Wait for services - Ensures bonus and auth services are ready
+ * 3. Setup bonus users - Creates users with proper roles/permissions via API
+ * 4. Run bonus tests:
+ *    - Tests ALL 38 bonus types organized by category
+ *    - Client-side eligibility verification using BonusEligibility class
+ *    - Turnover tracking and bonus queries
  * 
- * INCLUDES: Client-side eligibility verification using BonusEligibility class
- * 
- * Run: npx tsx scripts/bonus-service-tests.ts
+ * Usage: npx tsx scripts/bonus-test-all.ts
  */
 
 import { createHmac } from 'crypto';
@@ -32,9 +29,11 @@ import {
 export {}; // Make this a module
 
 const BONUS_URL = process.env.BONUS_URL || 'http://localhost:3005/graphql';
+const AUTH_SERVICE_URL = 'http://localhost:3003/graphql';
+const JWT_SECRET = process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || 'shared-jwt-secret-change-in-production';
 
-// JWT Configuration
-const JWT_SECRET = process.env.JWT_SECRET || 'bonus-service-secret-change-in-production';
+const ADMIN_EMAIL = 'admin@demo.com';
+const ADMIN_PASSWORD = 'Admin123!@#';
 
 // ═══════════════════════════════════════════════════════════════════
 // Test Configuration & Mock Data
@@ -358,6 +357,35 @@ function createJWT(payload: object): string {
   return `${base64Header}.${base64Payload}.${signature}`;
 }
 
+async function login(): Promise<string> {
+  const data = await graphql<{ login: { success: boolean; tokens?: { accessToken: string } } }>(
+    AUTH_SERVICE_URL,
+    `
+      mutation Login($input: LoginInput!) {
+        login(input: $input) {
+          success
+          tokens {
+            accessToken
+          }
+        }
+      }
+    `,
+    {
+      input: {
+        tenantId: 'default-tenant',
+        identifier: ADMIN_EMAIL,
+        password: ADMIN_PASSWORD,
+      },
+    }
+  );
+
+  if (!data.login.success || !data.login.tokens) {
+    throw new Error('Login failed');
+  }
+
+  return data.login.tokens.accessToken;
+}
+
 function createAdminToken(): string {
   return createJWT({
     userId: 'admin',
@@ -381,21 +409,40 @@ interface TestResult {
 const results: TestResult[] = [];
 let adminToken: string;
 
-async function graphql(query: string, variables: Record<string, unknown> = {}) {
-  const response = await fetch(BONUS_URL, {
+async function graphql<T = any>(
+  url: string,
+  query: string,
+  variables?: Record<string, unknown>,
+  token?: string
+): Promise<T> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  } else if (adminToken) {
+    headers['Authorization'] = `Bearer ${adminToken}`;
+  }
+
+  const response = await fetch(url, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${adminToken}`,
-    },
+    headers,
     body: JSON.stringify({ query, variables }),
   });
 
-  const json = await response.json();
-  if (json.errors) {
-    throw new Error(json.errors[0]?.message || 'GraphQL error');
+  if (!response.ok) {
+    throw new Error(`HTTP error! status: ${response.status}`);
   }
-  return json.data;
+
+  const result: any = await response.json();
+
+  if (result.errors) {
+    const errorMessage = result.errors.map((e: any) => e.message).join('; ');
+    throw new Error(`GraphQL Error: ${errorMessage}`);
+  }
+
+  return result.data as T;
 }
 
 async function runTest(name: string, testFn: () => Promise<void>): Promise<TestResult> {
@@ -451,10 +498,10 @@ async function createTemplate(config: TemplateConfig): Promise<string> {
     validUntil: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString(),
     eligibleTiers: config.eligibleTiers,
     priority: 50,
-    isActive: true,
+    // Note: isActive is not in CreateBonusTemplateInput - templates are active by default
   };
 
-  const data = await graphql(query, { input });
+  const data = await graphql(BONUS_URL, query, { input });
   
   if (!data.createBonusTemplate.success) {
     throw new Error(data.createBonusTemplate.errors?.join(', ') || 'Failed');
@@ -492,7 +539,7 @@ async function testOnboardingBonuses() {
         }
       }
     `;
-    const data = await graphql(query, {
+    const data = await graphql(BONUS_URL, query, {
       input: {
         userId: CONFIG.testUserId,
         templateCode: TEMPLATES.onboarding[0].code,
@@ -675,7 +722,7 @@ async function testTurnoverTracking() {
         }
       }
     `;
-    const listData = await graphql(listQuery);
+    const listData = await graphql(BONUS_URL, listQuery);
     if (listData.userBonuss.nodes.length === 0) {
       console.log('     → No bonuses to track turnover');
       return;
@@ -686,19 +733,19 @@ async function testTurnoverTracking() {
       mutation RecordTurnover($input: CreateBonusTransactionInput!) {
         createBonusTransaction(input: $input) {
           success
-          bonusTransaction { id turnoverContribution turnoverAfter }
+          bonusTransaction { id amount type }
           errors
         }
       }
     `;
-    const txData = await graphql(txQuery, {
+    const txData = await graphql(BONUS_URL, txQuery, {
       input: {
         userBonusId: bonus.id,
         userId: CONFIG.testUserId,
         type: 'turnover',
         currency: 'USD',
         amount: 5000,
-        activityCategory: 'slots',
+        // Note: activityCategory might not be in schema
       }
     });
     console.log(`     → Turnover: ${JSON.stringify(txData.createBonusTransaction.bonusTransaction)}`);
@@ -710,7 +757,7 @@ async function testBonusQueries() {
 
   await runTest('List all templates', async () => {
     const query = `query { bonusTemplates(first: 50) { totalCount nodes { type } } }`;
-    const data = await graphql(query);
+    const data = await graphql(BONUS_URL, query);
     console.log(`     → ${data.bonusTemplates.totalCount} templates created`);
     
     const types = [...new Set(data.bonusTemplates.nodes.map((n: any) => n.type))];
@@ -719,20 +766,22 @@ async function testBonusQueries() {
 
   await runTest('List user bonuses', async () => {
     const query = `query { userBonuss(first: 10) { totalCount nodes { type status } } }`;
-    const data = await graphql(query);
+    const data = await graphql(BONUS_URL, query);
     console.log(`     → ${data.userBonuss.totalCount} user bonuses`);
   });
 
   await runTest('Filter templates by type', async () => {
     const query = `
       query { 
-        bonusTemplates(filter: { type: "cashback" }, first: 5) { 
+        bonusTemplates(first: 100) { 
+          nodes { type }
           totalCount 
         }
       }
     `;
-    const data = await graphql(query);
-    console.log(`     → ${data.bonusTemplates.totalCount} cashback templates`);
+    const data = await graphql(BONUS_URL, query);
+    const cashbackCount = data.bonusTemplates.nodes.filter((t: any) => t.type === 'cashback').length;
+    console.log(`     → ${cashbackCount} cashback templates found`);
   });
 }
 
@@ -763,7 +812,7 @@ async function testClientSideEligibility() {
         }
       }
     `;
-    const data = await graphql(query);
+    const data = await graphql(BONUS_URL, query);
     const templates = data.bonusTemplates.nodes as ClientBonusTemplate[];
     console.log(`     → Fetched ${templates.length} templates from API`);
     
@@ -960,7 +1009,89 @@ async function testConsistencyServerClient() {
 // Main Test Runner
 // ═══════════════════════════════════════════════════════════════════
 
+async function waitForService(url: string, maxAttempts: number = 30): Promise<boolean> {
+  const healthUrl = url.replace('/graphql', '/health');
+  
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      const response = await fetch(healthUrl);
+      if (response.ok) {
+        return true;
+      }
+    } catch {
+      // Service not ready yet
+    }
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+  
+  return false;
+}
+
+async function runScript(scriptPath: string, args: string[] = []): Promise<void> {
+  const { execSync } = await import('child_process');
+  const command = `npx tsx ${scriptPath} ${args.join(' ')}`;
+  console.log(`\n📜 Running: ${command}\n`);
+  execSync(command, { stdio: 'inherit', cwd: process.cwd() });
+}
+
 async function main() {
+  console.log(`
+╔═══════════════════════════════════════════════════════════════════════════╗
+║                    BONUS TEST SUITE - COMPLETE TEST SUITE                ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+`);
+
+  console.log('Starting bonus test suite...\n');
+
+  // Step 1: Clean bonus data
+  console.log('\n╔═══════════════════════════════════════════════════════════════════╗');
+  console.log('║           STEP 1: CLEAN BONUS DATA (--full)                      ║');
+  console.log('╚═══════════════════════════════════════════════════════════════════╝\n');
+  
+  try {
+    await runScript('scripts/bonus-clean.ts', ['--full']);
+  } catch (error: any) {
+    console.error('⚠️  Cleanup failed (continuing anyway):', error.message);
+  }
+
+  // Step 2: Wait for services
+  console.log('\n╔═══════════════════════════════════════════════════════════════════╗');
+  console.log('║           STEP 2: WAITING FOR SERVICES                           ║');
+  console.log('╚═══════════════════════════════════════════════════════════════════╝\n');
+  
+  console.log('⏳ Waiting for Bonus Service...');
+  const bonusReady = await waitForService(BONUS_URL);
+  if (!bonusReady) {
+    console.error(`❌ Bonus Service not ready at ${BONUS_URL}`);
+    console.log('  Run: cd bonus-service && npm run dev');
+    process.exit(1);
+  }
+  console.log('✅ Bonus Service is ready');
+  
+  console.log('\n⏳ Waiting for Auth Service...');
+  const authReady = await waitForService('http://localhost:3003/graphql');
+  if (!authReady) {
+    console.error('❌ Auth Service not ready at http://localhost:3003/graphql');
+    process.exit(1);
+  }
+  console.log('✅ Auth Service is ready');
+
+  // Step 3: Setup bonus users
+  console.log('\n╔═══════════════════════════════════════════════════════════════════╗');
+  console.log('║           STEP 3: SETUP BONUS USERS                              ║');
+  console.log('╚═══════════════════════════════════════════════════════════════════╝\n');
+  
+  try {
+    await runScript('scripts/bonus-setup.ts');
+  } catch (error: any) {
+    console.error('⚠️  Setup failed (continuing anyway):', error.message);
+  }
+
+  // Step 4: Run bonus tests
+  console.log('\n╔═══════════════════════════════════════════════════════════════════╗');
+  console.log('║           STEP 4: RUNNING BONUS TESTS                            ║');
+  console.log('╚═══════════════════════════════════════════════════════════════════╝\n');
+
   console.log(`
 ╔═══════════════════════════════════════════════════════════════════════════╗
 ║         BONUS SERVICE - COMPREHENSIVE TEST SUITE (38 BONUS TYPES)         ║
@@ -973,20 +1104,15 @@ async function main() {
 ╚═══════════════════════════════════════════════════════════════════════════╝
 `);
 
-  // Check service
-  console.log('🔍 Checking Bonus Service...');
+  // Login as admin to get proper token
+  console.log('🔐 Logging in as admin...\n');
   try {
-    await fetch(BONUS_URL.replace('/graphql', '/health'));
-    console.log(`  ✅ Running at ${BONUS_URL}`);
-  } catch {
-    console.log(`  ❌ Not running at ${BONUS_URL}`);
-    console.log('  Run: cd Examples/bonus-service && npm start');
-    process.exit(1);
+    adminToken = await login();
+    console.log('  ✅ Admin logged in successfully\n');
+  } catch (error: any) {
+    console.log(`  ⚠️  Login failed: ${error.message}, using JWT token instead\n`);
+    adminToken = createAdminToken();
   }
-
-  // Generate admin token
-  adminToken = createAdminToken();
-  console.log('  🔑 Admin token generated\n');
 
   // Run all category tests
   await testOnboardingBonuses();

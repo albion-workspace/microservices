@@ -12,6 +12,7 @@ import {
   LogOut,
   Bell,
   Shield,
+  Zap,
 } from 'lucide-react'
 import { AuthProvider, useAuth } from './lib/auth-context'
 import ProtectedRoute from './components/ProtectedRoute'
@@ -29,6 +30,7 @@ import Profile from './pages/Profile'
 import AuthCallback from './pages/AuthCallback'
 import Notifications from './pages/Notifications'
 import UserManagement from './pages/UserManagement'
+import UseCases from './pages/UseCases'
 
 function AppContent() {
   const { isAuthenticated, user, logout } = useAuth()
@@ -99,6 +101,10 @@ function AppContent() {
               <Gift />
               <span>Bonus Service</span>
             </NavLink>
+            <NavLink to="/use-cases" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
+              <Zap />
+              <span>Use Cases</span>
+            </NavLink>
             <NavLink to="/notifications" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
               <Bell />
               <span>Notifications</span>
@@ -148,6 +154,7 @@ function AppContent() {
           <Route path="/health" element={<ProtectedRoute><HealthMonitor /></ProtectedRoute>} />
           <Route path="/payment" element={<ProtectedRoute><PaymentGateway /></ProtectedRoute>} />
           <Route path="/bonus" element={<ProtectedRoute><BonusService /></ProtectedRoute>} />
+          <Route path="/use-cases" element={<ProtectedRoute><UseCases /></ProtectedRoute>} />
           <Route path="/notifications" element={<ProtectedRoute><Notifications /></ProtectedRoute>} />
           <Route path="/users" element={<ProtectedRoute requireRoles={['admin']}><UserManagement /></ProtectedRoute>} />
           <Route path="/webhooks" element={<ProtectedRoute requireRoles={['admin']}><Webhooks /></ProtectedRoute>} />

@@ -1,6 +1,12 @@
+#!/usr/bin/env npx tsx
 /**
- * Test Provider Funding - Direct API Call
- * This will help us see the exact error when funding a provider
+ * Payment Test Funding - User-to-user transfer test
+ * 
+ * Naming: payment-test-funding.ts
+ * 
+ * Flow: payment-gateway user -> payment-provider user
+ * 
+ * Usage: npx tsx scripts/payment-test-funding.ts
  */
 
 const PAYMENT_SERVICE_URL = 'http://localhost:3004/graphql';
@@ -107,17 +113,20 @@ async function findWallet(token: string, userId: string, currency: string) {
   return wallet.id;
 }
 
-async function fundProvider(token: string) {
-  console.log('\n💰 Funding provider-stripe with 10,000 EUR...');
+async function fundUser(token: string, fromUserId: string, toUserId: string, amount: number, currency: string) {
+  console.log(`\n💰 Transferring ${(amount / 100).toFixed(2)} ${currency} from ${fromUserId} to ${toUserId}...`);
   
   try {
-    // First find the wallet
-    const walletId = await findWallet(token, 'provider-stripe', 'EUR');
+    // Find wallets
+    const fromWalletId = await findWallet(token, fromUserId, currency);
+    const toWalletId = await findWallet(token, toUserId, currency);
     
+    // Create user-to-user transfer via wallet transaction
+    // The wallet service will handle the ledger entry
     const result = await graphql<{ createWalletTransaction: any }>(
       PAYMENT_SERVICE_URL,
       `
-        mutation FundProvider($input: CreateWalletTransactionInput!) {
+        mutation TransferFunds($input: CreateWalletTransactionInput!) {
           createWalletTransaction(input: $input) {
             success
             walletTransaction {
@@ -135,29 +144,66 @@ async function fundProvider(token: string) {
       `,
       {
         input: {
-          walletId: walletId,
-          userId: 'provider-stripe',
-          type: 'deposit',
-          amount: 1000000, // 10,000.00 EUR in cents
-          currency: 'EUR',
+          walletId: fromWalletId,
+          userId: fromUserId,
+          type: 'transfer_out',
+          amount: amount,
+          currency: currency,
           balanceType: 'real',
-          description: 'Test funding from script',
+          description: `Transfer to ${toUserId}`,
+          refType: 'transfer',
+          refId: `transfer-${Date.now()}`,
         },
       },
       token
     );
 
-    console.log('✅ Funding result:', JSON.stringify(result, null, 2));
+    // Also credit the receiving user
+    const creditResult = await graphql<{ createWalletTransaction: any }>(
+      PAYMENT_SERVICE_URL,
+      `
+        mutation ReceiveFunds($input: CreateWalletTransactionInput!) {
+          createWalletTransaction(input: $input) {
+            success
+            walletTransaction {
+              id
+              userId
+              type
+              amount
+              currency
+              balance
+            }
+            errors
+          }
+        }
+      `,
+      {
+        input: {
+          walletId: toWalletId,
+          userId: toUserId,
+          type: 'transfer_in',
+          amount: amount,
+          currency: currency,
+          balanceType: 'real',
+          description: `Transfer from ${fromUserId}`,
+          refType: 'transfer',
+          refId: `transfer-${Date.now()}`,
+        },
+      },
+      token
+    );
+
+    console.log('✅ Transfer result:', JSON.stringify(result, null, 2));
     
-    if (result.createWalletTransaction.success) {
-      console.log('✅ Provider funded successfully!');
-      console.log(`   Transaction ID: ${result.createWalletTransaction.walletTransaction?.id}`);
-      console.log(`   Balance: ${(result.createWalletTransaction.walletTransaction?.balance / 100).toFixed(2)} EUR`);
+    if (result.createWalletTransaction.success && creditResult.createWalletTransaction.success) {
+      console.log('✅ Transfer completed successfully!');
+      console.log(`   From: ${fromUserId} - Transaction ID: ${result.createWalletTransaction.walletTransaction?.id}`);
+      console.log(`   To: ${toUserId} - Transaction ID: ${creditResult.createWalletTransaction.walletTransaction?.id}`);
     } else {
-      console.log('❌ Funding failed:', result.createWalletTransaction.errors);
+      console.log('❌ Transfer failed:', result.createWalletTransaction.errors || creditResult.createWalletTransaction.errors);
     }
   } catch (error: any) {
-    console.error('❌ Error funding provider:', error.message);
+    console.error('❌ Error transferring funds:', error.message);
     if (error.stack) {
       console.error(error.stack);
     }
@@ -196,14 +242,50 @@ async function checkLedgerTransactions() {
   }
 }
 
+async function getUserIdsByEmail(token: string) {
+  const usersData = await graphql<{ users: { nodes: any[] } }>(
+    AUTH_SERVICE_URL,
+    `
+      query GetUsers($first: Int) {
+        users(first: $first) {
+          nodes {
+            id
+            email
+          }
+        }
+      }
+    `,
+    { first: 100 },
+    token
+  );
+  
+  const gatewayUser = usersData.users.nodes.find((u: any) => u.email === 'payment-gateway@system.com');
+  const providerUser = usersData.users.nodes.find((u: any) => u.email === 'payment-provider@system.com');
+  
+  if (!gatewayUser || !providerUser) {
+    throw new Error('Required users not found. Run payment-setup.ts first.');
+  }
+  
+  return {
+    gatewayUserId: gatewayUser.id,
+    providerUserId: providerUser.id,
+  };
+}
+
 async function main() {
   console.log('╔═══════════════════════════════════════════════════════════════════╗');
-  console.log('║           TEST PROVIDER FUNDING                                  ║');
+  console.log('║           TEST USER-TO-USER FUNDING                              ║');
   console.log('╚═══════════════════════════════════════════════════════════════════╝\n');
 
   try {
     const token = await login();
-    await fundProvider(token);
+    
+    // Get user IDs by email
+    const { gatewayUserId, providerUserId } = await getUserIdsByEmail(token);
+    
+    // Test: Transfer from payment-gateway user to payment-provider user
+    await fundUser(token, gatewayUserId, providerUserId, 1000000, 'EUR'); // €10,000
+    
     await checkLedgerTransactions();
   } catch (error: any) {
     console.error('\n❌ Test failed:', error.message);

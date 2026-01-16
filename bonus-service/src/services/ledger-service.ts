@@ -1,13 +1,38 @@
 /**
  * Ledger Service Integration for Bonus Service
  * 
- * Ensures all bonus operations are backed by ledger accounts.
- * Prevents infinite money by checking bonus pool balance before awarding.
+ * Generic ledger wrapper - uses generic transfers for all bonus operations.
+ * The ledger system is agnostic to business logic (bonuses, fees, etc.).
+ * It only knows about:
+ * - Users/accounts (with optional subtypes like 'main', 'bonus', 'real')
+ * - Whether accounts can go negative (allowNegative flag)
+ * - Transaction types (transfer, deposit, withdrawal, etc.)
+ * - Balance validation
+ * 
+ * Business logic (bonus awards, conversions, forfeitures) is handled by bonus-service.
+ * This service provides generic accounting operations only.
  */
 
 import { createLedger, getDatabase, getClient, logger, type Ledger } from 'core-service';
 
 let ledgerInstance: Ledger | null = null;
+
+/**
+ * MongoDB error type helper
+ */
+interface MongoError {
+  code?: number;
+  codeName?: string;
+  message?: string;
+}
+
+/**
+ * Check if error is a MongoDB duplicate key error
+ */
+function isDuplicateKeyError(error: unknown): error is MongoError {
+  const mongoError = error as MongoError;
+  return mongoError.code === 11000 || mongoError.codeName === 'DuplicateKey';
+}
 
 /**
  * Initialize ledger system for bonus service
@@ -45,6 +70,8 @@ export function getLedger(): Ledger {
 
 /**
  * Get or create user bonus account
+ * Handles race conditions: if multiple concurrent calls try to create the same account,
+ * only one succeeds and others retry the get operation.
  */
 export async function getOrCreateUserBonusAccount(
   userId: string,
@@ -60,8 +87,62 @@ export async function getOrCreateUserBonusAccount(
   }
   
   // Create user bonus account
-  await ledger.createUserAccount(userId, 'bonus', currency, { allowNegative: false });
-  logger.info('User bonus account created', { userId, currency, accountId });
+  // Handle race condition: if another concurrent call created it, catch duplicate key error
+  try {
+    await ledger.createUserAccount(userId, 'bonus', currency, { allowNegative: false });
+    logger.info('User bonus account created', { userId, currency, accountId });
+  } catch (error: unknown) {
+    // MongoDB duplicate key error (E11000) - another concurrent call created it
+    if (isDuplicateKeyError(error)) {
+      // Retry get - account should exist now
+      const existingAccount = await ledger.getAccount(accountId);
+      if (existingAccount) {
+        logger.debug('Account created by concurrent call, using existing', { userId, currency, accountId });
+        return accountId;
+      }
+      // If still not found, rethrow the error
+      throw new Error(`Failed to create account ${accountId} and account not found after duplicate key error`);
+    }
+    // Rethrow other errors
+    throw error;
+  }
+  
+  return accountId;
+}
+
+/**
+ * Get or create bonus pool account
+ * Bonus pool is a user account (user:bonus-pool:main), not a system account
+ */
+export async function getOrCreateBonusPoolAccount(
+  currency: string = 'USD'
+): Promise<string> {
+  const ledger = getLedger();
+  const accountId = ledger.getUserAccountId('bonus-pool', 'main');
+  
+  // Check if account exists
+  const account = await ledger.getAccount(accountId);
+  if (account) {
+    return accountId;
+  }
+  
+  // Create bonus pool account (can go negative to allow funding)
+  try {
+    await ledger.createUserAccount('bonus-pool', 'main', currency, { allowNegative: true });
+    logger.info('Bonus pool account created', { currency, accountId });
+  } catch (error: unknown) {
+    // MongoDB duplicate key error (E11000) - another concurrent call created it
+    if (isDuplicateKeyError(error)) {
+      // Retry get - account should exist now
+      const existingAccount = await ledger.getAccount(accountId);
+      if (existingAccount) {
+        logger.debug('Bonus pool account created by concurrent call, using existing', { currency, accountId });
+        return accountId;
+      }
+      throw new Error(`Failed to create bonus pool account ${accountId} and account not found after duplicate key error`);
+    }
+    throw error;
+  }
   
   return accountId;
 }
@@ -74,7 +155,7 @@ export async function checkBonusPoolBalance(
   currency: string = 'USD'
 ): Promise<{ sufficient: boolean; available: number; required: number }> {
   const ledger = getLedger();
-  const bonusPoolAccountId = ledger.getSystemAccountId('bonus_pool');
+  const bonusPoolAccountId = await getOrCreateBonusPoolAccount(currency);
   
   const balance = await ledger.getBalance(bonusPoolAccountId);
   const available = balance.balance;
@@ -97,8 +178,9 @@ export async function checkBonusPoolBalance(
 }
 
 /**
- * Record bonus award in ledger
+ * Record bonus award in ledger using generic transfer
  * Flow: Bonus Pool -> User Bonus Account
+ * Uses generic 'transfer' type - business logic (bonus) is in metadata
  */
 export async function recordBonusAwardLedgerEntry(
   userId: string,
@@ -120,23 +202,25 @@ export async function recordBonusAwardLedgerEntry(
   }
   
   // Get or create accounts
-  const bonusPoolAccountId = ledger.getSystemAccountId('bonus_pool');
+  const bonusPoolAccountId = await getOrCreateBonusPoolAccount(currency);
   const userBonusAccountId = await getOrCreateUserBonusAccount(userId, currency);
   
-  // Record bonus award: Bonus Pool -> User Bonus Account
+  // Record bonus award using generic transfer: Bonus Pool -> User Bonus Account
   const bonusTx = await ledger.createTransaction({
-    type: 'bonus_credit',
+    type: 'transfer',
     fromAccountId: bonusPoolAccountId,
     toAccountId: userBonusAccountId,
     amount,
     currency,
     description: description || `Bonus awarded: ${bonusType}`,
+    externalRef: `bonus-award-${bonusId}-${Date.now()}`,
     initiatedBy: 'system',
     metadata: {
       userId,
       bonusId,
       bonusType,
       tenantId,
+      transactionType: 'bonus_award',
     },
   });
   
@@ -153,8 +237,9 @@ export async function recordBonusAwardLedgerEntry(
 }
 
 /**
- * Record bonus conversion in ledger
+ * Record bonus conversion in ledger using generic transfer
  * Flow: User Bonus Account -> User Real Account
+ * Uses generic 'transfer' type - business logic (bonus conversion) is in metadata
  */
 export async function recordBonusConversionLedgerEntry(
   userId: string,
@@ -178,19 +263,21 @@ export async function recordBonusConversionLedgerEntry(
     );
   }
   
-  // Record conversion: User Bonus -> User Real
+  // Record conversion using generic transfer: User Bonus -> User Real
   const conversionTx = await ledger.createTransaction({
-    type: 'bonus_convert',
+    type: 'transfer',
     fromAccountId: userBonusAccountId,
     toAccountId: userRealAccountId,
     amount,
     currency,
     description: description || `Bonus converted to real balance`,
+    externalRef: `bonus-convert-${bonusId}-${Date.now()}`,
     initiatedBy: userId,
     metadata: {
       userId,
       bonusId,
       tenantId,
+      transactionType: 'bonus_conversion',
     },
   });
   
@@ -206,8 +293,9 @@ export async function recordBonusConversionLedgerEntry(
 }
 
 /**
- * Record bonus forfeiture in ledger
+ * Record bonus forfeiture in ledger using generic transfer
  * Flow: User Bonus Account -> Bonus Pool (return funds)
+ * Uses generic 'transfer' type - business logic (bonus forfeiture) is in metadata
  */
 export async function recordBonusForfeitLedgerEntry(
   userId: string,
@@ -222,7 +310,7 @@ export async function recordBonusForfeitLedgerEntry(
   
   // Get accounts
   const userBonusAccountId = ledger.getUserAccountId(userId, 'bonus');
-  const bonusPoolAccountId = ledger.getSystemAccountId('bonus_pool');
+  const bonusPoolAccountId = await getOrCreateBonusPoolAccount(currency);
   
   // Check bonus account balance
   const bonusBalance = await ledger.getBalance(userBonusAccountId);
@@ -232,20 +320,22 @@ export async function recordBonusForfeitLedgerEntry(
     throw new Error('No bonus balance to forfeit');
   }
   
-  // Record forfeiture: User Bonus -> Bonus Pool (return funds)
+  // Record forfeiture using generic transfer: User Bonus -> Bonus Pool (return funds)
   const forfeitTx = await ledger.createTransaction({
-    type: 'bonus_forfeit',
+    type: 'transfer',
     fromAccountId: userBonusAccountId,
     toAccountId: bonusPoolAccountId,
     amount: forfeitAmount,
     currency,
     description: description || `Bonus forfeited: ${reason}`,
+    externalRef: `bonus-forfeit-${bonusId}-${Date.now()}`,
     initiatedBy: 'system',
     metadata: {
       userId,
       bonusId,
       reason,
       tenantId,
+      transactionType: 'bonus_forfeit',
     },
   });
   
@@ -285,7 +375,7 @@ export async function getUserBonusBalance(
  */
 export async function getBonusPoolBalance(currency: string = 'USD'): Promise<number> {
   const ledger = getLedger();
-  const bonusPoolAccountId = ledger.getSystemAccountId('bonus_pool');
+  const bonusPoolAccountId = await getOrCreateBonusPoolAccount(currency);
   const balance = await ledger.getBalance(bonusPoolAccountId);
   return balance.balance;
 }

@@ -202,6 +202,9 @@ export const authGraphQLTypes = `
     # List all users (admin only)
     users(tenantId: String, first: Int, skip: Int): UserConnection!
     
+    # Get users by role (admin only)
+    usersByRole(role: String!, tenantId: String, first: Int, skip: Int): UserConnection!
+    
     # Get user's active sessions
     mySessions: [Session!]!
     
@@ -265,6 +268,26 @@ export function createAuthResolvers(
   twoFactorService: any
 ): Resolvers {
   return {
+    User: {
+      /**
+       * Normalize permissions field: convert object to array if needed
+       */
+      permissions: (parent: any) => {
+        if (!parent.permissions) {
+          return [];
+        }
+        // If permissions is an array, return as-is
+        if (Array.isArray(parent.permissions)) {
+          return parent.permissions;
+        }
+        // If permissions is an object, convert to array of keys where value is true
+        if (typeof parent.permissions === 'object') {
+          return Object.keys(parent.permissions).filter(key => parent.permissions[key] === true);
+        }
+        // Fallback: return empty array
+        return [];
+      },
+    },
     Query: {
       /**
        * Get current authenticated user
@@ -274,10 +297,19 @@ export function createAuthResolvers(
         
         const { getDatabase } = await import('core-service');
         const db = getDatabase();
-        return await db.collection('users').findOne({
+        const user = await db.collection('users').findOne({
           id: getUserId(ctx),
           tenantId: getTenantId(ctx),
         });
+        
+        // Normalize permissions (object → array)
+        if (user && user.permissions && !Array.isArray(user.permissions)) {
+          user.permissions = Object.keys(user.permissions).filter(key => user.permissions[key] === true);
+        } else if (user && !user.permissions) {
+          user.permissions = [];
+        }
+        
+        return user;
       },
       
       /**
@@ -293,10 +325,19 @@ export function createAuthResolvers(
         
         const { getDatabase } = await import('core-service');
         const db = getDatabase();
-        return await db.collection('users').findOne({
+        const user = await db.collection('users').findOne({
           id: (args as any).id,
           tenantId: (args as any).tenantId,
         });
+        
+        // Normalize permissions (object → array)
+        if (user && user.permissions && !Array.isArray(user.permissions)) {
+          user.permissions = Object.keys(user.permissions).filter(key => user.permissions[key] === true);
+        } else if (user && !user.permissions) {
+          user.permissions = [];
+        }
+        
+        return user;
       },
       
       /**
@@ -329,8 +370,76 @@ export function createAuthResolvers(
           db.collection('users').countDocuments(query),
         ]);
         
+        // Normalize permissions for each user (object → array)
+        const normalizedUsers = items.map((user: any) => {
+          if (user.permissions && !Array.isArray(user.permissions)) {
+            user.permissions = Object.keys(user.permissions).filter(key => user.permissions[key] === true);
+          } else if (!user.permissions) {
+            user.permissions = [];
+          }
+          return user;
+        });
+        
         return {
-          nodes: items,
+          nodes: normalizedUsers,
+          totalCount: total,
+          pageInfo: {
+            hasNextPage: skip + first < total,
+            hasPreviousPage: skip > 0,
+          },
+        };
+      },
+      
+      /**
+       * Get users by role (admin only)
+       */
+      usersByRole: async (args: Record<string, unknown>, ctx: ResolverContext) => {
+        requireAuth(ctx);
+        
+        // Check if user is admin
+        if (!ctx.user!.roles.includes('admin')) {
+          throw new Error('Unauthorized');
+        }
+        
+        const { getDatabase } = await import('core-service');
+        const db = getDatabase();
+        const { role, tenantId, first = 50, skip = 0 } = args as any;
+        
+        if (!role) {
+          throw new Error('Role parameter is required');
+        }
+        
+        // MongoDB query: roles array contains the role
+        // Use $in operator to match array field containing the value
+        const query: Record<string, unknown> = {
+          roles: { $in: [role] }, // Match documents where roles array contains the role
+        };
+        if (tenantId) {
+          query.tenantId = tenantId;
+        }
+        
+        const [items, total] = await Promise.all([
+          db.collection('users')
+            .find(query)
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(first)
+            .toArray(),
+          db.collection('users').countDocuments(query),
+        ]);
+        
+        // Normalize permissions for each user (object → array)
+        const normalizedUsers = items.map((user: any) => {
+          if (user.permissions && !Array.isArray(user.permissions)) {
+            user.permissions = Object.keys(user.permissions).filter(key => user.permissions[key] === true);
+          } else if (!user.permissions) {
+            user.permissions = [];
+          }
+          return user;
+        });
+        
+        return {
+          nodes: normalizedUsers,
           totalCount: total,
           pageInfo: {
             hasNextPage: skip + first < total,

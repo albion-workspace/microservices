@@ -72,10 +72,20 @@ export class AuthenticationService {
         tenantId: user.tenantId 
       });
       
+      // Normalize permissions (object → array) for GraphQL compatibility
+      const normalizedUser = { ...user };
+      if (normalizedUser.permissions && !Array.isArray(normalizedUser.permissions)) {
+        normalizedUser.permissions = Object.keys(normalizedUser.permissions).filter(
+          key => normalizedUser.permissions[key] === true
+        );
+      } else if (!normalizedUser.permissions) {
+        normalizedUser.permissions = [];
+      }
+      
       return {
         success: true,
         message: 'Login successful',
-        user,
+        user: normalizedUser,
         tokens,
       };
       

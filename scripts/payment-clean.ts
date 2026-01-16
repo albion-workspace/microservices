@@ -1,7 +1,12 @@
 /**
- * Cleanup Payment Service Data
+ * Payment Clean - Cleanup payment service data
+ * 
+ * Naming: payment-clean.ts
+ * 
  * Removes all payment-related collections to start fresh
  * Use --full flag to clean everything including bonus and system accounts
+ * 
+ * Usage: npx tsx scripts/payment-clean.ts [--full]
  */
 
 import { MongoClient } from 'mongodb';
@@ -85,18 +90,29 @@ async function cleanupPaymentData() {
     // Clean ledger data related to payments
     console.log('\n🧹 Cleaning payment-related ledger data...');
     
-    // Delete provider accounts
+    // Reset all ledger account balances to 0 first (before deleting accounts)
     if (collectionNames.includes('ledger_accounts')) {
-      const providerAccounts = await db.collection('ledger_accounts')
-        .deleteMany({ type: 'provider' });
-      console.log(`   ✅ Deleted ${providerAccounts.deletedCount} provider ledger accounts`);
+      const resetResult = await db.collection('ledger_accounts').updateMany(
+        {},
+        { $set: { balance: 0 } }
+      );
+      console.log(`   ✅ Reset ${resetResult.modifiedCount} ledger account balances to 0`);
     }
     
-    // Delete user accounts (created by payment service for real balances)
+    // Delete user accounts (simplified: all accounts are user accounts)
     if (collectionNames.includes('ledger_accounts')) {
+      // Only delete user accounts created for payments (not system accounts like fee-collection, bonus-pool)
       const userAccounts = await db.collection('ledger_accounts')
-        .deleteMany({ type: 'user', subtype: 'real' });
-      console.log(`   ✅ Deleted ${userAccounts.deletedCount} user real balance accounts`);
+        .deleteMany({ 
+          type: 'user',
+          ownerId: { $exists: true, $ne: null },
+          $or: [
+            { ownerId: { $regex: '^test-' } },
+            { ownerId: { $regex: '^payment-' } },
+            { ownerId: { $regex: '^provider-' } },
+          ]
+        });
+      console.log(`   ✅ Deleted ${userAccounts.deletedCount} payment-related user ledger accounts`);
     }
     
     // Delete bonus accounts if full cleanup

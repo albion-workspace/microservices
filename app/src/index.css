@@ -367,6 +367,8 @@
     overflow-y: auto;
     padding: 2rem;
     min-width: 0; /* Prevents flex item from overflowing */
+    background-color: var(--color-bg-primary);
+    color: var(--color-text-primary);
   }
 
   /* Sidebar */

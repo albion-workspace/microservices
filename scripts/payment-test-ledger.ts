@@ -1,6 +1,11 @@
 /**
- * Test Ledger Funding Directly
- * Tests if ledger transactions are being created when funding providers
+ * Payment Test Ledger - Diagnostic tool for ledger transactions
+ * 
+ * Naming: payment-test-ledger.ts
+ * 
+ * Tests if ledger transactions are being created correctly
+ * 
+ * Usage: npx tsx scripts/payment-test-ledger.ts
  */
 
 import { MongoClient } from 'mongodb';
@@ -49,36 +54,33 @@ async function testLedgerFunding() {
       });
     }
     
-    // Check ledger accounts for providers
-    console.log('\n🏦 Checking Provider Ledger Accounts...');
-    const providerAccounts = await db.collection('ledger_accounts')
-      .find({ type: 'provider', subtype: 'deposit' })
+    // Check user ledger accounts
+    console.log('\n👥 Checking User Ledger Accounts...');
+    const userAccounts = await db.collection('ledger_accounts')
+      .find({ type: 'user' })
+      .limit(20)
       .toArray();
     
-    console.log(`Found ${providerAccounts.length} provider deposit accounts:`);
-    providerAccounts.forEach(acc => {
-      console.log(`  - ${acc._id}: balance=${acc.balance} (${(acc.balance / 100).toFixed(2)}), currency=${acc.currency}`);
+    console.log(`Found ${userAccounts.length} user accounts (showing first 20):`);
+    userAccounts.forEach(acc => {
+      const ownerId = acc.ownerId || 'N/A';
+      console.log(`  - ${acc._id} (${ownerId}): balance=${acc.balance} (${(acc.balance / 100).toFixed(2)}), currency=${acc.currency}, allowNegative=${acc.allowNegative || false}`);
     });
     
-    // Check system house account
-    console.log('\n🏛️  Checking System House Account...');
-    const houseAccount = await db.collection('ledger_accounts')
-      .findOne({ type: 'system', subtype: 'house' });
-    
-    if (houseAccount) {
-      console.log(`  System House: balance=${houseAccount.balance} (${(houseAccount.balance / 100).toFixed(2)}), currency=${houseAccount.currency}`);
-    } else {
-      console.log('  ⚠️  System House account NOT FOUND');
-    }
-    
-    // Check wallets for providers
-    console.log('\n💼 Checking Provider Wallets...');
-    const providerWallets = await db.collection('wallets')
-      .find({ userId: { $regex: '^provider-' } })
+    // Check wallets for payment-related users
+    console.log('\n💼 Checking Payment-Related User Wallets...');
+    const paymentWallets = await db.collection('wallets')
+      .find({ 
+        $or: [
+          { userId: { $regex: '^payment-' } },
+          { userId: { $regex: '^provider-' } },
+          { userId: { $regex: '^test-' } },
+        ]
+      })
       .toArray();
     
-    console.log(`Found ${providerWallets.length} provider wallets:`);
-    providerWallets.forEach(w => {
+    console.log(`Found ${paymentWallets.length} payment-related wallets:`);
+    paymentWallets.forEach(w => {
       console.log(`  - ${w.userId}: balance=${w.balance} (${(w.balance / 100).toFixed(2)}), currency=${w.currency}`);
     });
     
@@ -89,16 +91,13 @@ async function testLedgerFunding() {
     
     if (ledgerTxs.length === 0) {
       console.log('\n❌ PROBLEM: No ledger transactions found!');
-      console.log('   This means recordSystemFundProviderLedgerEntry() is either:');
-      console.log('   1. Not being called');
-      console.log('   2. Failing silently');
-      console.log('   3. Creating transactions but they\'re not being saved');
-      console.log('\n   Wallet transactions exist, but ledger transactions do not.');
+      console.log('   This means user-to-user transfers are not being recorded in ledger.');
+      console.log('   Wallet transactions exist, but ledger transactions do not.');
       console.log('   This is why balances are 0 - wallets sync from ledger, but ledger has no transactions.');
     } else {
       console.log('\n✅ Ledger transactions exist');
-      if (providerAccounts.every(a => a.balance === 0)) {
-        console.log('⚠️  But provider account balances are 0');
+      if (userAccounts.every(a => a.balance === 0)) {
+        console.log('⚠️  But user account balances are 0');
         console.log('   This might be a currency mismatch or sync issue');
       }
     }

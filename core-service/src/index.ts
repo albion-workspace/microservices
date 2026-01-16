@@ -45,6 +45,18 @@ export type {
   BalanceCalculator,
 } from './common/ledger.js';
 
+// Account ID Management (Unified Account ID System)
+export {
+  getSystemAccountId,
+  getProviderAccountId,
+  getUserAccountId,
+  resolveAccountId,
+  parseAccountId,
+} from './common/account-ids.js';
+export type {
+  AccountIdOptions,
+} from './common/account-ids.js';
+
 // Auth & Permissions
 export { 
   createToken, 

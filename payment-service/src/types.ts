@@ -171,11 +171,13 @@ export interface Transaction {
   feeCurrency: Currency;
   netAmount: number;
   
-  // Provider
-  providerId: string;
-  providerName: PaymentProvider;
-  providerTransactionId?: string;
-  providerResponse?: Record<string, unknown>;
+  // External transaction reference (for third-party integrations)
+  externalTransactionId?: string;
+  externalResponse?: Record<string, unknown>;
+  
+  // User-to-user transfer details
+  fromUserId?: string;  // For deposits: source user (e.g., payment gateway user)
+  toUserId?: string;    // For withdrawals: destination user (e.g., payment gateway user)
   
   // Payment details
   paymentDetails?: {

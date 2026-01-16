@@ -139,7 +139,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           
           // Try to fetch current user to validate token
           const data = await graphqlRequest(
-            `query { me { id email username status roles emailVerified phoneVerified twoFactorEnabled metadata createdAt lastLoginAt } }`,
+            `query { me { id email username status roles permissions emailVerified phoneVerified twoFactorEnabled metadata createdAt lastLoginAt } }`,
             {},
             accessToken
           );

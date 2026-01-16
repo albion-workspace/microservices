@@ -13,17 +13,13 @@
 
 import {
   createGateway,
-  // Legacy permission helpers (work without graphql-shield runtime)
   hasRole,
   isAuthenticated,
   allow,
-  and,
-  or,
   logger,
   on,
   startListening,
   getDatabase,
-  // Webhooks - plug-and-play service
   createWebhookService,
   type IntegrationEvent,
   type ResolverContext,
@@ -296,7 +292,6 @@ function setupEventHandlers() {
     
     // Note: Withdrawals while bonus is active may forfeit the bonus
     // This depends on business rules - implement if needed
-    // await bonusEngine.forfeit(bonusId, event.userId!, 'Withdrawal while bonus active');
   });
   
   // ═══════════════════════════════════════════════════════════════════
@@ -486,47 +481,19 @@ function setupEventHandlers() {
 }
 
 async function main() {
-  console.log(`
-╔═══════════════════════════════════════════════════════════════════════╗
-║                       BONUS SERVICE                                   ║
-╠═══════════════════════════════════════════════════════════════════════╣
-║                                                                       ║
-║  Design Patterns:                                                     ║
-║  • Strategy Pattern - Handler per bonus type                          ║
-║  • Template Method - Base handler defines algorithm                   ║
-║  • Factory/Registry - Dynamic handler registration                    ║
-║  • Chain of Responsibility - Validator chain                          ║
-║  • Facade Pattern - Clean BonusEngine API                             ║
-║                                                                       ║
-║  Bonus Types Supported:                                               ║
-║  • Welcome, First Deposit, Reload, Top-up                             ║
-║  • Referral (Referrer & Referee rewards, Commission)                  ║
-║  • Cashback, Consolation, Winback                                     ║
-║  • Loyalty, Loyalty Points, VIP, Tier Upgrade                         ║
-║  • Birthday, Anniversary, Seasonal                                    ║
-║  • Daily Login, Streak, Flash                                         ║
-║  • Achievement, Milestone, Task Completion, Challenge                 ║
-║  • Tournament, Leaderboard, Promo Code, Special Event                 ║
-║  • Free Credit, Trial, Selection, Combo                               ║
-║                                                                       ║
-║  Domains: betting, crypto, social, gaming, ecommerce, fintech         ║
-║                                                                       ║
-║  Events Listening:                                                    ║
-║  • wallet.deposit.completed → Auto-award deposit bonuses              ║
-║  • wallet.withdrawal.completed → Check forfeit rules                  ║
-║  • activity.completed → Track turnover progress                       ║
-║  • user.birthday, user.login, user.tier_upgraded                      ║
-║  • referral.qualified, achievement.unlocked                           ║
-║  • user.weekly_loss → Cashback bonuses                                ║
-║                                                                       ║
-╚═══════════════════════════════════════════════════════════════════════╝
-`);
-
-  console.log('Environment:');
-  console.log(`  PORT:       ${config.port}`);
-  console.log(`  MONGO_URI:  ${process.env.MONGO_URI || 'mongodb://localhost:27017/bonus_service'}`);
-  console.log(`  REDIS_URL:  ${process.env.REDIS_URL || 'not configured'}`);
-  console.log('');
+  logger.info('╔═══════════════════════════════════════════════════════════════════╗');
+  logger.info('║                       BONUS SERVICE                               ║');
+  logger.info('╠═══════════════════════════════════════════════════════════════════╣');
+  logger.info('║  Design Patterns: Strategy, Template Method, Factory, Facade     ║');
+  logger.info('║  Bonus Types: 38 types across 6 domains                           ║');
+  logger.info('║  Events: wallet, activity, user, referral, achievement           ║');
+  logger.info('╚═══════════════════════════════════════════════════════════════════╝');
+  
+  logger.info('Environment', {
+    port: config.port,
+    mongoUri: process.env.MONGO_URI || 'mongodb://localhost:27017/bonus_service',
+    redisUrl: process.env.REDIS_URL ? 'configured' : 'not configured',
+  });
 
   // Register event handlers before starting gateway
   setupEventHandlers();

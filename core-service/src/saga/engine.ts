@@ -83,7 +83,15 @@ async function executeSagaWithTransaction<TEntity, TInput>(
         // Check for transient errors (can retry)
         if (isTransientError(error) && retries < maxRetries - 1) {
           retries++;
-          logger.warn(`Saga ${sagaId} transient error, retrying (${retries}/${maxRetries})`, { error: errorMsg });
+          
+          // Exponential backoff: 100ms, 200ms, 400ms (max 1s)
+          const backoffMs = Math.min(100 * Math.pow(2, retries - 1), 1000);
+          await new Promise(resolve => setTimeout(resolve, backoffMs));
+          
+          logger.warn(`Saga ${sagaId} transient error, retrying (${retries}/${maxRetries})`, { 
+            error: errorMsg,
+            backoffMs 
+          });
           completedSteps.length = 0; // Reset completed steps for retry
           context = { sagaId, input, data: { _session: session } };
           continue;

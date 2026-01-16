@@ -1,117 +1,23 @@
 /**
- * Transaction Service - Saga-based payment processing
+ * Transaction Service - Generic user-to-user transaction processing
+ * 
+ * Generic transaction system that handles:
+ * - User-to-user deposits and withdrawals
+ * - Fee calculation and collection
+ * - Balance validation based on permissions
+ * - Saga-based rollback for atomic operations
+ * 
+ * The service is agnostic to business logic (gateway, provider, etc.).
+ * It only knows about users, amounts, currencies, and permissions.
  */
 
 import { createService, generateId, type, type Repository, type SagaContext, getDatabase, validateInput, logger } from 'core-service';
-import type { Transaction, ProviderConfig, TransactionStatus } from '../types.js';
+import type { Transaction, TransactionStatus } from '../types.js';
 import { 
   recordDepositLedgerEntry, 
   recordWithdrawalLedgerEntry,
   syncWalletBalanceFromLedger,
-  getOrCreateProviderAccount,
 } from './ledger-service.js';
-
-// ═══════════════════════════════════════════════════════════════════
-// Provider Config Types & Validation
-// ═══════════════════════════════════════════════════════════════════
-
-interface CreateProviderConfigInput {
-  provider: string;
-  name: string;
-  tenantId?: string;
-  supportedMethods: string[];
-  supportedCurrencies: string[];
-  feeType?: string;
-  feePercentage?: number;
-}
-
-type ProviderCtx = SagaContext<ProviderConfig, CreateProviderConfigInput>;
-
-const providerSchema = type({
-  provider: 'string',
-  name: 'string >= 3',
-  supportedMethods: 'string[]',
-  supportedCurrencies: 'string[]',
-  'tenantId?': 'string',
-  'feeType?': 'string',
-  'feePercentage?': 'number',
-});
-
-const providerSaga = [
-  {
-    name: 'createProvider',
-    critical: true,
-    execute: async ({ input, data, ...ctx }: ProviderCtx): Promise<ProviderCtx> => {
-      const repo = data._repository as Repository<ProviderConfig>;
-      const id = (data._generateId as typeof generateId)();
-      
-      const config: ProviderConfig = {
-        id,
-        tenantId: input.tenantId || 'default',
-        provider: input.provider as any,
-        name: input.name,
-        isActive: true,
-        isDefault: false,
-        credentials: {},
-        supportedMethods: input.supportedMethods as any[],
-        supportedCurrencies: input.supportedCurrencies as any[],
-        feeType: (input.feeType || 'percentage') as any,
-        feePercentage: input.feePercentage || 2.9,
-        autoCapture: true,
-        supportRefund: true,
-        supportPartialRefund: true,
-        priority: 0,
-      } as ProviderConfig;
-      
-      await repo.create(config);
-      
-      // Create provider accounts in ledger for deposit and withdrawal
-      try {
-        await getOrCreateProviderAccount(config.id, 'deposit', input.supportedCurrencies[0] || 'USD');
-        await getOrCreateProviderAccount(config.id, 'withdrawal', input.supportedCurrencies[0] || 'USD');
-        logger.info('Provider ledger accounts created', { providerId: config.id });
-      } catch (ledgerError) {
-        logger.warn('Could not create provider ledger accounts', { 
-          error: ledgerError,
-          providerId: config.id,
-        });
-        // Continue - provider config is created, ledger accounts can be created later
-      }
-      
-      return { ...ctx, input, data, entity: config };
-    },
-    compensate: async ({ entity, data }: ProviderCtx) => {
-      if (entity) {
-        const repo = data._repository as Repository<ProviderConfig>;
-        await repo.delete(entity.id);
-      }
-    },
-  },
-];
-
-export const providerConfigService = createService<ProviderConfig, CreateProviderConfigInput>({
-  name: 'providerConfig',
-  entity: {
-    name: 'providerConfig',
-    collection: 'provider_configs',
-    graphqlType: `
-      type ProviderConfig { id: ID! provider: String! name: String! isActive: Boolean! supportedMethods: [String!]! supportedCurrencies: [String!]! feePercentage: Float }
-      type ProviderConfigConnection { nodes: [ProviderConfig!]! totalCount: Int! pageInfo: PageInfo! }
-      type CreateProviderConfigResult { success: Boolean! providerConfig: ProviderConfig sagaId: ID! errors: [String!] executionTimeMs: Int }
-    `,
-    graphqlInput: `input CreateProviderConfigInput { provider: String! name: String! tenantId: String supportedMethods: [String!]! supportedCurrencies: [String!]! feeType: String feePercentage: Float }`,
-    validateInput: (input) => {
-      const result = providerSchema(input);
-      return validateInput(result) as CreateProviderConfigInput | { errors: string[] };
-    },
-    indexes: [
-      { fields: { tenantId: 1, provider: 1 }, options: { unique: true } },
-      { fields: { tenantId: 1, isActive: 1 } },
-    ],
-  },
-  saga: providerSaga,
-  // No transaction needed for config changes (no money involved)
-});
 
 // ═══════════════════════════════════════════════════════════════════
 // Deposit Transaction Types & Validation
@@ -123,6 +29,7 @@ interface CreateDepositInput {
   amount: number;
   currency: string;
   method?: string;
+  fromUserId: string; // Source user (required - must exist)
 }
 
 type DepositCtx = SagaContext<Transaction, CreateDepositInput>;
@@ -133,8 +40,7 @@ const depositSchema = type({
   currency: 'string',
   'tenantId?': 'string',
   'method?': 'string',
-  'providerId?': 'string',
-  'providerName?': 'string',
+  'fromUserId?': 'string',  // Source user (required - must exist)
 });
 
 const depositSaga = [
@@ -142,7 +48,9 @@ const depositSaga = [
     name: 'calculateFees',
     critical: true,
     execute: async ({ input, data, ...ctx }: DepositCtx): Promise<DepositCtx> => {
-      const feePercentage = 2.9; // Would come from provider config
+      // Fee calculation (generic - can be customized based on permissions/config)
+      // Default fee: 2.9% (can be overridden by user permissions or configuration)
+      const feePercentage = 2.9;
       const feeAmount = Math.round(input.amount * (feePercentage / 100) * 100) / 100;
       data.feeAmount = feeAmount;
       data.netAmount = input.amount - feeAmount;
@@ -168,8 +76,8 @@ const depositSaga = [
         feeAmount: data.feeAmount as number,
         feeCurrency: input.currency as any,
         netAmount: data.netAmount as number,
-        providerId: 'default-provider',
-        providerName: 'stripe' as any,
+        fromUserId: input.fromUserId!, // Source user (required - must exist)
+        toUserId: input.userId, // Receiving user
         initiatedAt: new Date(),
         statusHistory: [{
           timestamp: new Date(),
@@ -185,33 +93,35 @@ const depositSaga = [
     compensate: async ({ entity, data }: DepositCtx) => {
       if (entity) {
         const repo = data._repository as Repository<Transaction>;
-        await repo.update(entity.id, { status: 'cancelled' as TransactionStatus });
+        const { id } = entity;
+        await repo.update(id, { status: 'cancelled' as TransactionStatus });
       }
     },
   },
   {
-    name: 'processWithProvider',
+    name: 'processPayment',
     critical: true,
     execute: async ({ input, data, entity, ...ctx }: DepositCtx): Promise<DepositCtx> => {
       if (!entity) throw new Error('No transaction');
       
       const repo = data._repository as Repository<Transaction>;
-      const providerTxId = `stripe_${Date.now()}`;
+      const { id, statusHistory } = entity;
+      const externalTxId = `tx_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       
-      await repo.update(entity.id, {
+      await repo.update(id, {
         status: 'processing' as TransactionStatus,
-        providerTransactionId: providerTxId,
-        statusHistory: [...entity.statusHistory, {
+        externalTransactionId: externalTxId,
+        statusHistory: [...statusHistory, {
           timestamp: new Date(),
           previousStatus: 'pending' as TransactionStatus,
           newStatus: 'processing' as TransactionStatus,
-          reason: 'Sent to provider',
-          triggeredBy: 'system',
+          reason: 'Payment processing',
+          triggeredBy: 'user',
         }],
       });
       
       entity.status = 'processing' as TransactionStatus;
-      entity.providerTransactionId = providerTxId;
+      entity.externalTransactionId = externalTxId;
       return { ...ctx, input, data, entity };
     },
   },
@@ -260,24 +170,26 @@ const depositSaga = [
       }
       
       // Credit the wallet with net amount (after fees)
-      const netAmount = data.netAmount as number;
-      const feeAmount = data.feeAmount as number;
-      const providerId = entity.providerId || 'default-provider';
+      const { netAmount, feeAmount } = data as { netAmount: number; feeAmount: number };
+      // User-to-user transfer
+      const { fromUserId, id, externalTransactionId } = entity;
+      const fromUserIdValue = fromUserId!; // Source user (required - validated in createTransaction step)
+      const toUserId = input.userId; // Receiving user
       
-      // Record in ledger (Provider -> User) - ledger is source of truth
+      // Record in ledger (User -> User) - ledger is source of truth
       try {
         // Ensure externalRef is always set (use transaction ID or generate one to avoid duplicate key errors)
-        const externalRef = entity.id || entity.providerTransactionId || crypto.randomUUID();
+        const externalRef = id || externalTransactionId || crypto.randomUUID();
         
         await recordDepositLedgerEntry(
-          providerId,
-          input.userId,
+          fromUserIdValue,  // From: Source user
+          toUserId,    // To: Receiving user
           input.amount,
           feeAmount,
           input.currency,
           input.tenantId || 'default',
           externalRef, // Always set to avoid duplicate key errors
-          `Deposit via ${entity.providerName}`
+          `Deposit from ${fromUserIdValue}`
         );
         
         // Wallet balance sync happens via Redis event (ledger.deposit.completed)
@@ -356,7 +268,7 @@ const depositSaga = [
     },
   },
   // NOTE: Transaction stays in "processing" status
-  // In production: awaits webhook from payment provider (Stripe, PayPal, etc.)
+  // In production: awaits external approval/confirmation (webhook, manual approval, etc.)
   // For testing: use approveTransaction/declineTransaction mutations
 ];
 
@@ -366,18 +278,18 @@ export const depositService = createService<Transaction, CreateDepositInput>({
     name: 'deposit',
     collection: 'transactions',
     graphqlType: `
-      type Transaction { id: ID! userId: String! type: String! status: String! amount: Float! currency: String! feeAmount: Float! netAmount: Float! providerName: String! createdAt: String! }
+      type Transaction { id: ID! userId: String! type: String! status: String! amount: Float! currency: String! feeAmount: Float! netAmount: Float! fromUserId: String toUserId: String createdAt: String! }
       type TransactionConnection { nodes: [Transaction!]! totalCount: Int! pageInfo: PageInfo! }
       type CreateDepositResult { success: Boolean! deposit: Transaction sagaId: ID! errors: [String!] executionTimeMs: Int }
     `,
-    graphqlInput: `input CreateDepositInput { userId: String! amount: Float! currency: String! tenantId: String method: String }`,
+    graphqlInput: `input CreateDepositInput { userId: String! amount: Float! currency: String! tenantId: String method: String fromUserId: String! }`,
     validateInput: (input) => {
       const result = depositSchema(input);
       return validateInput(result) as CreateDepositInput | { errors: string[] };
     },
     indexes: [
       { fields: { userId: 1, type: 1, status: 1 } },
-      { fields: { providerTransactionId: 1 } },
+      { fields: { externalTransactionId: 1 } },
       { fields: { createdAt: -1 } },
     ],
   },
@@ -402,6 +314,7 @@ interface CreateWithdrawalInput {
   method: string;
   bankAccount?: string;
   walletAddress?: string;
+  toUserId: string; // Destination user (required - must exist)
 }
 
 type WithdrawalCtx = SagaContext<Transaction, CreateWithdrawalInput>;
@@ -414,8 +327,7 @@ const withdrawalSchema = type({
   'tenantId?': 'string',
   'bankAccount?': 'string',
   'walletAddress?': 'string',
-  'providerId?': 'string',
-  'providerName?': 'string',
+  toUserId: 'string',  // Destination user (required - must exist)
 });
 
 const withdrawalSaga = [
@@ -442,17 +354,17 @@ const withdrawalSaga = [
       
       // Check ledger balance (source of truth)
       try {
-        const { checkUserWithdrawalBalance } = await import('./ledger-service.js');
-        const balanceCheck = await checkUserWithdrawalBalance(
+        const { checkUserBalance } = await import('./ledger-service.js');
+        const { sufficient, allowNegative, available } = await checkUserBalance(
           input.userId,
-          input.amount,
-          feeAmount,
-          input.currency
+          totalRequired,
+          input.currency,
+          'main'
         );
         
-        if (!balanceCheck.sufficient) {
+        if (!sufficient && !allowNegative) {
           throw new Error(
-            `Insufficient balance in ledger. Available: ${balanceCheck.available}, Required: ${balanceCheck.required}`
+            `Insufficient balance in ledger. Available: ${available}, Required: ${totalRequired}`
           );
         }
         
@@ -462,7 +374,7 @@ const withdrawalSaga = [
           logger.warn('Wallet balance mismatch with ledger', {
             userId: input.userId,
             walletBalance,
-            ledgerBalance: balanceCheck.available,
+            ledgerBalance: available,
             required: totalRequired,
           });
           // Sync wallet from ledger
@@ -511,8 +423,8 @@ const withdrawalSaga = [
         feeAmount,
         feeCurrency: input.currency as any,
         netAmount: input.amount - feeAmount,
-        providerId: 'default-provider',
-        providerName: 'bank_transfer' as any,
+        fromUserId: input.userId, // User withdrawing
+        toUserId: input.toUserId!, // Destination user (required - must exist)
         paymentDetails: {
           bankAccount: input.bankAccount,
           walletAddress: input.walletAddress,
@@ -532,7 +444,8 @@ const withdrawalSaga = [
     compensate: async ({ entity, data }: WithdrawalCtx) => {
       if (entity) {
         const repo = data._repository as Repository<Transaction>;
-        await repo.update(entity.id, { status: 'cancelled' as TransactionStatus });
+        const { id } = entity;
+        await repo.update(id, { status: 'cancelled' as TransactionStatus });
       }
     },
   },
@@ -546,24 +459,27 @@ const withdrawalSaga = [
       const walletsCollection = db.collection('wallets');
       
       // Debit the full amount (amount + fee) from wallet
-      const totalAmount = input.amount + (data.feeAmount as number);
-      const feeAmount = data.feeAmount as number;
-      const providerId = entity.providerId || 'default-provider';
+      const { feeAmount } = data as { feeAmount: number };
+      const totalAmount = input.amount + feeAmount;
+      // User-to-user transfer
+      const fromUserId = input.userId; // User withdrawing
+      const { toUserId: toUserIdValue, id, externalTransactionId } = entity;
+      const toUserId = toUserIdValue!; // Destination user (required - validated in createTransaction step)
       
-      // Record in ledger (User -> Provider) - ledger is source of truth
+      // Record in ledger (User -> User) - ledger is source of truth
       try {
         // Ensure externalRef is always set (use transaction ID or generate one to avoid duplicate key errors)
-        const withdrawalExternalRef = entity.id || entity.providerTransactionId || crypto.randomUUID();
+        const withdrawalExternalRef = id || externalTransactionId || crypto.randomUUID();
         
         await recordWithdrawalLedgerEntry(
-          providerId,
-          input.userId,
+          fromUserId,  // From: User withdrawing
+          toUserId,    // To: Destination user
           input.amount,
           feeAmount,
           input.currency,
           input.tenantId || 'default',
           withdrawalExternalRef, // Always set to avoid duplicate key errors
-          `Withdrawal via ${entity.providerName}`
+          `Withdrawal to ${toUserId}`
         );
         
         // Wallet balance sync happens via Redis event (ledger.withdrawal.completed)
@@ -600,16 +516,17 @@ const withdrawalSaga = [
       } catch (ledgerError) {
         logger.error('Failed to record withdrawal in ledger', { 
           error: ledgerError,
-          transactionId: entity.id,
+          transactionId: id,
         });
         throw ledgerError; // Fail the saga if ledger fails
       }
       
       // Update transaction status to processing
       const repo = data._repository as Repository<Transaction>;
-      await repo.update(entity.id, {
+      const { statusHistory } = entity;
+      await repo.update(id, {
         status: 'processing' as TransactionStatus,
-        statusHistory: [...entity.statusHistory, {
+        statusHistory: [...statusHistory, {
           timestamp: new Date(),
           previousStatus: 'pending' as TransactionStatus,
           newStatus: 'processing' as TransactionStatus,
@@ -642,7 +559,7 @@ const withdrawalSaga = [
     },
   },
   // NOTE: Transaction stays in "processing" status with funds held
-  // In production: awaits manual approval or auto-approval based on limits/KYC/AML
+  // In production: awaits approval (manual or automatic based on limits/KYC/AML rules)
   // For testing: use approveTransaction/declineTransaction mutations
 ];
 
@@ -689,8 +606,9 @@ export const transactionApprovalResolvers = {
         throw new Error(`Transaction ${transactionId} not found`);
       }
       
-      if ((transaction as any).status !== 'processing') {
-        throw new Error(`Transaction must be in processing status. Current: ${(transaction as any).status}`);
+      const { status, statusHistory } = transaction as any;
+      if (status !== 'processing') {
+        throw new Error(`Transaction must be in processing status. Current: ${status}`);
       }
       
       // Update transaction to completed
@@ -701,7 +619,7 @@ export const transactionApprovalResolvers = {
             status: 'completed',
             completedAt: new Date(),
             statusHistory: [
-              ...((transaction as any).statusHistory || []),
+              ...(statusHistory || []),
               {
                 timestamp: new Date(),
                 previousStatus: 'processing',
@@ -732,20 +650,22 @@ export const transactionApprovalResolvers = {
         throw new Error(`Transaction ${transactionId} not found`);
       }
       
-      if ((transaction as any).status !== 'processing') {
-        throw new Error(`Transaction must be in processing status. Current: ${(transaction as any).status}`);
-      }
-      
       const txData = transaction as any;
+      const { status, statusHistory } = txData;
+      
+      if (status !== 'processing') {
+        throw new Error(`Transaction must be in processing status. Current: ${status}`);
+      }
       
       // If it's a deposit, rollback the credited amount
       if (txData.type === 'deposit') {
+        const { userId, currency, netAmount, amount } = txData;
         await walletsCollection.updateOne(
-          { userId: txData.userId, currency: txData.currency },
+          { userId, currency },
           {
             $inc: {
-              balance: -txData.netAmount,
-              lifetimeDeposits: -txData.amount,
+              balance: -netAmount,
+              lifetimeDeposits: -amount,
             },
             $set: { updatedAt: new Date() },
           }
@@ -754,13 +674,14 @@ export const transactionApprovalResolvers = {
       
       // If it's a withdrawal, return the held funds
       if (txData.type === 'withdrawal') {
-        const totalAmount = txData.amount + txData.feeAmount;
+        const { userId, currency, amount, feeAmount } = txData;
+        const totalAmount = amount + feeAmount;
         await walletsCollection.updateOne(
-          { userId: txData.userId, currency: txData.currency },
+          { userId, currency },
           {
             $inc: {
               balance: totalAmount,
-              lifetimeWithdrawals: -txData.amount,
+              lifetimeWithdrawals: -amount,
             },
             $set: { updatedAt: new Date() },
           }
@@ -774,7 +695,7 @@ export const transactionApprovalResolvers = {
           $set: {
             status: 'failed',
             statusHistory: [
-              ...(txData.statusHistory || []),
+              ...(statusHistory || []),
               {
                 timestamp: new Date(),
                 previousStatus: 'processing',

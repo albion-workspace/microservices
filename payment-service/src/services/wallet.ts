@@ -53,6 +53,7 @@
 
 import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, getDatabase, deleteCache, deleteCachePattern, logger, validateInput } from 'core-service';
 import type { Wallet, WalletTransaction, WalletCategory, WalletTransactionType } from '../types.js';
+import { SYSTEM_CURRENCY } from '../constants.js';
 import { emitPaymentEvent } from '../event-dispatcher.js';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -187,7 +188,7 @@ export const userWalletResolvers = {
       
       return {
         userId,
-        currency: (input.currency as string) || walletDocs[0]?.currency || 'EUR',
+        currency: (input.currency as string) || walletDocs[0]?.currency || SYSTEM_CURRENCY,
         totals,
         wallets,
       };
@@ -228,7 +229,7 @@ export const userWalletResolvers = {
         wallet = await walletsCollection.findOne({
           userId,
           category: (input.category as string) || 'main',
-          currency: (input.currency as string) || 'EUR',
+          currency: (input.currency as string) || SYSTEM_CURRENCY,
         });
       }
       
@@ -466,10 +467,10 @@ const walletTxSaga = [
       data.balanceField = balanceField;
       data.currentBalance = currentBalance; // Store for calculating balance
 
-      // For debit operations, preliminary check (atomic check happens during update)
-      if (!isCredit && currentBalance < input.amount) {
-        throw new Error(`Insufficient funds. Available: ${currentBalance}, Required: ${input.amount}`);
-      }
+      // For debit operations, check balance with allowNegative permission
+      // Note: The actual balance check with permissions happens in updateWalletBalance step
+      // This is just a preliminary check - we don't throw here if allowNegative might be true
+      // The real check happens later when we call checkUserBalance which reads permissions from auth_service
       
       return { ...ctx, input, data };
     },
@@ -488,72 +489,116 @@ const walletTxSaga = [
         try {
           const { 
             getLedger, 
-            getOrCreateUserAccount, 
-            getOrCreateProviderAccount,
-            recordSystemFundProviderLedgerEntry,
+            getOrCreateUserAccount,
             syncWalletBalanceFromLedger 
           } = await import('./ledger-service.js');
           const ledger = getLedger();
           const wallet = data.wallet as any;
           
-          // Check if this is a provider wallet (userId starts with "provider-")
-          const isProviderWallet = input.userId.startsWith('provider-');
-          
-          if (isProviderWallet) {
-            // Provider wallet funding: System House -> Provider Account
-            if (isCredit && input.type === 'deposit') {
-              try {
-                // Record system funding in ledger BEFORE updating wallet
-                // Generate a unique wallet transaction ID to use as externalRef
-                const walletTxId = `wallet-tx-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-                const ledgerTxId = await recordSystemFundProviderLedgerEntry(
-                  input.userId, // providerId
-                  input.amount,
-                  input.currency,
-                  wallet?.tenantId || 'default',
-                  input.description || `System funding to provider ${input.userId}`,
-                  walletTxId // Pass wallet transaction ID as externalRef
-                );
-                logger.info('Provider funding recorded in ledger', {
-                  providerId: input.userId,
-                  amount: input.amount,
-                  currency: input.currency,
-                  ledgerTxId,
-                });
-                // Mark that we should sync from ledger instead of direct update
-                (data as any).syncFromLedger = true;
-                // For provider funding, we'll sync from ledger instead of updating directly
-                // Set a flag to skip the direct wallet update
-                (data as any).skipDirectUpdate = true;
-              } catch (ledgerError: any) {
-                const errorMessage = ledgerError?.message || String(ledgerError);
-                const errorStack = ledgerError?.stack;
-                logger.error('Failed to record provider funding in ledger', {
-                  error: errorMessage,
-                  stack: errorStack,
-                  providerId: input.userId,
-                  amount: input.amount,
-                  currency: input.currency,
-                });
-                // Don't fail the transaction - allow direct wallet update as fallback
-                (data as any).skipDirectUpdate = false;
-              }
-            } else if (!isCredit) {
-              // Debit from provider account - check balance
-              const providerAccountId = await getOrCreateProviderAccount(input.userId, 'deposit', input.currency);
-              const balance = await ledger.getBalance(providerAccountId);
-              if (balance.balance < input.amount) {
-                throw new Error(
-                  `Insufficient balance in provider ledger. Available: ${balance.balance}, Required: ${input.amount}`
-                );
-              }
+          // Simplified: Everything is a user wallet - check permissions for negative balance
+          // Check user balance if debit operation
+          let allowNegative = false;
+          if (!isCredit) {
+            const { getOrCreateUserAccount, checkUserBalance } = await import('./ledger-service.js');
+            const balanceCheck = await checkUserBalance(input.userId, input.amount, input.currency, 'main');
+            allowNegative = balanceCheck.allowNegative;
+            if (!balanceCheck.sufficient && !balanceCheck.allowNegative) {
+              throw new Error(
+                `Insufficient balance. Available: ${balanceCheck.available}, Required: ${input.amount}`
+              );
             }
-          } else {
+          }
+          data.allowNegative = allowNegative;
+          
+          {
             // User wallet operations - record in ledger FIRST (ledger is source of truth)
             // For wallet transactions like bet, win, etc., we need to record them in ledger
             // Skip ledger recording for deposit/withdrawal (handled by their own sagas)
             const skipLedgerTypes = ['deposit', 'withdrawal'];
-            if (!skipLedgerTypes.includes(input.type)) {
+            // For transfer_out/transfer_in, handle as user-to-user transfers
+            // Extract the other user ID from description (format: "Transfer to/from {userId}")
+            const isTransfer = input.type === 'transfer_out' || input.type === 'transfer_in';
+            
+            if (isTransfer && input.description) {
+              try {
+                // Extract user ID from description (e.g., "Transfer to 4fc6cac9-..." or "Transfer from 89166b84-...")
+                const transferMatch = input.description.match(/Transfer (to|from) ([a-f0-9-]+)/i);
+                if (transferMatch) {
+                  const direction = transferMatch[1].toLowerCase(); // "to" or "from"
+                  const otherUserId = transferMatch[2];
+                  
+                  const { recordUserTransferLedgerEntry } = await import('./ledger-service.js');
+                  const wallet = data.wallet as any;
+                  const tenantId = wallet?.tenantId || 'default';
+                  
+                  if (input.type === 'transfer_out') {
+                    // transfer_out: from input.userId to otherUserId
+                    await recordUserTransferLedgerEntry(
+                      input.userId,
+                      otherUserId,
+                      input.amount,
+                      input.currency,
+                      tenantId,
+                      input.description,
+                      input.refId || `transfer-${input.userId}-${otherUserId}-${Date.now()}`
+                    );
+                  } else {
+                    // transfer_in: from otherUserId to input.userId
+                    await recordUserTransferLedgerEntry(
+                      otherUserId,
+                      input.userId,
+                      input.amount,
+                      input.currency,
+                      tenantId,
+                      input.description,
+                      input.refId || `transfer-${otherUserId}-${input.userId}-${Date.now()}`
+                    );
+                  }
+                  
+                  // Mark that we should sync from ledger instead of direct update
+                  (data as any).syncFromLedger = true;
+                  (data as any).skipDirectUpdate = true;
+                  
+                  logger.info('User-to-user transfer recorded in ledger', {
+                    userId: input.userId,
+                    otherUserId,
+                    type: input.type,
+                    amount: input.amount,
+                    currency: input.currency,
+                  });
+                } else {
+                  // Fallback: use recordWalletTransactionLedgerEntry if we can't extract user ID
+                  logger.warn('Could not extract user ID from transfer description, using fallback', {
+                    description: input.description,
+                  });
+                  const { recordWalletTransactionLedgerEntry } = await import('./ledger-service.js');
+                  const wallet = data.wallet as any;
+                  const tenantId = wallet?.tenantId || 'default';
+                  
+                  await recordWalletTransactionLedgerEntry(
+                    input.userId,
+                    input.type,
+                    input.amount,
+                    input.currency,
+                    tenantId,
+                    undefined,
+                    input.description
+                  );
+                  
+                  (data as any).syncFromLedger = true;
+                  (data as any).skipDirectUpdate = true;
+                }
+              } catch (transferError: any) {
+                logger.error('Failed to record user-to-user transfer in ledger', {
+                  error: transferError?.message || String(transferError),
+                  userId: input.userId,
+                  type: input.type,
+                  amount: input.amount,
+                });
+                // Don't fail - allow direct wallet update as fallback
+                (data as any).skipDirectUpdate = false;
+              }
+            } else if (!skipLedgerTypes.includes(input.type)) {
               try {
                 const { recordWalletTransactionLedgerEntry } = await import('./ledger-service.js');
                 const wallet = data.wallet as any;
@@ -615,12 +660,12 @@ const walletTxSaga = [
         }
       }
       
-      // Check if we should skip direct update (for provider funding via ledger)
+      // Check if we should skip direct update (for ledger-recorded transactions)
       let skipDirectUpdate = (data as any).skipDirectUpdate === true;
       let balance: number = 0;
       
       if (skipDirectUpdate && balanceField === 'balance') {
-        // For provider funding, sync directly from ledger (don't update wallet directly)
+        // For ledger-recorded transactions, sync directly from ledger (don't update wallet directly)
         // Wait for ledger transaction to be committed
         await new Promise(resolve => setTimeout(resolve, 300));
         
@@ -638,10 +683,10 @@ const walletTxSaga = [
             balance,
           });
         } catch (syncError) {
-          logger.error('Failed to sync provider wallet balance from ledger', { 
+          logger.error('Failed to sync wallet balance from ledger', { 
             error: syncError,
             walletId: input.walletId,
-            providerId: input.userId,
+            userId: input.userId,
           });
           // Fall back to direct update if sync fails
           skipDirectUpdate = false;
@@ -659,9 +704,13 @@ const walletTxSaga = [
         if (input.type === 'deposit') incUpdate.lifetimeDeposits = input.amount;
         else if (input.type === 'withdrawal') incUpdate.lifetimeWithdrawals = input.amount;
         
-        // Build query - for debits, add balance check condition
+        // Build query - for debits, add balance check condition only if allowNegative is false
         const query: Record<string, unknown> = { id: input.walletId };
-        if (!isCredit) query[balanceField] = { $gte: input.amount };
+        const allowNegative = (data.allowNegative as boolean) || false;
+        if (!isCredit && !allowNegative) {
+          // Only check balance if user cannot go negative
+          query[balanceField] = { $gte: input.amount };
+        }
         
         // Atomic update
         const result = await walletsCollection.findOneAndUpdate(

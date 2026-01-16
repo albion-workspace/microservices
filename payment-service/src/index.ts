@@ -1,11 +1,15 @@
 /**
- * Payment Gateway - Multi-provider payment processing
+ * Payment Service - Generic user-to-user transaction processing
  * 
- * Features:
- * - Multiple payment provider support
- * - Deposit & Withdrawal with saga rollback
- * - Wallet balance management
+ * Generic payment service that handles:
+ * - User-to-user deposits and withdrawals
+ * - Multi-currency wallet management
  * - Transaction history & tracking
+ * - Saga-based rollback for atomic operations
+ * - Event-driven balance synchronization
+ * 
+ * The service is agnostic to business logic (gateway, provider, etc.).
+ * It only knows about users, amounts, currencies, and permissions.
  */
 
 import {
@@ -46,7 +50,7 @@ export { emitPaymentEvent, type PaymentWebhookEvents };
 const webhookService = createWebhookService({
   manager: paymentWebhooks,
   eventsDocs: `
-    Payment Gateway Webhook Events:
+    Payment Service Webhook Events:
     • wallet.created - New wallet created
     • wallet.updated - Wallet settings changed
     • wallet.deposit.initiated - Deposit started
@@ -61,7 +65,6 @@ const webhookService = createWebhookService({
 });
 
 import { 
-  providerConfigService,
   depositService,
   withdrawalService,
   transactionApprovalResolvers,
@@ -78,7 +81,7 @@ import { ledgerResolvers, ledgerTypes } from './services/ledger-resolvers.js';
 // Configuration
 // ═══════════════════════════════════════════════════════════════════
 
-import { SYSTEM_ROLE } from './constants.js';
+import { SYSTEM_ROLE, SYSTEM_CURRENCY } from './constants.js';
 export { SYSTEM_ROLE };
 
 const config = {
@@ -92,7 +95,6 @@ const config = {
     expiresIn: '8h',
   },
   services: [
-    { name: 'providerConfig', types: providerConfigService.types, resolvers: providerConfigService.resolvers },
     { name: 'deposit', types: depositService.types, resolvers: depositService.resolvers },
     { name: 'withdrawal', types: withdrawalService.types, resolvers: withdrawalService.resolvers },
     { 
@@ -629,17 +631,33 @@ function setupBonusEventHandlers() {
         return;
       }
       
-      // Record in ledger FIRST (bonus-service should have already done this, but ensure it)
+      // Record in ledger using generic transfer (bonus-service should have already done this, but ensure it)
+      // Generic: User bonus account -> User real account (both are just user accounts with subtypes)
       try {
-        const { recordBonusConversionLedgerEntry } = await import('./services/ledger-service.js');
-        await recordBonusConversionLedgerEntry(
-          event.userId!,
-          convertAmount,
-          event.data.currency,
-          event.tenantId,
-          event.data.bonusId,
-          `Bonus converted: ${event.data.bonusId}`
-        );
+        const { getOrCreateUserAccount, getLedger } = await import('./services/ledger-service.js');
+        const ledger = getLedger();
+        
+        // Get account IDs for bonus and real accounts
+        const userBonusAccountId = await getOrCreateUserAccount(event.userId!, 'bonus', event.data.currency);
+        const userRealAccountId = await getOrCreateUserAccount(event.userId!, 'real', event.data.currency);
+        
+        // Use generic transfer: bonus account -> real account
+        await ledger.createTransaction({
+          type: 'transfer',
+          fromAccountId: userBonusAccountId,
+          toAccountId: userRealAccountId,
+          amount: convertAmount,
+          currency: event.data.currency,
+          description: `Bonus converted: ${event.data.bonusId}`,
+          externalRef: `bonus-convert-${event.data.bonusId}-${Date.now()}`,
+          initiatedBy: event.userId!,
+          metadata: {
+            userId: event.userId!,
+            bonusId: event.data.bonusId,
+            tenantId: event.tenantId,
+            transactionType: 'bonus_conversion',
+          },
+        });
       } catch (ledgerError) {
         logger.error('Failed to record bonus conversion in ledger', { error: ledgerError });
         // Continue - bonus-service should have already recorded it
@@ -743,18 +761,34 @@ function setupBonusEventHandlers() {
         return;
       }
       
-      // Record in ledger FIRST (bonus-service should have already done this, but ensure it)
+      // Record in ledger using generic transfer (bonus-service should have already done this, but ensure it)
+      // Generic: User bonus account -> Bonus pool account (both are just user accounts)
       try {
-        const { recordBonusForfeitLedgerEntry } = await import('./services/ledger-service.js');
-        await recordBonusForfeitLedgerEntry(
-          event.userId!,
-          event.data.forfeitedValue,
-          event.data.currency || 'USD',
-          event.tenantId,
-          event.data.bonusId,
-          event.data.reason || 'Forfeited',
-          `Bonus forfeited: ${event.data.reason || 'Forfeited'}`
-        );
+        const { getOrCreateUserAccount } = await import('./services/ledger-service.js');
+        const ledger = (await import('./services/ledger-service.js')).getLedger();
+        
+        // Get account IDs for bonus and bonus pool accounts
+        const userBonusAccountId = await getOrCreateUserAccount(event.userId!, 'bonus', event.data.currency || SYSTEM_CURRENCY);
+        const bonusPoolAccountId = await getOrCreateUserAccount('bonus-pool', 'main', event.data.currency || SYSTEM_CURRENCY, true);
+        
+        // Use generic transfer: user bonus account -> bonus pool account
+        await ledger.createTransaction({
+          type: 'transfer',
+          fromAccountId: userBonusAccountId,
+          toAccountId: bonusPoolAccountId,
+          amount: event.data.forfeitedValue,
+          currency: event.data.currency || SYSTEM_CURRENCY,
+          description: `Bonus forfeited: ${event.data.reason || 'Forfeited'}`,
+          externalRef: `bonus-forfeit-${event.data.bonusId}-${Date.now()}`,
+          initiatedBy: 'system',
+          metadata: {
+            userId: event.userId!,
+            bonusId: event.data.bonusId,
+            reason: event.data.reason || 'Forfeited',
+            tenantId: event.tenantId,
+            transactionType: 'bonus_forfeit',
+          },
+        });
       } catch (ledgerError) {
         logger.error('Failed to record bonus forfeiture in ledger', { error: ledgerError });
         // Continue - bonus-service should have already recorded it
@@ -868,17 +902,12 @@ async function main() {
 ║                     PAYMENT SERVICE                                   ║
 ╠═══════════════════════════════════════════════════════════════════════╣
 ║                                                                       ║
-║  Providers:                                                           ║
-║  • Stripe, PayPal, Adyen, Worldpay, Braintree                        ║
-║  • Skrill, Neteller, Paysafe, Trustly                                ║
-║  • Klarna, iDEAL, Sofort, Giropay, PIX                               ║
-║  • Crypto: BTC, ETH, USDT                                            ║
-║                                                                       ║
 ║  Features:                                                            ║
-║  • Deposits with auto-routing                                         ║
-║  • Withdrawals with balance hold                                      ║
-║  • Wallet management                                                  ║
-║  • Saga-based rollback                                                ║
+║  • User-to-user deposits and withdrawals                              ║
+║  • Multi-currency wallet management                                   ║
+║  • Balance validation based on permissions                            ║
+║  • Saga-based rollback for atomic operations                          ║
+║  • Event-driven balance synchronization                               ║
 ║                                                                       ║
 ║  Bonus Integration (listens to bonus-service events):                 ║
 ║  • bonus.awarded → credit bonusBalance                                ║
@@ -912,10 +941,14 @@ async function main() {
   }
   
   // Initialize ledger system AFTER database connection is established
-  const tenantId = 'default'; // Could be multi-tenant in future
+  const tenantId = 'default-tenant'; // Match tenantId used throughout the system
   try {
-    await initializeLedger(tenantId);
+    const ledger = await initializeLedger(tenantId);
     logger.info('Ledger system initialized for payment service');
+    
+    // ✅ PHASE 2: Start crash recovery job (runs every minute)
+    ledger.startRecoveryJob(60000); // 60 seconds
+    logger.info('Transaction recovery job started');
   } catch (error) {
     logger.error('Failed to initialize ledger system', { error });
     // Ledger is critical - but we'll let it fail gracefully and log

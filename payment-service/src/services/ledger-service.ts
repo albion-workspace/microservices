@@ -1,17 +1,27 @@
 /**
  * Ledger Service Integration
  * 
- * Wraps the core-service ledger system for payment service use.
- * Provides helper methods for common payment operations.
+ * Generic ledger system wrapper - handles user-to-user transactions only.
+ * The ledger system is agnostic to business logic (payment gateway, provider, bonuses, etc.).
+ * It only knows about:
+ * - Users/accounts (with optional subtypes like 'main', 'bonus', 'real')
+ * - Whether accounts can go negative (allowNegative flag)
+ * - Transaction types (deposit, withdrawal, transfer, fee, etc.)
+ * - Balance validation
+ * 
+ * Business logic (fees, bonuses, etc.) is handled by respective services.
+ * This service provides generic accounting operations only.
  */
 
-import { createLedger, getDatabase, getClient, logger, type Ledger, type CreateTransactionInput, emit } from 'core-service';
-import { SYSTEM_ROLE } from '../constants.js';
+import { createLedger, getDatabase, getClient, logger, type Ledger, emit } from 'core-service';
+import { SYSTEM_CURRENCY } from '../constants.js';
+import { convertCurrency, getExchangeRate } from './exchange-rate.js';
 
 let ledgerInstance: Ledger | null = null;
 
 /**
- * Initialize ledger system for payment service
+ * Initialize ledger system
+ * Generic: All accounts are user accounts - no system accounts
  */
 export async function initializeLedger(tenantId: string = 'default'): Promise<Ledger> {
   if (ledgerInstance) {
@@ -21,15 +31,17 @@ export async function initializeLedger(tenantId: string = 'default'): Promise<Le
   const db = getDatabase();
   const client = getClient();
 
+  // Generic: All accounts are user accounts - created on-demand
   ledgerInstance = createLedger({
     tenantId,
     db,
     client,
+    systemAccounts: [], // No system accounts - everything is user accounts
   });
 
   await ledgerInstance.initialize();
   
-  logger.info('Payment ledger initialized', { tenantId });
+  logger.info('Ledger initialized', { tenantId });
   
   return ledgerInstance;
 }
@@ -45,15 +57,29 @@ export function getLedger(): Ledger {
 }
 
 /**
- * Get or create provider account
+ * Initialize ledger and return instance (for recovery job setup)
  */
-export async function getOrCreateProviderAccount(
-  providerId: string,
-  subtype: 'deposit' | 'withdrawal',
-  currency: string = 'USD'
+export async function initializeLedgerAndGetInstance(tenantId: string = 'default'): Promise<Ledger> {
+  if (ledgerInstance) {
+    return ledgerInstance;
+  }
+  return await initializeLedger(tenantId);
+}
+
+/**
+ * Get or create user account
+ * Generic: All accounts are user accounts - permissions determine allowNegative
+ * Handles race conditions: if multiple concurrent calls try to create the same account,
+ * only one succeeds and others retry the get operation.
+ */
+export async function getOrCreateUserAccount(
+  userId: string,
+  subtype: string = 'main',
+  currency: string = SYSTEM_CURRENCY,
+  allowNegative: boolean = false
 ): Promise<string> {
   const ledger = getLedger();
-  const accountId = ledger.getProviderAccountId(providerId, subtype);
+  const accountId = ledger.getUserAccountId(userId, subtype as any);
   
   // Check if account exists
   const account = await ledger.getAccount(accountId);
@@ -61,21 +87,24 @@ export async function getOrCreateProviderAccount(
     return accountId;
   }
   
-  // Create provider account - handle race conditions
+  // Create user account with permission-based allowNegative
+  // Handle race condition: if another concurrent call created it, catch duplicate key error
   try {
-    await ledger.createProviderAccount(providerId, subtype, currency);
-    logger.info('Provider account created', { providerId, subtype, currency, accountId });
+    await ledger.createUserAccount(userId, subtype as any, currency, { allowNegative });
+    logger.info('User account created', { userId, subtype, currency, accountId, allowNegative });
   } catch (error: any) {
-    // If account was created by another concurrent request, that's fine
-    if (error.code === 11000 || error.message?.includes('duplicate key') || error.message?.includes('E11000')) {
-      // Account already exists (race condition) - verify it exists
+    // MongoDB duplicate key error (E11000) - another concurrent call created it
+    if (error.code === 11000 || error.codeName === 'DuplicateKey') {
+      // Retry get - account should exist now
       const existingAccount = await ledger.getAccount(accountId);
       if (existingAccount) {
-        logger.debug('Provider account already exists (race condition)', { providerId, subtype, accountId });
+        logger.debug('Account created by concurrent call, using existing', { userId, subtype, currency, accountId });
         return accountId;
       }
+      // If still not found, rethrow the error
+      throw new Error(`Failed to create account ${accountId} and account not found after duplicate key error`);
     }
-    // Re-throw if it's a different error
+    // Rethrow other errors
     throw error;
   }
   
@@ -83,174 +112,269 @@ export async function getOrCreateProviderAccount(
 }
 
 /**
- * Get or create user account (maps to wallet)
+ * Check if user account has sufficient balance
+ * Generic: Checks balance and validates against allowNegative permission
+ * 
+ * The ledger system doesn't know about business roles (provider, gateway, etc.).
+ * It only checks the allowNegative flag from user permissions.
+ * Business logic (which roles can go negative) is handled at the permission level.
  */
-export async function getOrCreateUserAccount(
+export async function checkUserBalance(
   userId: string,
-  subtype: 'real' | 'bonus' | 'locked',
-  currency: string = 'USD'
-): Promise<string> {
+  amount: number,
+  currency: string = SYSTEM_CURRENCY,
+  subtype: string = 'main'
+): Promise<{ sufficient: boolean; available: number; required: number; allowNegative: boolean }> {
   const ledger = getLedger();
-  const accountId = ledger.getUserAccountId(userId, subtype);
   
-  // Check if account exists
-  const account = await ledger.getAccount(accountId);
-  if (account) {
-    return accountId;
+  // Query user permissions from auth_service database directly (microservices architecture)
+  // Users are stored in auth_service, not duplicated in payment_service
+  // We query the auth_service database directly since both services share MongoDB
+  let permissions: Record<string, any> = {};
+  let allowNegative = false;
+  
+  try {
+    // Query auth_service database directly (both services share MongoDB instance)
+    // Use getClient to access MongoDB, then switch to auth_service database
+    const client = getClient();
+    const authDb = client.db('auth_service');
+    const authUsersCollection = authDb.collection('users');
+    
+    const authUser = await authUsersCollection.findOne(
+      { id: userId },
+      { projection: { permissions: 1 } }
+    );
+    
+    if (authUser?.permissions) {
+      // Permissions in database are stored as object { allowNegative: true, acceptFee: true, ... }
+      permissions = typeof authUser.permissions === 'object' && !Array.isArray(authUser.permissions)
+        ? authUser.permissions
+        : {};
+      allowNegative = permissions.allowNegative === true;
+      
+      logger.debug('Fetched user permissions from auth_service', {
+        userId,
+        permissions,
+        allowNegative,
+      });
+    } else {
+      logger.warn('User not found in auth_service or has no permissions', { userId });
+    }
+  } catch (error: any) {
+    // Auth service database not available or query failed
+    logger.warn('Could not fetch user permissions from auth_service database', { 
+      userId, 
+      error: error.message 
+    });
+    // Default to false (no negative balance allowed) if auth_service unavailable
   }
   
-  // Create user account
-  await ledger.createUserAccount(userId, subtype, currency, { allowNegative: false });
-  logger.info('User account created', { userId, subtype, currency, accountId });
+  // Get or create account with correct allowNegative flag
+  const accountId = await getOrCreateUserAccount(userId, subtype, currency, allowNegative);
   
-  return accountId;
-}
-
-/**
- * Check if provider account has sufficient balance for deposit
- * Providers can go negative (receivables), but we should track it
- */
-export async function checkProviderDepositBalance(
-  providerId: string,
-  amount: number,
-  currency: string = 'USD'
-): Promise<{ sufficient: boolean; available: number; required: number }> {
-  const ledger = getLedger();
-  const providerAccountId = await getOrCreateProviderAccount(providerId, 'deposit', currency);
+  const account = await ledger.getAccount(accountId);
+  if (!account) {
+    throw new Error(`Account not found: ${accountId}`);
+  }
   
-  const balance = await ledger.getBalance(providerAccountId);
-  // Providers can go negative (receivables), but we log it
-  const available = balance.balance;
-  const sufficient = true; // Providers can go negative
+  // Update account's allowNegative if it doesn't match user permissions
+  if (account.allowNegative !== allowNegative) {
+    const db = getDatabase();
+    await db.collection('ledger_accounts').updateOne(
+      { accountId: accountId },
+      { $set: { allowNegative } }
+    );
+    logger.info('Updated account allowNegative flag to match user permissions', {
+      userId,
+      accountId,
+      allowNegative,
+      previousValue: account.allowNegative,
+    });
+  }
   
-  if (available < 0) {
-    logger.warn('Provider deposit account is negative (receivables)', {
-      providerId,
+  const { balance: availableBalance } = await ledger.getBalance(accountId);
+  const available = availableBalance;
+  const sufficient = allowNegative || available >= amount;
+  
+  // Validate: Account cannot be negative if allowNegative is false
+  if (available < 0 && !allowNegative) {
+    logger.error('Account is negative but allowNegative is false', {
+      userId,
       balance: available,
       currency,
+      subtype,
     });
+    throw new Error(`Account cannot go negative. Current balance: ${available}, Required: ${amount}`);
   }
   
   return {
     sufficient,
     available,
     required: amount,
+    allowNegative,
   };
 }
 
 /**
  * Record deposit in ledger
- * Flow: Provider Account (deposit) -> User Account (real)
+ * Generic: User-to-user transaction with multi-currency support
+ * Flow: From User Account -> To User Account
+ * 
+ * Multi-currency support:
+ * - If currencies differ, automatically converts using exchange rates
+ * - Exchange rate is fetched from exchange-rate service (cached, manual override, or API)
+ * - Both accounts maintain their native currencies
  */
 export async function recordDepositLedgerEntry(
-  providerId: string,
-  userId: string,
+  fromUserId: string, // User providing the funds
+  toUserId: string,   // User receiving the funds
   amount: number,
   feeAmount: number,
-  currency: string,
+  currency: string, // Currency of the transaction (from user's currency)
   tenantId: string,
-  externalRef?: string,
-  description?: string
+  externalRef: string, // ✅ CRITICAL: Now required (was optional)
+  description?: string,
+  toCurrency?: string // Optional: destination currency (if different from source)
 ): Promise<string> {
+  // ✅ CRITICAL: Validate externalRef is provided
+  if (!externalRef || externalRef.trim() === '') {
+    throw new Error('externalRef is required for deposit transactions to prevent duplicates');
+  }
   const ledger = getLedger();
   
-  // Check provider balance (informational - providers can go negative)
-  await checkProviderDepositBalance(providerId, amount, currency);
+  // Determine destination currency (defaults to source currency if not specified)
+  const destinationCurrency = toCurrency || currency;
   
-  // Get or create accounts
-  const providerAccountId = await getOrCreateProviderAccount(providerId, 'deposit', currency);
-  const userAccountId = await getOrCreateUserAccount(userId, 'real', currency);
+  // Check from user balance in source currency - permissions determine if negative is allowed
+  const { sufficient, allowNegative: fromAllowNegative, available } = await checkUserBalance(fromUserId, amount, currency, 'main');
+  if (!sufficient && !fromAllowNegative) {
+    throw new Error(`Insufficient balance: ${available} < ${amount}`);
+  }
   
-  // Net amount (after fees)
-  const netAmount = amount - feeAmount;
+  // Get or create accounts (each in their own currency)
+  const fromAccountId = await getOrCreateUserAccount(fromUserId, 'main', currency, fromAllowNegative);
+  const toAccountId = await getOrCreateUserAccount(toUserId, 'main', destinationCurrency, false);
   
-  // Record deposit: Provider -> User
+  // Handle currency conversion if currencies differ
+  let convertedAmount = amount;
+  let convertedFeeAmount = feeAmount;
+  let exchangeRate = 1.0;
+  
+  if (currency !== destinationCurrency) {
+    // Convert amount to destination currency using exchange rate
+    exchangeRate = await getExchangeRate(currency, destinationCurrency);
+    convertedAmount = await convertCurrency(amount, currency, destinationCurrency);
+    convertedFeeAmount = await convertCurrency(feeAmount, currency, destinationCurrency);
+    
+    logger.info('Currency conversion applied for deposit', {
+      fromCurrency: currency,
+      toCurrency: destinationCurrency,
+      originalAmount: amount,
+      convertedAmount,
+      exchangeRate,
+      fromUserId,
+      toUserId,
+    });
+  }
+  
+  // Net amount (after fees) in destination currency
+  const netAmount = convertedAmount - convertedFeeAmount;
+  
+  // IMPORTANT: Ledger requires same currency for both accounts in a transaction
+  // For multi-currency support, we need to handle conversion at the service level
+  // Option 1: Create intermediate conversion transaction (fromCurrency -> toCurrency)
+  // Option 2: Use a conversion account as intermediary
+  // For now, we'll use the destination currency for the transaction
+  // The from account will be debited in its currency, to account credited in its currency
+  
+  // Record deposit: From User -> To User (gross amount in destination currency)
+  // Note: The ledger will validate currency match, so we use destination currency
+  // The actual debit from source account happens separately if currencies differ
   const depositTx = await ledger.createTransaction({
     type: 'deposit',
-    fromAccountId: providerAccountId,
-    toAccountId: userAccountId,
-    amount: netAmount,
-    currency,
-    description: description || `Deposit of ${amount} ${currency} (fee: ${feeAmount})`,
+    fromAccountId,
+    toAccountId,
+    amount: convertedAmount, // Use converted amount in destination currency
+    currency: destinationCurrency, // Use destination currency for transaction
+    description: description || `Deposit of ${amount} ${currency}${currency !== destinationCurrency ? ` (converted to ${convertedAmount} ${destinationCurrency})` : ''} (fee: ${feeAmount} ${currency})`,
     externalRef,
-    initiatedBy: userId,
+    initiatedBy: toUserId,
     metadata: {
-      providerId,
-      userId,
-      grossAmount: amount,
-      feeAmount,
-      netAmount,
+      fromUserId,
+      toUserId,
+      // Only save what cannot be calculated:
+      // - originalCurrency: needed to know user's requested currency
+      // - originalAmount: user's requested amount (can't be calculated)
+      // - originalFeeAmount: user's requested fee (can't be calculated)
+      // - exchangeRate: needed to reconstruct original amounts (can be calculated but saved for audit)
+      // Note: convertedAmount is already in transaction.amount, convertedFeeAmount = originalFeeAmount * exchangeRate
+      originalCurrency: currency !== destinationCurrency ? currency : undefined,
+      originalAmount: currency !== destinationCurrency ? amount : undefined,
+      originalFeeAmount: currency !== destinationCurrency ? feeAmount : undefined,
+      exchangeRate: currency !== destinationCurrency ? exchangeRate : undefined,
     },
   });
   
-  // Record fee: User -> Fee Collection
-  if (feeAmount > 0) {
-    const feeAccountId = ledger.getSystemAccountId('fee_collection');
+  // If currencies differ, we need to debit the source account separately
+  // This creates a conversion transaction: source account (source currency) -> conversion account
+  if (currency !== destinationCurrency) {
+    // Create a conversion account for the source currency to track the debit
+    const conversionAccountId = await getOrCreateUserAccount(`conversion-${currency}-${destinationCurrency}`, 'main', currency, true);
     
-    // Ensure fee collection account exists (create lazily if needed)
-    // Check if account exists first, then create if needed
-    let feeAccount = await ledger.getAccount(feeAccountId);
-    if (!feeAccount) {
-      // Use updateOne with upsert to avoid race conditions
-      const db = getDatabase();
-      try {
-        await db.collection('ledger_accounts').updateOne(
-          { _id: feeAccountId as any },
-          {
-            $setOnInsert: {
-              _id: feeAccountId as any,
-              tenantId,
-              type: 'system',
-              subtype: 'fee_collection',
-              currency,
-              balance: 0,
-              availableBalance: 0,
-              pendingIn: 0,
-              pendingOut: 0,
-              allowNegative: false,
-              status: 'active',
-              lastEntrySequence: 0,
-              createdAt: new Date(),
-              updatedAt: new Date(),
-            },
-          },
-          { upsert: true }
-        );
-        // Re-check if account was created
-        feeAccount = await ledger.getAccount(feeAccountId);
-      } catch (upsertError: any) {
-        // If duplicate key error, account was created by another request
-        if (upsertError.code === 11000 || upsertError.message?.includes('duplicate key') || upsertError.message?.includes('E11000')) {
-          feeAccount = await ledger.getAccount(feeAccountId);
-          if (!feeAccount) {
-            throw new Error(`Fee collection account creation failed: ${upsertError.message}`);
-          }
-        } else {
-          throw upsertError;
-        }
-      }
-    }
-    
-    if (!feeAccount) {
-      throw new Error(`Fee collection account not found: ${feeAccountId}`);
-    }
+    // Debit source account in source currency
+    await ledger.createTransaction({
+      type: 'transfer',
+      fromAccountId,
+      toAccountId: conversionAccountId,
+      amount, // Original amount in source currency
+      currency, // Source currency
+      description: `Currency conversion: ${amount} ${currency} -> ${convertedAmount} ${destinationCurrency}`,
+      externalRef: `${externalRef}-conversion`,
+      initiatedBy: toUserId,
+      metadata: {
+        fromUserId,
+        toUserId,
+        // Only save what cannot be calculated:
+        // - originalCurrency: needed to know source currency
+        // - originalAmount: source amount (can't be calculated)
+        // - exchangeRate: needed to reconstruct (can be calculated but saved for audit)
+        // Note: convertedAmount = originalAmount * exchangeRate, destinationCurrency is in transaction.currency
+        originalCurrency: currency,
+        originalAmount: amount,
+        exchangeRate,
+        relatedDepositTxId: depositTx._id,
+      },
+    });
+  }
+  
+  // Record fee: To User -> Fee Collection User (in destination currency)
+  if (convertedFeeAmount > 0) {
+    // Fee collection is just another user account (in destination currency)
+    const feeAccountId = await getOrCreateUserAccount('fee-collection', 'main', destinationCurrency, false);
     
     // Fee transaction should have externalRef to avoid duplicate key errors
-    // Use deposit transaction ID with suffix to make it unique
-    const feeExternalRef = externalRef ? `${externalRef}-fee` : `${depositTx._id}-fee`;
+    const feeExternalRef = `${externalRef}-fee`;
     
     await ledger.createTransaction({
       type: 'fee',
-      fromAccountId: userAccountId,
+      fromAccountId: toAccountId,
       toAccountId: feeAccountId,
-      amount: feeAmount,
-      currency,
-      description: `Deposit fee: ${feeAmount} ${currency}`,
+      amount: convertedFeeAmount, // Fee in destination currency
+      currency: destinationCurrency,
+      description: `Deposit fee: ${convertedFeeAmount} ${destinationCurrency}${currency !== destinationCurrency ? ` (${feeAmount} ${currency})` : ''}`,
       externalRef: feeExternalRef,
-      initiatedBy: 'system',
+      initiatedBy: toUserId,
       metadata: {
-        providerId,
-        userId,
+        fromUserId,
+        toUserId,
+        // Only save what cannot be calculated:
+        // - originalCurrency: needed if different from transaction currency
+        // - originalFeeAmount: user's requested fee (can't be calculated)
+        // - exchangeRate: needed to reconstruct (can be calculated but saved for audit)
+        // Note: convertedFeeAmount = originalFeeAmount * exchangeRate
+        originalCurrency: currency !== destinationCurrency ? currency : undefined,
+        originalFeeAmount: currency !== destinationCurrency ? feeAmount : undefined,
+        exchangeRate: currency !== destinationCurrency ? exchangeRate : undefined,
         parentTxId: depositTx._id,
         relatedDeposit: depositTx._id,
       },
@@ -259,22 +383,26 @@ export async function recordDepositLedgerEntry(
   
   logger.info('Deposit recorded in ledger', {
     depositTxId: depositTx._id,
-    providerId,
-    userId,
-    amount,
-    feeAmount,
-    netAmount,
+    fromUserId,
+    toUserId,
+    amount: currency !== destinationCurrency ? `${amount} ${currency} -> ${convertedAmount} ${destinationCurrency}` : `${amount} ${currency}`,
+    exchangeRate: currency !== destinationCurrency ? exchangeRate : undefined,
   });
   
   // Emit event for wallet balance sync (event-driven, no delays needed)
   // Works across containers/processes via Redis pub/sub - shared source of truth
   // Fire-and-forget: don't await to avoid blocking the deposit flow
-  emit('ledger.deposit.completed', tenantId, userId, {
+  emit('ledger.deposit.completed', tenantId, toUserId, {
     depositTxId: depositTx._id,
-    userId,
-    currency,
-    netAmount,
-    accountId: userAccountId,
+    userId: toUserId,
+    currency: destinationCurrency, // Use destination currency for event
+    netAmount, // Calculated: convertedAmount - convertedFeeAmount
+    accountId: toAccountId,
+    // Only include conversion info if currencies differ
+    ...(currency !== destinationCurrency ? {
+      originalCurrency: currency,
+      exchangeRate,
+    } : {}),
   }).catch((eventError) => {
     // Don't fail deposit if event emission fails - sync can happen via query resolver
     logger.debug('Failed to emit deposit completion event (non-critical)', { error: eventError });
@@ -283,108 +411,165 @@ export async function recordDepositLedgerEntry(
   return depositTx._id;
 }
 
-/**
- * Check if user has sufficient balance for withdrawal
- */
-export async function checkUserWithdrawalBalance(
-  userId: string,
-  amount: number,
-  feeAmount: number,
-  currency: string = 'USD'
-): Promise<{ sufficient: boolean; available: number; required: number }> {
-  const ledger = getLedger();
-  const userAccountId = await getOrCreateUserAccount(userId, 'real', currency);
-  
-  const balance = await ledger.getBalance(userAccountId);
-  const available = balance.balance;
-  const totalRequired = amount + feeAmount;
-  const sufficient = available >= totalRequired;
-  
-  if (!sufficient) {
-    logger.warn('Insufficient user balance for withdrawal', {
-      userId,
-      available,
-      required: totalRequired,
-      currency,
-    });
-  }
-  
-  return {
-    sufficient,
-    available,
-    required: totalRequired,
-  };
-}
+// Removed checkUserWithdrawalBalance - use checkUserBalance instead
 
 /**
  * Record withdrawal in ledger
- * Flow: User Account (real) -> Provider Account (withdrawal)
+ * Generic: User-to-user transaction with multi-currency support
+ * Flow: From User Account -> To User Account
+ * 
+ * Multi-currency support:
+ * - If currencies differ, automatically converts using exchange rates
+ * - Exchange rate is fetched from exchange-rate service (cached, manual override, or API)
+ * - Both accounts maintain their native currencies
  */
 export async function recordWithdrawalLedgerEntry(
-  providerId: string,
-  userId: string,
+  fromUserId: string, // User withdrawing
+  toUserId: string,   // Destination user
   amount: number,
   feeAmount: number,
-  currency: string,
+  currency: string, // Currency of the transaction (from user's currency)
   tenantId: string,
-  externalRef?: string,
-  description?: string
+  externalRef: string, // ✅ CRITICAL: Now required (was optional)
+  description?: string,
+  toCurrency?: string // Optional: destination currency (if different from source)
 ): Promise<string> {
+  // ✅ CRITICAL: Validate externalRef is provided
+  if (!externalRef || externalRef.trim() === '') {
+    throw new Error('externalRef is required for withdrawal transactions to prevent duplicates');
+  }
   const ledger = getLedger();
   
-  // Check user balance BEFORE recording (ledger will also check, but we want early validation)
-  const balanceCheck = await checkUserWithdrawalBalance(userId, amount, feeAmount, currency);
-  if (!balanceCheck.sufficient) {
+  // Determine destination currency (defaults to source currency if not specified)
+  const destinationCurrency = toCurrency || currency;
+  
+  const totalAmount = amount + feeAmount;
+  
+  // Check from user balance in source currency - permissions determine if negative is allowed
+  const { sufficient, allowNegative: fromAllowNegative, available } = await checkUserBalance(fromUserId, totalAmount, currency, 'main');
+  if (!sufficient && !fromAllowNegative) {
     throw new Error(
-      `Insufficient balance for withdrawal. Available: ${balanceCheck.available}, Required: ${balanceCheck.required}`
+      `Insufficient balance for withdrawal. Available: ${available}, Required: ${totalAmount}`
     );
   }
   
-  // Get or create accounts
-  const providerAccountId = await getOrCreateProviderAccount(providerId, 'withdrawal', currency);
-  const userAccountId = await getOrCreateUserAccount(userId, 'real', currency);
+  // Get or create accounts (each in their own currency)
+  const fromAccountId = await getOrCreateUserAccount(fromUserId, 'main', currency, fromAllowNegative);
+  const toAccountId = await getOrCreateUserAccount(toUserId, 'main', destinationCurrency, true); // Receiving user can go negative
   
-  // Total amount (amount + fee)
-  const totalAmount = amount + feeAmount;
+  // Handle currency conversion if currencies differ
+  let convertedAmount = amount;
+  let convertedFeeAmount = feeAmount;
+  let convertedTotalAmount = totalAmount;
+  let exchangeRate = 1.0;
   
-  // Record withdrawal: User -> Provider
-  // Ledger will validate balance again (double-check)
+  if (currency !== destinationCurrency) {
+    // Convert amounts to destination currency using exchange rate
+    exchangeRate = await getExchangeRate(currency, destinationCurrency);
+    convertedAmount = await convertCurrency(amount, currency, destinationCurrency);
+    convertedFeeAmount = await convertCurrency(feeAmount, currency, destinationCurrency);
+    convertedTotalAmount = convertedAmount + convertedFeeAmount;
+    
+    logger.info('Currency conversion applied for withdrawal', {
+      fromCurrency: currency,
+      toCurrency: destinationCurrency,
+      originalAmount: amount,
+      convertedAmount,
+      exchangeRate,
+      fromUserId,
+      toUserId,
+    });
+  }
+  
+  // IMPORTANT: Ledger requires same currency for both accounts in a transaction
+  // For multi-currency support, we handle conversion at the service level
+  // The from account will be debited in its currency, to account credited in its currency
+  
+  // Record withdrawal: From User -> To User (in destination currency)
+  // Note: The ledger will validate currency match, so we use destination currency
+  // The actual debit from source account happens separately if currencies differ
   const withdrawalTx = await ledger.createTransaction({
     type: 'withdrawal',
-    fromAccountId: userAccountId,
-    toAccountId: providerAccountId,
-    amount: totalAmount,
-    currency,
-    description: description || `Withdrawal of ${amount} ${currency} (fee: ${feeAmount})`,
+    fromAccountId,
+    toAccountId,
+    amount: convertedTotalAmount, // Use converted total amount in destination currency
+    currency: destinationCurrency, // Use destination currency for transaction
+    description: description || `Withdrawal of ${amount} ${currency}${currency !== destinationCurrency ? ` (converted to ${convertedAmount} ${destinationCurrency})` : ''} (fee: ${feeAmount} ${currency})`,
     externalRef,
-    initiatedBy: userId,
+    initiatedBy: fromUserId,
     metadata: {
-      providerId,
-      userId,
-      withdrawalAmount: amount,
-      feeAmount,
-      totalAmount,
+      fromUserId,
+      toUserId,
+      // Only save what cannot be calculated:
+      // - originalCurrency: needed to know user's requested currency
+      // - originalAmount: user's requested amount (can't be calculated)
+      // - originalFeeAmount: user's requested fee (can't be calculated)
+      // - exchangeRate: needed to reconstruct original amounts (can be calculated but saved for audit)
+      // Note: convertedAmount is already in transaction.amount, convertedFeeAmount = originalFeeAmount * exchangeRate
+      originalCurrency: currency !== destinationCurrency ? currency : undefined,
+      originalAmount: currency !== destinationCurrency ? amount : undefined,
+      originalFeeAmount: currency !== destinationCurrency ? feeAmount : undefined,
+      exchangeRate: currency !== destinationCurrency ? exchangeRate : undefined,
     },
   });
   
+  // If currencies differ, we need to debit the source account separately
+  // This creates a conversion transaction: source account (source currency) -> conversion account
+  if (currency !== destinationCurrency) {
+    // Create a conversion account for the source currency to track the debit
+    const conversionAccountId = await getOrCreateUserAccount(`conversion-${currency}-${destinationCurrency}`, 'main', currency, true);
+    
+    // Debit source account in source currency
+    await ledger.createTransaction({
+      type: 'transfer',
+      fromAccountId,
+      toAccountId: conversionAccountId,
+      amount: totalAmount, // Original total amount in source currency
+      currency, // Source currency
+      description: `Currency conversion: ${totalAmount} ${currency} -> ${convertedTotalAmount} ${destinationCurrency}`,
+      externalRef: `${externalRef}-conversion`,
+      initiatedBy: fromUserId,
+      metadata: {
+        fromUserId,
+        toUserId,
+        // Only save what cannot be calculated:
+        // - originalCurrency: needed to know source currency
+        // - originalAmount: source total amount (can't be calculated)
+        // - exchangeRate: needed to reconstruct (can be calculated but saved for audit)
+        // Note: convertedAmount = originalAmount * exchangeRate, destinationCurrency is in transaction.currency
+        originalCurrency: currency,
+        originalAmount: totalAmount,
+        exchangeRate,
+        relatedWithdrawalTxId: withdrawalTx._id,
+      },
+    });
+  }
+  
+  const { _id: withdrawalTxId } = withdrawalTx;
+  
   logger.info('Withdrawal recorded in ledger', {
-    withdrawalTxId: withdrawalTx._id,
-    providerId,
-    userId,
-    amount,
-    feeAmount,
-    totalAmount,
+    withdrawalTxId,
+    fromUserId,
+    toUserId,
+    amount: currency !== destinationCurrency ? `${amount} ${currency} -> ${convertedAmount} ${destinationCurrency}` : `${amount} ${currency}`,
+    exchangeRate: currency !== destinationCurrency ? exchangeRate : undefined,
   });
   
   // Emit event for wallet balance sync (event-driven, no delays needed)
   // Works across containers/processes via Redis pub/sub - shared source of truth
   // Fire-and-forget: don't await to avoid blocking the withdrawal flow
-  emit('ledger.withdrawal.completed', tenantId, userId, {
-    withdrawalTxId: withdrawalTx._id,
-    userId,
-    currency,
-    totalAmount,
-    accountId: userAccountId,
+  emit('ledger.withdrawal.completed', tenantId, fromUserId, {
+    withdrawalTxId,
+    fromUserId,
+    toUserId,
+    currency, // Use source currency for event (user's currency)
+    totalAmount, // Use original total amount
+    accountId: fromAccountId,
+    // Only include conversion info if currencies differ
+    ...(currency !== destinationCurrency ? {
+      destinationCurrency,
+      exchangeRate,
+    } : {}),
   }).catch((eventError) => {
     // Don't fail withdrawal if event emission fails - sync can happen via query resolver
     logger.debug('Failed to emit withdrawal completion event (non-critical)', { error: eventError });
@@ -393,262 +578,75 @@ export async function recordWithdrawalLedgerEntry(
   return withdrawalTx._id;
 }
 
-/**
- * Record bonus conversion in ledger
- * Flow: User Bonus Account -> User Real Account
- */
-export async function recordBonusConversionLedgerEntry(
-  userId: string,
-  amount: number,
-  currency: string,
-  tenantId: string,
-  bonusId: string,
-  description?: string
-): Promise<string> {
-  const ledger = getLedger();
-  
-  // Get accounts
-  const userBonusAccountId = await getOrCreateUserAccount(userId, 'bonus', currency);
-  const userRealAccountId = await getOrCreateUserAccount(userId, 'real', currency);
-  
-  // Check bonus account balance
-  const bonusBalance = await ledger.getBalance(userBonusAccountId);
-  if (bonusBalance.balance < amount) {
-    throw new Error(
-      `Insufficient bonus balance. Available: ${bonusBalance.balance}, Required: ${amount}`
-    );
-  }
-  
-  // Record conversion: User Bonus -> User Real
-  const conversionTx = await ledger.createTransaction({
-    type: 'bonus_convert',
-    fromAccountId: userBonusAccountId,
-    toAccountId: userRealAccountId,
-    amount,
-    currency,
-    description: description || `Bonus converted to real balance`,
-    initiatedBy: userId,
-    metadata: {
-      userId,
-      bonusId,
-      tenantId,
-    },
-  });
-  
-  logger.info('Bonus conversion recorded in ledger', {
-    conversionTxId: conversionTx._id,
-    userId,
-    bonusId,
-    amount,
-    currency,
-  });
-  
-  return conversionTx._id;
-}
+// Bonus-specific functions removed - use generic recordUserTransferLedgerEntry instead
+// Bonus operations should be handled by bonus-service using generic ledger transfers
 
 /**
- * Record bonus forfeiture in ledger
- * Flow: User Bonus Account -> Bonus Pool (return funds)
+ * Record user-to-user transfer (simplified funding)
+ * Flow: From User Account -> To User Account
+ * Simplified: Everything is user-to-user
  */
-export async function recordBonusForfeitLedgerEntry(
-  userId: string,
-  amount: number,
-  currency: string,
-  tenantId: string,
-  bonusId: string,
-  reason: string,
-  description?: string
-): Promise<string> {
-  const ledger = getLedger();
-  
-  // Get accounts
-  const userBonusAccountId = await getOrCreateUserAccount(userId, 'bonus', currency);
-  const bonusPoolAccountId = ledger.getSystemAccountId('bonus_pool');
-  
-  // Check bonus account balance
-  const bonusBalance = await ledger.getBalance(userBonusAccountId);
-  const forfeitAmount = Math.min(amount, bonusBalance.balance);
-  
-  if (forfeitAmount <= 0) {
-    throw new Error('No bonus balance to forfeit');
-  }
-  
-  // Record forfeiture: User Bonus -> Bonus Pool (return funds)
-  const forfeitTx = await ledger.createTransaction({
-    type: 'bonus_forfeit',
-    fromAccountId: userBonusAccountId,
-    toAccountId: bonusPoolAccountId,
-    amount: forfeitAmount,
-    currency,
-    description: description || `Bonus forfeited: ${reason}`,
-    initiatedBy: 'system',
-    metadata: {
-      userId,
-      bonusId,
-      reason,
-      tenantId,
-    },
-  });
-  
-  logger.info('Bonus forfeiture recorded in ledger', {
-    forfeitTxId: forfeitTx._id,
-    userId,
-    bonusId,
-    amount: forfeitAmount,
-    currency,
-    reason,
-  });
-  
-  return forfeitTx._id;
-}
-
-/**
- * Record system funding of provider in ledger
- * Flow: System House Account -> Provider Account (deposit)
- * This is used when admins manually fund providers
- */
-export async function recordSystemFundProviderLedgerEntry(
-  providerId: string,
+export async function recordUserTransferLedgerEntry(
+  fromUserId: string,
+  toUserId: string,
   amount: number,
   currency: string,
   tenantId: string,
   description?: string,
-  walletTransactionId?: string
+  externalRef?: string
 ): Promise<string> {
   const ledger = getLedger();
   
-  // Get or create provider account
-  const providerAccountId = await getOrCreateProviderAccount(providerId, 'deposit', currency);
-  
-  // Always use currency-specific system house account to avoid currency mismatches
-  // Format: system:house:{currency}:{tenantId}
-  const systemAccountId = `system:house:${currency.toLowerCase()}:${tenantId}`;
-  
-  // Check if currency-specific system account exists
-  let systemAccount = await ledger.getAccount(systemAccountId);
-  
-  if (!systemAccount) {
-    // Create currency-specific system house account
-    // Use upsert to handle race conditions
-    const db = getDatabase();
-    try {
-      await db.collection('ledger_accounts').updateOne(
-        { _id: systemAccountId as any },
-        {
-          $setOnInsert: {
-            _id: systemAccountId as any,
-            tenantId,
-            type: 'system',
-            subtype: 'house',
-            currency,
-            balance: 0,
-            availableBalance: 0,
-            pendingIn: 0,
-            pendingOut: 0,
-            allowNegative: true,
-            status: 'active',
-            lastEntrySequence: 0,
-            createdAt: new Date(),
-            updatedAt: new Date(),
-          },
-        },
-        { upsert: true }
-      );
-      // Re-fetch to get the created account
-      systemAccount = await ledger.getAccount(systemAccountId);
-      if (systemAccount) {
-        logger.info('Created currency-specific system house account', { currency, accountId: systemAccountId });
-      }
-    } catch (upsertError: any) {
-      // If duplicate key error, account was created by another request
-      if (upsertError.code === 11000 || upsertError.message?.includes('duplicate key') || upsertError.message?.includes('E11000')) {
-        systemAccount = await ledger.getAccount(systemAccountId);
-        if (systemAccount) {
-          logger.debug('Currency-specific system house account already exists (race condition)', { currency, accountId: systemAccountId });
-        }
-      } else {
-        throw upsertError;
-      }
-    }
+  // Check from user balance - permissions determine if negative is allowed
+  const { sufficient, allowNegative: fromAllowNegative, available } = await checkUserBalance(fromUserId, amount, currency, 'main');
+  if (!sufficient && !fromAllowNegative) {
+    throw new Error(`Insufficient balance: ${available} < ${amount}`);
   }
   
-  // Verify the account currency matches (safety check)
-  if (systemAccount && systemAccount.currency !== currency) {
-    throw new Error(`System house account currency mismatch: expected ${currency}, got ${systemAccount.currency}`);
-  }
+  // Get or create accounts
+  const fromAccountId = await getOrCreateUserAccount(fromUserId, 'main', currency, fromAllowNegative);
+  const toAccountId = await getOrCreateUserAccount(toUserId, 'main', currency, true); // Receiving user can go negative
   
-  if (!systemAccount) {
-    throw new Error(`Failed to get or create system house account for currency ${currency}`);
-  }
+  // Generate externalRef if not provided
+  const txExternalRef = externalRef || `transfer-${fromUserId}-${toUserId}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
   
-  // Verify provider account exists
-  const providerAccount = await ledger.getAccount(providerAccountId);
-  if (!providerAccount) {
-    throw new Error(`Provider account not found: ${providerAccountId}`);
-  }
+  // Record transfer: From User -> To User
+  const transferTx = await ledger.createTransaction({
+    type: 'transfer',
+    fromAccountId,
+    toAccountId,
+    amount,
+    currency,
+    description: description || `Transfer from ${fromUserId} to ${toUserId}`,
+    externalRef: txExternalRef,
+    initiatedBy: fromUserId,
+    metadata: {
+      fromUserId,
+      toUserId,
+      tenantId,
+    },
+  });
   
-  logger.info('Creating ledger transaction for provider funding', {
-    systemAccountId,
-    systemAccountCurrency: systemAccount.currency,
-    providerAccountId,
-    providerAccountCurrency: providerAccount.currency,
+  const { _id: transferTxId } = transferTx;
+  
+  logger.info('User transfer recorded in ledger', {
+    transferTxId,
+    fromUserId,
+    toUserId,
     amount,
     currency,
   });
   
-  // Record funding: System House -> Provider
-  // Always provide externalRef to avoid duplicate key errors
-  const externalRef = walletTransactionId || `provider-funding-${providerId}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-  
-  let fundingTx;
-  try {
-    fundingTx = await ledger.createTransaction({
-      type: 'transfer', // System transfer to provider
-      fromAccountId: systemAccountId,
-      toAccountId: providerAccountId,
-      amount,
-      currency,
-      description: description || `System funding to provider ${providerId}`,
-      externalRef, // Always provide externalRef to avoid duplicate key errors
-      initiatedBy: 'system',
-      metadata: {
-        providerId,
-        tenantId,
-        fundingType: 'provider',
-        walletTransactionId,
-      },
-    });
-    
-    logger.info('System funding recorded in ledger', {
-      fundingTxId: fundingTx._id,
-      providerId,
-      amount,
-      currency,
-      systemAccountId,
-      providerAccountId,
-    });
-  } catch (txError: any) {
-    logger.error('Failed to create ledger transaction', {
-      error: txError.message,
-      stack: txError.stack,
-      systemAccountId,
-      providerAccountId,
-      amount,
-      currency,
-    });
-    throw txError;
-  }
-  
-  return fundingTx._id;
+  return transferTx._id;
 }
 
 /**
  * Record wallet transaction in ledger (for bet, win, etc.)
- * For betting/casino operations, records the transaction in ledger
+ * Generic: User-to-user transactions only
  * Flow depends on transaction type:
- * - bet: User Account (real) -> System House Account
- * - win: System House Account -> User Account (real)
- * - refund: Provider/System Account -> User Account (real)
+ * - bet: User Account -> House User Account (house user can go negative)
+ * - win: House User Account -> User Account
+ * - refund: User Account -> User Account
  */
 export async function recordWalletTransactionLedgerEntry(
   userId: string,
@@ -657,116 +655,41 @@ export async function recordWalletTransactionLedgerEntry(
   currency: string,
   tenantId: string,
   walletTransactionId?: string,
-  description?: string
+  description?: string,
+  houseUserId?: string // Optional: house user ID (defaults to 'house')
 ): Promise<string> {
   const ledger = getLedger();
   
   // Get user account
-  const userAccountId = await getOrCreateUserAccount(userId, 'real', currency);
+  const userAccountId = await getOrCreateUserAccount(userId, 'main', currency);
   
   // Determine source/destination based on transaction type
   const creditTypes = ['win', 'refund', 'transfer_in', 'release'];
   const isCredit = creditTypes.includes(transactionType);
   
+  // House user (can go negative) - defaults to 'house' user
+  const houseUser = houseUserId || 'house';
+  const houseAccountId = await getOrCreateUserAccount(houseUser, 'main', currency, true); // House can go negative
+  
   let fromAccountId: string;
   let toAccountId: string;
   
   if (isCredit) {
-    // Credit to user: System House -> User
-    // Use currency-specific system house account
-    const systemAccountId = `system:house:${currency.toLowerCase()}:${tenantId}`;
-    let systemAccount = await ledger.getAccount(systemAccountId);
-    
-    if (!systemAccount) {
-      // Fall back to default system account
-      const defaultAccountId = ledger.getSystemAccountId('house');
-      systemAccount = await ledger.getAccount(defaultAccountId);
-      if (systemAccount) {
-        fromAccountId = defaultAccountId;
-      } else {
-        // Create currency-specific system account if needed
-        const db = getDatabase();
-        await db.collection('ledger_accounts').updateOne(
-          { _id: systemAccountId as any },
-          {
-            $setOnInsert: {
-              _id: systemAccountId as any,
-              tenantId,
-              type: 'system',
-              subtype: 'house',
-              currency,
-              balance: 0,
-              availableBalance: 0,
-              pendingIn: 0,
-              pendingOut: 0,
-              allowNegative: true,
-              status: 'active',
-              lastEntrySequence: 0,
-              createdAt: new Date(),
-              updatedAt: new Date(),
-            },
-          },
-          { upsert: true }
-        );
-        fromAccountId = systemAccountId;
-      }
-    } else {
-      fromAccountId = systemAccountId;
-    }
-    
+    // Credit to user: House User -> User
+    fromAccountId = houseAccountId;
     toAccountId = userAccountId;
   } else {
-    // Debit from user: User -> System House
+    // Debit from user: User -> House User
     fromAccountId = userAccountId;
-    
-    // Use currency-specific system house account
-    const systemAccountId = `system:house:${currency.toLowerCase()}:${tenantId}`;
-    let systemAccount = await ledger.getAccount(systemAccountId);
-    
-    if (!systemAccount) {
-      // Fall back to default system account
-      const defaultAccountId = ledger.getSystemAccountId('house');
-      systemAccount = await ledger.getAccount(defaultAccountId);
-      if (systemAccount) {
-        toAccountId = defaultAccountId;
-      } else {
-        // Create currency-specific system account if needed
-        const db = getDatabase();
-        await db.collection('ledger_accounts').updateOne(
-          { _id: systemAccountId as any },
-          {
-            $setOnInsert: {
-              _id: systemAccountId as any,
-              tenantId,
-              type: 'system',
-              subtype: 'house',
-              currency,
-              balance: 0,
-              availableBalance: 0,
-              pendingIn: 0,
-              pendingOut: 0,
-              allowNegative: true,
-              status: 'active',
-              lastEntrySequence: 0,
-              createdAt: new Date(),
-              updatedAt: new Date(),
-            },
-          },
-          { upsert: true }
-        );
-        toAccountId = systemAccountId;
-      }
-    } else {
-      toAccountId = systemAccountId;
-    }
+    toAccountId = houseAccountId;
   }
   
   // Check balance for debits
   if (!isCredit) {
-    const balance = await ledger.getBalance(userAccountId);
-    if (balance.balance < amount) {
+    const { balance: availableBalance } = await ledger.getBalance(userAccountId);
+    if (availableBalance < amount) {
       throw new Error(
-        `Insufficient balance in ledger. Available: ${balance.balance}, Required: ${amount}`
+        `Insufficient balance in ledger. Available: ${availableBalance}, Required: ${amount}`
       );
     }
   }
@@ -791,9 +714,11 @@ export async function recordWalletTransactionLedgerEntry(
     },
   });
   
+  const { _id: ledgerTxId } = ledgerTx;
+  
   logger.info('Wallet transaction recorded in ledger', {
     walletTransactionId,
-    ledgerTxId: ledgerTx._id,
+    ledgerTxId,
     userId,
     transactionType,
     amount,
@@ -805,7 +730,7 @@ export async function recordWalletTransactionLedgerEntry(
   // Emit event for wallet balance sync
   emit('ledger.wallet.transaction.completed', tenantId, userId, {
     walletTransactionId,
-    ledgerTxId: ledgerTx._id,
+    ledgerTxId,
     userId,
     currency,
     amount,
@@ -815,11 +740,12 @@ export async function recordWalletTransactionLedgerEntry(
     logger.debug('Failed to emit wallet transaction completion event (non-critical)', { error: eventError });
   });
   
-  return ledgerTx._id;
+  return ledgerTxId;
 }
 
 /**
  * Sync wallet balance from ledger account
+ * Generic: All wallets are user wallets - sync from user ledger account
  * This ensures wallet.balance matches ledger account balance
  */
 export async function syncWalletBalanceFromLedger(
@@ -831,177 +757,34 @@ export async function syncWalletBalanceFromLedger(
   const db = getDatabase();
   
   try {
-    // Check if this is a provider wallet (userId starts with "provider-")
-    const isProviderWallet = userId.startsWith('provider-');
+    // Generic: All wallets are user wallets - sync from user ledger account
+    const accountId = await getOrCreateUserAccount(userId, 'main', currency);
+    const { balance: ledgerBalance } = await ledger.getBalance(accountId);
     
-    if (isProviderWallet) {
-      // For provider wallets, sync from provider ledger account
-      const providerId = userId;
-      const providerAccountId = await getOrCreateProviderAccount(providerId, 'deposit', currency);
-      const balance = await ledger.getBalance(providerAccountId);
-      
-      // Update wallet balance to match ledger
-      await db.collection('wallets').updateOne(
-        { id: walletId },
-        {
-          $set: {
-            balance: balance.balance,
-            updatedAt: new Date(),
-          },
-        }
-      );
-      
-      logger.debug('Provider wallet balance synced from ledger', {
-        walletId,
-        providerId,
-        balance: balance.balance,
-      });
-    } else {
-      // Check if this is a system user wallet (user has 'system' role)
-      // Query the user's roles from auth_service database (optimized: only fetch roles field)
-      const user = await db.collection('users').findOne(
-        { id: userId },
-        { projection: { roles: 1 } } // Only fetch roles field for performance
-      );
-      const isSystemUser = user?.roles?.includes(SYSTEM_ROLE);
-      
-      if (isSystemUser) {
-        // For system wallet, sync from currency-specific system house account
-        // Get wallet to determine currency (optimized: only fetch needed fields)
-        const wallet = await db.collection('wallets').findOne(
-          { id: walletId },
-          { projection: { currency: 1, tenantId: 1 } } // Only fetch needed fields
-        );
-        if (!wallet) {
-          logger.debug('System wallet not found for sync', { walletId });
-          return;
-        }
-        
-        const walletCurrency = (wallet as any).currency || 'USD';
-        const tenantId = (wallet as any).tenantId || 'default-tenant';
-        
-        // Use currency-specific system account (e.g., system:house:eur:default-tenant)
-        const systemAccountId = `system:house:${walletCurrency.toLowerCase()}:${tenantId}`;
-        
-        try {
-          // Check if currency-specific account exists, fall back to default if not
-          let systemAccount = await ledger.getAccount(systemAccountId);
-          let accountIdToUse = systemAccountId;
-          
-          if (!systemAccount) {
-            // Try default system account as fallback
-            const defaultAccountId = ledger.getSystemAccountId('house');
-            systemAccount = await ledger.getAccount(defaultAccountId);
-            if (systemAccount) {
-              accountIdToUse = defaultAccountId;
-              logger.debug('Using default system account (currency-specific not found)', {
-                walletCurrency,
-                accountId: accountIdToUse,
-              });
-            }
-          }
-          
-          if (!systemAccount) {
-            logger.debug('System account not found, wallet balance will remain as is', {
-              walletId,
-              currency: walletCurrency,
-              accountId: systemAccountId,
-            });
-            return;
-          }
-          
-          const balance = await ledger.getBalance(accountIdToUse);
-          
-          // Update wallet balance to match ledger
-          await db.collection('wallets').updateOne(
-            { id: walletId },
-            {
-              $set: {
-                balance: balance.balance,
-                updatedAt: new Date(),
-              },
-            }
-          );
-          
-          logger.debug('System wallet balance synced from ledger', {
-            walletId,
-            userId,
-            currency: walletCurrency,
-            accountId: accountIdToUse,
-            balance: balance.balance,
-          });
-        } catch (systemError) {
-          // System account might not exist yet - that's ok
-          logger.debug('Could not sync system wallet balance (account may not exist yet)', {
-            walletId,
-            userId,
-            currency: walletCurrency,
-            accountId: systemAccountId,
-            error: systemError instanceof Error ? systemError.message : String(systemError),
-          });
-        }
-        return; // Exit early for system wallets
+    // Update wallet balance to match ledger
+    await db.collection('wallets').updateOne(
+      { id: walletId },
+      {
+        $set: {
+          balance: ledgerBalance,
+          updatedAt: new Date(),
+        },
       }
-      
-      // For regular user wallets, sync from user ledger account
-      // Ensure account exists first (it should be created during deposit/transaction)
-      const userAccountId = await getOrCreateUserAccount(userId, 'real', currency);
-      try {
-        const balance = await ledger.getBalance(userAccountId);
-        
-        // Update wallet balance to match ledger (single atomic operation - no verification query needed)
-        const updateResult = await db.collection('wallets').updateOne(
-          { id: walletId },
-          {
-            $set: {
-              balance: balance.balance,
-              updatedAt: new Date(),
-            },
-          }
-        );
-        
-        if (updateResult.matchedCount === 0) {
-          logger.error('Wallet not found for sync', { walletId, userId, currency });
-          throw new Error(`Wallet not found: ${walletId}`);
-        }
-        
-        // Log sync result (info level for critical operations, debug for routine syncs)
-        if (updateResult.modifiedCount > 0) {
-          logger.info('Wallet balance synced from ledger', {
-            walletId,
-            userId,
-            accountId: userAccountId,
-            ledgerBalance: balance.balance,
-            currency,
-          });
-        } else {
-          logger.debug('Wallet balance already in sync with ledger', {
-            walletId,
-            userId,
-            accountId: userAccountId,
-            ledgerBalance: balance.balance,
-            currency,
-          });
-        }
-      } catch (userError) {
-        // Log error with full context for debugging
-        logger.error('Could not sync user wallet balance from ledger', {
-          walletId,
-          userId,
-          accountId: userAccountId,
-          currency,
-          error: userError instanceof Error ? userError.message : String(userError),
-          stack: userError instanceof Error ? userError.stack : undefined,
-        });
-        throw userError; // Re-throw to allow retry logic to work
-      }
-    }
-  } catch (error) {
-    // General error handling
-    logger.warn('Error syncing wallet balance from ledger', {
+    );
+    
+    logger.debug('User wallet balance synced from ledger', {
       walletId,
       userId,
-      error: error instanceof Error ? error.message : String(error),
+      balance: ledgerBalance,
+      currency,
     });
+  } catch (error) {
+    logger.error('Failed to sync wallet balance from ledger', {
+      error,
+      walletId,
+      userId,
+      currency,
+    });
+    // Don't throw - sync failure shouldn't break the flow
   }
 }
