@@ -16,7 +16,8 @@
   },
   "dependencies": {
     "core-service": "file:../core-service",
-    "notification-service": "file:../notification-service"
+    "notification-service": "file:../notification-service",
+    "mongodb": "^7.0.0"
   },
   "devDependencies": {
     "tsx": "^4.7.0",

@@ -13,7 +13,7 @@ import {
   PlayCircle,
 } from 'lucide-react'
 import { graphql as gql, SERVICE_URLS } from '../lib/auth'
-import { useAuth } from '../lib/auth-context'
+import { useAuth, hasRole, getRoleNames } from '../lib/auth-context'
 
 /**
  * Real-World Use Cases Page
@@ -578,7 +578,7 @@ export default function UseCases() {
     const users = usersQuery.data || []
     const gatewayUser = users.find(u => u.email === 'payment-gateway@system.com')
     const providerUser = users.find(u => u.email === 'payment-provider@system.com')
-    const endUser = users.find(u => u.email === 'test-end-user@demo.com') || users.find(u => u.roles?.includes('user'))
+    const endUser = users.find(u => u.email === 'test-end-user@demo.com') || users.find(u => hasRole(u.roles, 'user'))
 
     if (gatewayUser) {
       setPaymentFlowState(prev => ({ ...prev, gatewayUserId: gatewayUser.id }))

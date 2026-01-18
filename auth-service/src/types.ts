@@ -1,76 +1,66 @@
 /**
  * Authentication Service Types
+ * 
+ * This file re-exports types from the new modular type system.
  */
 
 // ═══════════════════════════════════════════════════════════════════
-// User & Profile Types
+// Re-export from new type system
 // ═══════════════════════════════════════════════════════════════════
 
-export type IdentifierType = 'email' | 'phone' | 'username';
+export type {
+  IdentifierType,
+  AccountStatus,
+  AuthProvider,
+  User,
+  SocialProfile,
+  UserFilter,
+  UserQueryOptions,
+  UpdateUserInput,
+  UpdateUserMetadataInput,
+  BankingMetadata,
+  CryptoMetadata,
+  ForexMetadata,
+  BettingMetadata,
+} from './types/user-types.js';
 
-export type AccountStatus = 'pending' | 'active' | 'suspended' | 'locked' | 'deleted';
+// Role types are now imported from access-engine
+export type {
+  RoleContext,
+  UserRole,
+  ResolvedPermissions,
+  RoleResolutionOptions,
+  Role,
+} from 'access-engine';
 
-export type AuthProvider = 'local' | 'google' | 'facebook' | 'linkedin' | 'instagram';
-
-export interface User {
-  id: string;
+// Auth-service specific types
+export interface AssignRoleInput {
+  userId: string;
   tenantId: string;
-  
-  // Primary identifiers (at least one required)
-  username?: string;
-  email?: string;
-  phone?: string;
-  
-  // Password (only for local auth)
-  passwordHash?: string;
-  
-  // Account status
-  status: AccountStatus;
-  emailVerified: boolean;
-  phoneVerified: boolean;
-  
-  // Social auth profiles
-  socialProfiles?: SocialProfile[];
-  
-  // Security
-  twoFactorEnabled: boolean;
-  twoFactorSecret?: string;
-  failedLoginAttempts: number;
-  lastFailedLoginAt?: Date;
-  lockedUntil?: Date;
-  passwordChangedAt?: Date;
-  
-  // Roles & Permissions
-  roles: string[];
-  permissions: string[];
-  
-  // Flexible metadata (dynamic fields)
-  metadata: Record<string, any>;
-  
-  // Audit
-  createdAt: Date;
-  updatedAt: Date;
-  lastLoginAt?: Date;
-  lastActiveAt?: Date;
+  role: string;
+  context?: string;
+  expiresAt?: Date;
+  assignedBy?: string;
+  metadata?: Record<string, any>;
 }
 
-export interface SocialProfile {
-  provider: AuthProvider;
-  providerId: string;
-  email?: string;
-  displayName?: string;
-  photoUrl?: string;
-  accessToken?: string;
-  refreshToken?: string;
-  connectedAt: Date;
+export interface RevokeRoleInput {
+  userId: string;
+  tenantId: string;
+  role: string;
+  context?: string;
+  revokedBy?: string;
+  reason?: string;
 }
+
+// SocialProfile is exported from user-types.ts
 
 // ═══════════════════════════════════════════════════════════════════
 // Session Types
 // ═══════════════════════════════════════════════════════════════════
 
 export interface Session {
-  id: string;
+  sessionId: string; // Renamed from 'id' to avoid confusion with user.id
   userId: string;
   tenantId: string;
   

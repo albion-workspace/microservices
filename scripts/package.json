@@ -4,9 +4,18 @@
   "description": "Utility scripts for microservices platform",
   "type": "module",
   "scripts": {
-    "promote-to-admin": "node promote-to-admin.js",
-    "check-mongodb": "node check-mongodb-transactions.js",
-    "test-ledger": "npx tsx ledger-integration-tests.ts"
+    "promote-to-admin": "node typescript/auth/promote-user.ts",
+    "check-mongodb": "node typescript/auth/check-mongodb-transactions.js",
+    "test-ledger": "npx tsx typescript/ledger/ledger-integration-tests.ts",
+    "payment:test": "npx tsx typescript/payment/payment-test-all.ts",
+    "payment:setup": "npx tsx typescript/payment/payment-setup.ts",
+    "payment:clean": "npx tsx typescript/payment/payment-clean.ts",
+    "bonus:test": "npx tsx typescript/bonus/bonus-test-all.ts",
+    "bonus:setup": "npx tsx typescript/bonus/bonus-setup.ts",
+    "bonus:clean": "npx tsx typescript/bonus/bonus-clean.ts",
+    "benchmark": "npx tsx typescript/benchmark.ts",
+    "load-test": "npx tsx typescript/load-test.ts",
+    "channels-test": "npx tsx typescript/channels-tests.ts"
   },
   "dependencies": {
     "mongodb": "^7.0.0"

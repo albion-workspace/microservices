@@ -10,6 +10,8 @@
  * - Session management
  * - JWT + refresh tokens
  * - Account security (rate limiting, locking)
+ * 
+ * Restart trigger: ${Date.now()}
  */
 
 import {
@@ -141,6 +143,7 @@ const config = {
       me: isAuthenticated,
       getUser: hasRole('admin'),
       users: hasRole('admin'),
+      usersByRole: hasRole('admin'),
       mySessions: isAuthenticated,
       // Webhooks (admin only)
       webhooks: hasRole('admin'),

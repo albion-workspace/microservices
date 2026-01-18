@@ -134,6 +134,107 @@ export const ledgerResolvers = {
         throw new Error(`Failed to get user balances: ${error instanceof Error ? error.message : String(error)}`);
       }
     },
+    
+    /**
+     * ✅ PERFORMANT: Get balances for multiple users in one query
+     * Accepts array of userIds and returns balances for all users
+     * Optimized for admin dashboard - fetches all balances in one shot
+     */
+    bulkLedgerBalances: async (
+      args: Record<string, unknown>,
+      ctx: ResolverContext
+    ) => {
+      requireAuth(ctx);
+      const userIds = (args.userIds as string[]) || [];
+      const subtype = (args.subtype as string) || 'main';
+      const currency = (args.currency as string) || SYSTEM_CURRENCY;
+      
+      if (!Array.isArray(userIds) || userIds.length === 0) {
+        return {
+          balances: [],
+        };
+      }
+      
+      try {
+        const ledger = getLedger();
+        const balances: Array<{
+          userId: string;
+          accountId: string;
+          balance: number;
+          availableBalance: number;
+          pendingIn: number;
+          pendingOut: number;
+          allowNegative: boolean;
+        }> = [];
+        
+        // Fetch all balances in parallel for performance
+        const balancePromises = userIds.map(async (userId) => {
+          try {
+            const accountId = ledger.getUserAccountId(userId, subtype as any);
+            const account = await ledger.getAccount(accountId);
+            
+            if (!account) {
+              // Account doesn't exist - return zero balance
+              return {
+                userId,
+                accountId,
+                balance: 0,
+                availableBalance: 0,
+                pendingIn: 0,
+                pendingOut: 0,
+                allowNegative: false,
+              };
+            }
+            
+            // Only return balance for requested currency
+            if (account.currency !== currency) {
+              return {
+                userId,
+                accountId,
+                balance: 0,
+                availableBalance: 0,
+                pendingIn: 0,
+                pendingOut: 0,
+                allowNegative: account.allowNegative || false,
+              };
+            }
+            
+            const balance = await ledger.getBalance(accountId);
+            
+            return {
+              userId,
+              accountId,
+              balance: balance.balance,
+              availableBalance: balance.availableBalance,
+              pendingIn: balance.pendingIn,
+              pendingOut: balance.pendingOut,
+              allowNegative: account.allowNegative || false,
+            };
+          } catch (error) {
+            logger.warn('Failed to get balance for user', { userId, error });
+            // Return zero balance on error
+            return {
+              userId,
+              accountId: ledger.getUserAccountId(userId, subtype as any),
+              balance: 0,
+              availableBalance: 0,
+              pendingIn: 0,
+              pendingOut: 0,
+              allowNegative: false,
+            };
+          }
+        });
+        
+        const results = await Promise.all(balancePromises);
+        
+        return {
+          balances: results,
+        };
+      } catch (error) {
+        logger.error('Failed to get bulk ledger balances', { error, userIds });
+        throw new Error(`Failed to get bulk ledger balances: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    },
   },
   Mutation: {},
 };
@@ -166,6 +267,20 @@ export const ledgerTypes = `
     balances: [UserBalance!]!
   }
   
+  type BulkLedgerBalance {
+    userId: String!
+    accountId: String!
+    balance: Float!
+    availableBalance: Float!
+    pendingIn: Float!
+    pendingOut: Float!
+    allowNegative: Boolean!
+  }
+  
+  type BulkLedgerBalancesResponse {
+    balances: [BulkLedgerBalance!]!
+  }
+  
   extend type Query {
     """
     Get user's ledger account balance
@@ -183,5 +298,15 @@ export const ledgerTypes = `
       userId: String
       currencies: [String!]
     ): UserBalances
+    
+    """
+    ✅ PERFORMANT: Get balances for multiple users in one query
+    Optimized for admin dashboard - fetches all balances efficiently
+    """
+    bulkLedgerBalances(
+      userIds: [String!]!
+      subtype: String
+      currency: String
+    ): BulkLedgerBalancesResponse!
   }
 `;

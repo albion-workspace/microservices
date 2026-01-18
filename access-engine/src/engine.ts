@@ -29,6 +29,7 @@ import {
   isValidUrn,
   normalizeUrn,
 } from './urn.js';
+import { RoleResolver } from './roles.js';
 
 /**
  * Simple LRU cache implementation
@@ -103,6 +104,7 @@ export class AccessEngine {
   private tenants = new Map<string, TenantConfig>();
   private cache: LRUCache<string, AccessResult> | null = null;
   private config: Required<AccessEngineConfig>;
+  private roleResolver: RoleResolver;
 
   constructor(config: AccessEngineConfig = {}) {
     this.config = {
@@ -118,6 +120,9 @@ export class AccessEngine {
     if (this.config.enableCache) {
       this.cache = new LRUCache(this.config.maxCacheSize);
     }
+    
+    // Use RoleResolver for role permission resolution
+    this.roleResolver = new RoleResolver(this.roles);
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -129,6 +134,7 @@ export class AccessEngine {
    */
   addRole(role: Role): this {
     this.roles.set(role.name, role);
+    this.roleResolver.registerRole(role); // Keep RoleResolver in sync
     this.clearCache();
     return this;
   }
@@ -217,6 +223,7 @@ export class AccessEngine {
 
   /**
    * Get all permissions for a role, including inherited permissions
+   * Uses RoleResolver internally for consistency
    */
   getPermissionsForRole(roleName: string, visited = new Set<string>()): string[] {
     // Prevent infinite loops in circular inheritance
@@ -240,16 +247,17 @@ export class AccessEngine {
 
   /**
    * Get all permissions for a user (from roles + direct permissions)
+   * Uses RoleResolver internally to avoid duplication
+   * Supports both legacy format (string[]) and new format (UserRole[])
    */
-  getPermissionsForUser(user: User): string[] {
-    const permissions: string[] = [...user.permissions];
-
-    // Add permissions from all user roles
-    for (const roleName of user.roles) {
-      permissions.push(...this.getPermissionsForRole(roleName));
-    }
-
-    return [...new Set(permissions)]; // Deduplicate
+  getPermissionsForUser(user: User & { roles?: any[] }): string[] {
+    // Use RoleResolver for consistent permission resolution
+    const resolved = this.roleResolver.resolveUserPermissions(user, {
+      includeInherited: true,
+      includePermissions: true,
+    });
+    
+    return Array.from(resolved.permissions);
   }
 
   // ─────────────────────────────────────────────────────────────────────────────

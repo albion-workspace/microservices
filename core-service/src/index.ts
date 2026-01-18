@@ -50,7 +50,6 @@ export {
   getSystemAccountId,
   getProviderAccountId,
   getUserAccountId,
-  resolveAccountId,
   parseAccountId,
 } from './common/account-ids.js';
 export type {

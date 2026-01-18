@@ -17,66 +17,23 @@ import {
   Building,
 } from 'lucide-react'
 import { graphql as gql, SERVICE_URLS } from '../lib/auth'
-import { useAuth } from '../lib/auth-context'
+import { useAuth, getRoleNames, hasRole } from '../lib/auth-context'
+import { graphql as graphqlQuery, SERVICE_URLS as GRAPHQL_SERVICE_URLS } from '../lib/graphql-utils'
 
 const PAYMENT_URL = SERVICE_URLS.payment
-const AUTH_SERVICE_URL = (import.meta.env as any).VITE_AUTH_SERVICE_URL || 'http://localhost:3003/graphql'
 
-// Wrapper for payment service GraphQL with auth token
+// Global GraphQL function wrapper with auth token
 async function graphqlWithAuth<T = any>(
+  url: string,
   query: string, 
   variables?: Record<string, unknown>,
-  token?: string
+  token?: string,
+  options?: { operation?: string; showResponse?: boolean }
 ): Promise<T> {
   if (token) {
-    // Use authenticated request
-    const res = await fetch(SERVICE_URLS.payment, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`,
-      },
-      body: JSON.stringify({ query, variables }),
-    })
-    
-    const data = await res.json()
-    if (data.errors) {
-      throw new Error(data.errors[0]?.message || 'GraphQL error')
-    }
-    return data.data
+    return graphqlQuery<T>(url, query, variables, token, options)
   }
-  // Fallback to generated token
-  return gql<T>('payment', query, variables)
-}
-
-// Wrapper for auth service GraphQL with auth token
-async function graphqlAuthService<T = any>(
-  query: string, 
-  variables?: Record<string, unknown>,
-  token?: string
-): Promise<T> {
-  if (!token) {
-    throw new Error('Auth token required for auth service queries')
-  }
-  
-  const res = await fetch(AUTH_SERVICE_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${token}`,
-    },
-    body: JSON.stringify({ query, variables }),
-  })
-  
-  const data = await res.json()
-  if (data.errors) {
-    throw new Error(data.errors[0]?.message || 'GraphQL error')
-  }
-  return data.data
-}
-
-// Keep the old graphql function for backward compatibility (uses generated token)
-async function graphql<T = any>(query: string, variables?: Record<string, unknown>): Promise<T> {
+  // Fallback to generated token (legacy support)
   return gql<T>('payment', query, variables)
 }
 
@@ -203,21 +160,17 @@ function WalletsTab() {
   const [supportedCurrencies] = useState<string[]>(['EUR', 'USD', 'GBP', 'BTC', 'ETH']) // Add more as needed
   
   // Fetch users from auth service by role dynamically
-  const fetchUsers = async (): Promise<void> => {
+  const fetchUsers = async (): Promise<{ system: any[]; gateway: any[]; providers: any[]; regular: any[] }> => {
     if (!authToken) {
       console.warn('[Users] No auth token available')
-      return
+      return { system: [], gateway: [], providers: [], regular: [] }
     }
-    
-    console.log('[Users] Starting fetch with auth token:', authToken.substring(0, 20) + '...')
-    console.log('[Users] Auth service URL:', AUTH_SERVICE_URL)
     
     try {
       // Fetch users by role using the new usersByRole query (from AUTH service)
-      console.log('[Users] Fetching users from auth service...')
       const [systemResult, gatewayResult, providerResult, allUsersResult] = await Promise.all([
         // System users: admin or system role
-        graphqlAuthService(`
+        graphqlWithAuth(GRAPHQL_SERVICE_URLS.auth, `
           query GetSystemUsers($first: Int) {
             usersByRole(role: "admin", first: $first) {
               nodes {
@@ -228,17 +181,12 @@ function WalletsTab() {
               }
             }
           }
-        `, { first: 100 }, authToken).then((result) => {
-          console.log('[Users] Admin users result:', result)
-          return result
-        }).catch((err) => {
-          console.error('[Users] Failed to fetch admin users:', err)
-          console.error('[Users] Error details:', err.message, err.stack)
+        `, { first: 100 }, authToken, { operation: 'query', showResponse: false }).catch((err) => {
           return { usersByRole: { nodes: [] } }
         }),
         
         // Gateway users: payment-gateway role
-        graphqlAuthService(`
+        graphqlWithAuth(GRAPHQL_SERVICE_URLS.auth, `
           query GetGatewayUsers($first: Int) {
             usersByRole(role: "payment-gateway", first: $first) {
               nodes {
@@ -249,17 +197,12 @@ function WalletsTab() {
               }
             }
           }
-        `, { first: 100 }, authToken).then((result) => {
-          console.log('[Users] Gateway users result:', result)
-          return result
-        }).catch((err) => {
-          console.error('[Users] Failed to fetch gateway users:', err)
-          console.error('[Users] Error details:', err.message, err.stack)
+        `, { first: 100 }, authToken, { operation: 'query', showResponse: false }).catch((err) => {
           return { usersByRole: { nodes: [] } }
         }),
         
         // Provider users: payment-provider role
-        graphqlAuthService(`
+        graphqlWithAuth(GRAPHQL_SERVICE_URLS.auth, `
           query GetProviderUsers($first: Int) {
             usersByRole(role: "payment-provider", first: $first) {
               nodes {
@@ -270,17 +213,16 @@ function WalletsTab() {
               }
             }
           }
-        `, { first: 100 }, authToken).then((result) => {
-          console.log('[Users] Provider users result:', result)
-          return result
+        `, { first: 100 }, authToken, { operation: 'query', showResponse: false }).then((result) => {
+          console.log('[Users] Provider users query result:', result);
+          return result;
         }).catch((err) => {
-          console.error('[Users] Failed to fetch provider users:', err)
-          console.error('[Users] Error details:', err.message, err.stack)
+          console.error('[Users] Provider users query error:', err);
           return { usersByRole: { nodes: [] } }
         }),
         
         // Also get system role users
-        graphqlAuthService(`
+        graphqlWithAuth(GRAPHQL_SERVICE_URLS.auth, `
           query GetSystemRoleUsers($first: Int) {
             usersByRole(role: "system", first: $first) {
               nodes {
@@ -291,23 +233,13 @@ function WalletsTab() {
               }
             }
           }
-        `, { first: 100 }, authToken).catch((err) => {
-          console.error('[Users] Failed to fetch system role users:', err)
+        `, { first: 100 }, authToken, { operation: 'query', showResponse: false }).catch((err) => {
           return { usersByRole: { nodes: [] } }
         }),
       ])
       
-      // Combine system users (admin + system roles)
-      const adminUsers = systemResult?.usersByRole?.nodes || []
-      const systemRoleUsers = allUsersResult?.usersByRole?.nodes || []
-      const system = [...adminUsers, ...systemRoleUsers]
-        .filter((u, idx, arr) => arr.findIndex(v => v.id === u.id) === idx) // Remove duplicates
-      
-      const gateway = gatewayResult?.usersByRole?.nodes || []
-      const providers = providerResult?.usersByRole?.nodes || []
-      
-      // Get all users to find regular users (exclude system, gateway, provider)
-      const allUsersResult2 = await graphqlAuthService(`
+      // Get all users - this works even if usersByRole fails
+      const allUsersResult2 = await graphqlWithAuth(GRAPHQL_SERVICE_URLS.auth, `
         query GetAllUsers($first: Int) {
           users(first: $first) {
             nodes {
@@ -318,15 +250,114 @@ function WalletsTab() {
             }
           }
         }
-      `, { first: 100 }, authToken).catch((err) => {
-        console.error('[Users] Failed to fetch all users:', err)
+      `, { first: 100 }, authToken, { operation: 'query', showResponse: false }).catch((err) => {
         return { users: { nodes: [] } }
       })
       
       const allUsers = allUsersResult2?.users?.nodes || []
-      const systemIds = new Set(system.map(u => u.id))
-      const gatewayIds = new Set(gateway.map(u => u.id))
-      const providerIds = new Set(providers.map(u => u.id))
+      
+      // Check if usersByRole queries succeeded (they return empty nodes on error)
+      const systemUsersCount = systemResult?.usersByRole?.nodes?.length || 0
+      const gatewayUsersCount = gatewayResult?.usersByRole?.nodes?.length || 0
+      const providerUsersCount = providerResult?.usersByRole?.nodes?.length || 0
+      const systemRoleUsersCount = allUsersResult?.usersByRole?.nodes?.length || 0
+      
+      // If all usersByRole queries returned empty AND we have users from GetAllUsers, use fallback
+      const usersByRoleFailed = (systemUsersCount === 0 && gatewayUsersCount === 0 && 
+                                  providerUsersCount === 0 && systemRoleUsersCount === 0 && allUsers.length > 0)
+      
+      // If usersByRole queries failed OR if we have users but no role-based results, use fallback
+      if (usersByRoleFailed) {
+        console.warn('[Users] ⚠️ Using fallback: filtering allUsers by role (token may need refresh)')
+        
+        // Helper to extract role names from UserRole[] or string[]
+        const getRoleNames = (roles: any): string[] => {
+          if (!roles || !Array.isArray(roles)) return [];
+          if (roles.length === 0) return [];
+          // If first element is a string, it's already a string array
+          if (typeof roles[0] === 'string') return roles;
+          // If first element is an object, extract role names from UserRole[]
+          if (typeof roles[0] === 'object' && roles[0].role) {
+            return roles
+              .filter((r: any) => r.active !== false)
+              .filter((r: any) => !r.expiresAt || new Date(r.expiresAt) > new Date())
+              .map((r: any) => r.role)
+              .filter((role: string) => role !== undefined && role !== null);
+          }
+          return [];
+        };
+        
+        // Filter users by role from the allUsers list
+        const adminUsersFromAll = allUsers.filter((u: any) => {
+          const roleNames = getRoleNames(u.roles);
+          return roleNames.includes('admin');
+        });
+        const systemRoleUsersFromAll = allUsers.filter((u: any) => {
+          const roleNames = getRoleNames(u.roles);
+          return roleNames.includes('system');
+        });
+        const gatewayUsersFromAll = allUsers.filter((u: any) => {
+          const roleNames = getRoleNames(u.roles);
+          return roleNames.includes('payment-gateway');
+        });
+        const providerUsersFromAll = allUsers.filter((u: any) => {
+          const roleNames = getRoleNames(u.roles);
+          return roleNames.includes('payment-provider');
+        });
+        
+        // Combine admin and system role users
+        const combinedSystem = [...adminUsersFromAll, ...systemRoleUsersFromAll]
+          .filter((u, idx, arr) => arr.findIndex(v => v.id === u.id) === idx) // Remove duplicates
+        
+        setSystemUsers(combinedSystem)
+        setGatewayUsers(gatewayUsersFromAll)
+        setProviderUsers(providerUsersFromAll)
+        
+        const systemIds = new Set(combinedSystem.map((u: any) => u.id))
+        const gatewayIds = new Set(gatewayUsersFromAll.map((u: any) => u.id))
+        const providerIds = new Set(providerUsersFromAll.map((u: any) => u.id))
+        
+        const regular = allUsers.filter((u: any) => 
+          !systemIds.has(u.id) && 
+          !gatewayIds.has(u.id) && 
+          !providerIds.has(u.id)
+        )
+        
+        setRegularUsers(regular)
+        const userSummary = { 
+          system: combinedSystem.length, 
+          gateway: gatewayUsersFromAll.length, 
+          providers: providerUsersFromAll.length, 
+          regular: regular.length,
+          systemIds: combinedSystem.map((u: any) => u.id),
+          gatewayIds: gatewayUsersFromAll.map((u: any) => u.id),
+          providerIds: providerUsersFromAll.map((u: any) => u.id)
+        }
+        console.log('[Users] ✅ Categorized (fallback):', userSummary)
+        // Return users for immediate use
+        return { system: combinedSystem, gateway: gatewayUsersFromAll, providers: providerUsersFromAll, regular }
+      }
+      
+      // Normal flow: use results from usersByRole queries
+      const adminUsers = systemResult?.usersByRole?.nodes || []
+      const systemRoleUsers = allUsersResult?.usersByRole?.nodes || []
+      const system = [...adminUsers, ...systemRoleUsers]
+        .filter((u, idx, arr) => arr.findIndex(v => v.id === u.id) === idx) // Remove duplicates
+      
+      const gateway = gatewayResult?.usersByRole?.nodes || []
+      const providers = providerResult?.usersByRole?.nodes || []
+      
+      console.log('[Users] Normal flow results:', {
+        adminUsers: adminUsers.length,
+        systemRoleUsers: systemRoleUsers.length,
+        gateway: gateway.length,
+        providers: providers.length,
+        providerDetails: providers.map((p: any) => ({ id: p.id, email: p.email, roles: p.roles })),
+      });
+      
+      const systemIds = new Set(system.map((u: any) => u.id))
+      const gatewayIds = new Set(gateway.map((u: any) => u.id))
+      const providerIds = new Set(providers.map((u: any) => u.id))
       
       const regular = allUsers.filter((u: any) => 
         !systemIds.has(u.id) && 
@@ -338,30 +369,22 @@ function WalletsTab() {
       setGatewayUsers(gateway)
       setProviderUsers(providers)
       setRegularUsers(regular)
+      console.log('[Users] ✅ Categorized:', { system: system.length, gateway: gateway.length, providers: providers.length, regular: regular.length })
       
-      console.log('[Users] Categorized by role:', { 
-        system: system.length, 
-        gateway: gateway.length, 
-        providers: providers.length, 
-        regular: regular.length 
-      })
-      console.log('[Users] System users:', system.map(u => ({ id: u.id, email: u.email, roles: u.roles })))
-      console.log('[Users] Gateway users:', gateway.map(u => ({ id: u.id, email: u.email, roles: u.roles })))
-      console.log('[Users] Provider users:', providers.map(u => ({ id: u.id, email: u.email, roles: u.roles })))
-      console.log('[Users] Regular users (first 5):', regular.slice(0, 5).map(u => ({ id: u.id, email: u.email, roles: u.roles })))
+      // Return users for immediate use (avoiding state update race condition)
+      return { system, gateway, providers, regular }
     } catch (err) {
-      console.error('[Users] Fetch error:', err)
+      console.error('[Users] ❌ Error:', err)
+      return { system: [], gateway: [], providers: [], regular: [] }
     }
   }
   
   // Fetch wallets function - returns the wallets directly
-  // Use both wallets query and userWallets query to get all wallets with synced balances
   const fetchWallets = async (): Promise<any[]> => {
-    console.log('[Wallets] Fetching from API...')
     setWalletsLoading(true)
     try {
-      // Fetch all wallets
-      const walletsResult = await graphqlWithAuth(`
+      // Fetch all wallets (logged by GraphQL utility)
+      const walletsResult = await graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
         query ListWallets($first: Int) {
           wallets(first: $first) {
             nodes {
@@ -380,33 +403,23 @@ function WalletsTab() {
       `, { first: 100 }, authToken)
       
       const wallets = walletsResult?.wallets?.nodes || []
-      
-      console.log('[Wallets] Parsed wallets:', wallets.length, 'wallets')
-      console.log('[Wallets] All wallet details:', wallets.map((w: any) => ({
-        id: w.id,
-        userId: w.userId,
-        currency: w.currency,
-        balance: w.balance,
-        bonusBalance: w.bonusBalance,
-        status: w.status
-      })))
-      wallets.forEach((w: any) => console.log(`  - userId=${w.userId}, balance=${w.balance}, currency=${w.currency}`))
       return wallets
     } catch (err) {
-      console.error('[Wallets] Fetch error:', err)
+      console.error('[Wallets] ❌ Error:', err)
       return []
     } finally {
       setWalletsLoading(false)
     }
   }
   
-  // Fetch provider ledger balances (admin only) - now supports multi-currency
-  // Uses REAL user IDs from providerUsers
-  const fetchProviderLedgerBalances = async () => {
+  // ✅ PERFORMANT: Fetch ledger balances for all users in ONE query
+  // Uses bulkLedgerBalances GraphQL query for optimal performance
+  // Accepts users as parameters to avoid race condition with state updates
+  const fetchProviderLedgerBalances = async (usersToFetch?: { providers: any[], gateway: any[], system: any[], regular?: any[] }) => {
     if (!authToken || !user) return
     
     // Only fetch ledger balances if user is admin
-    const isAdmin = user.roles?.includes('admin')
+    const isAdmin = hasRole(user?.roles, 'admin')
     if (!isAdmin) {
       setLedgerBalancesLoading(false)
       return
@@ -416,93 +429,85 @@ function WalletsTab() {
     try {
       const balances: Record<string, Record<string, number>> = {} // userId -> currency -> balance
       
-      // Fetch ledger balances for each REAL provider user and each supported currency
-      for (const providerUser of providerUsers) {
-        balances[providerUser.id] = {}
-        
-        // Fetch balances for all supported currencies
-        for (const currency of supportedCurrencies) {
-          try {
-            const result = await graphqlWithAuth(`
-              query GetProviderLedgerBalance($providerId: String!, $subtype: String!, $currency: String!) {
-                providerLedgerBalance(providerId: $providerId, subtype: $subtype, currency: $currency) {
-                  accountId
-                  providerId
-                  currency
+      // Use provided users or fall back to state (for backwards compatibility)
+      const providers = usersToFetch?.providers || providerUsers
+      const gateway = usersToFetch?.gateway || gatewayUsers
+      const system = usersToFetch?.system || systemUsers
+      const regular = usersToFetch?.regular || regularUsers
+      
+      // Collect all user IDs
+      const allUsersToFetch = [...providers, ...gateway, ...system, ...regular]
+      const userIds = allUsersToFetch.map(u => u.id)
+      
+      if (userIds.length === 0) {
+        console.log('[Ledger] No users to fetch balances for')
+        setProviderLedgerBalances({})
+        setLedgerBalancesLoading(false)
+        return
+      }
+      
+      // ✅ SINGLE QUERY: Fetch all balances for all currencies in parallel
+      const balancePromises = supportedCurrencies.map(async (currency) => {
+        try {
+          const result = await graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
+            query BulkLedgerBalances($userIds: [String!]!, $subtype: String!, $currency: String!) {
+              bulkLedgerBalances(userIds: $userIds, subtype: $subtype, currency: $currency) {
+                balances {
+                  userId
                   balance
                   availableBalance
+                  allowNegative
                 }
               }
-            `, {
-              providerId: providerUser.id,
-              subtype: 'deposit',
-              currency: currency
-            }, authToken)
-            
-            if (result?.providerLedgerBalance) {
-              balances[providerUser.id][currency] = result.providerLedgerBalance.balance || 0
             }
-          } catch (err: any) {
-            // Silently skip authorization errors (user might not be admin)
-            const isAuthError = err?.message?.includes('Not authorized') || err?.message?.includes('authorized')
-            if (!isAuthError) {
-              console.debug(`Failed to fetch ledger balance for ${providerUser.id} (${currency}):`, err)
-            }
-            // Set to 0 if account doesn't exist for this currency
-            balances[providerUser.id][currency] = 0
+          `, {
+            userIds: userIds,
+            subtype: 'main',
+            currency: currency
+          }, authToken)
+          
+          if (result?.bulkLedgerBalances?.balances) {
+            // Map balances by userId
+            result.bulkLedgerBalances.balances.forEach((balanceEntry: any) => {
+              if (!balances[balanceEntry.userId]) {
+                balances[balanceEntry.userId] = {}
+              }
+              balances[balanceEntry.userId][currency] = balanceEntry.balance || 0
+            })
           }
+        } catch (err: any) {
+          // Silently skip authorization errors (user might not be admin)
+          const isAuthError = err?.message?.includes('Not authorized') || err?.message?.includes('authorized')
+          if (!isAuthError) {
+            console.error(`Failed to fetch bulk ledger balances for ${currency}:`, err)
+          }
+          // Set to 0 for all users if query fails
+          userIds.forEach(userId => {
+            if (!balances[userId]) {
+              balances[userId] = {}
+            }
+            balances[userId][currency] = 0
+          })
         }
-      }
+      })
+      
+      // Wait for all currency queries to complete
+      await Promise.all(balancePromises)
       
       setProviderLedgerBalances(balances)
       
-      // Fetch system house account balances (Platform Reserve)
-      try {
-        const systemBalanceResult = await graphqlWithAuth(`
-          query GetSystemHouseBalance($currencies: [String!]) {
-            systemHouseBalance(currencies: $currencies) {
-              totalBalance
-              balancesByCurrency
-              tenantId
-              currencies
-              primaryCurrency
-            }
-          }
-        `, { 
-          currencies: supportedCurrencies // Fetch all supported currencies
-        }, authToken)
-        
-        if (systemBalanceResult?.systemHouseBalance) {
-          const result = systemBalanceResult.systemHouseBalance
-          // Store balances by currency
-          const balancesByCurrency = result.balancesByCurrency || {}
-          setSystemHouseBalancesByCurrency(balancesByCurrency)
-          
-          // Set primary currency - use base currency if available, otherwise use returned primary currency
-          const primaryCurrency = result.primaryCurrency || baseCurrency || 'EUR'
-          setSystemPrimaryCurrency(primaryCurrency)
-          // Update base currency if it changed
-          if (baseCurrency !== primaryCurrency && result.primaryCurrency) {
-            setBaseCurrency(primaryCurrency)
-          }
-          
-          // Use totalBalance which is in primaryCurrency
-          const balance = result.totalBalance ?? 0
-          setSystemHouseBalance(balance)
-          setSystemBalanceFetched(true)
-          
-          console.log('[Ledger] System house balance (primary):', balance, primaryCurrency)
-          console.log('[Ledger] Balances by currency:', balancesByCurrency)
-        }
-      } catch (err: any) {
-        // Silently handle errors - might not have permission or resolver not available yet
-        const isAuthError = err?.message?.includes('Not authorized') || err?.message?.includes('authorized')
-        if (!isAuthError) {
-          console.debug('[Ledger] Failed to fetch system house balance (may need to rebuild service):', err)
-        }
-        // Fall back to wallet balance if query fails
-        setSystemHouseBalance(0)
-      }
+      // Log fetched ledger balances
+      console.log('[Ledger] ✅ Fetched balances for', allUsersToFetch.length, 'users in bulk:', {
+        providers: providers.length,
+        gateway: gateway.length,
+        system: system.length,
+        regular: regular.length,
+        balances: Object.keys(balances).length,
+        currencies: supportedCurrencies.length
+      })
+      
+      // System balance is calculated from gateway wallets (see balance calculation below)
+      // No need to query systemHouseBalance as it's not implemented in the GraphQL schema
     } catch (err) {
       // Silently handle errors - user might not have permission
       const isAuthError = (err as any)?.message?.includes('Not authorized') || (err as any)?.message?.includes('authorized')
@@ -517,7 +522,7 @@ function WalletsTab() {
   // Load wallets and update state
   const loadWallets = async () => {
     // First fetch users to identify roles
-    await fetchUsers()
+    const users = await fetchUsers() || { system: [], gateway: [], providers: [], regular: [] }
     
     // Then fetch wallets
     const wallets = await fetchWallets()
@@ -528,22 +533,27 @@ function WalletsTab() {
     setWalletsList(newWallets)
     setWalletsVersion(v => {
       const newVersion = v + 1
-      console.log('[Wallets] Version updated:', v, '->', newVersion)
+      // Version updated (detailed logs in GraphQL utility)
       return newVersion
     })
     
-    // Fetch ledger balances (after users are loaded)
-    await fetchProviderLedgerBalances()
+    // Fetch ledger balances (after users are loaded) - pass users directly to avoid race condition
+    // Include regular users (end users) so their balances are also fetched
+    await fetchProviderLedgerBalances({
+      providers: users.providers,
+      gateway: users.gateway,
+      system: users.system,
+      regular: users.regular
+    })
     
     // Small delay to ensure state is flushed
     await new Promise(resolve => setTimeout(resolve, 100))
-    console.log('[Wallets] State update complete')
+    // State update complete
     return wallets
   }
   
   // Initial fetch on mount
   useEffect(() => {
-    console.log('[Wallets] Initial load on mount')
     loadWallets()
   }, [])
   
@@ -567,20 +577,29 @@ function WalletsTab() {
   const excludedUserIds = new Set([...systemUserIds, ...providerUserIds, ...gatewayUserIds])
   const userWallets = allWallets.filter((w: any) => !excludedUserIds.has(w.userId))
   
-  console.log('[Wallets] Current state - version:', walletsVersion, 'total:', allWallets.length, 'providers:', providerWallets.length, 'gateway:', gatewayWallets.length, 'users:', userWallets.length)
-  console.log('[Wallets] Provider user IDs:', Array.from(providerUserIds))
-  console.log('[Wallets] Gateway user IDs:', Array.from(gatewayUserIds))
-  console.log('[Wallets] Provider wallets:', providerWallets.map(w => ({ userId: w.userId, currency: w.currency, balance: w.balance })))
-  console.log('[Wallets] Gateway wallets:', gatewayWallets.map(w => ({ userId: w.userId, currency: w.currency, balance: w.balance })))
-  console.log('[Wallets] User wallets (first 5):', userWallets.slice(0, 5).map(w => ({ userId: w.userId, currency: w.currency, balance: w.balance })))
-
+  // Log wallet counts and details
+  const walletSummary = {
+    total: allWallets.length,
+    system: systemWallets.length,
+    gateway: gatewayWallets.length,
+    providers: providerWallets.length,
+    users: userWallets.length,
+    systemUserIds: Array.from(systemUserIds),
+    gatewayUserIds: Array.from(gatewayUserIds),
+    providerUserIds: Array.from(providerUserIds),
+    systemWallets: systemWallets.map(w => ({ userId: w.userId, balance: w.balance, currency: w.currency })),
+    gatewayWallets: gatewayWallets.map(w => ({ userId: w.userId, balance: w.balance, currency: w.currency })),
+    providerWallets: providerWallets.map(w => ({ userId: w.userId, balance: w.balance, currency: w.currency }))
+  }
+  console.log('[Wallets] Counts:', walletSummary)
+  
   // Helper to refetch wallets data
   const refetchWallets = loadWallets
 
   // Create wallet mutation
   const createWalletMutation = useMutation({
     mutationFn: async (input: { userId: string; currency: string; category?: string; tenantId?: string }) => {
-      return graphqlWithAuth(`
+      return graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
         mutation CreateWallet($input: CreateWalletInput!) {
           createWallet(input: $input) {
             success
@@ -607,15 +626,15 @@ function WalletsTab() {
   const fundWalletMutation = useMutation({
     mutationFn: async (input: { walletId: string; userId: string; type: string; amount: number; currency: string; description?: string }) => {
       // Check if user is admin or system before attempting to create wallet transaction
-      const isAdmin = user?.roles?.includes('admin')
-      const isSystem = user?.roles?.includes('system')
+      const isAdmin = hasRole(user?.roles, 'admin')
+      const isSystem = hasRole(user?.roles, 'system')
       if (!isAdmin && !isSystem) {
         throw new Error('Only administrators or system users can fund wallets')
       }
       
-      console.log('[Fund] Creating wallet transaction:', input)
+      // Creating wallet transaction (logged by GraphQL utility)
       try {
-        const result = await graphqlWithAuth(`
+        const result = await graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
           mutation FundWallet($input: CreateWalletTransactionInput!) {
             createWalletTransaction(input: $input) {
               success
@@ -668,7 +687,7 @@ function WalletsTab() {
           throw new Error('No payment provider available. Please run payment-setup.ts first.')
         }
         
-        const result = await graphqlWithAuth(`
+        const result = await graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
           mutation CreateDeposit($input: CreateDepositInput!) {
             createDeposit(input: $input) {
               success
@@ -717,7 +736,7 @@ function WalletsTab() {
           await new Promise(resolve => setTimeout(resolve, 500))
           
           // Approve the transaction to complete the deposit flow
-          await graphqlWithAuth(`
+          await graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
             mutation ApproveTransaction($transactionId: String!) {
               approveTransaction(transactionId: $transactionId) {
                 success
@@ -753,7 +772,7 @@ function WalletsTab() {
     mutationFn: async (input: { userId: string; amount: number; currency: string; method: string; tenantId?: string; bankAccount?: string; walletAddress?: string }) => {
       console.log('[Withdrawal] Creating withdrawal:', input)
       try {
-        const result = await graphqlWithAuth(`
+        const result = await graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
           mutation CreateWithdrawal($input: CreateWithdrawalInput!) {
             createWithdrawal(input: $input) {
               success
@@ -801,7 +820,7 @@ function WalletsTab() {
           await new Promise(resolve => setTimeout(resolve, 500))
           
           // Approve the transaction to complete the withdrawal flow
-          await graphqlWithAuth(`
+          await graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
             mutation ApproveTransaction($transactionId: String!) {
               approveTransaction(transactionId: $transactionId) {
                 success
@@ -842,7 +861,7 @@ function WalletsTab() {
         return
       }
       
-      if (!user?.roles?.includes('system')) {
+      if (!hasRole(user?.roles, 'system')) {
         alert('You need system role to initialize system wallet.')
         return
       }
@@ -991,7 +1010,7 @@ function WalletsTab() {
       const providerName = providerUser?.email?.split('@')[0] || systemFundForm.provider.substring(0, 8)
       
       // Create transfer_out from gateway
-      const transferOutResult = await graphqlWithAuth(`
+      const transferOutResult = await graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
         mutation CreateTransferOut($input: CreateWalletTransactionInput!) {
           createWalletTransaction(input: $input) {
             success
@@ -1026,7 +1045,7 @@ function WalletsTab() {
       }
       
       // Create transfer_in to provider
-      const transferInResult = await graphqlWithAuth(`
+      const transferInResult = await graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
         mutation CreateTransferIn($input: CreateWalletTransactionInput!) {
           createWalletTransaction(input: $input) {
             success
@@ -1064,7 +1083,8 @@ function WalletsTab() {
       console.log('[FundProvider] Fund result:', fundResult)
       
       if (!fundResult?.createWalletTransaction?.success) {
-        throw new Error(fundResult?.createWalletTransaction?.errors?.join(', ') || 'Failed to fund provider')
+        const errors = (fundResult?.createWalletTransaction as any)?.errors
+        throw new Error(Array.isArray(errors) ? errors.join(', ') : 'Failed to fund provider')
       }
 
       // Wait for ledger sync to complete (provider funding uses ledger)
@@ -1217,15 +1237,53 @@ function WalletsTab() {
   }
 
   // Calculate totals using REAL data
-  // System Reserve = Gateway user balance (can be negative after funding providers)
-  // The gateway user is the one that funds providers, so its balance represents the system reserve
+  // System Reserve = Gateway user balance + System/Admin user balances
+  // The gateway user funds providers, and system users represent the platform reserve
   const gatewayWalletsInBaseCurrency = gatewayWallets.filter((w: any) => w.currency === baseCurrency)
-  const systemBalance = gatewayWalletsInBaseCurrency.reduce((sum: number, w: any) => sum + (w.balance || 0), 0)
+  const systemWalletsInBaseCurrency = systemWallets.filter((w: any) => w.currency === baseCurrency)
   
-  // Also try to get ledger balance for gateway user if available
-  // But prioritize wallet balance as it's the source of truth for the UI
+  // Calculate wallet balances
+  const gatewayBalanceFromWallets = gatewayWalletsInBaseCurrency.reduce((sum: number, w: any) => sum + (w.balance || 0), 0)
+  const systemUsersBalanceFromWallets = systemWalletsInBaseCurrency.reduce((sum: number, w: any) => sum + (w.balance || 0), 0)
+  
+  // Try to get ledger balances for gateway and system users (more accurate)
   const gatewayUser = gatewayUsers[0]
   const gatewayLedgerBalance = gatewayUser ? (providerLedgerBalances[gatewayUser.id]?.[baseCurrency] || null) : null
+  
+  // Calculate system user ledger balances
+  const systemUsersLedgerBalance = systemUsers.reduce((sum: number, user: any) => {
+    const ledgerBalances = providerLedgerBalances[user.id] || {}
+    return sum + (ledgerBalances[baseCurrency] || 0)
+  }, 0)
+  
+  // ✅ ALWAYS use ledger balances (source of truth)
+  // Wallet balances are not synced, so ledger is the only accurate source
+  // System user (admin@demo.com) can go negative, representing platform net position
+  const gatewayBalance = gatewayLedgerBalance !== null && gatewayLedgerBalance !== undefined
+    ? gatewayLedgerBalance
+    : gatewayBalanceFromWallets
+  
+  const systemUsersBalance = systemUsersLedgerBalance !== null && systemUsersLedgerBalance !== undefined && systemUsersLedgerBalance !== 0
+    ? systemUsersLedgerBalance
+    : systemUsersBalanceFromWallets
+  
+  // System balance = admin@demo.com balance (can be negative, represents platform net position)
+  const systemBalance = gatewayBalance + systemUsersBalance
+  
+  // Log balance source for debugging
+  console.log('[Balances] Balance sources:', {
+    gateway: {
+      wallet: gatewayBalanceFromWallets,
+      ledger: gatewayLedgerBalance,
+      final: gatewayBalance
+    },
+    system: {
+      wallet: systemUsersBalanceFromWallets,
+      ledger: systemUsersLedgerBalance,
+      final: systemUsersBalance
+    },
+    systemTotal: systemBalance
+  })
   
   // Calculate provider total balance from wallets (real balances)
   // Providers receive funds from gateway, so their balance should be positive
@@ -1239,46 +1297,44 @@ function WalletsTab() {
     return total + baseCurrencyBalance
   }, 0)
   
-  // Use ledger balance if available and wallets are empty, otherwise use wallet balance
-  const finalProviderBalance = providerWallets.length > 0 
-    ? providerTotalBalance 
-    : (providerTotalBalanceFromLedger || 0)
+  // ✅ ALWAYS use ledger balances for providers (source of truth)
+  // Provider users cannot go negative, so their balances should be positive or zero
+  const finalProviderBalance = providerTotalBalanceFromLedger !== 0
+    ? providerTotalBalanceFromLedger
+    : providerTotalBalance
   
-  // User total balance: sum all regular user wallets in base currency (should be positive)
-  const userTotalBalance = userWallets
-    .filter((w: any) => w.currency === baseCurrency)
-    .reduce((sum: number, w: any) => sum + (w.balance || 0), 0)
+  // ✅ Calculate end user balances from ledger (source of truth)
+  // End users cannot go negative, so their balances should be positive or zero
+  const userLedgerBalances = regularUsers.reduce((sum: number, user: any) => {
+    const ledgerBalances = providerLedgerBalances[user.id] || {}
+    return sum + (ledgerBalances[baseCurrency] || 0)
+  }, 0)
   
-  console.log('[Balances] Calculated:', {
+  // Use ledger balance if available, otherwise fall back to wallet balance
+  const userTotalBalance = userLedgerBalances !== 0
+    ? userLedgerBalances
+    : userWallets
+        .filter((w: any) => w.currency === baseCurrency)
+        .reduce((sum: number, w: any) => sum + (w.balance || 0), 0)
+  
+  // Log balances summary with detailed breakdown
+  const balanceSummary = {
     system: systemBalance,
-    gatewayLedger: gatewayLedgerBalance,
+    gateway: gatewayBalance,
+    systemUsers: systemUsersBalance,
     provider: finalProviderBalance,
-    providerLedger: providerTotalBalanceFromLedger,
     users: userTotalBalance,
     baseCurrency,
-    gatewayWalletsCount: gatewayWallets.length,
-    gatewayWalletsInBaseCurrency: gatewayWalletsInBaseCurrency.length,
-    providerWalletsCount: providerWallets.length,
-    userWalletsCount: userWallets.length,
-    gatewayUserIds: Array.from(gatewayUserIds),
-    providerUserIds: Array.from(providerUserIds),
-  })
-  console.log('[Balances] Gateway wallets details:', gatewayWalletsInBaseCurrency.map((w: any) => ({
-    userId: w.userId,
-    balance: w.balance,
-    currency: w.currency
-  })))
-  console.log('[Balances] Provider wallets details:', providerWallets.filter((w: any) => w.currency === baseCurrency).map((w: any) => ({
-    userId: w.userId,
-    balance: w.balance,
-    currency: w.currency
-  })))
-  console.log('[Balances] User wallets details (first 5):', userWallets.filter((w: any) => w.currency === baseCurrency).slice(0, 5).map((w: any) => ({
-    userId: w.userId,
-    balance: w.balance,
-    currency: w.currency
-  })))
-
+    total: systemBalance + finalProviderBalance + userTotalBalance,
+    gatewayWallets: gatewayWalletsInBaseCurrency.map(w => ({ userId: w.userId, balance: w.balance, currency: w.currency, id: w.id })),
+    systemWallets: systemWalletsInBaseCurrency.map(w => ({ userId: w.userId, balance: w.balance, currency: w.currency, id: w.id })),
+    providerWallets: providerWallets.filter((w: any) => w.currency === baseCurrency).map(w => ({ userId: w.userId, balance: w.balance, currency: w.currency, id: w.id })),
+    userWallets: userWallets.filter((w: any) => w.currency === baseCurrency).slice(0, 5).map(w => ({ userId: w.userId, balance: w.balance, currency: w.currency, id: w.id }))
+  }
+  console.log('[Balances] Summary:', balanceSummary)
+  console.log('[Balances] Gateway wallet details:', JSON.stringify(gatewayWalletsInBaseCurrency, null, 2))
+  console.log('[Balances] System wallet details:', JSON.stringify(systemWalletsInBaseCurrency, null, 2))
+  
   // Force re-render key
   const renderKey = `wallets-${walletsVersion}-${allWallets.length}-${providerWallets.reduce((sum, w) => sum + (w.balance || 0), 0)}`
   
@@ -2055,6 +2111,12 @@ function TransactionsTab() {
   const { tokens } = useAuth()
   const authToken = tokens?.accessToken
   
+  // Supported currencies
+  const supportedCurrencies = ['EUR', 'USD', 'GBP', 'BTC', 'ETH']
+  
+  // Provider users state (for deposit form)
+  const [providerUsers, setProviderUsers] = useState<any[]>([])
+  
   // Filters
   const [filters, setFilters] = useState<TransactionFilter>({
     type: '',
@@ -2083,10 +2145,11 @@ function TransactionsTab() {
     return Object.keys(filter).length > 0 ? filter : undefined
   }
 
-  // Fetch all transaction types with pagination
+  // ✅ Fetch all transactions - use separate queries to get complete data
+  // Unified query is available but we use separate queries for better control
   const depositsQuery = useQuery({
     queryKey: ['deposits', pagination, filters],
-    queryFn: () => graphql(`
+    queryFn: () => graphqlQuery(GRAPHQL_SERVICE_URLS.payment, `
       query ListDeposits($first: Int, $skip: Int, $filter: JSON) {
         deposits(first: $first, skip: $skip, filter: $filter) {
           nodes {
@@ -2098,8 +2161,10 @@ function TransactionsTab() {
             currency
             feeAmount
             netAmount
-            providerName
+            fromUserId
             createdAt
+            description
+            metadata
           }
           totalCount
           pageInfo {
@@ -2109,15 +2174,15 @@ function TransactionsTab() {
         }
       }
     `, { 
-      first: pagination.pageSize, 
-      skip: pagination.page * pagination.pageSize,
+      first: 1000, // Fetch all deposits (admin should see all)
+      skip: 0,
       filter: buildApiFilter()
-    }),
+    }, authToken),
   })
 
   const withdrawalsQuery = useQuery({
     queryKey: ['withdrawals', pagination, filters],
-    queryFn: () => graphql(`
+    queryFn: () => graphqlQuery(GRAPHQL_SERVICE_URLS.payment, `
       query ListWithdrawals($first: Int, $skip: Int, $filter: JSON) {
         withdrawals(first: $first, skip: $skip, filter: $filter) {
           nodes {
@@ -2129,8 +2194,10 @@ function TransactionsTab() {
             currency
             feeAmount
             netAmount
-            providerName
+            toUserId
             createdAt
+            description
+            metadata
           }
           totalCount
           pageInfo {
@@ -2140,15 +2207,50 @@ function TransactionsTab() {
         }
       }
     `, { 
-      first: pagination.pageSize, 
-      skip: pagination.page * pagination.pageSize,
+      first: 1000, // Fetch all withdrawals (admin should see all)
+      skip: 0,
       filter: buildApiFilter()
-    }),
+    }, authToken),
+  })
+
+  // Also fetch unified transactions for completeness (but use separate queries as primary)
+  const transactionsQuery = useQuery({
+    queryKey: ['transactions', pagination, filters],
+    queryFn: () => graphqlQuery(GRAPHQL_SERVICE_URLS.payment, `
+      query ListTransactions($first: Int, $skip: Int, $filter: JSON) {
+        transactions(first: $first, skip: $skip, filter: $filter) {
+          nodes {
+            id
+            userId
+            type
+            status
+            amount
+            currency
+            feeAmount
+            netAmount
+            fromUserId
+            toUserId
+            createdAt
+            description
+            metadata
+          }
+          totalCount
+          pageInfo {
+            hasNextPage
+            hasPreviousPage
+          }
+        }
+      }
+    `, { 
+      first: 1000, // Fetch all transactions (admin should see all)
+      skip: 0,
+      filter: buildApiFilter()
+    }, authToken),
   })
 
   const walletTxQuery = useQuery({
     queryKey: ['walletTransactions', pagination, filters],
-    queryFn: () => graphql(`
+    queryFn: () => graphqlQuery(GRAPHQL_SERVICE_URLS.payment, `
       query ListWalletTransactions($first: Int, $skip: Int, $filter: JSON) {
         walletTransactions(first: $first, skip: $skip, filter: $filter) {
           nodes {
@@ -2176,12 +2278,12 @@ function TransactionsTab() {
       first: pagination.pageSize * 2, 
       skip: pagination.page * pagination.pageSize * 2,
       filter: buildApiFilter()
-    }),
+    }, authToken),
   })
 
   // Create mutations
   const createDepositMutation = useMutation({
-    mutationFn: () => graphqlWithAuth(`
+    mutationFn: (variables?: any) => graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
       mutation CreateDeposit($input: CreateDepositInput!) {
         createDeposit(input: $input) {
           success
@@ -2196,8 +2298,9 @@ function TransactionsTab() {
           errors
         }
       }
-    `, { input: { ...depositForm, amount: parseFloat(depositForm.amount) * 100, tenantId: 'default-tenant' } }, authToken),
+    `, { input: { ...(variables || depositForm), amount: parseFloat((variables || depositForm).amount) * 100, tenantId: 'default-tenant' } }, authToken),
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['transactions'] })
       queryClient.invalidateQueries({ queryKey: ['deposits'] })
       queryClient.invalidateQueries({ queryKey: ['walletTransactions'] })
       queryClient.invalidateQueries({ queryKey: ['statement'] })
@@ -2207,7 +2310,7 @@ function TransactionsTab() {
   })
 
   const createWithdrawalMutation = useMutation({
-    mutationFn: () => graphqlWithAuth(`
+    mutationFn: () => graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
       mutation CreateWithdrawal($input: CreateWithdrawalInput!) {
         createWithdrawal(input: $input) {
           success
@@ -2224,6 +2327,7 @@ function TransactionsTab() {
       }
     `, { input: { ...withdrawalForm, amount: parseFloat(withdrawalForm.amount) * 100, tenantId: 'default-tenant' } }, authToken),
     onSuccess: async (result) => {
+      queryClient.invalidateQueries({ queryKey: ['transactions'] })
       queryClient.invalidateQueries({ queryKey: ['withdrawals'] })
       
       // Auto-approve withdrawal to complete the flow
@@ -2231,7 +2335,7 @@ function TransactionsTab() {
       if (withdrawalId) {
         try {
           await new Promise(resolve => setTimeout(resolve, 500))
-          await graphqlWithAuth(`
+          await graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
             mutation ApproveTransaction($transactionId: String!) {
               approveTransaction(transactionId: $transactionId) {
                 success
@@ -2255,16 +2359,17 @@ function TransactionsTab() {
     },
   })
 
-  // Extract data from responses
+  // Extract data from responses - use deposits and withdrawals as primary source
   const deposits = depositsQuery.data?.deposits?.nodes || []
   const withdrawals = withdrawalsQuery.data?.withdrawals?.nodes || []
   const walletTx = walletTxQuery.data?.walletTransactions?.nodes || []
+  const allTransactionsData = transactionsQuery.data?.transactions?.nodes || [] // Fallback
   
   const depositsTotalCount = depositsQuery.data?.deposits?.totalCount || 0
   const withdrawalsTotalCount = withdrawalsQuery.data?.withdrawals?.totalCount || 0
   const walletTxTotalCount = walletTxQuery.data?.walletTransactions?.totalCount || 0
+  const transactionsTotalCount = transactionsQuery.data?.transactions?.totalCount || depositsTotalCount + withdrawalsTotalCount
 
-  // Combine all transactions into unified statement
   // Helper function to parse date safely
   const parseDate = (dateValue: any): number => {
     if (!dateValue) return 0
@@ -2282,13 +2387,16 @@ function TransactionsTab() {
     return 0
   }
 
-  // Combine all transactions, avoiding duplicates by transaction ID
+  // ✅ DEDUPLICATION: Combine deposits and withdrawals, deduplicate by ID only
+  // Note: Backend prevents duplicates via unique index on externalRef
+  // Frontend only needs to deduplicate by transaction ID (in case same transaction appears in multiple queries)
   const transactionMap = new Map<string, any>()
   
-  // Add deposits
+  // Process deposits (primary source)
   deposits.forEach((tx: any) => {
-    if (!transactionMap.has(tx.id)) {
-      transactionMap.set(tx.id, {
+    const txId = tx.id
+    if (!transactionMap.has(txId)) {
+      transactionMap.set(txId, {
         ...tx,
         _source: 'deposit' as const,
         _isCredit: true,
@@ -2297,14 +2405,16 @@ function TransactionsTab() {
         _displayStatus: tx.status,
         _sortDate: parseDate(tx.createdAt),
         _createdAt: tx.createdAt,
+        _description: tx.description || `${tx.type} ${tx.userId?.substring(0, 8)}...`,
       })
     }
   })
   
-  // Add withdrawals
+  // Process withdrawals (primary source)
   withdrawals.filter((tx: any) => tx.type === 'withdrawal').forEach((tx: any) => {
-    if (!transactionMap.has(tx.id)) {
-      transactionMap.set(tx.id, {
+    const txId = tx.id
+    if (!transactionMap.has(txId)) {
+      transactionMap.set(txId, {
         ...tx,
         _source: 'withdrawal' as const,
         _isCredit: false,
@@ -2313,16 +2423,33 @@ function TransactionsTab() {
         _displayStatus: tx.status,
         _sortDate: parseDate(tx.createdAt),
         _createdAt: tx.createdAt,
+        _description: tx.description || `${tx.type} ${tx.userId?.substring(0, 8)}...`,
       })
     }
   })
   
-  // Add wallet transactions (skip if already added as deposit/withdrawal)
+  // Process unified transactions as fallback (in case deposits/withdrawals queries miss some)
+  allTransactionsData.forEach((tx: any) => {
+    const txId = tx.id
+    if (!transactionMap.has(txId)) {
+      transactionMap.set(txId, {
+        ...tx,
+        _source: tx.type === 'deposit' ? 'deposit' : tx.type === 'withdrawal' ? 'withdrawal' : 'transaction',
+        _isCredit: tx.type === 'deposit' || tx.type === 'transfer_in',
+        _displayType: tx.type === 'deposit' ? 'Deposit' : tx.type === 'withdrawal' ? 'Withdrawal' : tx.type,
+        _displayAmount: tx.amount,
+        _displayStatus: tx.status,
+        _sortDate: parseDate(tx.createdAt),
+        _createdAt: tx.createdAt,
+        _description: tx.description || `${tx.type} ${tx.userId?.substring(0, 8)}...`,
+      })
+    }
+  })
+  
+  // Add wallet transactions (skip if already represented by a transaction)
   walletTx.forEach((tx: any) => {
-    // Skip if this wallet transaction is already represented by a deposit/withdrawal
-    // Check by refId matching deposit/withdrawal ID
-    const isDuplicate = deposits.some((d: any) => d.id === tx.refId) || 
-                       withdrawals.some((w: any) => w.id === tx.refId)
+    // Skip if this wallet transaction is already represented by a transaction
+    const isDuplicate = transactionMap.has(tx.refId || tx.id)
     
     if (!isDuplicate && !transactionMap.has(tx.id)) {
       transactionMap.set(tx.id, {
@@ -2334,6 +2461,7 @@ function TransactionsTab() {
         _displayStatus: 'completed',
         _sortDate: parseDate(tx.createdAt),
         _createdAt: tx.createdAt,
+        _description: tx.description || `${tx.type} ${tx.userId?.substring(0, 8)}...`,
       })
     }
   })
@@ -2371,12 +2499,13 @@ function TransactionsTab() {
     walletTxCount: walletTxTotalCount,
   }
 
-  const isLoading = depositsQuery.isLoading || withdrawalsQuery.isLoading || walletTxQuery.isLoading
+  const isLoading = depositsQuery.isLoading || withdrawalsQuery.isLoading || walletTxQuery.isLoading || transactionsQuery.isLoading
 
   const refetchAll = () => {
     depositsQuery.refetch()
     withdrawalsQuery.refetch()
     walletTxQuery.refetch()
+    transactionsQuery.refetch()
   }
 
   // Pagination helpers
@@ -2435,9 +2564,9 @@ function TransactionsTab() {
             </div>
           </div>
           <div className="stat-value" style={{ fontSize: 28 }}>
-            {totalItems}
+            {transactionsTotalCount || totalItems}
           </div>
-          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>showing {paginatedTransactions.length}</div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>showing {paginatedTransactions.length} of {totalItems}</div>
         </div>
       </div>
 
@@ -2635,9 +2764,9 @@ function TransactionsTab() {
                           {tx._displayType}
                         </span>
                       </td>
-                      <td style={{ padding: '10px 8px', fontSize: 13, fontFamily: 'var(--font-mono)' }}>{tx.userId}</td>
+                      <td style={{ padding: '10px 8px', fontSize: 13, fontFamily: 'var(--font-mono)' }}>{tx.userId?.substring(0, 8)}...</td>
                       <td style={{ padding: '10px 8px', fontSize: 13, color: 'var(--text-secondary)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        {tx.description || tx.method || tx.providerName || '-'}
+                        {tx._description || tx.description || (tx.fromUserId ? `Transfer from ${tx.fromUserId.substring(0, 8)}...` : tx.toUserId ? `Transfer to ${tx.toUserId.substring(0, 8)}...` : tx.method || tx._displayType || '-')}
                       </td>
                       <td style={{ padding: '10px 8px', fontSize: 14, textAlign: 'right', fontFamily: 'var(--font-mono)', color: 'var(--accent-red)' }}>
                         {!tx._isCredit ? formatCurrency(tx._displayAmount, tx.currency) : '-'}
@@ -2656,7 +2785,7 @@ function TransactionsTab() {
                               className="btn btn-sm btn-primary"
                               onClick={async () => {
                                 try {
-                                  await graphqlWithAuth(`
+                                  await graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
                                     mutation ApproveTransaction($transactionId: String!) {
                                       approveTransaction(transactionId: $transactionId) {
                                         success
@@ -2666,7 +2795,7 @@ function TransactionsTab() {
                                         }
                                       }
                                     }
-                                  `, { transactionId: tx.id }, authToken)
+                                  `, { transactionId: String(tx.id) }, authToken)
                                   refetchAll()
                                   setTimeout(() => refetchAll(), 1000) // Refresh after sync
                                 } catch (err: any) {
@@ -2894,9 +3023,12 @@ function ReconciliationTab() {
   const [dateRange, setDateRange] = useState('today')
 
   // Fetch all transactions for reconciliation
+  const { tokens } = useAuth()
+  const authToken = tokens?.accessToken
+  
   const txQuery = useQuery({
     queryKey: ['reconciliation', dateRange],
-    queryFn: () => graphql(`
+    queryFn: () => graphqlQuery(GRAPHQL_SERVICE_URLS.payment, `
       query GetReconciliationData($txFirst: Int, $walletFirst: Int) {
         walletTransactions(first: $txFirst) {
           nodes {
@@ -2932,7 +3064,7 @@ function ReconciliationTab() {
     `, { 
       txFirst: 500,
       walletFirst: 100
-    }),
+    }, authToken),
   })
 
   const transactions = txQuery.data?.walletTransactions?.nodes || []
@@ -3112,9 +3244,12 @@ function SettingsTab() {
   })
 
   // Fetch providers - API uses JSON input/output
+  const { tokens } = useAuth()
+  const authToken = tokens?.accessToken
+  
   const providersQuery = useQuery({
     queryKey: ['providerConfigs'],
-    queryFn: () => graphql(`
+    queryFn: () => graphqlQuery(GRAPHQL_SERVICE_URLS.payment, `
       query ListProviders($input: JSON) {
         providerConfigs(input: $input)
       }
@@ -3123,7 +3258,7 @@ function SettingsTab() {
 
   // Create provider mutation - API uses JSON input/output
   const createProviderMutation = useMutation({
-    mutationFn: () => graphql(`
+    mutationFn: () => graphqlQuery(GRAPHQL_SERVICE_URLS.payment, `
       mutation CreateProvider($input: JSON) {
         createProviderConfig(input: $input)
       }
@@ -3132,7 +3267,7 @@ function SettingsTab() {
         ...newProvider,
         feePercentage: parseFloat(newProvider.feePercentage),
       }
-    }),
+    }, authToken),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['providerConfigs'] })
       setNewProvider({ ...newProvider, name: '' })

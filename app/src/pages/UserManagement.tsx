@@ -4,7 +4,7 @@
  */
 
 import { useState, useEffect } from 'react'
-import { useAuth, useAuthRequest } from '../lib/auth-context'
+import { useAuth, useAuthRequest, hasRole, getRoleNames } from '../lib/auth-context'
 import { Shield, Edit, Check, X, Search, Filter, Users, Key, Lock, Unlock, Database, Crown, UserCheck, BookOpen, ChevronDown, ChevronUp } from 'lucide-react'
 
 interface User {
@@ -111,7 +111,7 @@ export default function UserManagement() {
   const [showPermissionsGuide, setShowPermissionsGuide] = useState(false)
 
   // Check if current user is admin
-  const isAdmin = currentUser?.roles?.includes('admin')
+  const isAdmin = hasRole(currentUser?.roles, 'admin')
 
   useEffect(() => {
     if (!isAdmin) {
@@ -576,7 +576,7 @@ export default function UserManagement() {
                   </td>
                   <td className="px-6 py-4">
                     <div className="flex flex-wrap gap-1">
-                      {user.roles.map(role => {
+                      {getRoleNames(user.roles).map(role => {
                         const roleInfo = AVAILABLE_ROLES.find(r => r.value === role)
                         return (
                           <span
@@ -640,7 +640,7 @@ export default function UserManagement() {
                       >
                         <Edit className="w-4 h-4" />
                       </button>
-                      {!user.roles.includes('admin') && (
+                      {!hasRole(user.roles, 'admin') && (
                         <button
                           onClick={() => handlePromoteToAdmin(user)}
                           className="text-purple-600 hover:text-purple-900"
@@ -816,7 +816,7 @@ export default function UserManagement() {
             Admins
           </div>
           <div className="text-2xl font-bold text-red-600 mt-1">
-            {users.filter(u => u.roles.includes('admin')).length}
+            {users.filter(u => hasRole(u.roles, 'admin')).length}
           </div>
         </div>
         <div className="bg-white p-4 rounded-lg shadow">

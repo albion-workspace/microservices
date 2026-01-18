@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "tsx src/index.ts",
-    "dev": "tsx watch src/index.ts",
+    "dev": "tsx watch --ignore dist --ignore node_modules --ignore '**/*.log' --ignore '**/*.tmp' src/index.ts",
     "build": "tsc",
     "build:run": "npm run build && npm start",
     "test": "tsx src/test.ts",
@@ -16,8 +16,10 @@
     "infra:k8s": "service-infra generate -c infra.config.json --k8s"
   },
   "dependencies": {
+    "access-engine": "file:../access-engine",
     "core-service": "file:../core-service",
     "notification-service": "file:../notification-service",
+    "mongodb": "^7.0.0",
     "passport": "^0.7.0",
     "passport-facebook": "^3.0.0",
     "passport-google-oauth20": "^2.0.0",

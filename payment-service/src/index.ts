@@ -262,13 +262,16 @@ const config = {
     },
     // Ledger account balance queries
     { name: 'ledger', types: ledgerTypes, resolvers: ledgerResolvers },
-    // Transaction approval mutations (for testing/manual approval)
+    // Transaction approval mutations and unified transactions query
     { 
       name: 'transactionApproval', 
       types: `
         type TransactionApprovalResult {
           success: Boolean!
           transaction: Transaction
+        }
+        extend type Query {
+          transactions(first: Int, skip: Int, filter: JSON): TransactionConnection
         }
         extend type Mutation {
           approveTransaction(transactionId: String!): TransactionApprovalResult!
@@ -292,6 +295,7 @@ const config = {
       deposit: isAuthenticated,
       withdrawals: isAuthenticated,
       withdrawal: isAuthenticated,
+      transactions: isAuthenticated, // Unified transactions query
       // Wallets
       wallets: isAuthenticated,
       wallet: isAuthenticated,
@@ -302,6 +306,7 @@ const config = {
       walletBalance: isAuthenticated,
       // Ledger queries
       ledgerAccountBalance: isAuthenticated,
+      bulkLedgerBalances: isAuthenticated, // Allow authenticated users to query balances
       providerLedgerBalance: hasRole('admin'),
       bonusPoolBalance: hasRole('admin'),
       systemHouseBalance: hasRole('admin'),
@@ -331,8 +336,10 @@ const config = {
       createWallet: isAuthenticated,
       updateWallet: hasRole('admin'),
       deleteWallet: hasRole('admin'),
-      // Wallet transactions (internal)
-      createWalletTransaction: hasAnyRole('admin', 'system'),
+      // Wallet transactions (internal/system operations)
+      // Allow admin, system, payment-gateway, and payment-provider roles
+      // Regular users should use createDeposit/createWithdrawal instead
+      createWalletTransaction: hasAnyRole('admin', 'system', 'payment-gateway', 'payment-provider'),
       updateWalletTransaction: hasRole('admin'),
       deleteWalletTransaction: hasRole('admin'),
       // Webhooks (admin only)
@@ -938,6 +945,101 @@ async function main() {
   } catch (error) {
     logger.error('Failed to initialize payment webhooks', { error });
     // Continue - webhooks are optional
+  }
+  
+  // ✅ CRITICAL: Ensure unique index on metadata.externalRef exists
+  // This prevents duplicate transactions at the database level
+  try {
+    const db = getDatabase();
+    const transactionsCollection = db.collection('transactions');
+    
+    // Check if unique index exists
+    const indexes = await transactionsCollection.indexes();
+    const uniqueExternalRefIndex = indexes.find(idx => 
+      idx.key && 
+      typeof idx.key === 'object' && 
+      'metadata.externalRef' in idx.key && 
+      idx.unique === true
+    );
+    
+    if (!uniqueExternalRefIndex) {
+      logger.info('Creating unique index on metadata.externalRef for duplicate protection');
+      
+      // Drop any existing non-unique index on metadata.externalRef
+      const existingIndex = indexes.find(idx => 
+        idx.key && 
+        typeof idx.key === 'object' && 
+        'metadata.externalRef' in idx.key
+      );
+      
+      if (existingIndex && existingIndex.name && !existingIndex.unique) {
+        try {
+          await transactionsCollection.dropIndex(existingIndex.name);
+          logger.info(`Dropped existing non-unique index: ${existingIndex.name}`);
+        } catch (dropError: any) {
+          logger.warn('Could not drop existing index, will try to create unique index anyway', {
+            error: dropError.message
+          });
+        }
+      }
+      
+      // Create unique index
+      try {
+        await transactionsCollection.createIndex(
+          { 'metadata.externalRef': 1 },
+          { 
+            unique: true,
+            sparse: true,
+            name: 'metadata.externalRef_1_unique'
+          }
+        );
+        logger.info('✅ Unique index on metadata.externalRef created successfully');
+      } catch (createError: any) {
+        if (createError.code === 11000 || createError.codeName === 'DuplicateKey') {
+          logger.warn('Cannot create unique index - duplicate values exist. Please clean duplicates first.', {
+            error: createError.message
+          });
+        } else if (createError.code === 85 || createError.codeName === 'IndexOptionsConflict') {
+          logger.warn('Index exists with different options. Attempting to recreate...');
+          try {
+            // Try to drop conflicting indexes
+            await transactionsCollection.dropIndex('metadata.externalRef_1').catch(() => {});
+            await transactionsCollection.dropIndex('metadata.externalRef_1_unique').catch(() => {});
+            
+            // Recreate with correct options
+            await transactionsCollection.createIndex(
+              { 'metadata.externalRef': 1 },
+              { 
+                unique: true,
+                sparse: true,
+                name: 'metadata.externalRef_1_unique'
+              }
+            );
+            logger.info('✅ Unique index on metadata.externalRef recreated successfully');
+          } catch (recreateError: any) {
+            logger.error('Failed to recreate unique index on metadata.externalRef', {
+              error: recreateError.message
+            });
+            // Don't throw - service can still run, but duplicates won't be prevented at DB level
+          }
+        } else {
+          logger.error('Failed to create unique index on metadata.externalRef', {
+            error: createError.message,
+            code: createError.code
+          });
+          // Don't throw - service can still run, but duplicates won't be prevented at DB level
+        }
+      }
+    } else {
+      logger.debug('Unique index on metadata.externalRef already exists', {
+        indexName: uniqueExternalRefIndex.name
+      });
+    }
+  } catch (indexError: any) {
+    logger.error('Failed to ensure unique index on metadata.externalRef', {
+      error: indexError.message
+    });
+    // Don't throw - service can still run, but duplicates won't be prevented at DB level
   }
   
   // Initialize ledger system AFTER database connection is established

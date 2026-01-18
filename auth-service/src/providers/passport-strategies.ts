@@ -72,10 +72,33 @@ export function configurePassport(config: AuthConfig) {
               break;
           }
           
-          const user = await db.collection('users').findOne(query) as unknown as User | null;
+          // CRITICAL: Query MongoDB and get user with _id
+          // Use MongoDB's native _id as the primary identifier (Passport.js best practice)
+          const userDoc = await db.collection('users').findOne(query) as any;
           
-          if (!user) {
+          if (!userDoc) {
             return done(null, false, { message: 'Invalid credentials' });
+          }
+          
+          // CRITICAL: Always use MongoDB's _id as the primary identifier
+          // MongoDB's _id is the source of truth - convert to string for Passport serialization
+          if (!userDoc._id) {
+            logger.error('User document missing _id field', { email: userDoc.email, query });
+            return done(new Error('User missing _id field'));
+          }
+          
+          // Convert MongoDB document to User type
+          // Always use _id.toString() as id - this is what Passport will serialize
+          const user = {
+            ...userDoc,
+            _id: userDoc._id,
+            id: userDoc._id.toString(), // Always use _id.toString() - MongoDB's native ID
+          } as unknown as User;
+          
+          
+          // Ensure id field is set from _id
+          if (!user.id) {
+            user.id = user._id.toString();
           }
           
           // Check account status
@@ -125,8 +148,9 @@ export function configurePassport(config: AuthConfig) {
           }
           
           // Success! Reset failed attempts and update last login
+          // Use _id for MongoDB queries (more efficient and reliable)
           await db.collection('users').updateOne(
-            { id: user.id },
+            { _id: user._id },
             {
               $set: {
                 failedLoginAttempts: 0,
@@ -138,9 +162,19 @@ export function configurePassport(config: AuthConfig) {
             }
           );
           
+          // Ensure id field is set from _id
+          if (!user.id) {
+            user.id = user._id.toString();
+          }
+          
+          // Verify id matches _id.toString() for consistency
+          if (user._id && user.id !== user._id.toString()) {
+            user.id = user._id.toString();
+          }
+          
           logger.info('User authenticated via Passport LocalStrategy', { 
-            userId: user.id, 
-            tenantId: user.tenantId 
+            userId: user.id,
+            email: user.email,
           });
           
           return done(null, user);
@@ -393,8 +427,9 @@ export function authenticateLocal(input: {
       },
     };
     
-    // Call Passport's authenticate
-    passport.authenticate('local', (err: any, user: User | false, info: any) => {
+    // Call Passport's authenticate with session: false to prevent serialize/deserialize
+    // This ensures we get the user directly from the LocalStrategy without any modifications
+    passport.authenticate('local', { session: false }, (err: any, user: User | false, info: any) => {
       if (err) {
         logger.error('Passport authentication error', { error: err });
         resolve({ user: null, info: { message: 'Authentication error' } });
@@ -491,7 +526,7 @@ async function handleSocialAuth(
       const updatedProfiles = [...(user.socialProfiles || []), newProfile];
       
       await db.collection('users').updateOne(
-        { id: user.id },
+        { _id: user._id },
         { 
           $set: { 
             socialProfiles: updatedProfiles,
@@ -508,15 +543,15 @@ async function handleSocialAuth(
     }
   }
   
-  // Create new user
+  // Create new user - let MongoDB generate _id automatically
   const newUser: User = {
-    id: crypto.randomUUID(),
+    // Don't set id - MongoDB will generate _id automatically
     tenantId,
     email,
     emailVerified: email ? true : false, // Social providers verify email
     phoneVerified: false,
     status: 'active',
-    roles: ['user'],
+    roles: [{ role: 'user', assignedAt: new Date(), active: true }], // New UserRole[] format
     permissions: [],
     socialProfiles: [{
       provider,
@@ -539,30 +574,85 @@ async function handleSocialAuth(
     lastLoginAt: new Date(),
   };
   
-  await db.collection('users').insertOne(newUser);
+  const result = await db.collection('users').insertOne(newUser);
   
-  logger.info('New user created via social auth', { userId: newUser.id, provider });
+  // MongoDB generates _id automatically, use it as the id
+  const createdUser = { ...newUser, _id: result.insertedId, id: result.insertedId.toString() };
   
-  return newUser;
+  logger.info('New user created via social auth', { userId: createdUser.id, _id: createdUser._id, provider });
+  
+  return createdUser;
 }
 
 // ═══════════════════════════════════════════════════════════════════
 // Passport Serialization (for session-based auth)
 // ═══════════════════════════════════════════════════════════════════
 
+/**
+ * Passport Serialization - Store MongoDB _id in session
+ * 
+ * Best Practice: Always serialize MongoDB's _id (ObjectId) as a string.
+ * This is what Passport.js recommends - store the minimal identifier needed
+ * to retrieve the user on subsequent requests.
+ */
 passport.serializeUser((user: any, done) => {
-  done(null, { id: user.id, tenantId: user.tenantId });
+  // CRITICAL: Always use MongoDB's _id as the identifier (Passport.js best practice)
+  // MongoDB's _id is the source of truth - convert to string for session storage
+  if (!user._id) {
+    logger.error('Passport serializeUser: User missing _id field', {
+      userId: user?.id,
+      email: user?.email,
+      userKeys: user ? Object.keys(user) : [],
+    });
+    return done(new Error('User missing _id field'));
+  }
+  
+  // Serialize MongoDB _id as string (Passport.js standard pattern)
+  // This is what will be stored in the session
+  const serializedId = user._id.toString();
+  
+  // Store minimal data: just the _id (as string) and tenantId
+  done(null, { id: serializedId, tenantId: user.tenantId });
 });
 
+/**
+ * Passport Deserialization - Retrieve user from MongoDB by _id
+ * 
+ * Best Practice: Always query by MongoDB's _id using findById() or findOne({ _id: id }).
+ * MongoDB driver automatically handles string-to-ObjectId conversion.
+ * This is the standard Passport.js pattern for MongoDB.
+ */
 passport.deserializeUser(async (data: any, done) => {
   try {
+    if (!data?.id) {
+      logger.error('Passport deserializeUser: No id in session data', { data });
+      return done(null, null);
+    }
+    
     const db = getDatabase();
-    const user = await db.collection('users').findOne({
-      id: data.id,
+    
+    // CRITICAL: Always query by MongoDB's _id (Passport.js best practice)
+    // MongoDB driver automatically converts string to ObjectId for _id queries
+    // This is the standard pattern: User.findById(id) or findOne({ _id: id })
+    const userDoc = await db.collection('users').findOne({
+      _id: data.id as any, // MongoDB driver handles string-to-ObjectId conversion automatically
       tenantId: data.tenantId,
-    });
+    }) as any;
+    
+    if (!userDoc || !userDoc._id) {
+      return done(null, null);
+    }
+    
+    // Convert MongoDB document to User type
+    const user = {
+      ...userDoc,
+      _id: userDoc._id,
+      id: userDoc._id.toString(),
+    } as unknown as User;
+    
     done(null, user);
   } catch (error) {
+    logger.error('Passport deserializeUser error', { error });
     done(error);
   }
 });

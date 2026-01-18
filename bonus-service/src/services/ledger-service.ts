@@ -253,7 +253,7 @@ export async function recordBonusConversionLedgerEntry(
   
   // Get accounts
   const userBonusAccountId = ledger.getUserAccountId(userId, 'bonus');
-  const userRealAccountId = ledger.getUserAccountId(userId, 'real');
+  const userRealAccountId = ledger.getUserAccountId(userId, 'main'); // 'main' is the real balance account
   
   // Check bonus account balance
   const bonusBalance = await ledger.getBalance(userBonusAccountId);

@@ -45,6 +45,17 @@ export interface PermissionCondition {
 }
 
 /**
+ * Context identifier for role scoping
+ * Examples:
+ * - "branch:branch-001" - Role in a specific branch
+ * - "department:finance" - Role in a department
+ * - "project:project-abc" - Role in a project
+ * - "tenant:tenant-xyz" - Role in a tenant
+ * - "platform:betting" - Role in a platform
+ */
+export type RoleContext = string;
+
+/**
  * Role definition with associated permissions
  */
 export interface Role {
@@ -52,12 +63,71 @@ export interface Role {
   name: string;
   /** Human-readable description */
   description?: string;
+  /** Display name for UI */
+  displayName?: string;
   /** Permissions granted to this role */
   permissions: string[];
   /** Parent roles (for inheritance) */
   inherits?: string[];
   /** Priority for conflict resolution (higher = more priority) */
   priority?: number;
+  /** Context where this role applies (optional, if not set applies globally) */
+  context?: RoleContext;
+  /** Whether this role is active */
+  active?: boolean;
+  /** Metadata for flexible role configuration */
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Context-based role assignment
+ * A user can have different roles in different contexts
+ */
+export interface UserRole {
+  /** Role name */
+  role: string;
+  /** Context where this role applies (e.g., "branch:branch-001") */
+  context?: RoleContext;
+  /** When this role was assigned */
+  assignedAt: Date;
+  /** Who assigned this role */
+  assignedBy?: string;
+  /** When this role expires (optional) */
+  expiresAt?: Date;
+  /** Whether this role is active */
+  active: boolean;
+  /** Metadata for flexible role configuration */
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Resolved user permissions (flattened from roles and direct permissions)
+ */
+export interface ResolvedPermissions {
+  /** All effective permissions (including inherited) */
+  permissions: Set<string>;
+  /** All effective roles (including inherited) */
+  roles: Set<string>;
+  /** Context-specific roles */
+  contextRoles: Map<RoleContext, Set<string>>;
+  /** Whether user has wildcard permission (*:*:*) */
+  hasWildcard: boolean;
+}
+
+/**
+ * Role resolution options
+ */
+export interface RoleResolutionOptions {
+  /** Context to resolve roles for (optional) */
+  context?: RoleContext;
+  /** Whether to include inherited roles */
+  includeInherited?: boolean;
+  /** Whether to include permissions from roles */
+  includePermissions?: boolean;
+  /** Whether to resolve context-specific roles */
+  resolveContextRoles?: boolean;
+  /** Maximum depth for role inheritance resolution */
+  maxDepth?: number;
 }
 
 /**

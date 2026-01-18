@@ -17,7 +17,9 @@ import {
   recordDepositLedgerEntry, 
   recordWithdrawalLedgerEntry,
   syncWalletBalanceFromLedger,
+  getLedger,
 } from './ledger-service.js';
+import crypto from 'crypto';
 
 // ═══════════════════════════════════════════════════════════════════
 // Deposit Transaction Types & Validation
@@ -61,9 +63,54 @@ const depositSaga = [
     name: 'createTransaction',
     critical: true,
     execute: async ({ input, data, ...ctx }: DepositCtx): Promise<DepositCtx> => {
+      // ✅ GENERATE externalRef FIRST (before creating transaction)
+      // This enables atomic duplicate detection using the externalRef
+      const fromUserIdValue = input.fromUserId!;
+      const toUserId = input.userId;
+      const externalTransactionId = (input as any).externalTransactionId;
+      
+      // Generate deterministic externalRef (same logic as in creditWallet step)
+      let externalRef: string;
+      if (externalTransactionId) {
+        externalRef = externalTransactionId;
+      } else {
+        // Generate deterministic hash based on deposit details
+        // Include method field to ensure uniqueness when method varies (e.g., test-funding with timestamp)
+        const timeWindow = Math.floor(Date.now() / (5 * 60 * 1000)); // 5-minute windows
+        const method = input.method || 'deposit';
+        const hashData = `${fromUserIdValue}-${toUserId}-${input.amount}-${input.currency}-${method}-${timeWindow}`;
+        const hash = crypto.createHash('sha256').update(hashData).digest('hex').substring(0, 32);
+        externalRef = `deposit-${hash}`;
+      }
+      
+      // ✅ ATOMIC DUPLICATE CHECK: Check for existing transaction with same externalRef
+      // This prevents race conditions where multiple requests create transactions simultaneously
+      const db = getDatabase();
+      const transactionsCollection = db.collection('transactions');
+      
+      const existing = await transactionsCollection.findOne({
+        type: 'deposit',
+        'metadata.externalRef': externalRef,
+        status: { $in: ['pending', 'processing', 'completed'] },
+      });
+      
+      if (existing) {
+        logger.warn('Duplicate deposit detected - transaction already exists with same externalRef', {
+          externalRef,
+          existingTxId: existing.id,
+          fromUserId: fromUserIdValue,
+          toUserId,
+          amount: input.amount,
+          currency: input.currency,
+        });
+        throw new Error(`Duplicate deposit detected. A transaction with the same externalRef already exists (${existing.id})`);
+      }
+      
       const repo = data._repository as Repository<Transaction>;
       const id = (data._generateId as typeof generateId)();
       
+      // ✅ Store externalRef in metadata IMMEDIATELY when creating transaction
+      // This enables fast duplicate detection before ledger creation
       const transaction: Transaction = {
         id,
         tenantId: input.tenantId || 'default',
@@ -79,6 +126,9 @@ const depositSaga = [
         fromUserId: input.fromUserId!, // Source user (required - must exist)
         toUserId: input.userId, // Receiving user
         initiatedAt: new Date(),
+        metadata: {
+          externalRef, // Store immediately for duplicate detection
+        },
         statusHistory: [{
           timestamp: new Date(),
           newStatus: 'pending' as TransactionStatus,
@@ -87,8 +137,29 @@ const depositSaga = [
         }],
       } as Transaction;
       
-      await repo.create(transaction);
-      return { ...ctx, input, data, entity: transaction };
+      // Store externalRef in saga context for use in creditWallet step
+      (data as any).externalRef = externalRef;
+      
+      // No duplicate found - create the transaction
+      try {
+        await repo.create(transaction);
+        return { ...ctx, input, data, entity: transaction };
+      } catch (error: any) {
+        // ✅ Handle MongoDB duplicate key error (E11000) - unique index caught a duplicate
+        if (error.code === 11000 || error.codeName === 'DuplicateKey') {
+          logger.warn('Duplicate deposit detected - unique index prevented duplicate', {
+            externalRef,
+            fromUserId: fromUserIdValue,
+            toUserId,
+            amount: input.amount,
+            currency: input.currency,
+            error: error.message,
+          });
+          throw new Error(`Duplicate deposit detected. A transaction with the same externalRef already exists (unique index violation)`);
+        }
+        // Re-throw other errors
+        throw error;
+      }
     },
     compensate: async ({ entity, data }: DepositCtx) => {
       if (entity) {
@@ -176,12 +247,37 @@ const depositSaga = [
       const fromUserIdValue = fromUserId!; // Source user (required - validated in createTransaction step)
       const toUserId = input.userId; // Receiving user
       
+      // ✅ REUSE externalRef from createTransaction step (already generated and stored in metadata)
+      // This ensures consistency and prevents duplicate generation
+      let externalRef: string;
+      if (externalTransactionId) {
+        externalRef = externalTransactionId;
+      } else if ((data as any).externalRef) {
+        // Use externalRef from createTransaction step
+        externalRef = (data as any).externalRef;
+      } else if (entity.metadata?.externalRef) {
+        // Fallback: use externalRef from entity metadata
+        externalRef = typeof entity.metadata.externalRef === 'string' 
+          ? entity.metadata.externalRef 
+          : String(entity.metadata.externalRef);
+      } else {
+        // Last resort: generate it again (shouldn't happen, but safety net)
+        const timeWindow = Math.floor(Date.now() / (5 * 60 * 1000));
+        const hashData = `${fromUserIdValue}-${toUserId}-${input.amount}-${input.currency}-${timeWindow}`;
+        const hash = crypto.createHash('sha256').update(hashData).digest('hex').substring(0, 32);
+        externalRef = `deposit-${hash}`;
+        logger.warn('Had to regenerate externalRef in creditWallet step (should not happen)', {
+          transactionId: id,
+          fromUserId: fromUserIdValue,
+          toUserId,
+        });
+      }
+      
       // Record in ledger (User -> User) - ledger is source of truth
       try {
-        // Ensure externalRef is always set (use transaction ID or generate one to avoid duplicate key errors)
-        const externalRef = id || externalTransactionId || crypto.randomUUID();
         
-        await recordDepositLedgerEntry(
+        // ✅ ATOMICITY: Record in ledger FIRST - if this fails or returns existing, we'll handle it
+        const ledgerTxId = await recordDepositLedgerEntry(
           fromUserIdValue,  // From: Source user
           toUserId,    // To: Receiving user
           input.amount,
@@ -191,6 +287,19 @@ const depositSaga = [
           externalRef, // Always set to avoid duplicate key errors
           `Deposit from ${fromUserIdValue}`
         );
+        
+        // ✅ Store ledger transaction ID and externalRef in GraphQL transaction metadata
+        // This enables fast duplicate lookups by externalRef (indexed)
+        // Note: Ledger unique index on externalRef will prevent duplicate ledger transactions
+        // If ledger returns existing transaction (idempotent), we've already checked for GraphQL duplicates above
+        const repo = data._repository as Repository<Transaction>;
+        await repo.update(id, {
+          metadata: {
+            ...(entity.metadata || {}),
+            ledgerTxId,
+            externalRef,
+          }
+        });
         
         // Wallet balance sync happens via Redis event (ledger.deposit.completed)
         // No delays needed - event-driven sync works across containers/processes
@@ -278,7 +387,7 @@ export const depositService = createService<Transaction, CreateDepositInput>({
     name: 'deposit',
     collection: 'transactions',
     graphqlType: `
-      type Transaction { id: ID! userId: String! type: String! status: String! amount: Float! currency: String! feeAmount: Float! netAmount: Float! fromUserId: String toUserId: String createdAt: String! }
+      type Transaction { id: ID! userId: String! type: String! status: String! amount: Float! currency: String! feeAmount: Float! netAmount: Float! fromUserId: String toUserId: String description: String metadata: JSON createdAt: String! }
       type TransactionConnection { nodes: [Transaction!]! totalCount: Int! pageInfo: PageInfo! }
       type CreateDepositResult { success: Boolean! deposit: Transaction sagaId: ID! errors: [String!] executionTimeMs: Int }
     `,
@@ -291,6 +400,12 @@ export const depositService = createService<Transaction, CreateDepositInput>({
       { fields: { userId: 1, type: 1, status: 1 } },
       { fields: { externalTransactionId: 1 } },
       { fields: { createdAt: -1 } },
+      // ✅ PERFORMANCE: Compound index for duplicate check query optimization
+      // Matches the duplicate check query: type + metadata.externalRef + status
+      { fields: { type: 1, 'metadata.externalRef': 1, status: 1 }, options: { sparse: true } },
+      // ✅ CRITICAL: Unique index on metadata.externalRef to prevent duplicates at database level
+      // This is the final line of defense against race conditions
+      { fields: { 'metadata.externalRef': 1 }, options: { sparse: true, unique: true } },
     ],
   },
   saga: depositSaga,
@@ -468,8 +583,24 @@ const withdrawalSaga = [
       
       // Record in ledger (User -> User) - ledger is source of truth
       try {
-        // Ensure externalRef is always set (use transaction ID or generate one to avoid duplicate key errors)
-        const withdrawalExternalRef = id || externalTransactionId || crypto.randomUUID();
+        // ✅ DUPLICATE PROTECTION: Generate deterministic externalRef to prevent duplicates
+        // Priority: externalTransactionId (from payment provider) > deterministic hash > transaction ID
+        let withdrawalExternalRef: string;
+        if (externalTransactionId) {
+          // Use provided external transaction ID (from payment provider)
+          withdrawalExternalRef = externalTransactionId;
+        } else {
+          // Generate deterministic hash based on withdrawal details to detect duplicates
+          // Time window: round to nearest 5 minutes to catch rapid duplicates
+          const timeWindow = Math.floor(Date.now() / (5 * 60 * 1000)); // 5-minute windows
+          const hashData = `${fromUserId}-${toUserId || input.userId}-${input.amount}-${input.currency}-${timeWindow}`;
+          const hash = crypto.createHash('sha256').update(hashData).digest('hex').substring(0, 32);
+          withdrawalExternalRef = `withdrawal-${hash}`;
+          // Fallback to transaction ID if hash generation fails (shouldn't happen, but safety net)
+          if (!withdrawalExternalRef) {
+            withdrawalExternalRef = id || crypto.randomUUID();
+          }
+        }
         
         await recordWithdrawalLedgerEntry(
           fromUserId,  // From: User withdrawing
@@ -594,7 +725,83 @@ export const withdrawalService = createService<Transaction, CreateWithdrawalInpu
 // ═══════════════════════════════════════════════════════════════════
 
 export const transactionApprovalResolvers = {
-  Query: {},
+  Query: {
+    // ✅ Unified transactions query - fetches all transactions (deposits + withdrawals) together
+    transactions: async (args: Record<string, unknown>) => {
+      const db = getDatabase();
+      const transactionsCollection = db.collection('transactions');
+      
+      const first = (args.first as number) || 100;
+      const skip = (args.skip as number) || 0;
+      const filter = (args.filter as Record<string, unknown>) || {};
+      
+      // Build MongoDB query
+      const query: Record<string, unknown> = {};
+      
+      // Filter by type if specified
+      if (filter.type) {
+        query.type = filter.type;
+      }
+      
+      // Filter by userId if specified
+      if (filter.userId) {
+        query.userId = filter.userId;
+      }
+      
+      // Filter by status if specified
+      if (filter.status) {
+        query.status = filter.status;
+      }
+      
+      // Filter by date range if specified
+      if (filter.dateFrom || filter.dateTo) {
+        const dateFilter: Record<string, unknown> = {};
+        if (filter.dateFrom) {
+          dateFilter.$gte = new Date(filter.dateFrom as string);
+        }
+        if (filter.dateTo) {
+          const toDate = new Date(filter.dateTo as string);
+          toDate.setHours(23, 59, 59, 999); // Include full day
+          dateFilter.$lte = toDate;
+        }
+        query.createdAt = dateFilter;
+      }
+      
+      // Execute query
+      const [nodes, totalCount] = await Promise.all([
+        transactionsCollection
+          .find(query)
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(first)
+          .toArray(),
+        transactionsCollection.countDocuments(query),
+      ]);
+      
+      return {
+        nodes: nodes.map((tx: any) => ({
+          id: tx.id,
+          userId: tx.userId,
+          type: tx.type,
+          status: tx.status,
+          amount: tx.amount,
+          currency: tx.currency,
+          feeAmount: tx.feeAmount,
+          netAmount: tx.netAmount,
+          fromUserId: tx.fromUserId,
+          toUserId: tx.toUserId,
+          createdAt: tx.createdAt,
+          description: tx.description,
+          metadata: tx.metadata,
+        })),
+        totalCount,
+        pageInfo: {
+          hasNextPage: skip + first < totalCount,
+          hasPreviousPage: skip > 0,
+        },
+      };
+    },
+  },
   Mutation: {
     approveTransaction: async (args: Record<string, unknown>) => {
       const transactionId = args.transactionId as string;

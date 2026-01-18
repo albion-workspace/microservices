@@ -111,7 +111,12 @@ export async function connectDatabase(uri: string, config: Partial<MongoConfig> 
   
   await client.connect();
   
-  const dbName = cfg.dbName || new URL(uri).pathname.slice(1) || 'default';
+  let dbName = cfg.dbName || new URL(uri).pathname.slice(1) || 'default';
+  // Remove query parameters if present and trim whitespace
+  if (dbName.includes('?')) {
+    dbName = dbName.split('?')[0];
+  }
+  dbName = dbName.trim();
   db = client.db(dbName);
   
   // Create indexes for common queries

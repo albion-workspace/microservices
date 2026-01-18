@@ -80,7 +80,7 @@ export const authGraphQLTypes = `
   }
   
   type Session {
-    id: ID!
+    sessionId: ID!
     deviceInfo: JSON
     createdAt: String!
     lastAccessedAt: String!
@@ -258,6 +258,63 @@ export const authGraphQLTypes = `
 import type { Resolvers } from 'core-service';
 
 /**
+ * Normalize roles: convert UserRole[] objects to string[] array
+ * Handles both UserRole[] format ({ role: string, active: boolean, ... }) and string[] format
+ */
+function normalizeRoles(roles: any): string[] {
+  if (!roles) {
+    return [];
+  }
+  
+  if (!Array.isArray(roles) || roles.length === 0) {
+    return [];
+  }
+  
+  // If already string[] format, filter out null/undefined and return
+  if (typeof roles[0] === 'string') {
+    return roles.filter((r: string) => r !== null && r !== undefined);
+  }
+  
+  // If UserRole[] format, extract role names
+  if (typeof roles[0] === 'object' && roles[0].role) {
+    return roles
+      .filter((r: any) => r.active !== false)
+      .filter((r: any) => !r.expiresAt || new Date(r.expiresAt) > new Date())
+      .map((r: any) => r.role)
+      .filter((role: string) => role !== undefined && role !== null);
+  }
+  
+  // Fallback: return empty array
+  return [];
+}
+
+/**
+ * Normalize user object: map _id to id, normalize permissions and roles
+ */
+function normalizeUser(user: any): any {
+  if (!user) {
+    return null;
+  }
+  
+  // Map _id to id (GraphQL expects id, MongoDB has _id)
+  if (user._id && !user.id) {
+    user.id = user._id.toString();
+  }
+  
+  // Normalize permissions (object → array)
+  if (user.permissions && !Array.isArray(user.permissions)) {
+    user.permissions = Object.keys(user.permissions).filter(key => user.permissions[key] === true);
+  } else if (!user.permissions) {
+    user.permissions = [];
+  }
+  
+  // Normalize roles using helper function
+  user.roles = normalizeRoles(user.roles);
+  
+  return user;
+}
+
+/**
  * Create resolvers with service instances
  */
 export function createAuthResolvers(
@@ -266,9 +323,13 @@ export function createAuthResolvers(
   otpService: any,
   passwordService: any,
   twoFactorService: any
-): Resolvers {
+): Resolvers & Record<string, any> {
   return {
     User: {
+      /**
+       * Normalize roles field: extract role names from UserRole[] format
+       */
+      roles: (parent: any) => normalizeRoles(parent.roles),
       /**
        * Normalize permissions field: convert object to array if needed
        */
@@ -297,19 +358,38 @@ export function createAuthResolvers(
         
         const { getDatabase } = await import('core-service');
         const db = getDatabase();
-        const user = await db.collection('users').findOne({
-          id: getUserId(ctx),
-          tenantId: getTenantId(ctx),
-        });
+        const userId = getUserId(ctx);
+        const tenantId = getTenantId(ctx);
         
-        // Normalize permissions (object → array)
-        if (user && user.permissions && !Array.isArray(user.permissions)) {
-          user.permissions = Object.keys(user.permissions).filter(key => user.permissions[key] === true);
-        } else if (user && !user.permissions) {
-          user.permissions = [];
+        // Get ObjectId from mongodb package for reliable _id queries
+        const { ObjectId } = await import('mongodb');
+        
+        let user: any = null;
+        
+        // Try with ObjectId conversion first (most reliable)
+        if (userId && ObjectId.isValid(userId)) {
+          try {
+            user = await db.collection('users').findOne({
+              _id: new ObjectId(userId),
+              tenantId,
+            });
+          } catch (objIdError: any) {
+            // Fall through to string query
+          }
         }
         
-        return user;
+        // Fallback: Try string query (MongoDB driver should auto-convert)
+        if (!user) {
+          user = await db.collection('users').findOne({
+            $or: [
+              { id: userId },
+              { _id: userId as any },
+            ],
+            tenantId,
+          });
+        }
+        
+        return normalizeUser(user);
       },
       
       /**
@@ -325,19 +405,16 @@ export function createAuthResolvers(
         
         const { getDatabase } = await import('core-service');
         const db = getDatabase();
+        const userId = (args as any).id;
         const user = await db.collection('users').findOne({
-          id: (args as any).id,
+          $or: [
+            { id: userId },
+            { _id: userId as any },
+          ],
           tenantId: (args as any).tenantId,
         });
         
-        // Normalize permissions (object → array)
-        if (user && user.permissions && !Array.isArray(user.permissions)) {
-          user.permissions = Object.keys(user.permissions).filter(key => user.permissions[key] === true);
-        } else if (user && !user.permissions) {
-          user.permissions = [];
-        }
-        
-        return user;
+        return normalizeUser(user);
       },
       
       /**
@@ -370,15 +447,8 @@ export function createAuthResolvers(
           db.collection('users').countDocuments(query),
         ]);
         
-        // Normalize permissions for each user (object → array)
-        const normalizedUsers = items.map((user: any) => {
-          if (user.permissions && !Array.isArray(user.permissions)) {
-            user.permissions = Object.keys(user.permissions).filter(key => user.permissions[key] === true);
-          } else if (!user.permissions) {
-            user.permissions = [];
-          }
-          return user;
-        });
+        // Normalize all users using helper function
+        const normalizedUsers = items.map((user: any) => normalizeUser(user));
         
         return {
           nodes: normalizedUsers,
@@ -410,13 +480,23 @@ export function createAuthResolvers(
         }
         
         // MongoDB query: roles array contains the role
-        // Use $in operator to match array field containing the value
+        // Handle both UserRole[] objects and string[] arrays
         const query: Record<string, unknown> = {
-          roles: { $in: [role] }, // Match documents where roles array contains the role
+          $or: [
+            // Match UserRole[] objects: { role: "admin", active: true, ... }
+            { roles: { $elemMatch: { role: role, active: { $ne: false } } } },
+            // Match string[] arrays: ["admin", "user"] - MongoDB handles { roles: "role" } for arrays
+            { roles: role },
+          ],
         };
         if (tenantId) {
           query.tenantId = tenantId;
+        } else {
+          // Default tenant if not specified
+          query.tenantId = 'default-tenant';
         }
+        
+        console.log('[usersByRole] Query:', JSON.stringify(query, null, 2));
         
         const [items, total] = await Promise.all([
           db.collection('users')
@@ -428,15 +508,8 @@ export function createAuthResolvers(
           db.collection('users').countDocuments(query),
         ]);
         
-        // Normalize permissions for each user (object → array)
-        const normalizedUsers = items.map((user: any) => {
-          if (user.permissions && !Array.isArray(user.permissions)) {
-            user.permissions = Object.keys(user.permissions).filter(key => user.permissions[key] === true);
-          } else if (!user.permissions) {
-            user.permissions = [];
-          }
-          return user;
-        });
+        // Normalize all users using helper function
+        const normalizedUsers = items.map((user: any) => normalizeUser(user));
         
         return {
           nodes: normalizedUsers,

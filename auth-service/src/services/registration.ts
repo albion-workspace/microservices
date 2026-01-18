@@ -129,7 +129,8 @@ export class RegistrationService {
     }
     
     if (input.email) {
-      conditions.push({ email: normalizeEmail(input.email) });
+      const normalizedEmail = normalizeEmail(input.email);
+      conditions.push({ email: normalizedEmail });
     }
     
     if (input.phone) {
@@ -140,10 +141,14 @@ export class RegistrationService {
       return null;
     }
     
-    return await db.collection('users').findOne({
+    const query = {
       tenantId: input.tenantId,
       $or: conditions,
-    }) as unknown as User | null;
+    };
+    
+    const result = await db.collection('users').findOne(query) as unknown as User | null;
+    
+    return result;
   }
   
   /**
@@ -155,7 +160,7 @@ export class RegistrationService {
     const now = new Date();
     
     const user: User = {
-      id: crypto.randomUUID(),
+      // Let MongoDB generate _id automatically - don't set id field
       tenantId: input.tenantId,
       
       // Identifiers
@@ -175,8 +180,8 @@ export class RegistrationService {
       twoFactorEnabled: false,
       failedLoginAttempts: 0,
       
-      // Roles & Permissions
-      roles: ['user'],
+      // Roles & Permissions (UserRole[] format)
+      roles: [{ role: 'user', assignedAt: now, active: true }],
       permissions: [],
       
       // Metadata (flexible fields)
@@ -187,9 +192,10 @@ export class RegistrationService {
       updatedAt: now,
     };
     
-    await db.collection('users').insertOne(user);
+    const result = await db.collection('users').insertOne(user);
     
-    return user;
+    // MongoDB generates _id automatically, use it as the id
+    return { ...user, _id: result.insertedId, id: result.insertedId.toString() };
   }
   
   /**

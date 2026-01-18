@@ -5,7 +5,7 @@
 
 import React from 'react';
 import { Navigate, useLocation } from 'react-router-dom';
-import { useAuth } from '../lib/auth-context';
+import { useAuth, hasRole } from '../lib/auth-context';
 import { Loader2 } from 'lucide-react';
 
 interface ProtectedRouteProps {
@@ -36,7 +36,7 @@ export default function ProtectedRoute({ children, requireRoles }: ProtectedRout
 
   // Check role requirements
   if (requireRoles && requireRoles.length > 0) {
-    const hasRequiredRole = requireRoles.some(role => user?.roles.includes(role));
+    const hasRequiredRole = requireRoles.some(role => hasRole(user?.roles, role));
     
     if (!hasRequiredRole) {
       return (

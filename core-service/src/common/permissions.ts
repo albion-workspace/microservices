@@ -37,7 +37,14 @@ export const hasRole = (role: string): PermissionRule => (user) => {
   if (user.permissions?.some(p => p === '*:*:*' || p === '*')) return true;
   return false;
 };
-export const hasAnyRole = (...roles: string[]): PermissionRule => (user) => roles.some(r => user?.roles.includes(r)) ?? false;
+export const hasAnyRole = (...roles: string[]): PermissionRule => (user) => {
+  if (!user) return false;
+  // Check if user has any of the required roles
+  if (roles.some(r => user.roles?.includes(r))) return true;
+  // Also check if user has wildcard permissions (*:*:*), which grants all roles
+  if (user.permissions?.some(p => p === '*:*:*' || p === '*')) return true;
+  return false;
+};
 export const can = (resource: string, action: string): PermissionRule => (user, args) => hasPermission(user, resource, action, (args.id as string) || '*');
 
 export const and = (...rules: PermissionRule[]): PermissionRule => async (user, args) => {

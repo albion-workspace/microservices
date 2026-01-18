@@ -16,6 +16,7 @@
 import { createLedger, getDatabase, getClient, logger, type Ledger, emit } from 'core-service';
 import { SYSTEM_CURRENCY } from '../constants.js';
 import { convertCurrency, getExchangeRate } from './exchange-rate.js';
+import { ObjectId } from 'mongodb';
 
 let ledgerInstance: Ledger | null = null;
 
@@ -140,33 +141,103 @@ export async function checkUserBalance(
     const authDb = client.db('auth_service');
     const authUsersCollection = authDb.collection('users');
     
-    const authUser = await authUsersCollection.findOne(
-      { id: userId },
-      { projection: { permissions: 1 } }
-    );
+    // Query user - Try _id first (most common case), then fallback to id field
+    // MongoDB handles string-to-ObjectId conversion automatically for _id queries
+    let authUser: any = null;
+    
+    // Try _id first - explicitly convert to ObjectId (same pattern as test script)
+    if (ObjectId.isValid(userId) && userId.length === 24) {
+      try {
+        const objectId = new ObjectId(userId);
+        authUser = await authUsersCollection.findOne(
+          { _id: objectId },
+          { projection: { permissions: 1, roles: 1, id: 1, _id: 1, email: 1 } }
+        );
+      } catch (e: any) {
+        logger.warn('Failed to convert userId to ObjectId', { userId, error: e?.message });
+      }
+    }
+    
+    // Fallback: try by id field if _id query didn't find user
+    if (!authUser) {
+      authUser = await authUsersCollection.findOne(
+        { id: userId },
+        { projection: { permissions: 1, roles: 1, id: 1, _id: 1, email: 1 } }
+      );
+    }
+    
+    // Fallback: try by email if userId looks like email
+    if (!authUser && userId.includes('@')) {
+      authUser = await authUsersCollection.findOne(
+        { email: userId },
+        { projection: { permissions: 1, roles: 1, id: 1, _id: 1, email: 1 } }
+      );
+    }
+    
+    logger.info('checkUserBalance - User lookup result', {
+      userId,
+      found: !!authUser,
+      userEmail: authUser?.email,
+      userIdInDoc: authUser?.id,
+      user_idInDoc: authUser?._id?.toString(),
+      permissions: authUser?.permissions,
+      permissionsType: typeof authUser?.permissions,
+      isArray: Array.isArray(authUser?.permissions),
+      permissionsLength: Array.isArray(authUser?.permissions) ? authUser.permissions.length : 'N/A',
+      permissionsSample: Array.isArray(authUser?.permissions) && authUser.permissions.length > 0 ? authUser.permissions[0] : 'N/A',
+    });
     
     if (authUser?.permissions) {
-      // Permissions in database are stored as object { allowNegative: true, acceptFee: true, ... }
-      permissions = typeof authUser.permissions === 'object' && !Array.isArray(authUser.permissions)
-        ? authUser.permissions
-        : {};
-      allowNegative = permissions.allowNegative === true;
-      
-      logger.debug('Fetched user permissions from auth_service', {
-        userId,
-        permissions,
-        allowNegative,
-      });
+      // Permissions can be stored as:
+      // 1. Object: { allowNegative: true, acceptFee: true, ... }
+      // 2. Array: ["allowNegative", "acceptFee", ...]
+      if (Array.isArray(authUser.permissions)) {
+        // Array format - check if "allowNegative" is in the array
+        allowNegative = authUser.permissions.includes('allowNegative') || authUser.permissions.includes('*:*:*');
+        permissions = { allowNegative };
+        logger.info('Parsed permissions from array', {
+          userId,
+          permissionsArray: authUser.permissions,
+          allowNegative,
+        });
+      } else if (typeof authUser.permissions === 'object') {
+        // Object format
+        permissions = authUser.permissions;
+        allowNegative = permissions.allowNegative === true || permissions['*:*:*'] === true;
+        logger.info('Parsed permissions from object', {
+          userId,
+          permissionsObject: permissions,
+          allowNegative,
+        });
+      } else {
+        permissions = {};
+        allowNegative = false;
+        logger.warn('Permissions is not array or object', {
+          userId,
+          permissionsType: typeof authUser.permissions,
+          permissionsValue: authUser.permissions,
+        });
+      }
     } else {
-      logger.warn('User not found in auth_service or has no permissions', { userId });
+      logger.error('User not found in auth_service or has no permissions', { 
+        userId,
+        userFound: !!authUser,
+        hasPermissions: !!authUser?.permissions,
+        userEmail: authUser?.email,
+        user_id: authUser?._id?.toString(),
+      });
+      // Default to false if no permissions found
+      allowNegative = false;
     }
   } catch (error: any) {
     // Auth service database not available or query failed
-    logger.warn('Could not fetch user permissions from auth_service database', { 
+    logger.error('Could not fetch user permissions from auth_service database', { 
       userId, 
-      error: error.message 
+      error: error.message,
+      stack: error.stack,
     });
     // Default to false (no negative balance allowed) if auth_service unavailable
+    allowNegative = false;
   }
   
   // Get or create account with correct allowNegative flag
@@ -196,15 +267,46 @@ export async function checkUserBalance(
   const available = availableBalance;
   const sufficient = allowNegative || available >= amount;
   
-  // Validate: Account cannot be negative if allowNegative is false
-  if (available < 0 && !allowNegative) {
+  // Log final result
+  logger.info('checkUserBalance - Final result', {
+    userId,
+    allowNegative,
+    sufficient,
+    available,
+    amount,
+  });
+  
+  // Validate: Account cannot go negative if allowNegative is false
+  // BUT: If account is already negative and we're checking for a new transaction,
+  // we need to use the account's current allowNegative flag (which should match user permissions)
+  // This prevents accounts that shouldn't be negative from going further negative
+  const accountAllowNegative = account.allowNegative;
+  if (available < 0 && !accountAllowNegative) {
     logger.error('Account is negative but allowNegative is false', {
       userId,
       balance: available,
       currency,
       subtype,
+      accountAllowNegative,
+      userAllowNegative: allowNegative,
     });
     throw new Error(`Account cannot go negative. Current balance: ${available}, Required: ${amount}`);
+  }
+  
+  // If account is already negative but user permissions say it can go negative,
+  // update the account flag to match (this handles cases where permissions changed)
+  if (available < 0 && !accountAllowNegative && allowNegative) {
+    logger.warn('Account is negative but flag is false, updating to match user permissions', {
+      userId,
+      balance: available,
+      accountAllowNegative,
+      userAllowNegative: allowNegative,
+    });
+    const db = getDatabase();
+    await db.collection('ledger_accounts').updateOne(
+      { accountId: accountId },
+      { $set: { allowNegative: true } }
+    );
   }
   
   return {
@@ -246,8 +348,32 @@ export async function recordDepositLedgerEntry(
   const destinationCurrency = toCurrency || currency;
   
   // Check from user balance in source currency - permissions determine if negative is allowed
-  const { sufficient, allowNegative: fromAllowNegative, available } = await checkUserBalance(fromUserId, amount, currency, 'main');
+  const balanceCheck = await checkUserBalance(fromUserId, amount, currency, 'main');
+  const { sufficient, allowNegative: fromAllowNegative, available } = balanceCheck;
+  
+  logger.info('recordDepositLedgerEntry - Balance check result', {
+    fromUserId,
+    amount,
+    currency,
+    sufficient,
+    allowNegative: fromAllowNegative,
+    available,
+    willAllowNegative: fromAllowNegative,
+    canProceed: sufficient || fromAllowNegative,
+  });
+  
+  // Allow transaction if:
+  // 1. Balance is sufficient (available >= amount), OR
+  // 2. User has allowNegative permission (can go negative)
   if (!sufficient && !fromAllowNegative) {
+    logger.error('Insufficient balance and allowNegative is false', {
+      fromUserId,
+      amount,
+      available,
+      allowNegative: fromAllowNegative,
+      sufficient,
+      balanceCheckResult: balanceCheck,
+    });
     throw new Error(`Insufficient balance: ${available} < ${amount}`);
   }
   

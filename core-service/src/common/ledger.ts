@@ -257,11 +257,6 @@ export class Ledger implements BalanceCalculator {
       this.transactions.createIndex({ tenantId: 1, toAccountId: 1, createdAt: -1 }),
       // Type + status (filtered queries)
       this.transactions.createIndex({ tenantId: 1, type: 1, status: 1, createdAt: -1 }),
-      // External reference lookup (idempotency)
-      this.transactions.createIndex(
-        { externalRef: 1 }, 
-        { sparse: true, unique: true }
-      ),
       // Order reference lookup
       this.transactions.createIndex(
         { orderId: 1 }, 
@@ -301,10 +296,180 @@ export class Ledger implements BalanceCalculator {
       this.transactionStates.createIndex({ sagaId: 1 }, { sparse: true }),
     ]);
     
+    // ✅ CRITICAL: Ensure unique index on externalRef exists (duplicate protection)
+    // This is done separately with error handling to ensure it's always created
+    await this.ensureExternalRefIndex();
+    
     // No system accounts to create - everything is a user account
     // Users are created on-demand with their permissions determining allowNegative
     
     logger.info('Ledger initialized', { tenantId: this.config.tenantId });
+  }
+  
+  /**
+   * ✅ CRITICAL: Ensure unique index on externalRef exists
+   * This prevents duplicate transactions at the database level
+   * Called separately with error handling to ensure it's always created
+   */
+  private async ensureExternalRefIndex(): Promise<void> {
+    try {
+      // Check if index already exists (check by key, not just name)
+      const indexes = await this.transactions.indexes();
+      
+      // Find any index on externalRef field (regardless of name or uniqueness)
+      const existingIndexOnField = indexes.find(idx => 
+        idx.key && typeof idx.key === 'object' && 'externalRef' in idx.key
+      );
+      
+      // Check if we have a unique index on externalRef
+      const existingUniqueIndex = existingIndexOnField && existingIndexOnField.unique === true;
+      
+      if (existingUniqueIndex) {
+        logger.debug('Unique index on externalRef already exists', {
+          indexName: existingIndexOnField.name,
+          options: existingIndexOnField
+        });
+        return;
+      }
+      
+      // If there's an index but it's not unique, we need to drop it first
+      if (existingIndexOnField && existingIndexOnField.name) {
+        logger.warn('Found non-unique index on externalRef, dropping to recreate as unique', {
+          indexName: existingIndexOnField.name,
+          unique: existingIndexOnField.unique
+        });
+        try {
+          // Drop the existing index (by name)
+          await this.transactions.dropIndex(existingIndexOnField.name);
+          logger.info('Dropped existing non-unique index on externalRef');
+        } catch (dropError: any) {
+          logger.warn('Failed to drop existing index, will try to create anyway', {
+            error: dropError.message
+          });
+        }
+      }
+      
+      // Index doesn't exist or was dropped - create it
+      logger.info('Creating unique index on externalRef for duplicate protection');
+      await this.transactions.createIndex(
+        { externalRef: 1 },
+        { 
+          sparse: true, 
+          unique: true,
+          name: 'externalRef_1_unique'
+        }
+      );
+      logger.info('✅ Unique index on externalRef created successfully');
+      
+    } catch (error: any) {
+      // Handle index creation errors gracefully
+      if (error.code === 85 || error.codeName === 'IndexOptionsConflict') {
+        // Index exists but with different options - try to drop all possible names and recreate
+        logger.warn('Index on externalRef exists with different options, attempting to recreate', {
+          error: error.message
+        });
+        try {
+          // Get all indexes to find the conflicting one
+          const indexes = await this.transactions.indexes();
+          const conflictingIndex = indexes.find(idx => 
+            idx.key && typeof idx.key === 'object' && 'externalRef' in idx.key
+          );
+          
+          if (conflictingIndex && conflictingIndex.name) {
+            // Drop the conflicting index by name
+            await this.transactions.dropIndex(conflictingIndex.name).catch(() => {});
+            logger.info(`Dropped conflicting index: ${conflictingIndex.name}`);
+          }
+          
+          // Also try dropping by common names
+          await this.transactions.dropIndex('externalRef_1').catch(() => {});
+          await this.transactions.dropIndex('externalRef_1_unique').catch(() => {});
+          
+          // Recreate with correct options
+          await this.transactions.createIndex(
+            { externalRef: 1 },
+            { 
+              sparse: true, 
+              unique: true,
+              name: 'externalRef_1_unique'
+            }
+          );
+          logger.info('✅ Unique index on externalRef recreated successfully');
+        } catch (recreateError: any) {
+          logger.error('Failed to recreate externalRef index', {
+            error: recreateError.message,
+            code: recreateError.code,
+            codeName: recreateError.codeName
+          });
+          // Don't throw - index might still work, just log the error
+          // Check if a unique index exists anyway (might have been created by another process)
+          try {
+            const finalIndexes = await this.transactions.indexes();
+            const finalIndex = finalIndexes.find(idx => 
+              idx.key && typeof idx.key === 'object' && 'externalRef' in idx.key && idx.unique === true
+            );
+            if (finalIndex) {
+              logger.info('Unique index on externalRef exists (verified after recreate failure)', {
+                indexName: finalIndex.name
+              });
+            }
+          } catch (checkError) {
+            // Ignore check errors
+          }
+        }
+      } else if (error.code === 86 || error.codeName === 'IndexKeySpecsConflict') {
+        // Index with same key exists but different name - check if it's unique
+        try {
+          const indexes = await this.transactions.indexes();
+          const existingIndex = indexes.find(idx => 
+            idx.key && typeof idx.key === 'object' && 'externalRef' in idx.key
+          );
+          
+          if (existingIndex && existingIndex.unique === true) {
+            // It's already unique, that's fine
+            logger.info('Unique index on externalRef already exists (different name)', {
+              indexName: existingIndex.name
+            });
+          } else {
+            // Not unique, log warning but don't fail
+            logger.warn('Index on externalRef exists but may not be unique', {
+              indexName: existingIndex?.name,
+              unique: existingIndex?.unique
+            });
+          }
+        } catch (checkError) {
+          // Ignore check errors - index might still work
+          logger.warn('Could not verify externalRef index uniqueness', {
+            error: checkError instanceof Error ? checkError.message : String(checkError)
+          });
+        }
+      } else {
+        // Other error - log but don't fail initialization
+        logger.error('Failed to create unique index on externalRef', {
+          error: error.message,
+          code: error.code,
+          codeName: error.codeName
+        });
+        // Don't throw - allow service to start even if index creation fails
+        // The index might already exist or be created manually
+        // Verify if a unique index exists anyway
+        try {
+          const indexes = await this.transactions.indexes();
+          const existingIndex = indexes.find(idx => 
+            idx.key && typeof idx.key === 'object' && 'externalRef' in idx.key && idx.unique === true
+          );
+          if (existingIndex) {
+            logger.info('Unique index on externalRef exists (verified after creation failure)', {
+              indexName: existingIndex.name
+            });
+          } else {
+            logger.warn('⚠️  WARNING: Unique index on externalRef does not exist. Duplicate protection may not work.');
+          }
+        } catch (checkError) {
+          // Ignore check errors
+        }
+      }
+    }
   }
   
   // ─────────────────────────────────────────────────────────────────
@@ -1482,7 +1647,6 @@ export class Ledger implements BalanceCalculator {
   getUserAccountId(userId: string, subtype: AccountSubtype, currency?: string): string {
     return getUserId(userId, subtype, {
       currency,
-      useCurrencyInId: !!currency,
     });
   }
   

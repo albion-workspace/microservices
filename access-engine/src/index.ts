@@ -54,6 +54,10 @@ export type {
   Permission,
   PermissionCondition,
   Role,
+  RoleContext,
+  UserRole,
+  ResolvedPermissions,
+  RoleResolutionOptions,
   AccessResult,
   ParsedUrn,
   PermissionRule,
@@ -71,6 +75,10 @@ export {
   createAccessEngine,
   createAccessEngineWithDefaults,
 } from './engine.js';
+
+export {
+  RoleResolver,
+} from './roles.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // URN Utilities
