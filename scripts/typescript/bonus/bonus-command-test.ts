@@ -478,6 +478,11 @@ async function testSetup() {
     const systemUser = await registerAs('system', { updateRoles: true, updatePermissions: true });
     console.log(`  ✅ System user ${systemUser.created ? 'created' : 'updated'}: ${systemUser.userId}`);
 
+    // Register bonus-pool user (will create if doesn't exist, update if exists)
+    console.log('🔐 Registering bonus-pool user...');
+    const bonusPoolUser = await registerAs('bonusPool', { updateRoles: true, updatePermissions: true });
+    console.log(`  ✅ Bonus-pool user ${bonusPoolUser.created ? 'created' : 'updated'}: ${bonusPoolUser.userId}`);
+
     // Normalize system user roles in MongoDB to string array format if needed
     const db = await getAuthDatabase();
     const usersCollection = db.collection('users');
@@ -723,6 +728,7 @@ async function testTimeBasedBonuses() {
   async function ensureBonusPoolBalance(minRequired: number) {
     try {
       const systemUserId = await getUserId('system');
+      const bonusPoolUserId = await getUserId('bonusPool');
       const fundQuery = `
         mutation FundBonusPool($input: CreateDepositInput!) {
           createDeposit(input: $input) {
@@ -737,7 +743,7 @@ async function testTimeBasedBonuses() {
       const fundAmount = 500000000; // $5,000,000 in cents
       const fundData = await graphql(PAYMENT_SERVICE_URL, fundQuery, {
         input: {
-          userId: 'bonus-pool',
+          userId: bonusPoolUserId,
           amount: fundAmount,
           currency: CONFIG.currency,
           tenantId: DEFAULT_TENANT_ID,
@@ -1337,6 +1343,15 @@ async function testAll() {
     systemToken = await login();
     console.log('✅ System user logged in');
     
+    // Register bonus-pool user (required for bonus pool funding)
+    console.log('🔐 Registering bonus-pool user...');
+    try {
+      const bonusPoolUser = await registerAs('bonusPool', { updateRoles: true, updatePermissions: true });
+      console.log(`  ✅ Bonus-pool user ${bonusPoolUser.created ? 'created' : 'updated'}: ${bonusPoolUser.userId}`);
+    } catch (error: any) {
+      console.warn(`  ⚠️  Could not register bonus-pool user: ${error.message}`);
+    }
+    
     // Get test user IDs from existing users (created by payment tests)
     console.log('🔍 Getting test user IDs from existing users...');
     testUserId = await getUserId('user1');
@@ -1398,9 +1413,10 @@ async function testAll() {
     
     // Fund bonus pool with $20,000,000 (enough for all tests including large bonuses)
     const fundAmount = 2000000000; // $20,000,000 in cents (increased to ensure sufficient balance for all bonuses including showcase scenarios)
+    const bonusPoolUserId = await getUserId('bonusPool');
     const fundData = await graphql(PAYMENT_SERVICE_URL, fundQuery, {
       input: {
-        userId: 'bonus-pool',
+        userId: bonusPoolUserId,
         amount: fundAmount,
         currency: CONFIG.currency,
         tenantId: DEFAULT_TENANT_ID,

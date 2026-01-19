@@ -15,6 +15,35 @@
 
 import { createLedger, getDatabase, getClient, logger, type Ledger } from 'core-service';
 
+/**
+ * Get bonus-pool user ID from auth database
+ * Bonus-pool is a registered user (bonus-pool@system.com), not a string literal
+ */
+async function getBonusPoolUserId(): Promise<string> {
+  try {
+    const client = getClient();
+    const authDb = client.db('auth_service');
+    const usersCollection = authDb.collection('users');
+    
+    // Look up bonus-pool user by email
+    const bonusPoolUser = await usersCollection.findOne({ email: 'bonus-pool@system.com' });
+    
+    if (!bonusPoolUser) {
+      // Fallback: if user doesn't exist, log warning and return the string (for backward compatibility)
+      logger.warn('Bonus-pool user not found in auth database, using string literal as fallback');
+      return 'bonus-pool';
+    }
+    
+    const userId = bonusPoolUser._id?.toString() || bonusPoolUser.id;
+    logger.debug('Bonus-pool user ID resolved', { userId, email: bonusPoolUser.email });
+    return userId;
+  } catch (error) {
+    logger.error('Failed to get bonus-pool user ID', { error });
+    // Fallback to string literal for backward compatibility
+    return 'bonus-pool';
+  }
+}
+
 let ledgerInstance: Ledger | null = null;
 
 /**
@@ -36,14 +65,17 @@ function isDuplicateKeyError(error: unknown): error is MongoError {
 
 /**
  * Initialize ledger system for bonus service
+ * Uses payment_service database for ledger operations (shared with payment service)
  */
 export async function initializeLedger(tenantId: string = 'default'): Promise<Ledger> {
   if (ledgerInstance) {
     return ledgerInstance;
   }
 
-  const db = getDatabase();
   const client = getClient();
+  // Use payment_service database for ledger (shared with payment service)
+  // This ensures bonus pool accounts created by payment service are accessible
+  const db = client.db('payment_service');
 
   ledgerInstance = createLedger({
     tenantId,
@@ -53,7 +85,7 @@ export async function initializeLedger(tenantId: string = 'default'): Promise<Le
 
   await ledgerInstance.initialize();
   
-  logger.info('Bonus ledger initialized', { tenantId });
+  logger.info('Bonus ledger initialized', { tenantId, database: 'payment_service' });
   
   return ledgerInstance;
 }
@@ -112,13 +144,15 @@ export async function getOrCreateUserBonusAccount(
 
 /**
  * Get or create bonus pool account
- * Bonus pool is a user account (user:bonus-pool:main), not a system account
+ * Bonus pool is a user account (user:bonus-pool-user-id:main), not a system account
  */
 export async function getOrCreateBonusPoolAccount(
   currency: string = 'USD'
 ): Promise<string> {
   const ledger = getLedger();
-  const accountId = ledger.getUserAccountId('bonus-pool', 'main');
+  // Get actual bonus-pool user ID (registered user, not string literal)
+  const bonusPoolUserId = await getBonusPoolUserId();
+  const accountId = ledger.getUserAccountId(bonusPoolUserId, 'main');
   
   // Check if account exists
   const account = await ledger.getAccount(accountId);
@@ -126,10 +160,10 @@ export async function getOrCreateBonusPoolAccount(
     return accountId;
   }
   
-  // Create bonus pool account (can go negative to allow funding)
+  // Create bonus pool account (cannot go negative - has fixed budget)
   try {
-    await ledger.createUserAccount('bonus-pool', 'main', currency, { allowNegative: true });
-    logger.info('Bonus pool account created', { currency, accountId });
+    await ledger.createUserAccount(bonusPoolUserId, 'main', currency, { allowNegative: false });
+    logger.info('Bonus pool account created', { currency, accountId, bonusPoolUserId });
   } catch (error: unknown) {
     // MongoDB duplicate key error (E11000) - another concurrent call created it
     if (isDuplicateKeyError(error)) {
@@ -206,34 +240,51 @@ export async function recordBonusAwardLedgerEntry(
   const userBonusAccountId = await getOrCreateUserBonusAccount(userId, currency);
   
   // Record bonus award using generic transfer: Bonus Pool -> User Bonus Account
-  const bonusTx = await ledger.createTransaction({
-    type: 'transfer',
-    fromAccountId: bonusPoolAccountId,
-    toAccountId: userBonusAccountId,
-    amount,
-    currency,
-    description: description || `Bonus awarded: ${bonusType}`,
-    externalRef: `bonus-award-${bonusId}-${Date.now()}`,
-    initiatedBy: 'system',
-    metadata: {
+  try {
+    const bonusTx = await ledger.createTransaction({
+      type: 'transfer',
+      fromAccountId: bonusPoolAccountId,
+      toAccountId: userBonusAccountId,
+      amount,
+      currency,
+      description: description || `Bonus awarded: ${bonusType}`,
+      externalRef: `bonus-award-${bonusId}-${Date.now()}`,
+      initiatedBy: 'system',
+      metadata: {
+        userId,
+        bonusId,
+        bonusType,
+        tenantId,
+        transactionType: 'bonus_award',
+      },
+    });
+    
+    logger.info('Bonus award recorded in ledger', {
+      bonusTxId: bonusTx._id,
       userId,
       bonusId,
       bonusType,
-      tenantId,
-      transactionType: 'bonus_award',
-    },
-  });
-  
-  logger.info('Bonus award recorded in ledger', {
-    bonusTxId: bonusTx._id,
-    userId,
-    bonusId,
-    bonusType,
-    amount,
-    currency,
-  });
-  
-  return bonusTx._id;
+      amount,
+      currency,
+      bonusPoolAccountId,
+      userBonusAccountId,
+    });
+    
+    return bonusTx._id;
+  } catch (error: any) {
+    logger.error('Failed to create ledger transaction for bonus award', {
+      error: error.message,
+      stack: error.stack,
+      userId,
+      bonusId,
+      bonusType,
+      amount,
+      currency,
+      bonusPoolAccountId,
+      userBonusAccountId,
+    });
+    throw error;
+  }
 }
 
 /**

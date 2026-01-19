@@ -86,6 +86,17 @@ export const PROVIDER_USERS: Record<string, UserDefinition> = {
     },
     description: 'Payment provider user - accepts fees',
   },
+  bonusPool: {
+    email: 'bonus-pool@system.com',
+    password: 'BonusPool123!@#',
+    roles: ['payment-provider'],
+    permissions: {
+      acceptFee: true,
+      transaction: true,
+      wallet: true,
+    },
+    description: 'Bonus pool user - holds bonus funds with fixed budget, cannot go negative',
+  },
 };
 
 /**
@@ -141,6 +152,7 @@ export const END_USERS: Record<string, UserDefinition> = {
  */
 export const ALL_USERS: Record<string, UserDefinition> = {
   system: SYSTEM_USER,
+  bonusPool: PROVIDER_USERS.bonusPool,
   ...PROVIDER_USERS,
   ...END_USERS,
 };

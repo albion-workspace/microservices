@@ -24,6 +24,7 @@ import {
   on,
   startListening,
   getDatabase,
+  getClient,
   type IntegrationEvent,
   // Webhooks - plug-and-play service
   createWebhookService,
@@ -85,6 +86,33 @@ import { ledgerResolvers, ledgerTypes } from './services/ledger-resolvers.js';
 
 import { SYSTEM_ROLE, SYSTEM_CURRENCY } from './constants.js';
 export { SYSTEM_ROLE };
+
+/**
+ * Get bonus-pool user ID from auth database
+ * Bonus-pool is a registered user (bonus-pool@system.com), not a string literal
+ */
+async function getBonusPoolUserId(): Promise<string> {
+  try {
+    const client = getClient();
+    const authDb = client.db('auth_service');
+    const usersCollection = authDb.collection('users');
+    
+    // Look up bonus-pool user by email
+    const bonusPoolUser = await usersCollection.findOne({ email: 'bonus-pool@system.com' });
+    
+    if (!bonusPoolUser) {
+      // Fallback: if user doesn't exist, log warning and return the string (for backward compatibility)
+      logger.warn('Bonus-pool user not found in auth database, using string literal as fallback');
+      return 'bonus-pool';
+    }
+    
+    return bonusPoolUser._id?.toString() || bonusPoolUser.id;
+  } catch (error) {
+    logger.error('Failed to get bonus-pool user ID', { error });
+    // Fallback to string literal for backward compatibility
+    return 'bonus-pool';
+  }
+}
 
 const config = {
   name: 'payment-service',
@@ -786,9 +814,13 @@ function setupBonusEventHandlers() {
         const { getOrCreateUserAccount } = await import('./services/ledger-service.js');
         const ledger = (await import('./services/ledger-service.js')).getLedger();
         
+        // Get bonus-pool user ID (lookup from auth database)
+        const bonusPoolUserId = await getBonusPoolUserId();
+        
         // Get account IDs for bonus and bonus pool accounts
+        // Bonus pool cannot go negative (has fixed budget)
         const userBonusAccountId = await getOrCreateUserAccount(event.userId!, 'bonus', event.data.currency || SYSTEM_CURRENCY);
-        const bonusPoolAccountId = await getOrCreateUserAccount('bonus-pool', 'main', event.data.currency || SYSTEM_CURRENCY, true);
+        const bonusPoolAccountId = await getOrCreateUserAccount(bonusPoolUserId, 'main', event.data.currency || SYSTEM_CURRENCY, false);
         
         // Use generic transfer: user bonus account -> bonus pool account
         await ledger.createTransaction({
