@@ -8,7 +8,14 @@
  * is now handled by Passport strategies.
  */
 
-import { getDatabase, logger, createTokenPair as coreCreateTokenPair } from 'core-service';
+import { 
+  getDatabase, 
+  logger, 
+  createTokenPair as coreCreateTokenPair,
+  findById,
+  normalizeDocument,
+  generateMongoId,
+} from 'core-service';
 import type { UserContext } from 'core-service';
 import type { LoginInput, User, AuthResponse, TokenPair, Session, RefreshToken, DeviceInfo } from '../types.js';
 import { 
@@ -18,6 +25,7 @@ import {
   hashToken,
   addDays,
   addSeconds,
+  rolesToArray,
 } from '../utils.js';
 import type { AuthConfig } from '../types.js';
 import { authenticateLocal } from '../providers/passport-strategies.js';
@@ -255,8 +263,6 @@ export class AuthenticationService {
     const accessExpiresIn = this.parseExpiry(this.config.jwtExpiresIn);
     const refreshExpiresIn = this.parseExpiry(this.config.jwtRefreshExpiresIn);
     
-    // Create refresh token record
-    const refreshTokenId = crypto.randomUUID();
     // Ensure user.id is defined (should be guaranteed by checks above)
     if (!user.id) {
       // Try to get id from _id if not set
@@ -271,16 +277,24 @@ export class AuthenticationService {
       }
     }
     
+    // Ensure user has id field (normalize if needed)
+    const userId = user.id || (user as any)._id?.toString();
+    if (!userId) {
+      throw new Error('User missing id field - cannot create refresh token');
+    }
+    
     logger.info('Creating refresh token', {
-      userId: user.id,
-      user_id: (user as any)._id?.toString(),
+      userId,
       email: user.email,
       tenantId: user.tenantId,
     });
     
-    const refreshToken: RefreshToken = {
+    // Create refresh token record - use MongoDB ObjectId for performant single-insert operation
+    const { objectId: refreshTokenObjectId, idString: refreshTokenId } = generateMongoId();
+    const refreshToken = {
+      _id: refreshTokenObjectId,
       id: refreshTokenId,
-      userId: user.id, // This should be _id.toString()
+      userId,
       tenantId: user.tenantId,
       token: refreshTokenValue,
       tokenHash: refreshTokenHash,
@@ -291,15 +305,17 @@ export class AuthenticationService {
       isValid: true,
     };
     
-    await db.collection('refresh_tokens').insertOne(refreshToken);
+    await db.collection('refresh_tokens').insertOne(refreshToken as any);
     
-    // Create session
+    // Create session - use MongoDB ObjectId for performant single-insert operation
     // Ensure user.id is defined (should be guaranteed by checks above)
     if (!user.id) {
       throw new Error('User ID is required for session creation');
     }
-    const session: Session = {
-      sessionId: crypto.randomUUID(), // Use sessionId instead of id to avoid confusion with user.id
+    const { objectId: sessionObjectId, idString: sessionId } = generateMongoId();
+    const session = {
+      _id: sessionObjectId,
+      sessionId,
       userId: user.id, // Explicitly use user.id to ensure we're using the correct user ID
       tenantId: user.tenantId,
       refreshTokenId,
@@ -310,7 +326,7 @@ export class AuthenticationService {
       isValid: true,
     };
     
-    await db.collection('sessions').insertOne(session);
+    await db.collection('sessions').insertOne(session as any);
     
     // Generate JWT access token with roles and permissions from Passport user
     // CRITICAL: Use user.id (from Passport user object), NOT session.sessionId
@@ -422,46 +438,13 @@ export class AuthenticationService {
         { $set: { lastUsedAt: new Date() } }
       );
       
-      // Get user - query by _id (MongoDB's primary key) since refreshToken.userId is stored as _id.toString()
+      // Get user using generic helper function with automatic ObjectId handling
       logger.info('Looking up user for token refresh', {
         refreshTokenUserId: refreshToken.userId,
-        refreshTokenUserIdType: typeof refreshToken.userId,
-        refreshTokenUserIdLength: refreshToken.userId?.length,
         tenantId,
       });
       
-      // Get ObjectId from mongodb package (now available as dependency)
-      const { ObjectId } = await import('mongodb');
-      
-      let user: any = null;
-      
-      // Try with ObjectId conversion (most reliable)
-      if (refreshToken.userId && ObjectId.isValid(refreshToken.userId)) {
-        try {
-          user = await db.collection('users').findOne({
-            _id: new ObjectId(refreshToken.userId),
-            tenantId,
-          }) as unknown as User | null;
-          
-          if (user) {
-            logger.info('User found by _id (ObjectId)', { userId: user.id || user._id?.toString(), email: user.email });
-          }
-        } catch (objIdError: any) {
-          logger.warn('ObjectId conversion failed, trying string query', { error: objIdError.message });
-        }
-      }
-      
-      // Fallback: Try string query (MongoDB driver should auto-convert)
-      if (!user) {
-        user = await db.collection('users').findOne({
-          _id: refreshToken.userId as any,
-          tenantId,
-        }) as unknown as User | null;
-        
-        if (user) {
-          logger.info('User found by _id (string)', { userId: user.id || user._id?.toString(), email: user.email });
-        }
-      }
+      const user = await findById<User>(db.collection('users'), refreshToken.userId, { tenantId });
       
       if (!user) {
         // Check what users exist to help debug
@@ -484,36 +467,33 @@ export class AuthenticationService {
         };
       }
       
+      // Normalize user document (ensure id field exists)
+      const normalizedUser = normalizeDocument(user);
+      
       logger.info('User found during token refresh', {
-        userId: user.id,
-        user_id: user._id?.toString(),
-        email: user.email,
-        status: user.status,
+        userId: normalizedUser?.id,
+        email: normalizedUser?.email,
+        status: normalizedUser?.status,
       });
       
-      // Ensure user has _id and id fields
-      if (user._id && !user.id) {
-        user.id = user._id.toString();
-      }
-      
-      if (user.status !== 'active') {
+      if (!normalizedUser) {
         return {
           success: false,
           message: 'User not found or inactive',
         };
       }
       
-      // Ensure user has _id and id fields
-      if (user._id && !user.id) {
-        user.id = user._id.toString();
+      if (normalizedUser.status !== 'active') {
+        return {
+          success: false,
+          message: 'User not found or inactive',
+        };
       }
       
       // Generate new access token
-      // Ensure user.id is defined
-      if (!user.id) {
+      if (!normalizedUser.id) {
         logger.error('User missing id field after refresh token lookup', {
           userId: refreshToken.userId,
-          user_id: user._id?.toString(),
         });
         return {
           success: false,
@@ -521,34 +501,21 @@ export class AuthenticationService {
         };
       }
       
-      // Extract role names - handle both string[] and UserRole[] formats
-      let rolesForContext: string[] = [];
-      if (user.roles && Array.isArray(user.roles) && user.roles.length > 0) {
-        if (typeof user.roles[0] === 'string') {
-          // Already string[] format
-          rolesForContext = user.roles.filter((r: string) => r !== null && r !== undefined);
-        } else if (typeof user.roles[0] === 'object' && user.roles[0].role) {
-          // UserRole[] format - extract role names
-          rolesForContext = user.roles
-            .filter((r: any) => r.active !== false)
-            .filter((r: any) => !r.expiresAt || new Date(r.expiresAt) > new Date())
-            .map((r: any) => r.role)
-            .filter((role: string) => role !== undefined && role !== null);
-        }
-      }
+      // Extract role names using utility function
+      const rolesForContext = rolesToArray(normalizedUser.roles);
       
       logger.info('Extracted roles for token refresh', {
-        userId: user.id,
+        userId: normalizedUser.id,
         rolesForContext,
-        rawRoles: user.roles,
-        rolesType: Array.isArray(user.roles) && user.roles.length > 0 ? typeof user.roles[0] : 'unknown',
+        rawRoles: normalizedUser.roles,
+        rolesType: Array.isArray(normalizedUser.roles) && normalizedUser.roles.length > 0 ? typeof normalizedUser.roles[0] : 'unknown',
       });
       
       const userContext: UserContext = {
-        userId: user.id,
-        tenantId: user.tenantId,
+        userId: normalizedUser.id!,
+        tenantId: normalizedUser.tenantId,
         roles: rolesForContext,
-        permissions: user.permissions || [],
+        permissions: normalizedUser.permissions || [],
       };
       
       const jwtTokens = coreCreateTokenPair(userContext, {

@@ -14,7 +14,8 @@ import {
   Shield,
   Zap,
 } from 'lucide-react'
-import { AuthProvider, useAuth, hasRole } from './lib/auth-context'
+import { AuthProvider, useAuth } from './lib/auth-context'
+import { hasRole } from './lib/access'
 import ProtectedRoute from './components/ProtectedRoute'
 import Dashboard from './pages/Dashboard'
 import PaymentGateway from './pages/PaymentGateway'
@@ -79,7 +80,7 @@ function AppContent() {
           </div>
           <div className="user-info">
             <div className="user-name">{user?.email || user?.username}</div>
-            <div className="user-role">{user?.roles?.[0] || 'User'}</div>
+            <div className="user-role">{Array.isArray(user?.roles) && typeof user.roles[0] === 'string' ? user.roles[0] : (user?.roles?.[0] as any)?.role || 'User'}</div>
           </div>
           <button onClick={logout} className="user-logout" title="Logout">
             <LogOut className="w-4 h-4" />
@@ -123,9 +124,9 @@ function AppContent() {
             </NavLink>
           </div>
 
-          {hasRole(user?.roles, 'admin') && (
+          {hasRole(user?.roles, 'system') && (
             <div className="nav-section">
-              <div className="nav-section-title">Admin</div>
+              <div className="nav-section-title">System</div>
               <NavLink to="/users" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
                 <Shield />
                 <span>User Management</span>
@@ -168,8 +169,8 @@ function AppContent() {
           <Route path="/bonus" element={<ProtectedRoute><BonusService /></ProtectedRoute>} />
           <Route path="/use-cases" element={<ProtectedRoute><UseCases /></ProtectedRoute>} />
           <Route path="/notifications" element={<ProtectedRoute><Notifications /></ProtectedRoute>} />
-          <Route path="/users" element={<ProtectedRoute requireRoles={['admin']}><UserManagement /></ProtectedRoute>} />
-          <Route path="/webhooks" element={<ProtectedRoute requireRoles={['admin']}><Webhooks /></ProtectedRoute>} />
+          <Route path="/users" element={<ProtectedRoute requireRoles={['system']}><UserManagement /></ProtectedRoute>} />
+          <Route path="/webhooks" element={<ProtectedRoute requireRoles={['system']}><Webhooks /></ProtectedRoute>} />
           <Route path="/realtime" element={<ProtectedRoute><RealtimeTest /></ProtectedRoute>} />
           <Route path="/playground" element={<ProtectedRoute><GraphQLPlayground /></ProtectedRoute>} />
           <Route path="/settings" element={<ProtectedRoute><SettingsPage /></ProtectedRoute>} />

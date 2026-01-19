@@ -23,7 +23,8 @@
  * Run: npx tsx scripts/typescript/ledger/ledger-payment-tests.ts
  */
 
-import { createHmac, randomUUID } from 'crypto';
+import { randomUUID } from 'crypto';
+import { createJWT, createSystemToken, createTokenForUser, DEFAULT_TENANT_ID, registerAs, getUserId } from '../config/users.js';
 
 export {}; // Make this a module
 
@@ -32,13 +33,9 @@ export {}; // Make this a module
 // ═══════════════════════════════════════════════════════════════════
 
 const PAYMENT_URL = process.env.PAYMENT_URL || 'http://localhost:3004/graphql';
-const JWT_SECRET = process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || 'shared-jwt-secret-change-in-production';
 
 const CONFIG = {
-  tenantId: 'default',
-  testUserId: `ledger-payment-test-${Date.now()}`,
   testProviderId: 'provider-stripe-test',
-  systemUserId: 'system-treasury',
   currency: 'USD',
   testAmounts: {
     providerFunding: 1000000,  // $10,000.00
@@ -50,46 +47,22 @@ const CONFIG = {
   },
 };
 
-// ═══════════════════════════════════════════════════════════════════
-// JWT Token Generation
-// ═══════════════════════════════════════════════════════════════════
+// Test user ID (will be set from centralized users)
+let testUserId: string;
+let systemUserId: string;
 
-function createJWT(payload: object, expiresIn: string = '8h'): string {
-  const header = { alg: 'HS256', typ: 'JWT' };
-  const now = Math.floor(Date.now() / 1000);
-  let exp = now + 8 * 60 * 60;
-  if (expiresIn.endsWith('h')) exp = now + parseInt(expiresIn) * 60 * 60;
-  if (expiresIn.endsWith('m')) exp = now + parseInt(expiresIn) * 60;
-  
-  const fullPayload = { ...payload, iat: now, exp };
-  const base64Header = Buffer.from(JSON.stringify(header)).toString('base64url');
-  const base64Payload = Buffer.from(JSON.stringify(fullPayload)).toString('base64url');
-  const signature = createHmac('sha256', JWT_SECRET)
-    .update(`${base64Header}.${base64Payload}`)
-    .digest('base64url');
-  
-  return `${base64Header}.${base64Payload}.${signature}`;
-}
+// ═══════════════════════════════════════════════════════════════════
+// JWT Token Generation (using centralized utilities)
+// ═══════════════════════════════════════════════════════════════════
 
 const TOKENS = {
-  admin: createJWT({
-    userId: 'admin',
-    tenantId: CONFIG.tenantId,
-    roles: ['admin'],
-    permissions: ['*:*:*'],
-  }),
-  system: createJWT({
-    userId: CONFIG.systemUserId,
-    tenantId: CONFIG.tenantId,
-    roles: ['system'],
-    permissions: ['wallets:*:*', 'transactions:*:*'],
-  }),
+  system: createSystemToken('8h'),
   user: (userId: string) => createJWT({
     userId,
-    tenantId: CONFIG.tenantId,
+    tenantId: DEFAULT_TENANT_ID,
     roles: ['user'],
     permissions: [],
-  }),
+  }, '8h'),
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -266,7 +239,7 @@ async function testProviderConfiguration() {
           }
         }
       `, {
-        filter: { provider: 'stripe', tenantId: CONFIG.tenantId }
+        filter: { provider: 'stripe', tenantId: DEFAULT_TENANT_ID }
       }, TOKENS.admin);
       if (existingProvider?.providerConfigs?.nodes?.[0]) {
         testData.providerConfigId = existingProvider.providerConfigs.nodes[0].id;
@@ -341,7 +314,7 @@ async function testProviderFunding() {
       userId: CONFIG.testProviderId,
       currency: CONFIG.currency,
       category: 'main',
-      tenantId: CONFIG.tenantId,
+      tenantId: DEFAULT_TENANT_ID,
     },
   }, TOKENS.admin);
   
@@ -396,7 +369,7 @@ async function testProviderFunding() {
   `, {
     input: {
       walletId: testData.providerWalletId,
-      userId: CONFIG.systemUserId,
+      userId: systemUserId,
       type: 'deposit',
       balanceType: 'real',
       currency: CONFIG.currency,
@@ -468,10 +441,10 @@ async function testWalletCreation() {
     }
   `, {
     input: {
-      userId: CONFIG.testUserId,
+      userId: testUserId,
       currency: CONFIG.currency,
       category: 'main',
-      tenantId: CONFIG.tenantId,
+      tenantId: DEFAULT_TENANT_ID,
     },
   }, TOKENS.admin);
   
@@ -503,10 +476,10 @@ async function testMultiCategoryWallets() {
       }
     `, {
       input: {
-        userId: CONFIG.testUserId,
+        userId: testUserId,
         currency: CONFIG.currency,
         category,
-        tenantId: CONFIG.tenantId,
+        tenantId: DEFAULT_TENANT_ID,
       },
     }, TOKENS.admin);
     
@@ -547,7 +520,7 @@ async function testUserWalletsQuery() {
       }
     }
   `, {
-    input: { userId: CONFIG.testUserId, currency: CONFIG.currency }
+    input: { userId: testUserId, currency: CONFIG.currency }
   }, TOKENS.admin);
   
   if (!userWalletsData?.userWallets) {
@@ -578,7 +551,7 @@ async function testWalletBalanceQuery() {
       }
     }
   `, {
-    input: { userId: CONFIG.testUserId, category: 'main', currency: CONFIG.currency }
+    input: { userId: testUserId, category: 'main', currency: CONFIG.currency }
   }, TOKENS.admin);
   
   if (!walletBalanceData?.walletBalance) {
@@ -639,11 +612,11 @@ async function testDepositFlow() {
     }
   `, {
     input: {
-      userId: CONFIG.testUserId,
+      userId: testUserId,
       amount: CONFIG.testAmounts.deposit,
       currency: CONFIG.currency,
       method: 'card',
-      tenantId: CONFIG.tenantId,
+      tenantId: DEFAULT_TENANT_ID,
     },
   }, TOKENS.admin);
   
@@ -701,7 +674,7 @@ async function testDepositFlow() {
           }
         }
       `, {
-        userId: CONFIG.testUserId,
+        userId: testUserId,
         subtype: 'real',
         currency: CONFIG.currency,
       }, TOKENS.admin);
@@ -780,7 +753,7 @@ async function testWithdrawalFlow() {
         }
       }
     `, {
-      userId: CONFIG.testUserId,
+      userId: testUserId,
       subtype: 'real',
       currency: CONFIG.currency,
     }, TOKENS.admin);
@@ -832,11 +805,11 @@ async function testWithdrawalFlow() {
     }
   `, {
     input: {
-      userId: CONFIG.testUserId,
+      userId: testUserId,
       amount: CONFIG.testAmounts.withdrawal,
       currency: CONFIG.currency,
       method: 'bank_transfer',
-      tenantId: CONFIG.tenantId,
+      tenantId: DEFAULT_TENANT_ID,
     },
   }, TOKENS.admin);
   
@@ -882,7 +855,7 @@ async function testWithdrawalFlow() {
         }
       }
     `, {
-      userId: CONFIG.testUserId,
+      userId: testUserId,
       subtype: 'real',
       currency: CONFIG.currency,
     }, TOKENS.admin);
@@ -973,7 +946,7 @@ async function testBetTransaction() {
   `, {
     input: {
       walletId: testData.userWalletId,
-      userId: CONFIG.testUserId,
+      userId: testUserId,
       type: 'bet',
       balanceType: 'real',
       amount: CONFIG.testAmounts.bet,
@@ -1024,7 +997,7 @@ async function testWinTransaction() {
   `, {
     input: {
       walletId: testData.userWalletId,
-      userId: CONFIG.testUserId,
+      userId: testUserId,
       type: 'win',
       balanceType: 'real',
       amount: CONFIG.testAmounts.win,
@@ -1070,7 +1043,7 @@ async function testBonusCreditTransaction() {
   `, {
     input: {
       walletId: testData.userWalletId,
-      userId: CONFIG.testUserId,
+      userId: testUserId,
       type: 'bonus_credit',
       balanceType: 'bonus',
       amount: CONFIG.testAmounts.bonusCredit,
@@ -1136,7 +1109,7 @@ async function testBalanceSynchronization() {
       }
     `, {
       input: {
-        userId: CONFIG.testUserId,
+        userId: testUserId,
         currency: CONFIG.currency,
       },
     }, TOKENS.admin);
@@ -1155,7 +1128,7 @@ async function testBalanceSynchronization() {
           }
         }
       `, {
-        userId: CONFIG.testUserId,
+        userId: testUserId,
         subtype: 'real',
         currency: CONFIG.currency,
       }, TOKENS.admin);
@@ -1178,7 +1151,7 @@ async function testBalanceSynchronization() {
           }
         }
       `, {
-        userId: CONFIG.testUserId,
+        userId: testUserId,
         subtype: 'bonus',
         currency: CONFIG.currency,
       }, TOKENS.admin);
@@ -1258,7 +1231,7 @@ async function testInsufficientBalanceError() {
       }
     }
   `, {
-    userId: CONFIG.testUserId,
+    userId: testUserId,
     subtype: 'real',
     currency: CONFIG.currency,
   }, TOKENS.admin);
@@ -1282,11 +1255,11 @@ async function testInsufficientBalanceError() {
       }
     `, {
       input: {
-        userId: CONFIG.testUserId,
+        userId: testUserId,
         amount: excessiveAmount,
         currency: CONFIG.currency,
         method: 'bank_transfer',
-        tenantId: CONFIG.tenantId,
+        tenantId: DEFAULT_TENANT_ID,
       },
     }, TOKENS.admin);
     
@@ -1339,7 +1312,7 @@ async function testInvalidAmounts() {
   `, {
     input: {
       walletId: testData.userWalletId,
-      userId: CONFIG.testUserId,
+      userId: testUserId,
       type: 'deposit',
       balanceType: 'real',
       amount: 0,
@@ -1363,7 +1336,7 @@ async function testInvalidAmounts() {
   `, {
     input: {
       walletId: testData.userWalletId,
-      userId: CONFIG.testUserId,
+      userId: testUserId,
       type: 'deposit',
       balanceType: 'real',
       amount: -1000,
@@ -1495,7 +1468,13 @@ async function main() {
 `);
 
   console.log(`Test Configuration:`);
-  console.log(`  User ID: ${CONFIG.testUserId}`);
+  // Initialize test users from centralized config
+  const { userId: testUser } = await registerAs('user1');
+  testUserId = testUser;
+  systemUserId = await getUserId('system');
+  
+  console.log(`  User ID: ${testUserId}`);
+  console.log(`  System User ID: ${systemUserId}`);
   console.log(`  Provider ID: ${CONFIG.testProviderId}`);
   console.log(`  Currency: ${CONFIG.currency}`);
   console.log(`  Payment Service: ${PAYMENT_URL}`);

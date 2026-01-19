@@ -21,6 +21,8 @@ import type {
   EligibilityResult, 
   AwardResult,
   DepositEvent,
+  PurchaseEvent,
+  ActionEvent,
   ActivityEvent,
   WithdrawalEvent,
 } from './types.js';
@@ -159,6 +161,67 @@ export class BonusEngine {
   }
 
   /**
+   * Handle purchase event - check and award eligible bonuses (e.g., first_purchase).
+   */
+  async handlePurchase(event: PurchaseEvent): Promise<UserBonus[]> {
+    const awarded: UserBonus[] = [];
+    const context: BonusContext = {
+      userId: event.userId,
+      tenantId: event.tenantId,
+      depositAmount: event.amount, // Reuse depositAmount field for purchase amount
+      transactionId: event.transactionId,
+      walletId: event.walletId,
+      currency: event.currency,
+      isFirstPurchase: event.isFirstPurchase,
+    };
+
+    // Try first purchase bonus
+    // Note: Metadata check happens in FirstPurchaseHandler.validateSpecific
+    const result = await this.award('first_purchase', context);
+    if (result.success && result.bonus) {
+      awarded.push(result.bonus);
+    }
+
+    logger.info('Purchase bonuses processed', {
+      userId: event.userId,
+      transactionId: event.transactionId,
+      awarded: awarded.map(b => ({ id: b.id, type: b.type, value: b.currentValue })),
+    });
+
+    return awarded;
+  }
+
+  /**
+   * Handle action event - check and award eligible bonuses (e.g., first_action).
+   */
+  async handleAction(event: ActionEvent): Promise<UserBonus[]> {
+    const awarded: UserBonus[] = [];
+    const context: BonusContext = {
+      userId: event.userId,
+      tenantId: event.tenantId,
+      activityAmount: event.amount, // Use activityAmount for action amount
+      transactionId: event.transactionId,
+      walletId: event.walletId,
+      currency: event.currency,
+    };
+
+    // Try first action bonus
+    // Note: Metadata check happens in FirstActionHandler.validateSpecific
+    const result = await this.award('first_action', context);
+    if (result.success && result.bonus) {
+      awarded.push(result.bonus);
+    }
+
+    logger.info('Action bonuses processed', {
+      userId: event.userId,
+      transactionId: event.transactionId,
+      awarded: awarded.map(b => ({ id: b.id, type: b.type, value: b.currentValue })),
+    });
+
+    return awarded;
+  }
+
+  /**
    * Handle activity event - update turnover progress.
    * Uses persistence layer for data operations.
    */
@@ -188,8 +251,8 @@ export class BonusEngine {
         : 'in_progress';
 
       // Record transaction using persistence layer
+      // MongoDB will automatically create _id, which will be normalized to id when reading
       await transactionPersistence.create({
-        id: crypto.randomUUID(),
         userBonusId: bonus.id,
         userId: event.userId,
         tenantId: event.tenantId,

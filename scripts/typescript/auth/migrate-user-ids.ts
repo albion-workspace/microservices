@@ -98,7 +98,7 @@ Options:
 Examples:
   npx tsx scripts/typescript/auth/migrate-user-ids.ts --dry-run
   npx tsx scripts/typescript/auth/migrate-user-ids.ts
-  npx tsx scripts/typescript/auth/migrate-user-ids.ts --email admin@demo.com
+  npx tsx scripts/typescript/auth/migrate-user-ids.ts --email system@demo.com
 `);
     process.exit(0);
   }

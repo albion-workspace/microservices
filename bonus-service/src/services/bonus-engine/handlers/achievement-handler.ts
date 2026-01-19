@@ -66,7 +66,7 @@ export class AchievementHandler extends BaseBonusHandler {
     context: BonusContext,
     calculation: BonusCalculation,
     now: Date
-  ): UserBonus {
+  ): Omit<UserBonus, 'id'> {
     const bonus = super.buildUserBonus(template, context, calculation, now);
     (bonus as any).metadata = {
       ...((bonus as any).metadata || {}),
@@ -124,7 +124,7 @@ export class MilestoneHandler extends BaseBonusHandler {
     context: BonusContext,
     calculation: BonusCalculation,
     now: Date
-  ): UserBonus {
+  ): Omit<UserBonus, 'id'> {
     const bonus = super.buildUserBonus(template, context, calculation, now);
     (bonus as any).metadata = {
       ...((bonus as any).metadata || {}),
@@ -330,7 +330,7 @@ export class TaskCompletionHandler extends BaseBonusHandler {
     context: BonusContext,
     calculation: BonusCalculation,
     now: Date
-  ): UserBonus {
+  ): Omit<UserBonus, 'id'> {
     const bonus = super.buildUserBonus(template, context, calculation, now);
     (bonus as any).metadata = {
       ...((bonus as any).metadata || {}),
@@ -386,7 +386,7 @@ export class ChallengeHandler extends BaseBonusHandler {
     context: BonusContext,
     calculation: BonusCalculation,
     now: Date
-  ): UserBonus {
+  ): Omit<UserBonus, 'id'> {
     const bonus = super.buildUserBonus(template, context, calculation, now);
     (bonus as any).metadata = {
       ...((bonus as any).metadata || {}),

@@ -10,6 +10,9 @@
 
 import type { Role } from 'access-engine';
 
+// Alias for backward compatibility
+type RoleDefinition = Role;
+
 /**
  * Default role definitions for common scenarios
  * Uses access-engine's Role type
@@ -29,20 +32,27 @@ export const DEFAULT_ROLES: Role[] = [
   },
   
   {
-    name: 'admin',
-    displayName: 'Administrator',
-    description: 'Administrative access within tenant',
-    permissions: ['*:*:*'],
-    priority: 90,
+    name: 'system',
+    displayName: 'System User',
+    description: 'System-level user with full access - only role with unrestricted permissions',
+    permissions: ['*:*:*'], // Full access for system operations
+    priority: 100,
     active: true,
   },
   
   {
-    name: 'system',
-    displayName: 'System User',
-    description: 'System-level user for automated processes',
-    permissions: ['system:*:*'],
-    priority: 80,
+    name: 'admin',
+    displayName: 'Administrator',
+    description: 'Business administrator role - uses permissions for access control',
+    permissions: [
+      // Business admin permissions (not full system access)
+      'user:*:*',
+      'transaction:*:*',
+      'wallet:*:*',
+      'bonus:*:*',
+      'webhook:*:*',
+    ],
+    priority: 90,
     active: true,
   },
   
@@ -113,7 +123,7 @@ export const DEFAULT_ROLES: Role[] = [
     name: 'crypto-admin',
     displayName: 'Crypto Administrator',
     description: 'Administrator for crypto wallet platform',
-    inherits: ['admin'],
+    inherits: ['admin'], // Business role, inherits admin permissions (not system)
     permissions: [
       'wallet:*:*',
       'transaction:*:*',
@@ -195,7 +205,7 @@ export const DEFAULT_ROLES: Role[] = [
     name: 'betting-admin',
     displayName: 'Betting Administrator',
     description: 'Administrator for betting platform',
-    inherits: ['admin'],
+    inherits: ['admin'], // Business role, inherits admin permissions (not system)
     permissions: [
       'betting:*:*',
       'player:*:*',
@@ -285,7 +295,7 @@ export function getDefaultRolesForUseCase(useCase: 'banking' | 'crypto' | 'forex
   };
   
   const roleNames = useCaseMap[useCase] || [];
-  const systemRoles = ['super-admin', 'admin', 'system', 'user'];
+  const systemRoles = ['super-admin', 'system', 'user']; // Note: 'admin' is now a business role
   
   return DEFAULT_ROLES.filter(
     (role) => systemRoles.includes(role.name) || roleNames.includes(role.name)

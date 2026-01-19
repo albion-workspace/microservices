@@ -5,7 +5,7 @@
  */
 
 import { getLedger } from './ledger-service.js';
-import { requireAuth, getUserId, getTenantId, logger, type ResolverContext } from 'core-service';
+import { requireAuth, getUserId, getTenantId, logger, getDatabase, type ResolverContext } from 'core-service';
 import { SYSTEM_CURRENCY } from '../constants.js';
 
 /**
@@ -235,6 +235,106 @@ export const ledgerResolvers = {
         throw new Error(`Failed to get bulk ledger balances: ${error instanceof Error ? error.message : String(error)}`);
       }
     },
+    
+    /**
+     * ✅ Get ledger transactions with filtering and pagination
+     * For audit, reconciliation, and debugging purposes
+     */
+    ledgerTransactions: async (
+      args: Record<string, unknown>,
+      ctx: ResolverContext
+    ) => {
+      requireAuth(ctx);
+      const db = getDatabase();
+      const ledgerTransactionsCollection = db.collection('ledger_transactions');
+      
+      const first = (args.first as number) || 100;
+      const skip = (args.skip as number) || 0;
+      const filter = (args.filter as Record<string, unknown>) || {};
+      
+      // Build MongoDB query
+      const query: Record<string, unknown> = {};
+      
+      // Filter by type if specified
+      if (filter.type) {
+        query.type = filter.type;
+      }
+      
+      // Filter by account if specified
+      if (filter.fromAccountId) {
+        query.fromAccountId = filter.fromAccountId;
+      }
+      if (filter.toAccountId) {
+        query.toAccountId = filter.toAccountId;
+      }
+      if (filter.accountId) {
+        query.$or = [
+          { fromAccountId: filter.accountId },
+          { toAccountId: filter.accountId },
+        ];
+      }
+      
+      // Filter by currency if specified
+      if (filter.currency) {
+        query.currency = filter.currency;
+      }
+      
+      // Filter by status if specified
+      if (filter.status) {
+        query.status = filter.status;
+      }
+      
+      // Filter by externalRef if specified
+      if (filter.externalRef) {
+        query.externalRef = { $regex: filter.externalRef, $options: 'i' };
+      }
+      
+      // Filter by date range if specified
+      if (filter.dateFrom || filter.dateTo) {
+        const dateFilter: Record<string, unknown> = {};
+        if (filter.dateFrom) {
+          dateFilter.$gte = new Date(filter.dateFrom as string);
+        }
+        if (filter.dateTo) {
+          const toDate = new Date(filter.dateTo as string);
+          toDate.setHours(23, 59, 59, 999); // Include full day
+          dateFilter.$lte = toDate;
+        }
+        query.createdAt = dateFilter;
+      }
+      
+      // Execute query
+      const [nodes, totalCount] = await Promise.all([
+        ledgerTransactionsCollection
+          .find(query)
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(first)
+          .toArray(),
+        ledgerTransactionsCollection.countDocuments(query),
+      ]);
+      
+      return {
+        nodes: nodes.map((tx: any) => ({
+          _id: tx._id,
+          type: tx.type,
+          fromAccountId: tx.fromAccountId,
+          toAccountId: tx.toAccountId,
+          amount: tx.amount,
+          currency: tx.currency,
+          description: tx.description,
+          externalRef: tx.externalRef,
+          status: tx.status,
+          createdAt: tx.createdAt,
+          metadata: tx.metadata,
+        })),
+        totalCount,
+        pageInfo: {
+          hasNextPage: skip + first < totalCount,
+          hasPreviousPage: skip > 0,
+        },
+      };
+    },
   },
   Mutation: {},
 };
@@ -281,6 +381,26 @@ export const ledgerTypes = `
     balances: [BulkLedgerBalance!]!
   }
   
+  type LedgerTransaction {
+    _id: String!
+    type: String!
+    fromAccountId: String!
+    toAccountId: String!
+    amount: Float!
+    currency: String!
+    description: String
+    externalRef: String
+    status: String!
+    createdAt: String!
+    metadata: JSON
+  }
+  
+  type LedgerTransactionConnection {
+    nodes: [LedgerTransaction!]!
+    totalCount: Int!
+    pageInfo: PageInfo!
+  }
+  
   extend type Query {
     """
     Get user's ledger account balance
@@ -308,5 +428,15 @@ export const ledgerTypes = `
       subtype: String
       currency: String
     ): BulkLedgerBalancesResponse!
+    
+    """
+    ✅ Get ledger transactions with filtering and pagination
+    For audit, reconciliation, and debugging purposes
+    """
+    ledgerTransactions(
+      first: Int
+      skip: Int
+      filter: JSON
+    ): LedgerTransactionConnection!
   }
 `;

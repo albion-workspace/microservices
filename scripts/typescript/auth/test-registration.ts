@@ -50,7 +50,7 @@ async function main() {
       `,
       {
         input: {
-          email: 'admin@demo.com',
+          email: 'system@demo.com',
           password: 'Admin123!@#',
           tenantId: 'default-tenant',
         },

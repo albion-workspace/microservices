@@ -17,7 +17,7 @@
  * Run: npx tsx scripts/typescript/ledger/ledger-integration-tests.ts
  */
 
-import { createHmac } from 'crypto';
+import { createJWT, createSystemToken, createUserToken as createUserTokenUtil, createTokenForUser, DEFAULT_TENANT_ID, registerAs, getUserId } from '../config/users.js';
 
 export {}; // Make this a module
 
@@ -30,12 +30,8 @@ const URLS = {
   bonus: process.env.BONUS_URL || 'http://localhost:3005/graphql',
 };
 
-const JWT_SECRET = process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || 'shared-jwt-secret-change-in-production';
-
 const CONFIG = {
-  testUserId: `ledger-test-user-${Date.now()}`,
   testProviderId: 'provider-stripe',
-  tenantId: 'default',
   currency: 'USD',
   testAmounts: {
     providerFunding: 1000000,  // $10,000.00
@@ -46,41 +42,21 @@ const CONFIG = {
   },
 };
 
-// ═══════════════════════════════════════════════════════════════════
-// JWT Token Generation
-// ═══════════════════════════════════════════════════════════════════
+// Test user ID (will be set from centralized users)
+let testUserId: string;
 
-function createJWT(payload: object, secret: string, expiresIn: string = '8h'): string {
-  const header = { alg: 'HS256', typ: 'JWT' };
-  const now = Math.floor(Date.now() / 1000);
-  let exp = now + 8 * 60 * 60;
-  if (expiresIn.endsWith('h')) {
-    exp = now + parseInt(expiresIn) * 60 * 60;
-  } else if (expiresIn.endsWith('m')) {
-    exp = now + parseInt(expiresIn) * 60;
-  }
-  
-  const fullPayload = { ...payload, iat: now, exp };
-  const base64Header = Buffer.from(JSON.stringify(header)).toString('base64url');
-  const base64Payload = Buffer.from(JSON.stringify(fullPayload)).toString('base64url');
-  const signature = createHmac('sha256', secret)
-    .update(`${base64Header}.${base64Payload}`)
-    .digest('base64url');
-  
-  return `${base64Header}.${base64Payload}.${signature}`;
-}
+// ═══════════════════════════════════════════════════════════════════
+// JWT Token Generation (using centralized utilities)
+// ═══════════════════════════════════════════════════════════════════
 
 function createAdminToken(): string {
-  return createJWT(
-    { userId: 'admin', tenantId: CONFIG.tenantId, roles: ['admin'], permissions: ['*:*:*'] },
-    JWT_SECRET
-  );
+  return createSystemToken('8h');
 }
 
 function createUserToken(userId: string): string {
   return createJWT(
-    { userId, tenantId: CONFIG.tenantId, roles: ['user'], permissions: [] },
-    JWT_SECRET
+    { userId, tenantId: DEFAULT_TENANT_ID, roles: ['user'], permissions: [] },
+    '8h'
   );
 }
 
@@ -263,7 +239,7 @@ async function testProviderFunding() {
       userId: CONFIG.testProviderId,
       currency: CONFIG.currency,
       category: 'main',
-      tenantId: CONFIG.tenantId,
+      tenantId: DEFAULT_TENANT_ID,
     },
   });
   
@@ -378,10 +354,10 @@ async function testUserAccountCreation(): Promise<string> {
     }
   `, {
     input: {
-      userId: CONFIG.testUserId,
+      userId: testUserId,
       currency: CONFIG.currency,
       category: 'main',
-      tenantId: CONFIG.tenantId,
+      tenantId: DEFAULT_TENANT_ID,
     },
   });
   
@@ -435,12 +411,12 @@ async function testDepositFlow(walletId: string) {
     }
   `, {
     input: {
-      userId: CONFIG.testUserId,
+      userId: testUserId,
       amount: CONFIG.testAmounts.deposit,
       currency: CONFIG.currency,
       method: 'card',
       providerId: CONFIG.testProviderId,
-      tenantId: CONFIG.tenantId,
+      tenantId: DEFAULT_TENANT_ID,
     },
   });
   
@@ -486,7 +462,7 @@ async function testDepositFlow(walletId: string) {
       }
     }
   `, {
-    userId: CONFIG.testUserId,
+    userId: testUserId,
     subtype: 'real',
     currency: CONFIG.currency,
   });
@@ -547,7 +523,7 @@ async function testWithdrawalFlow(walletId: string) {
       }
     }
   `, {
-    userId: CONFIG.testUserId,
+    userId: testUserId,
     subtype: 'real',
     currency: CONFIG.currency,
   });
@@ -574,12 +550,12 @@ async function testWithdrawalFlow(walletId: string) {
     }
   `, {
     input: {
-      userId: CONFIG.testUserId,
+      userId: testUserId,
       amount: CONFIG.testAmounts.withdrawal,
       currency: CONFIG.currency,
       method: 'bank_transfer',
       providerId: CONFIG.testProviderId,
-      tenantId: CONFIG.tenantId,
+      tenantId: DEFAULT_TENANT_ID,
     },
   });
   
@@ -623,7 +599,7 @@ async function testWithdrawalFlow(walletId: string) {
       }
     }
   `, {
-    userId: CONFIG.testUserId,
+    userId: testUserId,
     subtype: 'real',
     currency: CONFIG.currency,
   });
@@ -718,10 +694,10 @@ async function testBonusAward() {
     }
   `, {
     input: {
-      userId: CONFIG.testUserId,
+      userId: testUserId,
       templateCode,
       currency: CONFIG.currency,
-      tenantId: CONFIG.tenantId,
+      tenantId: DEFAULT_TENANT_ID,
     },
   });
   
@@ -761,7 +737,7 @@ async function testBonusAward() {
       }
     }
   `, {
-    userId: CONFIG.testUserId,
+    userId: testUserId,
     subtype: 'bonus',
     currency: CONFIG.currency,
   });
@@ -794,7 +770,7 @@ async function testBonusConversion() {
     }
   `, {
     input: {
-      userId: CONFIG.testUserId,
+      userId: testUserId,
     },
   });
   
@@ -819,7 +795,7 @@ async function testBonusConversion() {
       }
     }
   `, {
-    userId: CONFIG.testUserId,
+    userId: testUserId,
     subtype: 'bonus',
     currency: CONFIG.currency,
   });
@@ -831,7 +807,7 @@ async function testBonusConversion() {
       }
     }
   `, {
-    userId: CONFIG.testUserId,
+    userId: testUserId,
     subtype: 'real',
     currency: CONFIG.currency,
   });
@@ -863,7 +839,7 @@ async function testInsufficientBalanceError() {
       }
     }
   `, {
-    userId: CONFIG.testUserId,
+    userId: testUserId,
     subtype: 'real',
     currency: CONFIG.currency,
   });
@@ -887,12 +863,12 @@ async function testInsufficientBalanceError() {
       }
     `, {
       input: {
-        userId: CONFIG.testUserId,
+        userId: testUserId,
         amount: excessiveAmount,
         currency: CONFIG.currency,
         method: 'bank_transfer',
         providerId: CONFIG.testProviderId,
-        tenantId: CONFIG.tenantId,
+        tenantId: DEFAULT_TENANT_ID,
       },
     });
     
@@ -957,7 +933,7 @@ async function testBalanceSynchronization() {
     }
   `, {
     input: {
-      userId: CONFIG.testUserId,
+      userId: testUserId,
       currency: CONFIG.currency,
     },
   });
@@ -973,7 +949,7 @@ async function testBalanceSynchronization() {
       }
     }
   `, {
-    userId: CONFIG.testUserId,
+    userId: testUserId,
     subtype: 'real',
     currency: CONFIG.currency,
   });
@@ -985,7 +961,7 @@ async function testBalanceSynchronization() {
       }
     }
   `, {
-    userId: CONFIG.testUserId,
+    userId: testUserId,
     subtype: 'bonus',
     currency: CONFIG.currency,
   });
@@ -1127,8 +1103,12 @@ async function main() {
 ╚═══════════════════════════════════════════════════════════════════════╝
 `);
 
+  // Initialize test user from centralized config
+  const { userId: testUser } = await registerAs('user1');
+  testUserId = testUser;
+  
   console.log(`Test Configuration:`);
-  console.log(`  User ID: ${CONFIG.testUserId}`);
+  console.log(`  User ID: ${testUserId}`);
   console.log(`  Provider ID: ${CONFIG.testProviderId}`);
   console.log(`  Currency: ${CONFIG.currency}`);
   console.log(`  Payment Service: ${URLS.payment}`);

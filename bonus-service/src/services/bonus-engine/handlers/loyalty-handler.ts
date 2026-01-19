@@ -65,7 +65,7 @@ export class DailyLoginHandler extends BaseBonusHandler {
     context: BonusContext,
     calculation: BonusCalculation,
     now: Date
-  ): UserBonus {
+  ): Omit<UserBonus, 'id'> {
     const bonus = super.buildUserBonus(template, context, calculation, now);
     (bonus as any).streakDay = context.consecutiveDays || 1;
     return bonus;
@@ -194,7 +194,7 @@ export class TierUpgradeHandler extends BaseBonusHandler {
     context: BonusContext,
     calculation: BonusCalculation,
     now: Date
-  ): UserBonus {
+  ): Omit<UserBonus, 'id'> {
     const bonus = super.buildUserBonus(template, context, calculation, now);
     (bonus as any).upgradedToTier = context.newTier;
     return bonus;

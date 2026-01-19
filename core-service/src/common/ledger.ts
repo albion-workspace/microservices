@@ -20,6 +20,7 @@
 import { Db, Collection, ClientSession, MongoClient } from 'mongodb';
 import { randomUUID, createHash } from 'crypto';
 import { logger } from './logger.js';
+import { isDuplicateKeyError, handleDuplicateKeyError } from './mongodb-errors.js';
 import { getUserAccountId as getUserId } from './account-ids.js';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -105,7 +106,7 @@ export interface LedgerTransaction {
 }
 
 export interface LedgerEntry {
-  _id: string;
+  _id?: string; // MongoDB will automatically generate this
   tenantId: string;
   transactionId: string;
   accountId: string;
@@ -750,50 +751,21 @@ export class Ledger implements BalanceCalculator {
       });
       
       // ✅ CRITICAL FIX: Handle duplicate key error gracefully (race condition)
-      // If two requests try to insert same externalRef simultaneously, one will get E11000
-      if (error.code === 11000 || 
-          error.message?.includes('duplicate key') || 
-          error.message?.includes('E11000') ||
-          errorName === 'MongoServerError' && errorMessage.includes('E11000')) {
-        
-        // Another request inserted same externalRef - fetch and return it (idempotent)
+      // Use centralized duplicate key handler (optimized for sharding)
+      if (isDuplicateKeyError(error)) {
         if (input.externalRef) {
-          logger.info('Duplicate key error detected (race condition), fetching existing transaction', {
-            externalRef: input.externalRef,
-            error: errorMessage,
-          });
-          
-          // Retry fetch with small delay to ensure transaction is committed
-          await new Promise(resolve => setTimeout(resolve, 100));
-          
-          const existing = await this.transactions.findOne(
-            { externalRef: input.externalRef },
-            { projection: { _id: 1, status: 1, amount: 1, currency: 1, createdAt: 1 } }
+          const existing = await handleDuplicateKeyError<LedgerTransaction>(
+            this.transactions as any, // Type assertion needed due to generic Collection type
+            error,
+            {
+              lookupField: 'externalRef',
+              lookupValue: input.externalRef,
+              projection: { _id: 1, status: 1, amount: 1, currency: 1, createdAt: 1 },
+            }
           );
           
           if (existing) {
-            logger.info('Returning existing transaction (duplicate key race condition resolved)', {
-              externalRef: input.externalRef,
-              txId: existing._id,
-              status: existing.status,
-            });
             return existing as LedgerTransaction;
-          }
-          
-          // If still not found, wait a bit more and retry (transaction might be committing)
-          await new Promise(resolve => setTimeout(resolve, 200));
-          const retryExisting = await this.transactions.findOne(
-            { externalRef: input.externalRef },
-            { projection: { _id: 1, status: 1, amount: 1, currency: 1, createdAt: 1 } }
-          );
-          
-          if (retryExisting) {
-            logger.info('Returning existing transaction (after retry)', {
-              externalRef: input.externalRef,
-              txId: retryExisting._id,
-              status: retryExisting.status,
-            });
-            return retryExisting as LedgerTransaction;
           }
         }
         
@@ -910,8 +882,8 @@ export class Ledger implements BalanceCalculator {
     };
     
     // Create DEBIT entry (from account)
+    // MongoDB will automatically generate _id
     const debitEntry: LedgerEntry = {
-      _id: randomUUID(),
       tenantId: this.config.tenantId,
       transactionId: txId,
       accountId: input.fromAccountId,
@@ -925,8 +897,8 @@ export class Ledger implements BalanceCalculator {
     };
     
     // Create CREDIT entry (to account)
+    // MongoDB will automatically generate _id
     const creditEntry: LedgerEntry = {
-      _id: randomUUID(),
       tenantId: this.config.tenantId,
       transactionId: txId,
       accountId: input.toAccountId,
@@ -1132,8 +1104,8 @@ export class Ledger implements BalanceCalculator {
         const toSeq = toAccount.lastEntrySequence + 1;
         
         // Create entries
+        // MongoDB will automatically generate _id
         const debitEntry: LedgerEntry = {
-          _id: randomUUID(),
           tenantId: this.config.tenantId,
           transactionId: txId,
           accountId: tx.fromAccountId,
@@ -1147,7 +1119,6 @@ export class Ledger implements BalanceCalculator {
         };
         
         const creditEntry: LedgerEntry = {
-          _id: randomUUID(),
           tenantId: this.config.tenantId,
           transactionId: txId,
           accountId: tx.toAccountId,

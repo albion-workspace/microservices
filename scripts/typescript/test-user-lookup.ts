@@ -9,13 +9,13 @@ async function main() {
   try {
     const db = await getAuthDatabase();
     
-    const adminUserId = '696d42a6b5dac3ff318f031f';
+    const systemUserId = '696d42a6b5dac3ff318f031f';
     
-    console.log(`\n🔍 Looking up admin user with ID: ${adminUserId}\n`);
+    console.log(`\n🔍 Looking up system user with ID: ${systemUserId}\n`);
     
     // Try query by id field
     const userById = await db.collection('users').findOne(
-      { id: adminUserId },
+      { id: systemUserId },
       { projection: { id: 1, _id: 1, email: 1, permissions: 1, roles: 1 } }
     );
     
@@ -33,8 +33,8 @@ async function main() {
     const { ObjectId } = await import('mongodb');
     let userBy_id: any = null;
     try {
-      if (ObjectId.isValid(adminUserId)) {
-        const objectId = new ObjectId(adminUserId);
+      if (ObjectId.isValid(systemUserId)) {
+        const objectId = new ObjectId(systemUserId);
         userBy_id = await db.collection('users').findOne(
           { _id: objectId },
           { projection: { id: 1, _id: 1, email: 1, permissions: 1, roles: 1 } }
@@ -56,11 +56,11 @@ async function main() {
     
     // Try query by email
     const userByEmail = await db.collection('users').findOne(
-      { email: 'admin@demo.com' },
+      { email: 'system@demo.com' },
       { projection: { id: 1, _id: 1, email: 1, permissions: 1, roles: 1 } }
     );
     
-    console.log('\nQuery by email (admin@demo.com):');
+    console.log('\nQuery by email (system@demo.com):');
     console.log('  Found:', !!userByEmail);
     if (userByEmail) {
       console.log('  Email:', userByEmail.email);

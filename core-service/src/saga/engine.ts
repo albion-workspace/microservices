@@ -73,8 +73,7 @@ async function executeSagaWithTransaction<TEntity, TInput>(
           readPreference: 'primary',
         });
         
-        // Transaction committed successfully
-        logger.info(`Saga ${sagaId} committed`, { steps: completedSteps.length });
+        // Transaction committed successfully - no logging needed (expected behavior)
         return { success: true, context, completedSteps };
         
       } catch (error) {

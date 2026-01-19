@@ -5,9 +5,17 @@
  * Provides type-safe, generic methods for user CRUD operations.
  */
 
-import { getDatabase, logger } from 'core-service';
+import { 
+  getDatabase, 
+  logger, 
+  findById, 
+  normalizeDocument, 
+  findOneAndUpdateById,
+  updateOneById,
+  deleteOneById,
+} from 'core-service';
 import type { User, UserFilter, UserQueryOptions, UpdateUserInput, UpdateUserMetadataInput } from '../types/user-types.js';
-import type { UserRole, AssignRoleInput } from '../types/role-types.js';
+import type { UserRole, AssignRoleInput } from '../types.js';
 
 /**
  * User Repository for data access operations
@@ -24,12 +32,12 @@ export class UserRepository {
   }
   
   /**
-   * Find user by ID
+   * Find user by ID (handles both _id and id fields automatically)
    */
   async findById(userId: string, tenantId: string): Promise<User | null> {
     const collection = this.getCollection();
-    const user = await collection.findOne({ id: userId, tenantId }) as any;
-    return user || null;
+    const user = await findById<User>(collection, userId, { tenantId });
+    return normalizeDocument(user);
   }
   
   /**
@@ -38,7 +46,7 @@ export class UserRepository {
   async findByMongoId(_id: any, tenantId: string): Promise<User | null> {
     const collection = this.getCollection();
     const user = await collection.findOne({ _id, tenantId }) as any;
-    return user || null;
+    return normalizeDocument(user);
   }
   
   /**
@@ -134,7 +142,7 @@ export class UserRepository {
   }
   
   /**
-   * Update user
+   * Update user (handles both _id and id fields automatically)
    */
   async update(input: UpdateUserInput): Promise<User | null> {
     const collection = this.getCollection();
@@ -150,67 +158,61 @@ export class UserRepository {
     if (input.status !== undefined) update.status = input.status;
     if (input.metadata !== undefined) update.metadata = input.metadata;
     
-    const result = await collection.findOneAndUpdate(
-      { id: input.userId, tenantId: input.tenantId },
+    // Use optimized helper function for findOneAndUpdate (performance-optimized)
+    const result = await findOneAndUpdateById<User>(
+      collection,
+      input.userId,
       { $set: update },
+      { tenantId: input.tenantId },
       { returnDocument: 'after' }
     );
     
-    return result as any || null;
+    return normalizeDocument(result) || null;
   }
   
   /**
-   * Update user metadata
+   * Update user metadata (handles both _id and id fields automatically)
    */
   async updateMetadata(input: UpdateUserMetadataInput): Promise<User | null> {
     const collection = this.getCollection();
     const now = new Date();
     
-    if (input.merge) {
-      // Merge with existing metadata
-      await collection.updateOne(
-        { id: input.userId, tenantId: input.tenantId },
-        {
-          $set: {
-            'metadata': input.metadata,
-            updatedAt: now,
-          },
-        }
-      );
-    } else {
-      // Replace metadata
-      await collection.updateOne(
-        { id: input.userId, tenantId: input.tenantId },
-        {
-          $set: {
-            metadata: input.metadata,
-            updatedAt: now,
-          },
-        }
-      );
-    }
+    // Use optimized helper function for updateOne (performance-optimized)
+    const updateDoc = input.merge
+      ? { 'metadata': input.metadata, updatedAt: now }
+      : { metadata: input.metadata, updatedAt: now };
+    
+    await updateOneById(
+      collection,
+      input.userId,
+      { $set: updateDoc },
+      { tenantId: input.tenantId }
+    );
     
     return this.findById(input.userId, input.tenantId);
   }
   
   /**
-   * Add role to user
+   * Add role to user (handles both _id and id fields automatically)
    */
   async addRole(userId: string, tenantId: string, role: UserRole): Promise<void> {
     const collection = this.getCollection();
     const now = new Date();
     
-    await collection.updateOne(
-      { id: userId, tenantId },
+    // Use optimized helper function for updateOne (performance-optimized)
+    await updateOneById(
+      collection,
+      userId,
       {
         $push: { roles: role },
         $set: { updatedAt: now },
-      }
+      },
+      { tenantId }
     );
   }
   
   /**
-   * Remove role from user
+   * Remove role from user (handles both _id and id fields automatically)
    */
   async removeRole(
     userId: string,
@@ -230,14 +232,17 @@ export class UserRepository {
       (r) => !(r.role === roleName && r.context === context)
     );
     
-    await collection.updateOne(
-      { id: userId, tenantId },
+    // Use optimized helper function for updateOne (performance-optimized)
+    await updateOneById(
+      collection,
+      userId,
       {
         $set: {
           roles,
           updatedAt: now,
         },
-      }
+      },
+      { tenantId }
     );
   }
   
@@ -310,66 +315,76 @@ export class UserRepository {
   }
   
   /**
-   * Delete user (soft delete)
+   * Delete user (soft delete) - handles both _id and id fields automatically
    */
   async delete(userId: string, tenantId: string): Promise<void> {
     const collection = this.getCollection();
     const now = new Date();
     
-    await collection.updateOne(
-      { id: userId, tenantId },
+    // Use optimized helper function for updateOne (performance-optimized)
+    await updateOneById(
+      collection,
+      userId,
       {
         $set: {
           status: 'deleted',
           deletedAt: now,
           updatedAt: now,
         },
-      }
+      },
+      { tenantId }
     );
   }
   
   /**
-   * Hard delete user (permanent)
+   * Hard delete user (permanent) - handles both _id and id fields automatically
    */
   async hardDelete(userId: string, tenantId: string): Promise<void> {
     const collection = this.getCollection();
-    await collection.deleteOne({ id: userId, tenantId });
+    // Use optimized helper function for deleteOne (performance-optimized)
+    await deleteOneById(collection, userId, { tenantId });
   }
   
   /**
-   * Update last login timestamp
+   * Update last login timestamp - handles both _id and id fields automatically
    */
   async updateLastLogin(userId: string, tenantId: string): Promise<void> {
     const collection = this.getCollection();
     const now = new Date();
     
-    await collection.updateOne(
-      { id: userId, tenantId },
+    // Use optimized helper function for updateOne (performance-optimized)
+    await updateOneById(
+      collection,
+      userId,
       {
         $set: {
           lastLoginAt: now,
           lastActiveAt: now,
           updatedAt: now,
         },
-      }
+      },
+      { tenantId }
     );
   }
   
   /**
-   * Update last active timestamp
+   * Update last active timestamp - handles both _id and id fields automatically
    */
   async updateLastActive(userId: string, tenantId: string): Promise<void> {
     const collection = this.getCollection();
     const now = new Date();
     
-    await collection.updateOne(
-      { id: userId, tenantId },
+    // Use optimized helper function for updateOne (performance-optimized)
+    await updateOneById(
+      collection,
+      userId,
       {
         $set: {
           lastActiveAt: now,
           updatedAt: now,
         },
-      }
+      },
+      { tenantId }
     );
   }
 }

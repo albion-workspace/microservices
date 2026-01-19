@@ -5,33 +5,35 @@
  * Supports context-based roles and hierarchical role inheritance.
  */
 
-import { getDatabase, logger } from 'core-service';
+import { getDatabase, logger, findOneById, updateOneById } from 'core-service';
+import { RoleResolver, type Role } from 'access-engine';
 import type {
-  RoleDefinition,
   UserRole,
   RoleContext,
-  RoleName,
-  PermissionName,
   RoleGraph,
   ResolvedPermissions,
   RoleResolutionOptions,
   AssignRoleInput,
   RevokeRoleInput,
-  PermissionCheckInput,
 } from '../types/role-types.js';
 import type { User } from '../types/user-types.js';
+import { rolesToArray } from '../utils.js';
 
 /**
  * Role Service for managing graph-based roles and permissions
  */
 export class RoleService {
   private roleGraph: RoleGraph;
+  private roleResolver: RoleResolver;
   
-  constructor(initialRoles?: RoleDefinition[], initialPermissions?: any[]) {
+  constructor(initialRoles?: Role[], initialPermissions?: any[]) {
     this.roleGraph = {
       roles: new Map(),
       permissions: new Map(),
     };
+    
+    // Initialize RoleResolver from access-engine
+    this.roleResolver = new RoleResolver(initialRoles || []);
     
     // Initialize with provided roles and permissions
     if (initialRoles) {
@@ -50,9 +52,10 @@ export class RoleService {
   /**
    * Register a role definition
    */
-  registerRole(role: RoleDefinition): void {
+  registerRole(role: Role): void {
     this.roleGraph.roles.set(role.name, role);
-    logger.info('Role registered', { role: role.name, context: role.context });
+    this.roleResolver.registerRole(role);
+    logger.info('Role registered', { role: role.name });
   }
   
   /**
@@ -70,17 +73,24 @@ export class RoleService {
     user: User,
     options: RoleResolutionOptions = {}
   ): ResolvedPermissions {
+    // Convert UserRole[] to string[] using utility function
+    const rolesArray = rolesToArray(user.roles);
+    
     // Convert User to access-engine User format
     const accessEngineUser = {
       userId: user.id || (user._id ? user._id.toString() : ''),
       tenantId: user.tenantId,
-      roles: user.roles || [],
+      roles: rolesArray,
       permissions: user.permissions || [],
       metadata: user.metadata,
     };
     
-    // Use access-engine's RoleResolver
-    return this.roleResolver.resolveUserPermissions(accessEngineUser, options);
+    // Use access-engine's RoleResolver - returns ResolvedPermissions
+    const resolved = this.roleResolver.resolveUserPermissions(accessEngineUser, options);
+    return {
+      allowed: Array.from(resolved.permissions),
+      denied: [],
+    };
   }
   
   /**
@@ -92,10 +102,13 @@ export class RoleService {
     permission: string,
     context?: RoleContext
   ): boolean {
+    // Convert UserRole[] to string[] using utility function
+    const rolesArray = rolesToArray(user.roles);
+    
     const accessEngineUser = {
       userId: user.id || (user._id ? user._id.toString() : ''),
       tenantId: user.tenantId,
-      roles: user.roles || [],
+      roles: rolesArray,
       permissions: user.permissions || [],
       metadata: user.metadata,
     };
@@ -112,10 +125,13 @@ export class RoleService {
     role: string,
     context?: RoleContext
   ): boolean {
+    // Convert UserRole[] to string[] using utility function
+    const rolesArray = rolesToArray(user.roles);
+    
     const accessEngineUser = {
       userId: user.id || (user._id ? user._id.toString() : ''),
       tenantId: user.tenantId,
-      roles: user.roles || [],
+      roles: rolesArray,
       permissions: user.permissions || [],
       metadata: user.metadata,
     };
@@ -132,10 +148,13 @@ export class RoleService {
     roles: string[],
     context?: RoleContext
   ): boolean {
+    // Convert UserRole[] to string[] using utility function
+    const rolesArray = rolesToArray(user.roles);
+    
     const accessEngineUser = {
       userId: user.id || (user._id ? user._id.toString() : ''),
       tenantId: user.tenantId,
-      roles: user.roles || [],
+      roles: rolesArray,
       permissions: user.permissions || [],
       metadata: user.metadata,
     };
@@ -172,31 +191,35 @@ export class RoleService {
     const userId = input.userId;
     const tenantId = input.tenantId;
     
-    // Check if role already exists for this context
-    const user = await usersCollection.findOne({ id: userId, tenantId }) as any;
+    // Use optimized findOneById utility (performance-optimized)
+    const user = await findOneById(usersCollection, userId, { tenantId }) as any;
     if (user) {
       const existingRoleIndex = (user.roles || []).findIndex(
         (r: UserRole) => r.role === input.role && r.context === input.context
       );
       
       if (existingRoleIndex >= 0) {
-        // Update existing role
+        // Update existing role - use optimized updateOneById utility
         const update = {
           [`roles.${existingRoleIndex}`]: userRole,
           updatedAt: now,
         };
-        await usersCollection.updateOne(
-          { id: userId, tenantId },
-          { $set: update }
+        await updateOneById(
+          usersCollection,
+          userId,
+          { $set: update },
+          { tenantId }
         );
       } else {
-        // Add new role
-        await usersCollection.updateOne(
-          { id: userId, tenantId },
+        // Add new role - use optimized updateOneById utility
+        await updateOneById(
+          usersCollection,
+          userId,
           {
             $push: { roles: userRole },
             $set: { updatedAt: now },
-          }
+          },
+          { tenantId }
         );
       }
     } else {
@@ -223,8 +246,8 @@ export class RoleService {
     const userId = input.userId;
     const tenantId = input.tenantId;
     
-    // Find user
-    const user = await usersCollection.findOne({ id: userId, tenantId }) as any;
+    // Use optimized findOneById utility (performance-optimized)
+    const user = await findOneById(usersCollection, userId, { tenantId }) as any;
     if (!user) {
       throw new Error(`User "${userId}" not found`);
     }
@@ -234,14 +257,17 @@ export class RoleService {
       (r: UserRole) => !(r.role === input.role && r.context === input.context)
     );
     
-    await usersCollection.updateOne(
-      { id: userId, tenantId },
+    // Use optimized updateOneById utility (performance-optimized)
+    await updateOneById(
+      usersCollection,
+      userId,
       {
         $set: {
           roles,
           updatedAt: now,
         },
-      }
+      },
+      { tenantId }
     );
     
     logger.info('Role revoked', {

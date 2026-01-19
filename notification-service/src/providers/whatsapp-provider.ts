@@ -4,7 +4,7 @@
 
 import twilio from 'twilio';
 import type { Twilio } from 'twilio';
-import { logger } from 'core-service';
+import { logger, generateId } from 'core-service';
 import type { NotificationProvider, WhatsAppNotification, NotificationResponse, NotificationConfig } from '../types.js';
 
 export class WhatsAppProvider implements NotificationProvider {
@@ -54,7 +54,7 @@ export class WhatsAppProvider implements NotificationProvider {
         });
         
         results.push({
-          id: crypto.randomUUID(),
+          id: generateId(),
           status: 'sent',
           channel: 'whatsapp',
           sentAt: new Date(),
@@ -64,7 +64,7 @@ export class WhatsAppProvider implements NotificationProvider {
         logger.error('Failed to send WhatsApp', { error: error.message, to });
         
         results.push({
-          id: crypto.randomUUID(),
+          id: generateId(),
           status: 'failed',
           channel: 'whatsapp',
           error: error.message,

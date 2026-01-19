@@ -97,17 +97,7 @@ export function verifyToken(token: string, config: JwtConfig): UserContext | nul
       return null;
     }
 
-    // Log token payload for debugging (only in development)
-    if (process.env.NODE_ENV !== 'production') {
-      logger?.info('JWT token verified', {
-        userId: payload.sub,
-        tenantId: payload.tid,
-        roles: payload.roles || [],
-        permissions: payload.permissions || [],
-        rolesCount: (payload.roles || []).length,
-        permissionsCount: (payload.permissions || []).length,
-      });
-    }
+    // Token verification successful - no logging needed (expected behavior)
 
     return {
       userId: payload.sub,

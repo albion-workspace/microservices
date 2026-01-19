@@ -3,7 +3,7 @@
  * Handles TOTP (Time-based One-Time Password) 2FA setup and verification
  */
 
-import { getDatabase, logger } from 'core-service';
+import { getDatabase, logger, findOneById, updateOneById } from 'core-service';
 import speakeasy from 'speakeasy';
 import qrcode from 'qrcode';
 import type { Enable2FAInput, Verify2FAInput, User, TwoFactorSetupResponse } from '../types.js';
@@ -242,7 +242,8 @@ export class TwoFactorService {
     const db = getDatabase();
     
     try {
-      const user = await db.collection('users').findOne({ id: userId }) as unknown as User | null;
+      // Use optimized findOneById utility (performance-optimized)
+      const user = await findOneById<User>(db.collection('users'), userId, {});
       
       if (!user || !user.twoFactorSecret || !user.twoFactorEnabled) {
         return false;

@@ -26,32 +26,8 @@ export interface User {
   lastLoginAt?: string;
 }
 
-/**
- * Helper to extract role names from UserRole[] or string[]
- * Handles both formats defensively
- */
-export function getRoleNames(roles: any): string[] {
-  if (!roles || !Array.isArray(roles)) return [];
-  if (roles.length === 0) return [];
-  // If first element is a string, it's already a string array
-  if (typeof roles[0] === 'string') return roles;
-  // If first element is an object, extract role names from UserRole[]
-  if (typeof roles[0] === 'object' && roles[0].role) {
-    return roles
-      .filter((r: any) => r.active !== false)
-      .filter((r: any) => !r.expiresAt || new Date(r.expiresAt) > new Date())
-      .map((r: any) => r.role)
-      .filter((role: string) => role !== undefined && role !== null);
-  }
-  return [];
-}
-
-/**
- * Helper to check if user has a specific role
- */
-export function hasRole(roles: any, roleName: string): boolean {
-  return getRoleNames(roles).includes(roleName);
-}
+// Re-export access utilities from access.ts (uses access-engine)
+export { getRoleNames, hasRole, hasAnyRole, can, canAny, canAll, isSystem, isAuthenticated as isUserAuthenticated, parsePermissionUrn, matchPermission } from './access.js';
 
 export interface AuthTokens {
   accessToken: string;

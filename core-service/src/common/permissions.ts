@@ -1,65 +1,150 @@
 /**
  * URN Permission System
+ * 
+ * This module re-exports access-engine utilities for consistency.
+ * All URN parsing, matching, and role checking should use access-engine.
  */
 
-import type { Permission, PermissionRule, UserContext } from '../types/index.js';
+import {
+  // URN utilities
+  matchUrn as matchUrnEngine,
+  matchAnyUrn,
+  // Permission rules
+  allow,
+  deny,
+  isAuthenticated as isAuthenticatedEngine,
+  hasRole as hasRoleEngine,
+  hasAnyRole as hasAnyRoleEngine,
+  can as canEngine,
+  and as andEngine,
+  or as orEngine,
+  isOwner as isOwnerEngine,
+  sameTenant as sameTenantEngine,
+  type PermissionRule,
+} from 'access-engine';
 
-export function parseUrn(urn: string): Permission {
-  const [resource = '*', resourceId = '*', action = '*'] = urn.split(':');
-  return { resource, resourceId, action };
+import type { UserContext } from '../types/index.js';
+
+// Re-export everything from access-engine for consistency
+export {
+  // URN utilities
+  parseUrn,
+  buildUrn,
+  matchUrn,
+  matchAnyUrn,
+  isValidUrn,
+  normalizeUrn,
+  getMatchingPatterns,
+  getResource,
+  getAction,
+  getTarget,
+  isOwnTarget,
+  isTenantTarget,
+  hasWildcard,
+  createResourceUrn,
+  StandardActions,
+  StandardTargets,
+  
+  // Permission rules
+  allow,
+  deny,
+  isGuest,
+  hasAllRoles,
+  canAny,
+  canAll,
+  canOn,
+  hasAttribute,
+  attributeIn,
+  attributeMatches,
+  not,
+  duringHours,
+  onDays,
+  rateLimit,
+  custom,
+  rule,
+} from 'access-engine';
+
+/**
+ * Check if user is authenticated
+ * Compatible with core-service UserContext type
+ */
+export const isAuthenticated: PermissionRule = (user) => {
+  return isAuthenticatedEngine(user as any);
+};
+
+/**
+ * Check if user has a specific role
+ * Compatible with core-service UserContext type and handles both string[] and UserRole[] formats
+ */
+export function hasRole(role: string): PermissionRule {
+  return (user) => {
+    if (!user) return false;
+    const userRoles = Array.isArray(user.roles) 
+      ? (typeof user.roles[0] === 'string' 
+          ? user.roles as string[]
+          : (user.roles as any[]).map((r: any) => r.role || r).filter(Boolean))
+      : [];
+    return hasRoleEngine(role)({ ...user, roles: userRoles } as any);
+  };
 }
 
-export function matchUrn(userPerm: string, required: string): boolean {
-  const user = parseUrn(userPerm);
-  const req = parseUrn(required);
-  return (
-    (user.resource === '*' || user.resource === req.resource) &&
-    (user.resourceId === '*' || user.resourceId === req.resourceId) &&
-    (user.action === '*' || user.action === req.action)
-  );
+/**
+ * Check if user has any of the specified roles
+ */
+export function hasAnyRole(...roles: string[]): PermissionRule {
+  return (user) => {
+    if (!user) return false;
+    const userRoles = Array.isArray(user.roles) 
+      ? (typeof user.roles[0] === 'string' 
+          ? user.roles as string[]
+          : (user.roles as any[]).map((r: any) => r.role || r).filter(Boolean))
+      : [];
+    return hasAnyRoleEngine(roles)({ ...user, roles: userRoles } as any);
+  };
 }
 
+/**
+ * Check if user has a specific permission
+ * Compatible with core-service UserContext type
+ */
 export function hasPermission(user: UserContext | null, resource: string, action: string, resourceId = '*'): boolean {
   if (!user) return false;
-  return user.permissions.some(p => matchUrn(p, `${resource}:${resourceId}:${action}`));
+  return matchAnyUrn(user.permissions || [], `${resource}:${action}:${resourceId}`);
 }
 
-// Built-in rules
-export const allow: PermissionRule = () => true;
-export const deny: PermissionRule = () => false;
-export const isAuthenticated: PermissionRule = (user) => user !== null;
+/**
+ * Check permission using URN format
+ */
+export function can(resource: string, action: string): PermissionRule {
+  return (user, args) => {
+    const resourceId = (args?.id as string) || '*';
+    return hasPermission(user as UserContext | null, resource, action, resourceId);
+  };
+}
 
-export const hasRole = (role: string): PermissionRule => (user) => {
-  if (!user) return false;
-  // Check if user has the role
-  if (user.roles?.includes(role)) return true;
-  // Also check if user has wildcard permissions (*:*:*), which grants all roles
-  if (user.permissions?.some(p => p === '*:*:*' || p === '*')) return true;
-  return false;
-};
-export const hasAnyRole = (...roles: string[]): PermissionRule => (user) => {
-  if (!user) return false;
-  // Check if user has any of the required roles
-  if (roles.some(r => user.roles?.includes(r))) return true;
-  // Also check if user has wildcard permissions (*:*:*), which grants all roles
-  if (user.permissions?.some(p => p === '*:*:*' || p === '*')) return true;
-  return false;
-};
-export const can = (resource: string, action: string): PermissionRule => (user, args) => hasPermission(user, resource, action, (args.id as string) || '*');
+/**
+ * Combine multiple rules with AND logic
+ */
+export const and = andEngine;
 
-export const and = (...rules: PermissionRule[]): PermissionRule => async (user, args) => {
-  for (const rule of rules) {
-    if (!(await rule(user, args))) return false;
-  }
-  return true;
-};
+/**
+ * Combine multiple rules with OR logic
+ */
+export const or = orEngine;
 
-export const or = (...rules: PermissionRule[]): PermissionRule => async (user, args) => {
-  for (const rule of rules) {
-    if (await rule(user, args)) return true;
-  }
-  return false;
-};
+/**
+ * Check if user owns the resource
+ */
+export const isOwner = isOwnerEngine;
 
-export const isOwner = (field = 'createdBy'): PermissionRule => (user, args) => user?.userId === args[field];
-export const sameTenant = (field = 'tenantId'): PermissionRule => (user, args) => user?.tenantId === args[field];
+/**
+ * Check if resource belongs to same tenant
+ */
+export const sameTenant = sameTenantEngine;
+
+/**
+ * Check if user has system role (full system access)
+ * This is the only role that should have unrestricted access
+ * All other roles (admin, moderator, etc.) are business logic and use permissions
+ */
+export const isSystem = (): PermissionRule => hasRole('system');

@@ -18,8 +18,8 @@
  *   --all                     Grant all permissions (admin + all permissions)
  * 
  * Examples:
- *   # Promote to admin with all permissions
- *   npx tsx scripts/promote-user.ts admin@test.com --all
+ *   # Promote to system with all permissions
+ *   npx tsx scripts/promote-user.ts system@test.com --all
  * 
  *   # Set specific roles
  *   npx tsx scripts/promote-user.ts user@test.com --roles admin,system
@@ -117,7 +117,7 @@ async function promoteUser() {
     // Determine roles
     let roles: string[] = [];
     if (options.all) {
-      roles = ['admin', 'system'];
+      roles = ['system'];
     } else if (options.roles) {
       roles = options.roles;
     } else if (user.roles) {
@@ -204,7 +204,7 @@ async function promoteUser() {
     if (permissions.allowNegative) console.log(`     ✓ Go negative balance`);
     if (permissions.acceptFee) console.log(`     ✓ Accept fees`);
     if (permissions.bonuses) console.log(`     ✓ Receive bonuses (bonus-service will award bonuses)`);
-    if (roles.includes('admin')) console.log(`     ✓ Perform admin operations`);
+    if (roles.includes('system')) console.log(`     ✓ Perform system operations`);
     if (roles.includes('system')) console.log(`     ✓ Perform system operations`);
     if (roles.includes('bonus-admin')) console.log(`     ✓ Manage bonus templates and operations`);
     

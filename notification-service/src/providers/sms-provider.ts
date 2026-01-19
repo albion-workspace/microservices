@@ -4,7 +4,7 @@
 
 import twilio from 'twilio';
 import type { Twilio } from 'twilio';
-import { logger } from 'core-service';
+import { logger, generateId } from 'core-service';
 import type { NotificationProvider, SmsNotification, NotificationResponse, NotificationConfig } from '../types.js';
 
 export class SmsProvider implements NotificationProvider {
@@ -50,7 +50,7 @@ export class SmsProvider implements NotificationProvider {
         });
         
         results.push({
-          id: crypto.randomUUID(),
+          id: generateId(),
           status: 'sent',
           channel: 'sms',
           sentAt: new Date(),
@@ -60,7 +60,7 @@ export class SmsProvider implements NotificationProvider {
         logger.error('Failed to send SMS', { error: error.message, to });
         
         results.push({
-          id: crypto.randomUUID(),
+          id: generateId(),
           status: 'failed',
           channel: 'sms',
           error: error.message,

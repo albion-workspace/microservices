@@ -74,7 +74,7 @@ const gatewayConfig = {
       health: allow,
       notificationHealth: allow,
       myNotifications: isAuthenticated,
-      notificationStats: hasRole('admin'),
+      notificationStats: hasRole('system'),
       availableChannels: allow, // Allow checking available channels
     },
     Mutation: {

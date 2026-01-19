@@ -51,7 +51,7 @@
  *    - Consistent across all entities
  */
 
-import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, getDatabase, deleteCache, deleteCachePattern, logger, validateInput } from 'core-service';
+import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, getDatabase, deleteCache, deleteCachePattern, logger, validateInput, findOneById, findOneAndUpdateById } from 'core-service';
 import type { Wallet, WalletTransaction, WalletCategory, WalletTransactionType } from '../types.js';
 import { SYSTEM_CURRENCY } from '../constants.js';
 import { emitPaymentEvent } from '../event-dispatcher.js';
@@ -219,8 +219,8 @@ export const userWalletResolvers = {
       let wallet: any;
       
       if (input.walletId) {
-        // Direct lookup by ID
-        wallet = await walletsCollection.findOne({ id: input.walletId as string });
+        // Use optimized findOneById utility (performance-optimized)
+        wallet = await findOneById(walletsCollection, input.walletId as string, {});
       } else {
         // Lookup by user + category + currency
         const userId = (input.userId as string) || ctx.user?.userId;
@@ -447,7 +447,8 @@ const walletTxSaga = [
       // Load wallet from DB to get real balance
       const db = getDatabase();
       const walletsCollection = db.collection('wallets');
-      const walletDoc = await walletsCollection.findOne({ id: input.walletId });
+      // Use optimized findOneById utility (performance-optimized)
+      const walletDoc = await findOneById(walletsCollection, input.walletId, {});
       
       if (!walletDoc) {
         throw new Error(`Wallet not found: ${input.walletId}`);
@@ -674,7 +675,8 @@ const walletTxSaga = [
           await syncWalletBalanceFromLedger(input.userId, input.walletId, input.currency);
           
           // Get the updated balance from wallet after sync
-          const syncedWallet = await walletsCollection.findOne({ id: input.walletId });
+          // Use optimized findOneById utility (performance-optimized)
+          const syncedWallet = await findOneById(walletsCollection, input.walletId, {});
           balance = (syncedWallet as any)?.[balanceField] || 0;
           
           logger.info('Wallet balance synced from ledger (skipped direct update)', {
@@ -741,7 +743,8 @@ const walletTxSaga = [
             await new Promise(resolve => setTimeout(resolve, 100));
             await syncWalletBalanceFromLedger(input.userId, input.walletId, input.currency);
             // Re-read balance after sync to get the correct value
-            const syncedWallet = await walletsCollection.findOne({ id: input.walletId });
+            // Use optimized findOneById utility (performance-optimized)
+          const syncedWallet = await findOneById(walletsCollection, input.walletId, {});
             if (syncedWallet) {
               balance = (syncedWallet as any)[balanceField] || balance;
             }
@@ -760,7 +763,8 @@ const walletTxSaga = [
           await syncWalletBalanceFromLedger(input.userId, input.walletId, input.currency);
           
           // Get the updated balance from wallet after sync
-          const syncedWallet = await walletsCollection.findOne({ id: input.walletId });
+          // Use optimized findOneById utility (performance-optimized)
+          const syncedWallet = await findOneById(walletsCollection, input.walletId, {});
           balance = (syncedWallet as any)?.[balanceField] || 0;
           
           logger.info('Wallet balance synced from ledger (ledger-recorded transaction)', {
@@ -778,12 +782,15 @@ const walletTxSaga = [
           });
           // Fall back to direct update if sync fails
           const delta = isCredit ? input.amount : -input.amount;
-          const result = await walletsCollection.findOneAndUpdate(
-            { id: input.walletId },
+          // Use optimized findOneAndUpdateById utility (performance-optimized)
+          const result = await findOneAndUpdateById(
+            walletsCollection,
+            input.walletId,
             { 
               $inc: { [balanceField]: delta },
               $set: { lastActivityAt: new Date(), updatedAt: new Date() } 
             },
+            {},
             { returnDocument: 'after' }
           );
           balance = result ? ((result as any)[balanceField] || 0) : 0;

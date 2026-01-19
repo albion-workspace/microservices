@@ -28,6 +28,8 @@ import {
   // Webhooks - plug-and-play service
   createWebhookService,
   type ResolverContext,
+  findOneById,
+  generateMongoId,
 } from 'core-service';
 import { initializeLedger } from './services/ledger-service.js';
 
@@ -287,9 +289,9 @@ const config = {
   permissions: {
     Query: {
       health: allow,
-      // Provider configs (admin only)
-      providerConfigs: hasRole('admin'),
-      providerConfig: hasRole('admin'),
+      // Provider configs (system only - was admin)
+      providerConfigs: hasRole('system'),
+      providerConfig: hasRole('system'),
       // Transactions
       deposits: isAuthenticated,
       deposit: isAuthenticated,
@@ -307,46 +309,47 @@ const config = {
       // Ledger queries
       ledgerAccountBalance: isAuthenticated,
       bulkLedgerBalances: isAuthenticated, // Allow authenticated users to query balances
-      providerLedgerBalance: hasRole('admin'),
-      bonusPoolBalance: hasRole('admin'),
-      systemHouseBalance: hasRole('admin'),
-      // Webhooks (admin only)
-      webhooks: hasRole('admin'),
-      webhook: hasRole('admin'),
-      webhookStats: hasRole('admin'),
-      webhookDeliveries: hasRole('admin'),
+      ledgerTransactions: isAuthenticated, // Allow authenticated users to query ledger transactions
+      providerLedgerBalance: hasRole('system'),
+      bonusPoolBalance: hasRole('system'),
+      systemHouseBalance: hasRole('system'),
+      // Webhooks (system only)
+      webhooks: hasRole('system'),
+      webhook: hasRole('system'),
+      webhookStats: hasRole('system'),
+      webhookDeliveries: hasRole('system'),
     },
     Mutation: {
-      // Admin: Provider management
-      createProviderConfig: hasRole('admin'),
-      updateProviderConfig: hasRole('admin'),
-      deleteProviderConfig: hasRole('admin'),
+      // System: Provider management
+      createProviderConfig: hasRole('system'),
+      updateProviderConfig: hasRole('system'),
+      deleteProviderConfig: hasRole('system'),
       // User: Deposits
       createDeposit: isAuthenticated,
-      updateDeposit: hasRole('admin'),
-      deleteDeposit: hasRole('admin'),
+      updateDeposit: hasRole('system'),
+      deleteDeposit: hasRole('system'),
       // User: Withdrawals
       createWithdrawal: isAuthenticated,
-      updateWithdrawal: hasRole('admin'),
-      deleteWithdrawal: hasRole('admin'),
-      // Admin: Transaction approval (for testing/manual approval)
-      approveTransaction: hasRole('admin'),
-      declineTransaction: hasRole('admin'),
+      updateWithdrawal: hasRole('system'),
+      deleteWithdrawal: hasRole('system'),
+      // System: Transaction approval (for testing/manual approval)
+      approveTransaction: hasRole('system'),
+      declineTransaction: hasRole('system'),
       // User: Wallets
       createWallet: isAuthenticated,
-      updateWallet: hasRole('admin'),
-      deleteWallet: hasRole('admin'),
+      updateWallet: hasRole('system'),
+      deleteWallet: hasRole('system'),
       // Wallet transactions (internal/system operations)
-      // Allow admin, system, payment-gateway, and payment-provider roles
+      // Allow system, payment-gateway, and payment-provider roles
       // Regular users should use createDeposit/createWithdrawal instead
-      createWalletTransaction: hasAnyRole('admin', 'system', 'payment-gateway', 'payment-provider'),
-      updateWalletTransaction: hasRole('admin'),
-      deleteWalletTransaction: hasRole('admin'),
-      // Webhooks (admin only)
-      registerWebhook: hasRole('admin'),
-      updateWebhook: hasRole('admin'),
-      deleteWebhook: hasRole('admin'),
-      testWebhook: hasRole('admin'),
+      createWalletTransaction: hasAnyRole('system', 'payment-gateway', 'payment-provider'),
+      updateWalletTransaction: hasRole('system'),
+      deleteWalletTransaction: hasRole('system'),
+      // Webhooks (system only)
+      registerWebhook: hasRole('system'),
+      updateWebhook: hasRole('system'),
+      deleteWebhook: hasRole('system'),
+      testWebhook: hasRole('system'),
     },
   },
   // Note: When connecting from localhost, directConnection=true prevents replica set member discovery
@@ -573,10 +576,12 @@ function setupBonusEventHandlers() {
           currency: event.data.currency,
         });
         
-        // Record the transaction
+        // Record the transaction - use MongoDB ObjectId for performant single-insert operation
         const txCollection = db.collection('wallet_transactions');
-        await txCollection.insertOne({
-          id: crypto.randomUUID(),
+        const { objectId, idString } = generateMongoId();
+        const txData = {
+          _id: objectId,
+          id: idString,
           walletId,
           userId: event.userId,
           tenantId: event.tenantId,
@@ -588,7 +593,8 @@ function setupBonusEventHandlers() {
           description: `Bonus awarded: ${event.data.type}`,
           createdAt: new Date(),
           updatedAt: new Date(),
-        });
+        };
+        await txCollection.insertOne(txData as any);
         
         // Dispatch webhook for bonus credit (skipInternal: already handling this event)
         await emitPaymentEvent('wallet.updated', event.tenantId, event.userId!, {
@@ -621,7 +627,8 @@ function setupBonusEventHandlers() {
       const walletsCollection = db.collection('wallets');
       
       // Find wallet
-      const wallet = await walletsCollection.findOne({ id: event.data.walletId });
+      // Use optimized findOneById utility (performance-optimized)
+      const wallet = await findOneById(walletsCollection, event.data.walletId, {});
       
       if (!wallet) {
         logger.warn('Wallet not found for bonus conversion', { walletId: event.data.walletId });
@@ -697,12 +704,13 @@ function setupBonusEventHandlers() {
           logger.warn('Could not sync wallet balance from ledger', { error: syncError });
         }
         
-        // Record the transactions
+        // Record the transactions - use MongoDB ObjectId for performant single-insert operation
         const txCollection = db.collection('wallet_transactions');
-        const txId = crypto.randomUUID();
         
         // Debit from bonus
-        await txCollection.insertOne({
+        const { objectId: debitObjectId, idString: txId } = generateMongoId();
+        const debitTxData = {
+          _id: debitObjectId,
           id: txId,
           walletId: event.data.walletId,
           userId: event.userId,
@@ -715,11 +723,14 @@ function setupBonusEventHandlers() {
           description: 'Bonus converted to real balance',
           createdAt: new Date(),
           updatedAt: new Date(),
-        });
+        };
+        await txCollection.insertOne(debitTxData as any);
         
         // Credit to real
-        await txCollection.insertOne({
-          id: crypto.randomUUID(),
+        const { objectId: creditObjectId, idString: creditIdString } = generateMongoId();
+        const creditTxData = {
+          _id: creditObjectId,
+          id: creditIdString,
           walletId: event.data.walletId,
           userId: event.userId,
           tenantId: event.tenantId,
@@ -732,7 +743,8 @@ function setupBonusEventHandlers() {
           description: 'Converted from bonus balance',
           createdAt: new Date(),
           updatedAt: new Date(),
-        });
+        };
+        await txCollection.insertOne(creditTxData as any);
         
         // Dispatch webhook (skipInternal: already handling this event)
         await emitPaymentEvent('wallet.transfer.completed', event.tenantId, event.userId!, {
@@ -821,10 +833,12 @@ function setupBonusEventHandlers() {
           reason: event.data.reason,
         });
         
-        // Record transaction
+        // Record transaction - use MongoDB ObjectId for performant single-insert operation
         const txCollection = db.collection('wallet_transactions');
-        await txCollection.insertOne({
-          id: crypto.randomUUID(),
+        const { objectId, idString } = generateMongoId();
+        const forfeitTxData = {
+          _id: objectId,
+          id: idString,
           walletId: event.data.walletId,
           userId: event.userId,
           tenantId: event.tenantId,
@@ -836,7 +850,8 @@ function setupBonusEventHandlers() {
           description: `Bonus forfeited: ${event.data.reason}`,
           createdAt: new Date(),
           updatedAt: new Date(),
-        });
+        };
+        await txCollection.insertOne(forfeitTxData as any);
         
         // Dispatch webhook (skipInternal: already handling this event)
         await emitPaymentEvent('wallet.updated', event.tenantId, event.userId!, {
@@ -995,7 +1010,8 @@ async function main() {
         );
         logger.info('✅ Unique index on metadata.externalRef created successfully');
       } catch (createError: any) {
-        if (createError.code === 11000 || createError.codeName === 'DuplicateKey') {
+        const { isDuplicateKeyError } = await import('core-service');
+        if (isDuplicateKeyError(createError)) {
           logger.warn('Cannot create unique index - duplicate values exist. Please clean duplicates first.', {
             error: createError.message
           });

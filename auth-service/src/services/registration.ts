@@ -3,7 +3,7 @@
  * Handles user registration with flexible identifiers (username/email/phone)
  */
 
-import { getDatabase, logger } from 'core-service';
+import { getDatabase, logger, generateMongoId } from 'core-service';
 import type { RegisterInput, User, AuthResponse, OTPChannel } from '../types.js';
 import { 
   validatePassword, 
@@ -227,9 +227,11 @@ export class RegistrationService {
       const db = getDatabase();
       const now = new Date();
       
-      // Store OTP in database
+      // Store OTP in database - use MongoDB ObjectId for performant single-insert operation
+      const { objectId, idString } = generateMongoId();
       await db.collection('otps').insertOne({
-        id: crypto.randomUUID(),
+        _id: objectId,
+        id: idString,
         userId: user.id,
         tenantId: user.tenantId,
         code, // Store plain code temporarily for delivery
@@ -242,7 +244,7 @@ export class RegistrationService {
         isUsed: false,
         createdAt: now,
         expiresAt: addMinutes(now, this.config.otpExpiryMinutes),
-      });
+      } as any);
       
       // Send OTP via provider (uses notification service)
       const provider = this.otpProviders.getProvider(channel);

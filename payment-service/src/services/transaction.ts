@@ -11,7 +11,19 @@
  * It only knows about users, amounts, currencies, and permissions.
  */
 
-import { createService, generateId, type, type Repository, type SagaContext, getDatabase, validateInput, logger } from 'core-service';
+import { 
+  createService, 
+  generateId, 
+  type, 
+  type Repository, 
+  type SagaContext, 
+  getDatabase, 
+  validateInput, 
+  logger,
+  findOneById,
+  updateOneById,
+  findOneAndUpdateById,
+} from 'core-service';
 import type { Transaction, TransactionStatus } from '../types.js';
 import { 
   recordDepositLedgerEntry, 
@@ -145,8 +157,9 @@ const depositSaga = [
         await repo.create(transaction);
         return { ...ctx, input, data, entity: transaction };
       } catch (error: any) {
-        // ✅ Handle MongoDB duplicate key error (E11000) - unique index caught a duplicate
-        if (error.code === 11000 || error.codeName === 'DuplicateKey') {
+        // ✅ Handle MongoDB duplicate key error (E11000) - use centralized handler
+        const { isDuplicateKeyError } = await import('core-service');
+        if (isDuplicateKeyError(error)) {
           logger.warn('Duplicate deposit detected - unique index prevented duplicate', {
             externalRef,
             fromUserId: fromUserIdValue,
@@ -314,9 +327,10 @@ const depositSaga = [
             input.currency
           );
           // Re-read wallet to get synced balance
-          const syncedWallet = await walletsCollection.findOne({ id: (wallet as any).id });
+          // Use optimized findOneById utility (performance-optimized)
+          const syncedWallet = await findOneById(walletsCollection, (wallet as any).id, {});
           if (syncedWallet) {
-            wallet = syncedWallet;
+            wallet = syncedWallet as any; // Type assertion: syncedWallet has _id from MongoDB
           }
         } catch (syncError) {
           // Log error for debugging - sync is critical for balance accuracy
@@ -496,7 +510,8 @@ const withdrawalSaga = [
           const { syncWalletBalanceFromLedger } = await import('./ledger-service.js');
           await syncWalletBalanceFromLedger(input.userId, (wallet as any).id, input.currency);
           // Re-check wallet balance after sync
-          const updatedWallet = await walletsCollection.findOne({ id: (wallet as any).id });
+          // Use optimized findOneById utility (performance-optimized)
+          const updatedWallet = await findOneById(walletsCollection, (wallet as any).id, {});
           const updatedBalance = (updatedWallet as any)?.balance || 0;
           if (updatedBalance < totalRequired) {
             throw new Error(`Insufficient balance after sync. Available: ${updatedBalance}, Required: ${totalRequired}`);
@@ -598,7 +613,7 @@ const withdrawalSaga = [
           withdrawalExternalRef = `withdrawal-${hash}`;
           // Fallback to transaction ID if hash generation fails (shouldn't happen, but safety net)
           if (!withdrawalExternalRef) {
-            withdrawalExternalRef = id || crypto.randomUUID();
+            withdrawalExternalRef = id || generateId();
           }
         }
         
@@ -808,7 +823,8 @@ export const transactionApprovalResolvers = {
       const db = getDatabase();
       const transactionsCollection = db.collection('transactions');
       
-      const transaction = await transactionsCollection.findOne({ id: transactionId });
+      // Use optimized findOneById utility (performance-optimized)
+      const transaction = await findOneById(transactionsCollection, transactionId, {});
       if (!transaction) {
         throw new Error(`Transaction ${transactionId} not found`);
       }
@@ -818,9 +834,10 @@ export const transactionApprovalResolvers = {
         throw new Error(`Transaction must be in processing status. Current: ${status}`);
       }
       
-      // Update transaction to completed
-      await transactionsCollection.updateOne(
-        { id: transactionId },
+      // Use optimized updateOneById utility (performance-optimized)
+      await updateOneById(
+        transactionsCollection,
+        transactionId,
         {
           $set: {
             status: 'completed',
@@ -832,7 +849,7 @@ export const transactionApprovalResolvers = {
                 previousStatus: 'processing',
                 newStatus: 'completed',
                 reason: 'Manually approved',
-                triggeredBy: 'admin',
+                triggeredBy: 'system',
               },
             ],
           },
@@ -852,7 +869,8 @@ export const transactionApprovalResolvers = {
       const transactionsCollection = db.collection('transactions');
       const walletsCollection = db.collection('wallets');
       
-      const transaction = await transactionsCollection.findOne({ id: transactionId });
+      // Use optimized findOneById utility (performance-optimized)
+      const transaction = await findOneById(transactionsCollection, transactionId, {});
       if (!transaction) {
         throw new Error(`Transaction ${transactionId} not found`);
       }
@@ -867,6 +885,7 @@ export const transactionApprovalResolvers = {
       // If it's a deposit, rollback the credited amount
       if (txData.type === 'deposit') {
         const { userId, currency, netAmount, amount } = txData;
+        // Note: This update uses userId+currency (not id), so we keep manual query
         await walletsCollection.updateOne(
           { userId, currency },
           {
@@ -895,9 +914,10 @@ export const transactionApprovalResolvers = {
         );
       }
       
-      // Update transaction to failed
-      await transactionsCollection.updateOne(
-        { id: transactionId },
+      // Use optimized updateOneById utility (performance-optimized)
+      await updateOneById(
+        transactionsCollection,
+        transactionId,
         {
           $set: {
             status: 'failed',
@@ -908,7 +928,7 @@ export const transactionApprovalResolvers = {
                 previousStatus: 'processing',
                 newStatus: 'failed',
                 reason,
-                triggeredBy: 'admin',
+                triggeredBy: 'system',
               },
             ],
           },

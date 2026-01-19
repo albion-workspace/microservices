@@ -5,9 +5,9 @@
  * Performs various checks on auth service data (users, sessions, passwords, etc.)
  * 
  * Usage:
- *   npx tsx scripts/typescript/auth/check-auth.ts admin              # Check admin user
- *   npx tsx scripts/typescript/auth/check-auth.ts admin --password   # Check admin password
- *   npx tsx scripts/typescript/auth/check-auth.ts admin --duplicates # Check for duplicate admins
+ *   npx tsx scripts/typescript/auth/check-auth.ts system              # Check system user
+ *   npx tsx scripts/typescript/auth/check-auth.ts system --password   # Check system password
+ *   npx tsx scripts/typescript/auth/check-auth.ts system --duplicates # Check for duplicate system users
  *   npx tsx scripts/typescript/auth/check-auth.ts user <email>      # Check specific user
  *   npx tsx scripts/typescript/auth/check-auth.ts users              # List all users
  *   npx tsx scripts/typescript/auth/check-auth.ts sessions          # Check sessions
@@ -17,7 +17,9 @@
 
 import { getAuthDatabase, closeAllConnections } from '../config/mongodb.js';
 
-const DEFAULT_ADMIN_EMAIL = 'admin@demo.com';
+import { users } from '../config/users.js';
+
+const DEFAULT_SYSTEM_EMAIL = users.system.email;
 const DEFAULT_TENANT_ID = 'default-tenant';
 const DEFAULT_PASSWORD = 'Admin123!@#';
 
@@ -34,17 +36,17 @@ async function connectDB() {
   return { db };
 }
 
-async function checkAdmin(options: CheckOptions = {}) {
-  const { client, db } = await connectDB();
+async function checkSystem(options: CheckOptions = {}) {
+  const { db } = await connectDB();
   try {
     const usersCollection = db.collection('users');
     
-    // Find admin users
+    // Find system users
     const query: any = {
       $or: [
-        { email: DEFAULT_ADMIN_EMAIL },
-        { email: DEFAULT_ADMIN_EMAIL.toUpperCase() },
-        { email: /^admin@demo\.com$/i },
+        { email: DEFAULT_SYSTEM_EMAIL },
+        { email: DEFAULT_SYSTEM_EMAIL.toUpperCase() },
+        { email: /^system@demo\.com$/i },
       ]
     };
     
@@ -52,11 +54,11 @@ async function checkAdmin(options: CheckOptions = {}) {
       query.tenantId = options.tenantId;
     }
     
-    const adminUsers = await usersCollection.find(query).toArray();
+    const systemUsers = await usersCollection.find(query).toArray();
     
-    console.log(`\n📊 Found ${adminUsers.length} admin user(s):\n`);
+    console.log(`\n📊 Found ${systemUsers.length} system user(s):\n`);
     
-    adminUsers.forEach((user, idx) => {
+    systemUsers.forEach((user, idx) => {
       console.log(`User ${idx + 1}:`);
       console.log(`  ID: ${user.id || user._id}`);
       console.log(`  Email: ${user.email}`);
@@ -77,21 +79,21 @@ async function checkAdmin(options: CheckOptions = {}) {
     });
     
     // Check for duplicates
-    if (options.duplicates || adminUsers.length > 1) {
-      if (adminUsers.length > 1) {
-        console.log('❌ PROBLEM: Multiple admin users found!');
-        const correctAdmin = adminUsers.find(u => 
-          Array.isArray(u.roles) && (u.roles.includes('admin') || u.roles.includes('system'))
+    if (options.duplicates || systemUsers.length > 1) {
+      if (systemUsers.length > 1) {
+        console.log('❌ PROBLEM: Multiple system users found!');
+        const correctSystem = systemUsers.find(u => 
+          Array.isArray(u.roles) && u.roles.includes('system')
         );
-        const wrongAdmins = adminUsers.filter(u => 
+        const wrongSystems = systemUsers.filter(u => 
           Array.isArray(u.roles) && u.roles.length === 1 && u.roles[0] === 'user'
         );
         
-        if (correctAdmin) {
-          console.log(`✅ Correct admin: ${correctAdmin.id}`);
+        if (correctSystem) {
+          console.log(`✅ Correct system user: ${correctSystem.id}`);
         }
-        if (wrongAdmins.length > 0) {
-          console.log(`❌ Wrong admin(s): ${wrongAdmins.map(u => u.id).join(', ')}`);
+        if (wrongSystems.length > 0) {
+          console.log(`❌ Wrong system user(s): ${wrongSystems.map(u => u.id).join(', ')}`);
         }
       } else {
         console.log('✅ No duplicates found');
@@ -99,14 +101,14 @@ async function checkAdmin(options: CheckOptions = {}) {
     }
     
     // Check password if requested
-    if (options.password && adminUsers.length > 0) {
-      const adminUser = adminUsers[0];
+    if (options.password && systemUsers.length > 0) {
+      const systemUser = systemUsers[0];
       console.log('\n🔐 Password Check:');
-      console.log(`  Stored Hash: ${adminUser.passwordHash}`);
+      console.log(`  Stored Hash: ${systemUser.passwordHash}`);
       console.log(`  Expected: ${DEFAULT_PASSWORD}`);
-      console.log(`  Match: ${adminUser.passwordHash === DEFAULT_PASSWORD}`);
+      console.log(`  Match: ${systemUser.passwordHash === DEFAULT_PASSWORD}`);
       
-      if (adminUser.passwordHash !== DEFAULT_PASSWORD) {
+      if (systemUser.passwordHash !== DEFAULT_PASSWORD) {
         console.log('\n⚠️  Password mismatch detected!');
       }
     }
@@ -361,10 +363,10 @@ async function main() {
 Usage: npx tsx scripts/typescript/auth/check-auth.ts <command> [options]
 
 Commands:
-  admin [--password] [--duplicates] [--all] [--verbose]
-    Check admin user(s)
+  system [--password] [--duplicates] [--all] [--verbose]
+    Check system user(s)
     --password      Check password hash
-    --duplicates    Check for duplicate admin users
+    --duplicates    Check for duplicate system users
     --all           List all users in database
     --verbose       Show detailed information
 
@@ -387,13 +389,13 @@ Commands:
     Check user document structure
 
 Examples:
-  npx tsx scripts/typescript/auth/check-auth.ts admin
-  npx tsx scripts/typescript/auth/check-auth.ts admin --password --duplicates
-  npx tsx scripts/typescript/auth/check-auth.ts user admin@demo.com --verbose
+  npx tsx scripts/typescript/auth/check-auth.ts system
+  npx tsx scripts/typescript/auth/check-auth.ts system --password --duplicates
+  npx tsx scripts/typescript/auth/check-auth.ts user system@demo.com --verbose
   npx tsx scripts/typescript/auth/check-auth.ts users
   npx tsx scripts/typescript/auth/check-auth.ts sessions
-  npx tsx scripts/typescript/auth/check-auth.ts password admin@demo.com Admin123!@#
-  npx tsx scripts/typescript/auth/check-auth.ts document admin@demo.com
+  npx tsx scripts/typescript/auth/check-auth.ts password system@demo.com System123!@#
+  npx tsx scripts/typescript/auth/check-auth.ts document system@demo.com
 `);
     process.exit(1);
   }
@@ -409,8 +411,8 @@ Examples:
   
   try {
     switch (command) {
-      case 'admin':
-        await checkAdmin(options);
+      case 'system':
+        await checkSystem(options);
         break;
         
       case 'user':

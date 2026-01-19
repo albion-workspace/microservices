@@ -8,17 +8,17 @@ Unified scripts for checking, testing, and debugging the auth service.
 Performs various checks on auth service data (users, sessions, passwords, etc.)
 
 ```bash
-# Check admin user
-npx tsx scripts/typescript/auth/check-auth.ts admin
+# Check system user
+npx tsx scripts/typescript/auth/check-auth.ts system
 
-# Check admin with password verification
-npx tsx scripts/typescript/auth/check-auth.ts admin --password
+# Check system with password verification
+npx tsx scripts/typescript/auth/check-auth.ts system --password
 
-# Check for duplicate admins
-npx tsx scripts/typescript/auth/check-auth.ts admin --duplicates
+# Check for duplicate system users
+npx tsx scripts/typescript/auth/check-auth.ts system --duplicates
 
 # Check specific user
-npx tsx scripts/typescript/auth/check-auth.ts user admin@demo.com
+npx tsx scripts/typescript/auth/check-auth.ts user system@demo.com
 
 # List all users grouped by role
 npx tsx scripts/typescript/auth/check-auth.ts users
@@ -27,10 +27,10 @@ npx tsx scripts/typescript/auth/check-auth.ts users
 npx tsx scripts/typescript/auth/check-auth.ts sessions
 
 # Check password
-npx tsx scripts/typescript/auth/check-auth.ts password admin@demo.com Admin123!@#
+npx tsx scripts/typescript/auth/check-auth.ts password system@demo.com System123!@#
 
 # Check user document structure
-npx tsx scripts/typescript/auth/check-auth.ts document admin@demo.com
+npx tsx scripts/typescript/auth/check-auth.ts document system@demo.com
 ```
 
 ### `test-auth.ts` - Test Operations
@@ -44,7 +44,7 @@ npx tsx scripts/typescript/auth/test-auth.ts login
 npx tsx scripts/typescript/auth/test-auth.ts token
 
 # Test Passport lookup
-npx tsx scripts/typescript/auth/test-auth.ts passport admin@demo.com
+npx tsx scripts/typescript/auth/test-auth.ts passport system@demo.com
 
 # Test permission check
 npx tsx scripts/typescript/auth/test-auth.ts permission
@@ -61,13 +61,13 @@ Debugging tools for auth issues (wrong users, duplicates, ID mismatches)
 npx tsx scripts/typescript/auth/debug-auth.ts wrong-user
 
 # Find duplicate users
-npx tsx scripts/typescript/auth/debug-auth.ts duplicates admin@demo.com
+npx tsx scripts/typescript/auth/debug-auth.ts duplicates system@demo.com
 
 # Fix duplicate admins
 npx tsx scripts/typescript/auth/debug-auth.ts fix-duplicates
 
 # Find user by email
-npx tsx scripts/typescript/auth/debug-auth.ts find-user admin@demo.com
+npx tsx scripts/typescript/auth/debug-auth.ts find-user system@demo.com
 
 # Check for ID mismatches
 npx tsx scripts/typescript/auth/debug-auth.ts id-mismatch
@@ -77,11 +77,11 @@ npx tsx scripts/typescript/auth/debug-auth.ts id-mismatch
 Promote users and manage roles/permissions
 
 ```bash
-# Promote to admin with all permissions
-npx tsx scripts/typescript/auth/promote-user.ts admin@demo.com --all
+# Promote to system with all permissions
+npx tsx scripts/typescript/auth/promote-user.ts system@demo.com --all
 
 # Set specific roles
-npx tsx scripts/typescript/auth/promote-user.ts user@test.com --roles admin,system
+npx tsx scripts/typescript/auth/promote-user.ts user@test.com --roles system
 
 # Set specific permissions
 npx tsx scripts/typescript/auth/promote-user.ts gateway@test.com --allow-negative --accept-fee
@@ -99,7 +99,7 @@ The following scripts have been consolidated into the unified scripts above:
 - `check-user-document.ts` → `check-auth.ts document <email>`
 - `check-user-now.ts` → `check-auth.ts user <email>`
 - `check-users.ts` → `check-auth.ts users`
-- `check-login-user.ts` → `check-auth.ts user admin@demo.com`
+- `check-login-user.ts` → `check-auth.ts user system@demo.com`
 - `check-password-match.ts` → `check-auth.ts password <email> [password]`
 - `check-sessions.ts` → `check-auth.ts sessions [userId]`
 

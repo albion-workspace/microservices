@@ -13,13 +13,13 @@ Created 3 unified scripts that consolidate all related functionality:
 ### 1. `check-auth.ts` - All Check Operations
 Consolidates 10+ check scripts into one unified interface:
 - `check-admin-user.ts` → `check-auth.ts admin`
-- `check-admin-password.ts` → `check-auth.ts admin --password`
+- `check-system-password.ts` → `check-auth.ts system --password`
 - `check-admin-duplicates.ts` → `check-auth.ts admin --duplicates`
 - `check-all-admin-users.ts` → `check-auth.ts admin --all`
 - `check-user-document.ts` → `check-auth.ts document <email>`
 - `check-user-now.ts` → `check-auth.ts user <email>`
 - `check-users.ts` → `check-auth.ts users`
-- `check-login-user.ts` → `check-auth.ts user admin@demo.com`
+- `check-login-user.ts` → `check-auth.ts user system@demo.com`
 - `check-password-match.ts` → `check-auth.ts password <email> [password]`
 - `check-sessions.ts` → `check-auth.ts sessions [userId]`
 

@@ -17,7 +17,8 @@ import {
   Building,
 } from 'lucide-react'
 import { graphql as gql, SERVICE_URLS } from '../lib/auth'
-import { useAuth, getRoleNames, hasRole } from '../lib/auth-context'
+import { useAuth } from '../lib/auth-context'
+import { getRoleNames, hasRole, isSystem as checkIsSystem } from '../lib/access'
 import { graphql as graphqlQuery, SERVICE_URLS as GRAPHQL_SERVICE_URLS } from '../lib/graphql-utils'
 
 const PAYMENT_URL = SERVICE_URLS.payment
@@ -44,7 +45,7 @@ function formatCurrency(amount: number, currency = 'EUR'): string {
   }).format(amount / 100)
 }
 
-type TabId = 'wallets' | 'transactions' | 'reconciliation' | 'settings'
+type TabId = 'wallets' | 'transactions' | 'ledger' | 'reconciliation' | 'settings'
 
 export default function PaymentGateway() {
   const [activeTab, setActiveTab] = useState<TabId>('wallets')
@@ -52,6 +53,7 @@ export default function PaymentGateway() {
   const tabs = [
     { id: 'wallets' as const, label: 'Wallets', icon: Wallet },
     { id: 'transactions' as const, label: 'Transactions', icon: ArrowDownCircle },
+    { id: 'ledger' as const, label: 'Ledger', icon: FileText },
     { id: 'reconciliation' as const, label: 'Reconciliation', icon: FileText },
     { id: 'settings' as const, label: 'Settings', icon: Settings },
   ]
@@ -80,6 +82,7 @@ export default function PaymentGateway() {
       {/* Tab Content */}
       {activeTab === 'wallets' && <WalletsTab />}
       {activeTab === 'transactions' && <TransactionsTab />}
+      {activeTab === 'ledger' && <LedgerTab />}
       {activeTab === 'reconciliation' && <ReconciliationTab />}
       {activeTab === 'settings' && <SettingsTab />}
     </div>
@@ -169,10 +172,10 @@ function WalletsTab() {
     try {
       // Fetch users by role using the new usersByRole query (from AUTH service)
       const [systemResult, gatewayResult, providerResult, allUsersResult] = await Promise.all([
-        // System users: admin or system role
+        // System users: system role only
         graphqlWithAuth(GRAPHQL_SERVICE_URLS.auth, `
           query GetSystemUsers($first: Int) {
-            usersByRole(role: "admin", first: $first) {
+            usersByRole(role: "system", first: $first) {
               nodes {
                 id
                 email
@@ -254,59 +257,35 @@ function WalletsTab() {
         return { users: { nodes: [] } }
       })
       
-      const allUsers = allUsersResult2?.users?.nodes || []
+      const allUsersFallback = allUsersResult2?.users?.nodes || []
       
       // Check if usersByRole queries succeeded (they return empty nodes on error)
-      const systemUsersCount = systemResult?.usersByRole?.nodes?.length || 0
       const gatewayUsersCount = gatewayResult?.usersByRole?.nodes?.length || 0
       const providerUsersCount = providerResult?.usersByRole?.nodes?.length || 0
       const systemRoleUsersCount = allUsersResult?.usersByRole?.nodes?.length || 0
       
       // If all usersByRole queries returned empty AND we have users from GetAllUsers, use fallback
-      const usersByRoleFailed = (systemUsersCount === 0 && gatewayUsersCount === 0 && 
-                                  providerUsersCount === 0 && systemRoleUsersCount === 0 && allUsers.length > 0)
+      const usersByRoleFailed = (gatewayUsersCount === 0 && 
+                                  providerUsersCount === 0 && systemRoleUsersCount === 0 && allUsersFallback.length > 0)
       
       // If usersByRole queries failed OR if we have users but no role-based results, use fallback
       if (usersByRoleFailed) {
         console.warn('[Users] ⚠️ Using fallback: filtering allUsers by role (token may need refresh)')
         
-        // Helper to extract role names from UserRole[] or string[]
-        const getRoleNames = (roles: any): string[] => {
-          if (!roles || !Array.isArray(roles)) return [];
-          if (roles.length === 0) return [];
-          // If first element is a string, it's already a string array
-          if (typeof roles[0] === 'string') return roles;
-          // If first element is an object, extract role names from UserRole[]
-          if (typeof roles[0] === 'object' && roles[0].role) {
-            return roles
-              .filter((r: any) => r.active !== false)
-              .filter((r: any) => !r.expiresAt || new Date(r.expiresAt) > new Date())
-              .map((r: any) => r.role)
-              .filter((role: string) => role !== undefined && role !== null);
-          }
-          return [];
-        };
-        
-        // Filter users by role from the allUsers list
-        const adminUsersFromAll = allUsers.filter((u: any) => {
-          const roleNames = getRoleNames(u.roles);
-          return roleNames.includes('admin');
+        // Filter users by role from the allUsersFallback list using access-engine utilities
+        // Note: 'admin' is now a business role, only 'system' has full access
+        const systemRoleUsersFromAll = allUsersFallback.filter((u: any) => {
+          return hasRole(u.roles, 'system');
         });
-        const systemRoleUsersFromAll = allUsers.filter((u: any) => {
-          const roleNames = getRoleNames(u.roles);
-          return roleNames.includes('system');
+        const gatewayUsersFromAll = allUsersFallback.filter((u: any) => {
+          return hasRole(u.roles, 'payment-gateway');
         });
-        const gatewayUsersFromAll = allUsers.filter((u: any) => {
-          const roleNames = getRoleNames(u.roles);
-          return roleNames.includes('payment-gateway');
-        });
-        const providerUsersFromAll = allUsers.filter((u: any) => {
-          const roleNames = getRoleNames(u.roles);
-          return roleNames.includes('payment-provider');
+        const providerUsersFromAll = allUsersFallback.filter((u: any) => {
+          return hasRole(u.roles, 'payment-provider');
         });
         
-        // Combine admin and system role users
-        const combinedSystem = [...adminUsersFromAll, ...systemRoleUsersFromAll]
+        // System role users only
+        const combinedSystem = [...systemRoleUsersFromAll]
           .filter((u, idx, arr) => arr.findIndex(v => v.id === u.id) === idx) // Remove duplicates
         
         setSystemUsers(combinedSystem)
@@ -317,7 +296,7 @@ function WalletsTab() {
         const gatewayIds = new Set(gatewayUsersFromAll.map((u: any) => u.id))
         const providerIds = new Set(providerUsersFromAll.map((u: any) => u.id))
         
-        const regular = allUsers.filter((u: any) => 
+        const regular = allUsersFallback.filter((u: any) => 
           !systemIds.has(u.id) && 
           !gatewayIds.has(u.id) && 
           !providerIds.has(u.id)
@@ -339,16 +318,19 @@ function WalletsTab() {
       }
       
       // Normal flow: use results from usersByRole queries
-      const adminUsers = systemResult?.usersByRole?.nodes || []
-      const systemRoleUsers = allUsersResult?.usersByRole?.nodes || []
-      const system = [...adminUsers, ...systemRoleUsers]
+      // Filter system users from allUsers (admin is now a business role, only system has full access)
+      const allUsers = allUsersResult?.users?.nodes || []
+      const systemRoleUsers = allUsers.filter((u: any) => {
+        return hasRole(u.roles || [], 'system')
+      })
+      const system = [...systemRoleUsers]
         .filter((u, idx, arr) => arr.findIndex(v => v.id === u.id) === idx) // Remove duplicates
       
       const gateway = gatewayResult?.usersByRole?.nodes || []
       const providers = providerResult?.usersByRole?.nodes || []
       
       console.log('[Users] Normal flow results:', {
-        adminUsers: adminUsers.length,
+        systemUsers: system.length,
         systemRoleUsers: systemRoleUsers.length,
         gateway: gateway.length,
         providers: providers.length,
@@ -418,9 +400,9 @@ function WalletsTab() {
   const fetchProviderLedgerBalances = async (usersToFetch?: { providers: any[], gateway: any[], system: any[], regular?: any[] }) => {
     if (!authToken || !user) return
     
-    // Only fetch ledger balances if user is admin
-    const isAdmin = hasRole(user?.roles, 'admin')
-    if (!isAdmin) {
+    // Only fetch ledger balances if user is system
+    const isSystem = checkIsSystem(user)
+    if (!isSystem) {
       setLedgerBalancesLoading(false)
       return
     }
@@ -476,7 +458,7 @@ function WalletsTab() {
             })
           }
         } catch (err: any) {
-          // Silently skip authorization errors (user might not be admin)
+          // Silently skip authorization errors (user might not be system)
           const isAuthError = err?.message?.includes('Not authorized') || err?.message?.includes('authorized')
           if (!isAuthError) {
             console.error(`Failed to fetch bulk ledger balances for ${currency}:`, err)
@@ -560,7 +542,7 @@ function WalletsTab() {
   // Categorize wallets from state using REAL user IDs
   const allWallets = walletsList
   
-  // System wallets: wallets belonging to system/admin users
+  // System wallets: wallets belonging to system users
   const systemUserIds = new Set(systemUsers.map(u => u.id))
   const systemWallets = allWallets.filter((w: any) => systemUserIds.has(w.userId))
   const systemWallet = systemWallets.find((w: any) => w.userId === user?.id) || systemWallets[0]
@@ -622,14 +604,13 @@ function WalletsTab() {
     },
   })
 
-  // Fund wallet mutation (wallet transaction) - admin/system only
+  // Fund wallet mutation (wallet transaction) - system only
   const fundWalletMutation = useMutation({
     mutationFn: async (input: { walletId: string; userId: string; type: string; amount: number; currency: string; description?: string }) => {
-      // Check if user is admin or system before attempting to create wallet transaction
-      const isAdmin = hasRole(user?.roles, 'admin')
-      const isSystem = hasRole(user?.roles, 'system')
-      if (!isAdmin && !isSystem) {
-        throw new Error('Only administrators or system users can fund wallets')
+      // Check if user is system before attempting to create wallet transaction
+      const isSystem = checkIsSystem(user)
+      if (!isSystem) {
+        throw new Error('Only system users can fund wallets')
       }
       
       // Creating wallet transaction (logged by GraphQL utility)
@@ -669,7 +650,7 @@ function WalletsTab() {
         // Handle authorization errors gracefully
         const isAuthError = err?.message?.includes('Not authorized') || err?.message?.includes('authorized')
         if (isAuthError) {
-          throw new Error('You do not have permission to perform this action. Administrator or system access required.')
+          throw new Error('You do not have permission to perform this action. System access required.')
         }
         throw err
       }
@@ -861,7 +842,7 @@ function WalletsTab() {
         return
       }
       
-      if (!hasRole(user?.roles, 'system')) {
+      if (!checkIsSystem(user)) {
         alert('You need system role to initialize system wallet.')
         return
       }
@@ -1237,7 +1218,7 @@ function WalletsTab() {
   }
 
   // Calculate totals using REAL data
-  // System Reserve = Gateway user balance + System/Admin user balances
+  // System Reserve = Gateway user balance + System user balances
   // The gateway user funds providers, and system users represent the platform reserve
   const gatewayWalletsInBaseCurrency = gatewayWallets.filter((w: any) => w.currency === baseCurrency)
   const systemWalletsInBaseCurrency = systemWallets.filter((w: any) => w.currency === baseCurrency)
@@ -1258,7 +1239,7 @@ function WalletsTab() {
   
   // ✅ ALWAYS use ledger balances (source of truth)
   // Wallet balances are not synced, so ledger is the only accurate source
-  // System user (admin@demo.com) can go negative, representing platform net position
+  // System user (system@demo.com with system role) can go negative, representing platform net position
   const gatewayBalance = gatewayLedgerBalance !== null && gatewayLedgerBalance !== undefined
     ? gatewayLedgerBalance
     : gatewayBalanceFromWallets
@@ -1267,7 +1248,7 @@ function WalletsTab() {
     ? systemUsersLedgerBalance
     : systemUsersBalanceFromWallets
   
-  // System balance = admin@demo.com balance (can be negative, represents platform net position)
+  // System balance = system@demo.com balance (system role, can be negative, represents platform net position)
   const systemBalance = gatewayBalance + systemUsersBalance
   
   // Log balance source for debugging
@@ -2090,6 +2071,361 @@ function WalletsTab() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// LEDGER TAB - Double-Entry Bookkeeping View
+// ═══════════════════════════════════════════════════════════════════
+
+interface LedgerFilter {
+  type: string
+  accountId: string
+  currency: string
+  status: string
+  externalRef: string
+  dateFrom: string
+  dateTo: string
+}
+
+function LedgerTab() {
+  const queryClient = useQueryClient()
+  const { tokens } = useAuth()
+  const authToken = tokens?.accessToken
+  
+  // Filters
+  const [filters, setFilters] = useState<LedgerFilter>({
+    type: '',
+    accountId: '',
+    currency: '',
+    status: '',
+    externalRef: '',
+    dateFrom: '',
+    dateTo: '',
+  })
+  
+  // Pagination
+  const [pagination, setPagination] = useState({
+    page: 0,
+    pageSize: 25,
+  })
+  
+  // Build filter object for API
+  const buildApiFilter = () => {
+    const filter: Record<string, any> = {}
+    if (filters.type) filter.type = filters.type
+    if (filters.accountId) filter.accountId = filters.accountId
+    if (filters.currency) filter.currency = filters.currency
+    if (filters.status) filter.status = filters.status
+    if (filters.externalRef) filter.externalRef = filters.externalRef
+    if (filters.dateFrom) filter.dateFrom = filters.dateFrom
+    if (filters.dateTo) filter.dateTo = filters.dateTo
+    return Object.keys(filter).length > 0 ? filter : undefined
+  }
+  
+  // Fetch ledger transactions
+  const ledgerTransactionsQuery = useQuery({
+    queryKey: ['ledgerTransactions', pagination, filters],
+    queryFn: () => graphqlQuery(GRAPHQL_SERVICE_URLS.payment, `
+      query ListLedgerTransactions($first: Int, $skip: Int, $filter: JSON) {
+        ledgerTransactions(first: $first, skip: $skip, filter: $filter) {
+          nodes {
+            _id
+            type
+            fromAccountId
+            toAccountId
+            amount
+            currency
+            description
+            externalRef
+            status
+            createdAt
+            metadata
+          }
+          totalCount
+          pageInfo {
+            hasNextPage
+            hasPreviousPage
+          }
+        }
+      }
+    `, { 
+      first: pagination.pageSize,
+      skip: pagination.page * pagination.pageSize,
+      filter: buildApiFilter()
+    }, authToken),
+  })
+  
+  const transactions = ledgerTransactionsQuery.data?.ledgerTransactions?.nodes || []
+  const totalCount = ledgerTransactionsQuery.data?.ledgerTransactions?.totalCount || 0
+  const isLoading = ledgerTransactionsQuery.isLoading
+  
+  // Pagination helpers
+  const totalPages = Math.ceil(totalCount / pagination.pageSize)
+  
+  const formatCurrency = (amount: number, currency: string = 'EUR') => {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: currency || 'EUR',
+      minimumFractionDigits: 2,
+    }).format(amount / 100)
+  }
+  
+  return (
+    <div>
+      {/* Filters */}
+      <div className="card" style={{ marginBottom: 24 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-end' }}>
+          {/* Type Filter */}
+          <div className="form-group" style={{ marginBottom: 0, minWidth: 140 }}>
+            <label className="form-label">Type</label>
+            <select 
+              className="input" 
+              value={filters.type}
+              onChange={e => { setFilters({ ...filters, type: e.target.value }); setPagination({ ...pagination, page: 0 }) }}
+            >
+              <option value="">All Types</option>
+              <option value="deposit">Deposit</option>
+              <option value="withdrawal">Withdrawal</option>
+              <option value="transfer">Transfer</option>
+              <option value="fee">Fee</option>
+            </select>
+          </div>
+          
+          {/* Account ID Filter */}
+          <div className="form-group" style={{ marginBottom: 0, minWidth: 200 }}>
+            <label className="form-label">Account ID</label>
+            <input 
+              type="text" 
+              className="input"
+              placeholder="user:xxx:main"
+              value={filters.accountId}
+              onChange={e => { setFilters({ ...filters, accountId: e.target.value }); setPagination({ ...pagination, page: 0 }) }}
+            />
+          </div>
+          
+          {/* Currency Filter */}
+          <div className="form-group" style={{ marginBottom: 0, minWidth: 120 }}>
+            <label className="form-label">Currency</label>
+            <select 
+              className="input" 
+              value={filters.currency}
+              onChange={e => { setFilters({ ...filters, currency: e.target.value }); setPagination({ ...pagination, page: 0 }) }}
+            >
+              <option value="">All</option>
+              <option value="EUR">EUR</option>
+              <option value="USD">USD</option>
+              <option value="GBP">GBP</option>
+            </select>
+          </div>
+          
+          {/* Status Filter */}
+          <div className="form-group" style={{ marginBottom: 0, minWidth: 140 }}>
+            <label className="form-label">Status</label>
+            <select 
+              className="input" 
+              value={filters.status}
+              onChange={e => { setFilters({ ...filters, status: e.target.value }); setPagination({ ...pagination, page: 0 }) }}
+            >
+              <option value="">All Status</option>
+              <option value="pending">Pending</option>
+              <option value="completed">Completed</option>
+              <option value="failed">Failed</option>
+            </select>
+          </div>
+          
+          {/* External Ref Filter */}
+          <div className="form-group" style={{ marginBottom: 0, minWidth: 180 }}>
+            <label className="form-label">External Ref</label>
+            <input 
+              type="text" 
+              className="input"
+              placeholder="Search..."
+              value={filters.externalRef}
+              onChange={e => { setFilters({ ...filters, externalRef: e.target.value }); setPagination({ ...pagination, page: 0 }) }}
+            />
+          </div>
+          
+          {/* Date From */}
+          <div className="form-group" style={{ marginBottom: 0, minWidth: 150 }}>
+            <label className="form-label">From Date</label>
+            <input 
+              type="date" 
+              className="input"
+              value={filters.dateFrom}
+              onChange={e => { setFilters({ ...filters, dateFrom: e.target.value }); setPagination({ ...pagination, page: 0 }) }}
+            />
+          </div>
+          
+          {/* Date To */}
+          <div className="form-group" style={{ marginBottom: 0, minWidth: 150 }}>
+            <label className="form-label">To Date</label>
+            <input 
+              type="date" 
+              className="input"
+              value={filters.dateTo}
+              onChange={e => { setFilters({ ...filters, dateTo: e.target.value }); setPagination({ ...pagination, page: 0 }) }}
+            />
+          </div>
+          
+          {/* Page Size */}
+          <div className="form-group" style={{ marginBottom: 0, minWidth: 100 }}>
+            <label className="form-label">Page Size</label>
+            <select 
+              className="input" 
+              value={pagination.pageSize}
+              onChange={e => setPagination({ page: 0, pageSize: parseInt(e.target.value) })}
+            >
+              <option value="25">25</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+            </select>
+          </div>
+          
+          {/* Actions */}
+          <div style={{ display: 'flex', gap: 8, marginLeft: 'auto' }}>
+            <button 
+              className="btn btn-secondary"
+              onClick={() => {
+                setFilters({ type: '', accountId: '', currency: '', status: '', externalRef: '', dateFrom: '', dateTo: '' })
+                setPagination({ page: 0, pageSize: 25 })
+              }}
+            >
+              Clear
+            </button>
+            <button className="btn btn-secondary" onClick={() => ledgerTransactionsQuery.refetch()}>
+              <RefreshCw size={14} />
+              Refresh
+            </button>
+          </div>
+        </div>
+      </div>
+      
+      {/* Ledger Transactions Table */}
+      <div className="card">
+        <div className="card-header">
+          <h3 className="card-title">Ledger Transactions</h3>
+          <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+            Page {pagination.page + 1} of {totalPages || 1} • Total: {totalCount}
+          </div>
+        </div>
+        
+        {isLoading ? (
+          <div className="empty-state">Loading ledger transactions...</div>
+        ) : transactions.length === 0 ? (
+          <div className="empty-state">
+            <FileText />
+            <p>No ledger transactions found</p>
+            <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>Try adjusting your filters</p>
+          </div>
+        ) : (
+          <>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 1200 }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                    <th style={{ textAlign: 'left', padding: '12px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>DATE</th>
+                    <th style={{ textAlign: 'left', padding: '12px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>TYPE</th>
+                    <th style={{ textAlign: 'left', padding: '12px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>FROM ACCOUNT</th>
+                    <th style={{ textAlign: 'left', padding: '12px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>TO ACCOUNT</th>
+                    <th style={{ textAlign: 'right', padding: '12px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>AMOUNT</th>
+                    <th style={{ textAlign: 'left', padding: '12px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>CURRENCY</th>
+                    <th style={{ textAlign: 'center', padding: '12px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>STATUS</th>
+                    <th style={{ textAlign: 'left', padding: '12px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>EXTERNAL REF</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {transactions.map((tx: any) => (
+                    <tr key={tx._id} style={{ borderBottom: '1px solid var(--border-subtle)' }}>
+                      <td style={{ padding: '10px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+                        {new Date(tx.createdAt).toLocaleString()}
+                      </td>
+                      <td style={{ padding: '10px 8px' }}>
+                        <span style={{ 
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 6,
+                          padding: '4px 10px',
+                          borderRadius: 4,
+                          fontSize: 12,
+                          fontWeight: 500,
+                          background: 'var(--bg-subtle)',
+                          color: 'var(--text-secondary)',
+                          whiteSpace: 'nowrap',
+                        }}>
+                          {tx.type}
+                        </span>
+                      </td>
+                      <td style={{ padding: '10px 8px', fontSize: 11, fontFamily: 'var(--font-mono)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {tx.fromAccountId}
+                      </td>
+                      <td style={{ padding: '10px 8px', fontSize: 11, fontFamily: 'var(--font-mono)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {tx.toAccountId}
+                      </td>
+                      <td style={{ padding: '10px 8px', fontSize: 14, textAlign: 'right', fontFamily: 'var(--font-mono)', fontWeight: 500 }}>
+                        {formatCurrency(tx.amount, tx.currency)}
+                      </td>
+                      <td style={{ padding: '10px 8px', fontSize: 12 }}>
+                        {tx.currency}
+                      </td>
+                      <td style={{ padding: '10px 8px', textAlign: 'center' }}>
+                        <span className={`status-badge ${tx.status === 'completed' ? 'healthy' : tx.status === 'failed' ? 'unhealthy' : 'pending'}`}>
+                          <span className="status-badge-dot" />
+                          {tx.status}
+                        </span>
+                      </td>
+                      <td style={{ padding: '10px 8px', fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {tx.externalRef || '-'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            
+            {/* Pagination Controls */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 8px', borderTop: '1px solid var(--border)' }}>
+              <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+                Showing {pagination.page * pagination.pageSize + 1} - {Math.min((pagination.page + 1) * pagination.pageSize, totalCount)} of {totalCount}
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button 
+                  className="btn btn-sm btn-secondary"
+                  disabled={pagination.page === 0}
+                  onClick={() => setPagination({ ...pagination, page: 0 })}
+                >
+                  First
+                </button>
+                <button 
+                  className="btn btn-sm btn-secondary"
+                  disabled={pagination.page === 0}
+                  onClick={() => setPagination({ ...pagination, page: pagination.page - 1 })}
+                >
+                  Previous
+                </button>
+                <span style={{ display: 'flex', alignItems: 'center', padding: '0 12px', fontSize: 13 }}>
+                  Page {pagination.page + 1} of {totalPages || 1}
+                </span>
+                <button 
+                  className="btn btn-sm btn-secondary"
+                  disabled={pagination.page >= totalPages - 1}
+                  onClick={() => setPagination({ ...pagination, page: pagination.page + 1 })}
+                >
+                  Next
+                </button>
+                <button 
+                  className="btn btn-sm btn-secondary"
+                  disabled={pagination.page >= totalPages - 1}
+                  onClick={() => setPagination({ ...pagination, page: totalPages - 1 })}
+                >
+                  Last
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // TRANSACTIONS TAB - Unified Statement View
 // ═══════════════════════════════════════════════════════════════════
 
@@ -2174,7 +2510,7 @@ function TransactionsTab() {
         }
       }
     `, { 
-      first: 1000, // Fetch all deposits (admin should see all)
+      first: 1000, // Fetch all deposits (system should see all)
       skip: 0,
       filter: buildApiFilter()
     }, authToken),
@@ -2207,7 +2543,7 @@ function TransactionsTab() {
         }
       }
     `, { 
-      first: 1000, // Fetch all withdrawals (admin should see all)
+      first: 1000, // Fetch all withdrawals (system should see all)
       skip: 0,
       filter: buildApiFilter()
     }, authToken),
@@ -2242,7 +2578,7 @@ function TransactionsTab() {
         }
       }
     `, { 
-      first: 1000, // Fetch all transactions (admin should see all)
+      first: 1000, // Fetch all transactions (system should see all)
       skip: 0,
       filter: buildApiFilter()
     }, authToken),
@@ -2718,39 +3054,39 @@ function TransactionsTab() {
                 <tbody>
                   {paginatedTransactions.map((tx: any, idx: number) => (
                     <tr key={`${tx._source}-${tx.id}-${idx}`} style={{ borderBottom: '1px solid var(--border-subtle)' }}>
-                      <td style={{ padding: '10px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
-                        {(() => {
-                          const dateValue = tx._createdAt || tx.createdAt;
-                          if (!dateValue) return 'N/A';
-                          
-                          try {
-                            // Handle number (timestamp in milliseconds)
-                            if (typeof dateValue === 'number') {
-                              return new Date(dateValue).toLocaleString();
-                            }
-                            // Handle string (ISO or timestamp string)
-                            if (typeof dateValue === 'string') {
-                              // Try ISO string first
-                              const isoDate = new Date(dateValue);
-                              if (!isNaN(isoDate.getTime())) {
-                                return isoDate.toLocaleString();
+                          <td style={{ padding: '10px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+                            {(() => {
+                              const dateValue = tx._createdAt || tx.createdAt;
+                              if (!dateValue) return 'N/A';
+                              
+                              try {
+                                // Handle number (timestamp in milliseconds)
+                                if (typeof dateValue === 'number') {
+                                  return new Date(dateValue).toLocaleString();
+                                }
+                                // Handle string (ISO or timestamp string)
+                                if (typeof dateValue === 'string') {
+                                  // Try ISO string first
+                                  const isoDate = new Date(dateValue);
+                                  if (!isNaN(isoDate.getTime())) {
+                                    return isoDate.toLocaleString();
+                                  }
+                                  // Try timestamp string
+                                  const timestamp = parseInt(dateValue, 10);
+                                  if (!isNaN(timestamp)) {
+                                    return new Date(timestamp).toLocaleString();
+                                  }
+                                }
+                                return 'Invalid Date';
+                              } catch {
+                                return 'Invalid Date';
                               }
-                              // Try timestamp string
-                              const timestamp = parseInt(dateValue, 10);
-                              if (!isNaN(timestamp)) {
-                                return new Date(timestamp).toLocaleString();
-                              }
-                            }
-                            return 'Invalid Date';
-                          } catch {
-                            return 'Invalid Date';
-                          }
-                        })()}
-                      </td>
-                      <td style={{ padding: '10px 8px' }}>
-                        <span style={{ 
-                          display: 'inline-flex',
-                          alignItems: 'center',
+                            })()}
+                          </td>
+                          <td style={{ padding: '10px 8px' }}>
+                            <span style={{ 
+                              display: 'inline-flex',
+                              alignItems: 'center',
                           gap: 6,
                           padding: '4px 10px',
                           borderRadius: 4,

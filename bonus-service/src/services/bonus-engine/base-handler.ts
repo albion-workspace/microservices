@@ -257,16 +257,21 @@ export abstract class BaseBonusHandler implements IBonusHandler {
     }
 
     const now = new Date();
-    const userBonus = this.buildUserBonus(template, context, calculation, now);
+    const userBonusData = this.buildUserBonus(template, context, calculation, now);
 
-    // Record in ledger BEFORE creating bonus record (atomic operation)
+    // Create bonus first to get MongoDB-generated ID
+    // MongoDB will automatically create _id, which will be normalized to id
+    const createdBonus = await userBonusPersistence.create(userBonusData);
+
+    // Record in ledger AFTER creating bonus record (we need the bonus ID)
+    // If ledger fails, the transaction will roll back the bonus creation
     try {
       await recordBonusAwardLedgerEntry(
         context.userId,
         calculation.bonusValue,
         template.currency,
         context.tenantId,
-        userBonus.id,
+        createdBonus.id,
         template.type,
         `Bonus awarded: ${template.name} (${template.code})`
       );
@@ -274,8 +279,14 @@ export abstract class BaseBonusHandler implements IBonusHandler {
       logger.error('Failed to record bonus in ledger', {
         error: ledgerError,
         userId: context.userId,
-        bonusId: userBonus.id,
+        bonusId: createdBonus.id,
       });
+      // If ledger fails, delete the bonus (transaction will handle rollback if in transaction)
+      try {
+        await userBonusPersistence.delete(createdBonus.id);
+      } catch (deleteError) {
+        logger.error('Failed to delete bonus after ledger error', { error: deleteError });
+      }
       // If ledger fails, we should not award the bonus
       return { 
         success: false, 
@@ -283,26 +294,23 @@ export abstract class BaseBonusHandler implements IBonusHandler {
       };
     }
 
-    // Use persistence layer for data operations
-    await userBonusPersistence.create(userBonus);
-
     // Increment template usage via persistence layer
     await templatePersistence.incrementUsage(template.id);
 
     // Emit event
-    await this.emitAwardedEvent(userBonus, calculation);
+    await this.emitAwardedEvent(createdBonus, calculation);
 
     // Run post-award hook
-    await this.onAwarded(userBonus, context);
+    await this.onAwarded(createdBonus, context);
 
     logger.info('Bonus awarded', {
       userId: context.userId,
-      bonusId: userBonus.id,
+      bonusId: createdBonus.id,
       type: template.type,
       value: calculation.bonusValue,
     });
 
-    return { success: true, bonus: userBonus };
+    return { success: true, bonus: createdBonus };
   }
 
   /**
@@ -314,9 +322,9 @@ export abstract class BaseBonusHandler implements IBonusHandler {
     context: BonusContext,
     calculation: BonusCalculation,
     now: Date
-  ): UserBonus {
+  ): Omit<UserBonus, 'id'> {
+    // MongoDB will automatically create _id, which will be normalized to id when reading
     return {
-      id: crypto.randomUUID(),
       userId: context.userId,
       tenantId: context.tenantId,
       templateId: template.id,

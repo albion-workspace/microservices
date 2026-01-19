@@ -13,10 +13,17 @@
  * This service provides generic accounting operations only.
  */
 
-import { createLedger, getDatabase, getClient, logger, type Ledger, emit } from 'core-service';
+import { 
+  createLedger, 
+  getDatabase, 
+  getClient, 
+  logger, 
+  type Ledger, 
+  emit,
+  findById,
+} from 'core-service';
 import { SYSTEM_CURRENCY } from '../constants.js';
 import { convertCurrency, getExchangeRate } from './exchange-rate.js';
-import { ObjectId } from 'mongodb';
 
 let ledgerInstance: Ledger | null = null;
 
@@ -94,9 +101,10 @@ export async function getOrCreateUserAccount(
     await ledger.createUserAccount(userId, subtype as any, currency, { allowNegative });
     logger.info('User account created', { userId, subtype, currency, accountId, allowNegative });
   } catch (error: any) {
-    // MongoDB duplicate key error (E11000) - another concurrent call created it
-    if (error.code === 11000 || error.codeName === 'DuplicateKey') {
-      // Retry get - account should exist now
+    // Use centralized duplicate key handler (optimized for sharding)
+    const { isDuplicateKeyError, handleDuplicateKeyError } = await import('core-service');
+    if (isDuplicateKeyError(error)) {
+      // Account was created by concurrent call - verify it exists
       const existingAccount = await ledger.getAccount(accountId);
       if (existingAccount) {
         logger.debug('Account created by concurrent call, using existing', { userId, subtype, currency, accountId });
@@ -141,29 +149,25 @@ export async function checkUserBalance(
     const authDb = client.db('auth_service');
     const authUsersCollection = authDb.collection('users');
     
-    // Query user - Try _id first (most common case), then fallback to id field
-    // MongoDB handles string-to-ObjectId conversion automatically for _id queries
+    // Query user using generic findById utility from core-service
     let authUser: any = null;
     
-    // Try _id first - explicitly convert to ObjectId (same pattern as test script)
-    if (ObjectId.isValid(userId) && userId.length === 24) {
-      try {
-        const objectId = new ObjectId(userId);
-        authUser = await authUsersCollection.findOne(
-          { _id: objectId },
-          { projection: { permissions: 1, roles: 1, id: 1, _id: 1, email: 1 } }
-        );
-      } catch (e: any) {
-        logger.warn('Failed to convert userId to ObjectId', { userId, error: e?.message });
-      }
-    }
+    // Try findById first (handles both _id and id fields automatically)
+    authUser = await findById(
+      authUsersCollection,
+      userId,
+      {}
+    );
     
-    // Fallback: try by id field if _id query didn't find user
-    if (!authUser) {
-      authUser = await authUsersCollection.findOne(
-        { id: userId },
-        { projection: { permissions: 1, roles: 1, id: 1, _id: 1, email: 1 } }
-      );
+    // If found, apply projection
+    if (authUser) {
+      authUser = {
+        permissions: authUser.permissions,
+        roles: authUser.roles,
+        id: authUser.id,
+        _id: authUser._id,
+        email: authUser.email,
+      };
     }
     
     // Fallback: try by email if userId looks like email
@@ -407,68 +411,72 @@ export async function recordDepositLedgerEntry(
   const netAmount = convertedAmount - convertedFeeAmount;
   
   // IMPORTANT: Ledger requires same currency for both accounts in a transaction
-  // For multi-currency support, we need to handle conversion at the service level
-  // Option 1: Create intermediate conversion transaction (fromCurrency -> toCurrency)
-  // Option 2: Use a conversion account as intermediary
-  // For now, we'll use the destination currency for the transaction
-  // The from account will be debited in its currency, to account credited in its currency
+  // For multi-currency support, we use a conversion account as intermediary
+  // When currencies differ:
+  // 1. Debit source account (source currency) -> conversion account (source currency)
+  // 2. Credit conversion account (destination currency) -> destination account (destination currency)
   
-  // Record deposit: From User -> To User (gross amount in destination currency)
-  // Note: The ledger will validate currency match, so we use destination currency
-  // The actual debit from source account happens separately if currencies differ
-  const depositTx = await ledger.createTransaction({
-    type: 'deposit',
-    fromAccountId,
-    toAccountId,
-    amount: convertedAmount, // Use converted amount in destination currency
-    currency: destinationCurrency, // Use destination currency for transaction
-    description: description || `Deposit of ${amount} ${currency}${currency !== destinationCurrency ? ` (converted to ${convertedAmount} ${destinationCurrency})` : ''} (fee: ${feeAmount} ${currency})`,
-    externalRef,
-    initiatedBy: toUserId,
-    metadata: {
-      fromUserId,
-      toUserId,
-      // Only save what cannot be calculated:
-      // - originalCurrency: needed to know user's requested currency
-      // - originalAmount: user's requested amount (can't be calculated)
-      // - originalFeeAmount: user's requested fee (can't be calculated)
-      // - exchangeRate: needed to reconstruct original amounts (can be calculated but saved for audit)
-      // Note: convertedAmount is already in transaction.amount, convertedFeeAmount = originalFeeAmount * exchangeRate
-      originalCurrency: currency !== destinationCurrency ? currency : undefined,
-      originalAmount: currency !== destinationCurrency ? amount : undefined,
-      originalFeeAmount: currency !== destinationCurrency ? feeAmount : undefined,
-      exchangeRate: currency !== destinationCurrency ? exchangeRate : undefined,
-    },
-  });
+  let depositTx;
   
-  // If currencies differ, we need to debit the source account separately
-  // This creates a conversion transaction: source account (source currency) -> conversion account
   if (currency !== destinationCurrency) {
-    // Create a conversion account for the source currency to track the debit
-    const conversionAccountId = await getOrCreateUserAccount(`conversion-${currency}-${destinationCurrency}`, 'main', currency, true);
+    // Cross-currency deposit: use conversion accounts as intermediaries
+    // Step 1: Create conversion accounts (one per currency)
+    const sourceConversionAccountId = await getOrCreateUserAccount(`conversion-${currency}-${destinationCurrency}-source`, 'main', currency, true);
+    const destConversionAccountId = await getOrCreateUserAccount(`conversion-${currency}-${destinationCurrency}-dest`, 'main', destinationCurrency, true);
     
-    // Debit source account in source currency
+    // Step 2: Debit source account in source currency
     await ledger.createTransaction({
       type: 'transfer',
       fromAccountId,
-      toAccountId: conversionAccountId,
+      toAccountId: sourceConversionAccountId,
       amount, // Original amount in source currency
       currency, // Source currency
-      description: `Currency conversion: ${amount} ${currency} -> ${convertedAmount} ${destinationCurrency}`,
-      externalRef: `${externalRef}-conversion`,
+      description: `Currency conversion debit: ${amount} ${currency}`,
+      externalRef: `${externalRef}-conversion-debit`,
       initiatedBy: toUserId,
       metadata: {
         fromUserId,
         toUserId,
-        // Only save what cannot be calculated:
-        // - originalCurrency: needed to know source currency
-        // - originalAmount: source amount (can't be calculated)
-        // - exchangeRate: needed to reconstruct (can be calculated but saved for audit)
-        // Note: convertedAmount = originalAmount * exchangeRate, destinationCurrency is in transaction.currency
         originalCurrency: currency,
         originalAmount: amount,
         exchangeRate,
-        relatedDepositTxId: depositTx._id,
+        conversionType: 'cross-currency-deposit',
+      },
+    });
+    
+    // Step 3: Create main deposit transaction: conversion account (destination currency) -> destination account (destination currency)
+    depositTx = await ledger.createTransaction({
+      type: 'deposit',
+      fromAccountId: destConversionAccountId, // Use conversion account in destination currency
+      toAccountId,
+      amount: convertedAmount, // Use converted amount in destination currency
+      currency: destinationCurrency, // Use destination currency for transaction
+      description: description || `Deposit of ${amount} ${currency} (converted to ${convertedAmount} ${destinationCurrency}) (fee: ${feeAmount} ${currency})`,
+      externalRef,
+      initiatedBy: toUserId,
+      metadata: {
+        fromUserId,
+        toUserId,
+        originalCurrency: currency,
+        originalAmount: amount,
+        originalFeeAmount: feeAmount,
+        exchangeRate,
+      },
+    });
+  } else {
+    // Same currency: direct deposit
+    depositTx = await ledger.createTransaction({
+      type: 'deposit',
+      fromAccountId,
+      toAccountId,
+      amount: convertedAmount, // Same as original amount
+      currency: destinationCurrency, // Same as source currency
+      description: description || `Deposit of ${amount} ${currency} (fee: ${feeAmount} ${currency})`,
+      externalRef,
+      initiatedBy: toUserId,
+      metadata: {
+        fromUserId,
+        toUserId,
       },
     });
   }
@@ -608,65 +616,73 @@ export async function recordWithdrawalLedgerEntry(
   }
   
   // IMPORTANT: Ledger requires same currency for both accounts in a transaction
-  // For multi-currency support, we handle conversion at the service level
-  // The from account will be debited in its currency, to account credited in its currency
+  // For multi-currency support, we use a conversion account as intermediary
+  // When currencies differ:
+  // 1. Debit source account (source currency) -> conversion account (source currency)
+  // 2. Credit conversion account (destination currency) -> destination account (destination currency)
   
-  // Record withdrawal: From User -> To User (in destination currency)
-  // Note: The ledger will validate currency match, so we use destination currency
-  // The actual debit from source account happens separately if currencies differ
-  const withdrawalTx = await ledger.createTransaction({
-    type: 'withdrawal',
-    fromAccountId,
-    toAccountId,
-    amount: convertedTotalAmount, // Use converted total amount in destination currency
-    currency: destinationCurrency, // Use destination currency for transaction
-    description: description || `Withdrawal of ${amount} ${currency}${currency !== destinationCurrency ? ` (converted to ${convertedAmount} ${destinationCurrency})` : ''} (fee: ${feeAmount} ${currency})`,
-    externalRef,
-    initiatedBy: fromUserId,
-    metadata: {
-      fromUserId,
-      toUserId,
-      // Only save what cannot be calculated:
-      // - originalCurrency: needed to know user's requested currency
-      // - originalAmount: user's requested amount (can't be calculated)
-      // - originalFeeAmount: user's requested fee (can't be calculated)
-      // - exchangeRate: needed to reconstruct original amounts (can be calculated but saved for audit)
-      // Note: convertedAmount is already in transaction.amount, convertedFeeAmount = originalFeeAmount * exchangeRate
-      originalCurrency: currency !== destinationCurrency ? currency : undefined,
-      originalAmount: currency !== destinationCurrency ? amount : undefined,
-      originalFeeAmount: currency !== destinationCurrency ? feeAmount : undefined,
-      exchangeRate: currency !== destinationCurrency ? exchangeRate : undefined,
-    },
-  });
+  let withdrawalTx;
   
-  // If currencies differ, we need to debit the source account separately
-  // This creates a conversion transaction: source account (source currency) -> conversion account
   if (currency !== destinationCurrency) {
-    // Create a conversion account for the source currency to track the debit
-    const conversionAccountId = await getOrCreateUserAccount(`conversion-${currency}-${destinationCurrency}`, 'main', currency, true);
+    // Cross-currency withdrawal: use conversion accounts as intermediaries
+    // Step 1: Create conversion accounts (one per currency)
+    const sourceConversionAccountId = await getOrCreateUserAccount(`conversion-${currency}-${destinationCurrency}-source`, 'main', currency, true);
+    const destConversionAccountId = await getOrCreateUserAccount(`conversion-${currency}-${destinationCurrency}-dest`, 'main', destinationCurrency, true);
     
-    // Debit source account in source currency
+    // Step 2: Debit source account in source currency
     await ledger.createTransaction({
       type: 'transfer',
       fromAccountId,
-      toAccountId: conversionAccountId,
+      toAccountId: sourceConversionAccountId,
       amount: totalAmount, // Original total amount in source currency
       currency, // Source currency
-      description: `Currency conversion: ${totalAmount} ${currency} -> ${convertedTotalAmount} ${destinationCurrency}`,
-      externalRef: `${externalRef}-conversion`,
+      description: `Currency conversion debit: ${totalAmount} ${currency}`,
+      externalRef: `${externalRef}-conversion-debit`,
       initiatedBy: fromUserId,
       metadata: {
         fromUserId,
         toUserId,
-        // Only save what cannot be calculated:
-        // - originalCurrency: needed to know source currency
-        // - originalAmount: source total amount (can't be calculated)
-        // - exchangeRate: needed to reconstruct (can be calculated but saved for audit)
-        // Note: convertedAmount = originalAmount * exchangeRate, destinationCurrency is in transaction.currency
         originalCurrency: currency,
-        originalAmount: totalAmount,
+        originalAmount: amount,
+        originalFeeAmount: feeAmount,
         exchangeRate,
-        relatedWithdrawalTxId: withdrawalTx._id,
+        conversionType: 'cross-currency-withdrawal',
+      },
+    });
+    
+    // Step 3: Create main withdrawal transaction: conversion account (destination currency) -> destination account (destination currency)
+    withdrawalTx = await ledger.createTransaction({
+      type: 'withdrawal',
+      fromAccountId: destConversionAccountId, // Use conversion account in destination currency
+      toAccountId,
+      amount: convertedTotalAmount, // Use converted total amount in destination currency
+      currency: destinationCurrency, // Use destination currency for transaction
+      description: description || `Withdrawal of ${amount} ${currency} (converted to ${convertedAmount} ${destinationCurrency}) (fee: ${feeAmount} ${currency})`,
+      externalRef,
+      initiatedBy: fromUserId,
+      metadata: {
+        fromUserId,
+        toUserId,
+        originalCurrency: currency,
+        originalAmount: amount,
+        originalFeeAmount: feeAmount,
+        exchangeRate,
+      },
+    });
+  } else {
+    // Same currency: direct withdrawal
+    withdrawalTx = await ledger.createTransaction({
+      type: 'withdrawal',
+      fromAccountId,
+      toAccountId,
+      amount: convertedTotalAmount, // Same as original total amount
+      currency: destinationCurrency, // Same as source currency
+      description: description || `Withdrawal of ${amount} ${currency} (fee: ${feeAmount} ${currency})`,
+      externalRef,
+      initiatedBy: fromUserId,
+      metadata: {
+        fromUserId,
+        toUserId,
       },
     });
   }

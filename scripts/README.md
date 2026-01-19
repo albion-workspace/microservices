@@ -69,9 +69,9 @@ See `typescript/README.md` for detailed script organization and usage.
 ### Promote User to Admin
 ```powershell
 cd scripts/bin
-node promote-to-admin.js admin@demo.com
+node promote-to-system.js system@demo.com
 # Or from project root:
-npm run promote-to-admin -- admin@demo.com
+npm run promote-to-system -- system@demo.com
 ```
 
 ## Notes

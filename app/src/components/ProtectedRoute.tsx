@@ -5,7 +5,8 @@
 
 import React from 'react';
 import { Navigate, useLocation } from 'react-router-dom';
-import { useAuth, hasRole } from '../lib/auth-context';
+import { useAuth } from '../lib/auth-context';
+import { hasAnyRole } from '../lib/access';
 import { Loader2 } from 'lucide-react';
 
 interface ProtectedRouteProps {
@@ -34,9 +35,9 @@ export default function ProtectedRoute({ children, requireRoles }: ProtectedRout
     return <Navigate to="/login" state={{ from: location }} replace />;
   }
 
-  // Check role requirements
+  // Check role requirements using access-engine
   if (requireRoles && requireRoles.length > 0) {
-    const hasRequiredRole = requireRoles.some(role => hasRole(user?.roles, role));
+    const hasRequiredRole = hasAnyRole(user?.roles, requireRoles);
     
     if (!hasRequiredRole) {
       return (

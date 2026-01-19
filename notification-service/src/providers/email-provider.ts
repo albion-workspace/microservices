@@ -4,7 +4,7 @@
 
 import nodemailer from 'nodemailer';
 import type { Transporter } from 'nodemailer';
-import { logger } from 'core-service';
+import { logger, generateId } from 'core-service';
 import type { NotificationProvider, EmailNotification, NotificationResponse, NotificationConfig } from '../types.js';
 
 export class EmailProvider implements NotificationProvider {
@@ -59,7 +59,7 @@ export class EmailProvider implements NotificationProvider {
       });
       
       return {
-        id: crypto.randomUUID(),
+        id: generateId(),
         status: 'sent',
         channel: 'email',
         sentAt: new Date(),
@@ -69,7 +69,7 @@ export class EmailProvider implements NotificationProvider {
       logger.error('Failed to send email', { error: error.message });
       
       return {
-        id: crypto.randomUUID(),
+        id: generateId(),
         status: 'failed',
         channel: 'email',
         error: error.message,

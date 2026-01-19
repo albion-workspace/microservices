@@ -12,10 +12,10 @@
  *   npx tsx scripts/typescript/auth/test-auth.ts trace            # Trace login flow
  */
 
+import { loginAs, users, getUserDefinition } from '../config/users.js';
+
 const AUTH_SERVICE_URL = process.env.AUTH_URL || 'http://localhost:3003/graphql';
 const PAYMENT_SERVICE_URL = process.env.PAYMENT_URL || 'http://localhost:3004/graphql';
-const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@demo.com';
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'Admin123!@#';
 const DEFAULT_TENANT_ID = 'default-tenant';
 
 async function graphql<T = any>(
@@ -63,36 +63,16 @@ function decodeJWT(token: string): any {
   return JSON.parse(decoded);
 }
 
-async function login(email: string = ADMIN_EMAIL, password: string = ADMIN_PASSWORD): Promise<string> {
-  const data = await graphql<{ login: { success: boolean; tokens?: { accessToken: string } } }>(
-    AUTH_SERVICE_URL,
-    `
-      mutation Login($input: LoginInput!) {
-        login(input: $input) {
-          success
-          tokens {
-            accessToken
-          }
-        }
-      }
-    `,
-    {
-      input: {
-        tenantId: DEFAULT_TENANT_ID,
-        identifier: email,
-        password: password,
-      },
-    }
-  );
-
-  if (!data.login.success || !data.login.tokens) {
-    throw new Error('Login failed');
-  }
-
-  return data.login.tokens.accessToken;
+async function login(userKeyOrEmail: string = 'system'): Promise<string> {
+  const user = getUserDefinition(userKeyOrEmail);
+  const { token } = await loginAs(userKeyOrEmail);
+  return token;
 }
 
-async function testLogin(email: string = ADMIN_EMAIL, password: string = ADMIN_PASSWORD) {
+async function testLogin(userKeyOrEmail: string = 'system') {
+  const user = getUserDefinition(userKeyOrEmail);
+  const email = user.email;
+  const password = user.password;
   console.log('🔐 Testing login...\n');
   
   try {
@@ -172,7 +152,10 @@ async function testLogin(email: string = ADMIN_EMAIL, password: string = ADMIN_P
   }
 }
 
-async function testToken(email: string = ADMIN_EMAIL, password: string = ADMIN_PASSWORD) {
+async function testToken(userKeyOrEmail: string = 'system') {
+  const user = getUserDefinition(userKeyOrEmail);
+  const email = user.email;
+  const password = user.password;
   console.log('🔐 Logging in...');
   const token = await login(email, password);
   
@@ -201,14 +184,16 @@ async function testToken(email: string = ADMIN_EMAIL, password: string = ADMIN_P
     console.log('\n⚠️  WARNING: Token has NO permissions!');
   }
   
-  if ((payload.roles || []).includes('admin')) {
-    console.log('\n✅ Token has admin role');
+  if ((payload.roles || []).includes('system')) {
+    console.log('\n✅ Token has system role');
   } else {
-    console.log('\n❌ Token does NOT have admin role');
+    console.log('\n❌ Token does NOT have system role');
   }
 }
 
-async function testPassport(email: string = ADMIN_EMAIL) {
+async function testPassport(userKeyOrEmail: string = 'system') {
+  const user = getUserDefinition(userKeyOrEmail);
+  const email = user.email;
   const { MongoClient } = await import('mongodb');
   
   function normalizeEmail(email: string): string {
@@ -264,7 +249,10 @@ async function testPassport(email: string = ADMIN_EMAIL) {
   }
 }
 
-async function testPermission(email: string = ADMIN_EMAIL, password: string = ADMIN_PASSWORD) {
+async function testPermission(userKeyOrEmail: string = 'system') {
+  const user = getUserDefinition(userKeyOrEmail);
+  const email = user.email;
+  const password = user.password;
   console.log('🔐 Logging in...');
   const token = await login(email, password);
   
@@ -273,8 +261,8 @@ async function testPermission(email: string = ADMIN_EMAIL, password: string = AD
   console.log(`Roles in token: ${JSON.stringify(payload.roles || [])}`);
   console.log(`Permissions in token: ${JSON.stringify(payload.permissions || [])}`);
   
-  // Try to call a mutation that requires admin role
-  console.log('\n🧪 Testing createWalletTransaction mutation (requires admin/system role)...');
+  // Try to call a mutation that requires system role
+  console.log('\n🧪 Testing createWalletTransaction mutation (requires system role)...');
   try {
     const result = await graphql(
       PAYMENT_SERVICE_URL,
@@ -307,15 +295,15 @@ async function testPermission(email: string = ADMIN_EMAIL, password: string = AD
       console.log('   The payment service is correctly rejecting the request.');
       console.log('   This means the JWT token does NOT have admin/system roles.');
       console.log(`   Token has roles: ${JSON.stringify(payload.roles || [])}`);
-      console.log('   Required roles: ["admin"] or ["system"]');
+      console.log('   Required roles: ["system"]');
     }
   }
 }
 
-async function testTrace(email: string = ADMIN_EMAIL, password: string = ADMIN_PASSWORD) {
+async function testTrace(userKeyOrEmail: string = 'system') {
   console.log('🔐 Testing login and tracing user object...\n');
   
-  await testLogin(email, password);
+  await testLogin(userKeyOrEmail);
 }
 
 async function main() {
@@ -344,7 +332,7 @@ Commands:
 Examples:
   npx tsx scripts/typescript/auth/test-auth.ts login
   npx tsx scripts/typescript/auth/test-auth.ts token
-  npx tsx scripts/typescript/auth/test-auth.ts passport admin@demo.com
+  npx tsx scripts/typescript/auth/test-auth.ts passport system@demo.com
   npx tsx scripts/typescript/auth/test-auth.ts permission
   npx tsx scripts/typescript/auth/test-auth.ts trace
 `);
@@ -352,29 +340,28 @@ Examples:
   }
   
   const command = args[0];
-  const email = args[1] || ADMIN_EMAIL;
-  const password = args[2] || ADMIN_PASSWORD;
+  const userKeyOrEmail = args[1] || 'system';
   
   try {
     switch (command) {
       case 'login':
-        await testLogin(email, password);
+        await testLogin(userKeyOrEmail);
         break;
         
       case 'token':
-        await testToken(email, password);
+        await testToken(userKeyOrEmail);
         break;
         
       case 'passport':
-        await testPassport(email);
+        await testPassport(userKeyOrEmail);
         break;
         
       case 'permission':
-        await testPermission(email, password);
+        await testPermission(userKeyOrEmail);
         break;
         
       case 'trace':
-        await testTrace(email, password);
+        await testTrace(userKeyOrEmail);
         break;
         
       default:

@@ -5,7 +5,7 @@
  * Socket.IO server is automatically created by createGateway() with enableSocketIO: true
  */
 
-import { logger, emit } from 'core-service';
+import { logger, emit, generateId } from 'core-service';
 import type { NotificationProvider, SocketNotification, NotificationResponse, NotificationConfig } from '../types.js';
 
 export class SocketProvider implements NotificationProvider {
@@ -71,7 +71,7 @@ export class SocketProvider implements NotificationProvider {
       });
       
       return {
-        id: crypto.randomUUID(),
+        id: generateId(),
         status: 'sent',
         channel: 'socket',
         sentAt: new Date(),
@@ -82,7 +82,7 @@ export class SocketProvider implements NotificationProvider {
       });
       
       return {
-        id: crypto.randomUUID(),
+        id: generateId(),
         status: 'failed',
         channel: 'socket',
         error: error.message,

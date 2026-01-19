@@ -13,7 +13,8 @@ import {
   PlayCircle,
 } from 'lucide-react'
 import { graphql as gql, SERVICE_URLS } from '../lib/auth'
-import { useAuth, hasRole, getRoleNames } from '../lib/auth-context'
+import { useAuth } from '../lib/auth-context'
+import { hasRole, getRoleNames } from '../lib/access'
 
 /**
  * Real-World Use Cases Page

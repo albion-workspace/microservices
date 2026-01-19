@@ -13,9 +13,10 @@
  */
 
 import { getAuthDatabase, closeAllConnections } from '../config/mongodb.js';
+import { users } from '../config/users.js';
 
 const DEFAULT_TENANT_ID = 'default-tenant';
-const DEFAULT_ADMIN_EMAIL = 'admin@demo.com';
+const DEFAULT_SYSTEM_EMAIL = users.system.email;
 
 async function connectDB() {
   const db = await getAuthDatabase();
@@ -43,9 +44,9 @@ async function checkWrongUser(userId?: string) {
       console.log(`  Permissions: ${JSON.stringify(wrongUser.permissions)}`);
       console.log(`  Created: ${wrongUser.createdAt}`);
       
-      if (wrongUser.email === DEFAULT_ADMIN_EMAIL) {
-        console.log('\n⚠️  This user has admin@demo.com email but wrong roles!');
-        console.log('   This is why Passport finds it instead of the correct admin user.');
+      if (wrongUser.email === DEFAULT_SYSTEM_EMAIL) {
+        console.log('\n⚠️  This user has system@demo.com email but wrong roles!');
+        console.log('   This is why Passport finds it instead of the correct system user.');
       }
     } else {
       console.log('  ❌ NOT FOUND');
@@ -65,20 +66,20 @@ async function checkWrongUser(userId?: string) {
     }
     
     // Check by email
-    console.log(`\n🔍 Checking for ${DEFAULT_ADMIN_EMAIL}...\n`);
-    const adminUser = await usersCollection.findOne({ email: DEFAULT_ADMIN_EMAIL });
-    console.log(`User with email ${DEFAULT_ADMIN_EMAIL}:`);
-    if (adminUser) {
+    console.log(`\n🔍 Checking for ${DEFAULT_SYSTEM_EMAIL}...\n`);
+    const systemUser = await usersCollection.findOne({ email: DEFAULT_SYSTEM_EMAIL });
+    console.log(`User with email ${DEFAULT_SYSTEM_EMAIL}:`);
+    if (systemUser) {
       console.log('  ✅ EXISTS!');
-      console.log(`  ID: ${adminUser.id || adminUser._id}`);
-      console.log(`  Roles: ${JSON.stringify(adminUser.roles)}`);
+      console.log(`  ID: ${systemUser.id || systemUser._id}`);
+      console.log(`  Roles: ${JSON.stringify(systemUser.roles)}`);
       
-      if (adminUser.id === wrongUserId) {
-        console.log('\n❌ PROBLEM: Admin user has the WRONG user ID!');
-      } else if (adminUser.id === correctUserId) {
-        console.log('\n✅ Admin user has the CORRECT user ID');
+      if (systemUser.id === wrongUserId) {
+        console.log('\n❌ PROBLEM: System user has the WRONG user ID!');
+      } else if (systemUser.id === correctUserId) {
+        console.log('\n✅ System user has the CORRECT user ID');
       } else {
-        console.log(`\n⚠️  Admin user has a DIFFERENT user ID: ${adminUser.id}`);
+        console.log(`\n⚠️  System user has a DIFFERENT user ID: ${systemUser.id}`);
       }
     } else {
       console.log('  ❌ NOT FOUND');
@@ -102,7 +103,7 @@ async function findDuplicates(email?: string) {
   try {
     const usersCollection = db.collection('users');
     
-    const searchEmail = email || DEFAULT_ADMIN_EMAIL;
+    const searchEmail = email || DEFAULT_SYSTEM_EMAIL;
     
     console.log(`\n🔍 Checking for duplicate users with email: ${searchEmail}\n`);
     
@@ -125,22 +126,22 @@ async function findDuplicates(email?: string) {
     if (users.length > 1) {
       console.log('❌ PROBLEM: Multiple users found with the same email!');
       
-      const correctAdmin = users.find(u => 
+      const correctSystem = users.find(u => 
         Array.isArray(u.roles) && 
-        (u.roles.includes('admin') || u.roles.includes('system'))
+        u.roles.includes('system')
       );
       
-      const wrongAdmins = users.filter(u => 
+      const wrongSystems = users.filter(u => 
         Array.isArray(u.roles) && 
         u.roles.length === 1 && 
         u.roles[0] === 'user'
       );
       
-      if (correctAdmin) {
-        console.log(`\n✅ Correct admin user: ${correctAdmin.id || correctAdmin._id}`);
+      if (correctSystem) {
+        console.log(`\n✅ Correct system user: ${correctSystem.id || correctSystem._id}`);
       }
-      if (wrongAdmins.length > 0) {
-        console.log(`\n❌ Wrong admin user(s): ${wrongAdmins.map(u => u.id || u._id).join(', ')}`);
+      if (wrongSystems.length > 0) {
+        console.log(`\n❌ Wrong system user(s): ${wrongSystems.map(u => u.id || u._id).join(', ')}`);
       }
     } else if (users.length === 0) {
       console.log('❌ PROBLEM: No users found with this email!');
@@ -180,18 +181,18 @@ async function fixDuplicates(email?: string) {
     const sessionsCollection = db.collection('sessions');
     const refreshTokensCollection = db.collection('refresh_tokens');
     
-    const searchEmail = email || DEFAULT_ADMIN_EMAIL;
+    const searchEmail = email || DEFAULT_SYSTEM_EMAIL;
     
     console.log(`\n🔍 Finding duplicate users with email: ${searchEmail}\n`);
     
-    const adminUsers = await usersCollection.find({
+    const systemUsers = await usersCollection.find({
       email: searchEmail,
       tenantId: DEFAULT_TENANT_ID
     }).toArray();
     
-    console.log(`Found ${adminUsers.length} user(s) with email ${searchEmail}:\n`);
+    console.log(`Found ${systemUsers.length} user(s) with email ${searchEmail}:\n`);
     
-    adminUsers.forEach((user, idx) => {
+    systemUsers.forEach((user, idx) => {
       console.log(`User ${idx + 1}:`);
       console.log(`  ID: ${user.id || user._id}`);
       console.log(`  Email: ${user.email}`);
@@ -202,52 +203,52 @@ async function fixDuplicates(email?: string) {
       console.log('');
     });
     
-    // Find the correct admin user (should have admin/system roles)
-    const correctAdmin = adminUsers.find(u => 
+    // Find the correct system user (should have system role)
+    const correctSystem = systemUsers.find(u => 
       Array.isArray(u.roles) && 
-      (u.roles.includes('admin') || u.roles.includes('system'))
+      u.roles.includes('system')
     );
     
     // Find the wrong user (has only 'user' role)
-    const wrongAdmin = adminUsers.find(u => 
+    const wrongSystem = systemUsers.find(u => 
       Array.isArray(u.roles) && 
       u.roles.length === 1 && 
       u.roles[0] === 'user'
     );
     
-    if (correctAdmin && wrongAdmin) {
-      console.log('✅ Found correct admin user:', correctAdmin.id || correctAdmin._id);
-      console.log('❌ Found wrong admin user:', wrongAdmin.id || wrongAdmin._id);
-      console.log('\n🗑️  Deleting wrong admin user...');
+    if (correctSystem && wrongSystem) {
+      console.log('✅ Found correct system user:', correctSystem.id || correctSystem._id);
+      console.log('❌ Found wrong system user:', wrongSystem.id || wrongSystem._id);
+      console.log('\n🗑️  Deleting wrong system user...');
       
-      const deleteResult = await usersCollection.deleteOne({ id: wrongAdmin.id });
+      const deleteResult = await usersCollection.deleteOne({ id: wrongSystem.id });
       console.log(`✅ Deleted ${deleteResult.deletedCount} user(s)`);
       
       // Also delete any sessions/refresh tokens for the wrong user
-      const sessionsDeleted = await sessionsCollection.deleteMany({ userId: wrongAdmin.id });
-      const tokensDeleted = await refreshTokensCollection.deleteMany({ userId: wrongAdmin.id });
+      const sessionsDeleted = await sessionsCollection.deleteMany({ userId: wrongSystem.id });
+      const tokensDeleted = await refreshTokensCollection.deleteMany({ userId: wrongSystem.id });
       
       console.log(`✅ Deleted ${sessionsDeleted.deletedCount} session(s)`);
       console.log(`✅ Deleted ${tokensDeleted.deletedCount} refresh token(s)`);
       
-      console.log('\n✅ Cleanup complete! Now Passport should find the correct admin user.');
-    } else if (correctAdmin && !wrongAdmin) {
-      console.log('✅ Only correct admin user found. No cleanup needed.');
-    } else if (!correctAdmin && wrongAdmin) {
-      console.log('⚠️  Only wrong admin user found. Promoting it to admin...');
+      console.log('\n✅ Cleanup complete! Now Passport should find the correct system user.');
+    } else if (correctSystem && !wrongSystem) {
+      console.log('✅ Only correct system user found. No cleanup needed.');
+    } else if (!correctSystem && wrongSystem) {
+      console.log('⚠️  Only wrong system user found. Promoting it to system...');
       await usersCollection.updateOne(
-        { id: wrongAdmin.id },
+        { id: wrongSystem.id },
         {
           $set: {
-            roles: ['admin', 'system'],
+            roles: ['system'],
             permissions: ['*:*:*', 'allowNegative', 'acceptFee', 'bonuses'],
             updatedAt: new Date(),
           },
         }
       );
-      console.log('✅ User promoted to admin');
+      console.log('✅ User promoted to system');
     } else {
-      console.log('❌ No admin users found!');
+      console.log('❌ No system users found!');
     }
     
   } finally {
@@ -352,10 +353,10 @@ Commands:
     Check for wrong user ID (default: 4a83b793-6a86-45b6-ae86-8b10ed48fb6e)
 
   duplicates [email]
-    Find duplicate users by email (default: admin@demo.com)
+    Find duplicate users by email (default: system@demo.com)
 
   fix-duplicates [email]
-    Fix duplicate admin users (default: admin@demo.com)
+    Fix duplicate system users (default: system@demo.com)
 
   find-user <email>
     Find user by email (tries multiple query variations)
@@ -365,9 +366,9 @@ Commands:
 
 Examples:
   npx tsx scripts/typescript/auth/debug-auth.ts wrong-user
-  npx tsx scripts/typescript/auth/debug-auth.ts duplicates admin@demo.com
+  npx tsx scripts/typescript/auth/debug-auth.ts duplicates system@demo.com
   npx tsx scripts/typescript/auth/debug-auth.ts fix-duplicates
-  npx tsx scripts/typescript/auth/debug-auth.ts find-user admin@demo.com
+  npx tsx scripts/typescript/auth/debug-auth.ts find-user system@demo.com
   npx tsx scripts/typescript/auth/debug-auth.ts id-mismatch
 `);
     process.exit(1);

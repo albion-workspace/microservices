@@ -7,7 +7,7 @@
  * - Microservices (cross-service references)
  */
 
-import { getDatabase, getClient, logger } from 'core-service';
+import { getDatabase, getClient, logger, findOneById } from 'core-service';
 
 /**
  * Collection mapping for reference types
@@ -58,10 +58,14 @@ export async function resolveReference(
       const client = getClient();
       const authDb = client.db('auth_service');
       const usersCollection = authDb.collection('users');
-      return await usersCollection.findOne(
-        { id: refId },
-        { projection: { _id: 0 } }
-      );
+      // Use optimized findOneById utility (performance-optimized)
+      const doc = await findOneById(usersCollection, refId, {});
+      if (doc) {
+        // Remove _id from projection
+        const { _id, ...rest } = doc as any;
+        return rest;
+      }
+      return null;
     } catch (error) {
       logger.error(`Failed to resolve user reference ${refId} from auth_service`, { error });
       return null;
@@ -74,7 +78,14 @@ export async function resolveReference(
   const collection = db.collection(collectionName);
   
   try {
-    return await collection.findOne({ id: refId }, { projection: { _id: 0 } });
+    // Use optimized findOneById utility (performance-optimized)
+    const doc = await findOneById(collection, refId, {});
+    if (doc) {
+      // Remove _id from projection
+      const { _id, ...rest } = doc as any;
+      return rest;
+    }
+    return null;
   } catch (error) {
     logger.error(`Failed to resolve reference ${refType}:${refId}`, { error });
     return null;
@@ -155,16 +166,20 @@ export async function batchResolveReferences<T extends Record<string, any>>(
         const client = getClient();
         const authDb = client.db('auth_service');
         const usersCollection = authDb.collection('users');
-        refs = await usersCollection
+        // Batch lookup: use $in query (efficient for multiple IDs)
+        const docs = await usersCollection
           .find({ id: { $in: ids } }, { projection: { _id: 0 } })
           .toArray();
+        refs = docs;
       } else {
         // All other references come from payment_service database
         const collectionName = COLLECTION_MAP[refType] || refType;
         const collection = db.collection(collectionName);
-        refs = await collection
+        // Batch lookup: use $in query (efficient for multiple IDs)
+        const docs = await collection
           .find({ id: { $in: ids } }, { projection: { _id: 0 } })
           .toArray();
+        refs = docs;
       }
       
       // Cache by ID
@@ -207,10 +222,8 @@ export async function referenceExists(
       const client = getClient();
       const authDb = client.db('auth_service');
       const usersCollection = authDb.collection('users');
-      const doc = await usersCollection.findOne(
-        { id: refId },
-        { projection: { id: 1 } }
-      );
+      // Use optimized findOneById utility (performance-optimized)
+      const doc = await findOneById(usersCollection, refId, {});
       return doc !== null;
     }
     
@@ -218,10 +231,8 @@ export async function referenceExists(
     const db = getDatabase();
     const collectionName = COLLECTION_MAP[refType] || refType;
     const collection = db.collection(collectionName);
-    const doc = await collection.findOne(
-      { id: refId },
-      { projection: { id: 1 } }
-    );
+    // Use optimized findOneById utility (performance-optimized)
+    const doc = await findOneById(collection, refId, {});
     return doc !== null;
   } catch {
     return false;

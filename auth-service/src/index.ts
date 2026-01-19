@@ -19,6 +19,10 @@ import {
   hasRole,
   isAuthenticated,
   allow,
+  can,
+  or,
+  and,
+  isOwner,
   logger,
   on,
   startListening,
@@ -103,6 +107,7 @@ const webhookService = createWebhookService({
     • user.unlocked - Account unlocked
     • user.suspended - Account suspended
     • user.deleted - Account deleted
+    • user.metadata - User metadata updated (type: deposit/withdrawal/purchase/action)
     • session.created - New session created
     • session.expired - Session expired
     • session.revoked - Session revoked
@@ -141,15 +146,16 @@ const config = {
       health: allow,
       authHealth: allow,
       me: isAuthenticated,
-      getUser: hasRole('admin'),
-      users: hasRole('admin'),
-      usersByRole: hasRole('admin'),
+      // URN-based permissions for user management
+      getUser: or(hasRole('system'), can('user', 'read')), // System or user:read permission
+      users: or(hasRole('system'), can('user', 'list')), // System or user:list permission
+      usersByRole: or(hasRole('system'), can('user', 'list')), // System or user:list permission
       mySessions: isAuthenticated,
-      // Webhooks (admin only)
-      webhooks: hasRole('admin'),
-      webhook: hasRole('admin'),
-      webhookStats: hasRole('admin'),
-      webhookDeliveries: hasRole('admin'),
+      // Webhooks (system only - using URN for consistency)
+      webhooks: or(hasRole('system'), can('webhook', 'read')),
+      webhook: or(hasRole('system'), can('webhook', 'read')),
+      webhookStats: or(hasRole('system'), can('webhook', 'read')),
+      webhookDeliveries: or(hasRole('system'), can('webhook', 'read')),
     },
     Mutation: {
       // Public mutations (no auth required)
@@ -161,26 +167,26 @@ const config = {
       verifyOTP: allow,
       resendOTP: allow,
       
-      // Authenticated mutations
+      // Authenticated mutations (users can manage their own account)
       logout: isAuthenticated,
       logoutAll: isAuthenticated,
       refreshToken: allow, // Token validation in resolver
-      changePassword: isAuthenticated,
-      enable2FA: isAuthenticated,
+      changePassword: isAuthenticated, // Users can change their own password
+      enable2FA: isAuthenticated, // Users can enable 2FA for themselves
       verify2FA: isAuthenticated,
       disable2FA: isAuthenticated,
       regenerateBackupCodes: isAuthenticated,
       
-      // Webhooks (admin only)
-      registerWebhook: hasRole('admin'),
-      updateWebhook: hasRole('admin'),
-      deleteWebhook: hasRole('admin'),
-      testWebhook: hasRole('admin'),
-      
-      // User Management (admin only)
-      updateUserRoles: hasRole('admin'),
-      updateUserPermissions: hasRole('admin'),
-      updateUserStatus: hasRole('admin'),
+      // Webhooks (system only - using URN for consistency)
+      registerWebhook: or(hasRole('system'), can('webhook', 'create')),
+      updateWebhook: or(hasRole('system'), can('webhook', 'update')),
+      deleteWebhook: or(hasRole('system'), can('webhook', 'delete')),
+      testWebhook: or(hasRole('system'), can('webhook', 'execute')),
+
+      // User Management (system only - using URN for granular control)
+      updateUserRoles: or(hasRole('system'), can('user', 'update')), // System or user:update permission
+      updateUserPermissions: or(hasRole('system'), can('user', 'update')), // System or user:update permission
+      updateUserStatus: or(hasRole('system'), can('user', 'update')), // System or user:update permission
     },
   },
   mongoUri: authConfig.mongoUri,
@@ -193,10 +199,256 @@ const config = {
 // ═══════════════════════════════════════════════════════════════════
 
 function setupEventHandlers() {
-  // Example: Listen to events from other services
-  // This service typically emits events rather than consuming them
+  // ═══════════════════════════════════════════════════════════════════
+  // Payment Service Events - Update User Metadata
+  // ═══════════════════════════════════════════════════════════════════
   
-  logger.info('Event handlers registered');
+  /**
+   * Generic handler for wallet events to track user activity in metadata
+   * This allows other services (like bonus-service) to check user status
+   * without querying large transaction tables
+   * 
+   * Handles: deposit, withdrawal, purchase, action, etc.
+   */
+  const handleWalletEvent = async (
+    event: IntegrationEvent<{
+      transactionId: string;
+      walletId: string;
+      type: string;
+      amount: number;
+      currency: string;
+      balance: number;
+    }>,
+    eventType: 'deposit' | 'withdrawal' | 'purchase' | 'action' | string
+  ) => {
+    if (!event.userId) return;
+    
+    try {
+      const db = getDatabase();
+      const usersCollection = db.collection('users');
+      
+      // Get current user metadata
+      const user = await usersCollection.findOne(
+        { id: event.userId, tenantId: event.tenantId },
+        { projection: { metadata: 1 } }
+      );
+      
+      const now = new Date();
+      const metadataUpdates: Record<string, any> = {};
+      let shouldUpdate = false;
+      
+      // Handle different event types
+      if (eventType === 'deposit') {
+        // Check if this is the user's first deposit
+        const hasMadeFirstDeposit = user?.metadata?.hasMadeFirstDeposit === true;
+        if (!hasMadeFirstDeposit) {
+          metadataUpdates['metadata.hasMadeFirstDeposit'] = true;
+          metadataUpdates['metadata.firstDepositAt'] = now;
+          shouldUpdate = true;
+        }
+      } else if (eventType === 'withdrawal') {
+        // Track first withdrawal if needed
+        const hasMadeFirstWithdrawal = user?.metadata?.hasMadeFirstWithdrawal === true;
+        if (!hasMadeFirstWithdrawal) {
+          metadataUpdates['metadata.hasMadeFirstWithdrawal'] = true;
+          metadataUpdates['metadata.firstWithdrawalAt'] = now;
+          shouldUpdate = true;
+        }
+      } else if (eventType === 'purchase') {
+        // Track first purchase
+        const hasMadeFirstPurchase = user?.metadata?.hasMadeFirstPurchase === true;
+        if (!hasMadeFirstPurchase) {
+          metadataUpdates['metadata.hasMadeFirstPurchase'] = true;
+          metadataUpdates['metadata.firstPurchaseAt'] = now;
+          shouldUpdate = true;
+        }
+      } else if (eventType === 'action') {
+        // Track first action
+        const hasCompletedFirstAction = user?.metadata?.hasCompletedFirstAction === true;
+        if (!hasCompletedFirstAction) {
+          metadataUpdates['metadata.hasCompletedFirstAction'] = true;
+          metadataUpdates['metadata.firstActionAt'] = now;
+          shouldUpdate = true;
+        }
+      }
+      
+      // Update metadata if needed
+      if (shouldUpdate) {
+        await usersCollection.updateOne(
+          { id: event.userId, tenantId: event.tenantId },
+          {
+            $set: {
+              ...metadataUpdates,
+              updatedAt: now,
+            },
+            $setOnInsert: {
+              metadata: metadataUpdates,
+            },
+          },
+          { upsert: false } // Don't create user - they should already exist
+        );
+        
+        logger.info(`User ${eventType} marked in metadata`, {
+          userId: event.userId,
+          tenantId: event.tenantId,
+          transactionId: event.data.transactionId,
+          eventType,
+        });
+        
+        // Emit generic user.metadata event for other services
+        // This can be reused for all metadata updates (deposit, withdrawal, purchase, action, etc.)
+        try {
+          // Extract metadata fields (remove 'metadata.' prefix from keys)
+          const metadataFields: Record<string, any> = {};
+          Object.entries(metadataUpdates).forEach(([key, value]) => {
+            if (key.startsWith('metadata.')) {
+              const fieldName = key.replace('metadata.', '');
+              metadataFields[fieldName] = value instanceof Date ? value.toISOString() : value;
+            }
+          });
+          
+          await emitAuthEvent('user.metadata', event.tenantId, event.userId, {
+            type: eventType,
+            metadata: metadataFields,
+            transactionId: event.data.transactionId,
+            amount: event.data.amount,
+            currency: event.data.currency,
+            timestamp: now.toISOString(),
+          });
+        } catch (err) {
+          // Non-critical - log but don't fail
+          logger.debug('Failed to emit user.metadata event', { error: err });
+        }
+      }
+    } catch (error) {
+      logger.error(`Failed to update user metadata on ${eventType}`, {
+        error,
+        userId: event.userId,
+        tenantId: event.tenantId,
+        eventId: event.eventId,
+        eventType,
+      });
+      // Non-critical - don't fail the transaction
+    }
+  };
+  
+  // Map wallet transaction types to metadata event types
+  // This allows us to track first-time activities for bonus eligibility
+  const walletEventTypeMap: Record<string, string> = {
+    'deposit': 'deposit',
+    'withdrawal': 'withdrawal',
+    'purchase': 'purchase',      // E-commerce purchases
+    'bet': 'action',             // First bet = first action (gaming)
+    'action': 'action',           // Generic first action
+  };
+  
+  // Listen to wallet deposit events
+  on<{
+    transactionId: string;
+    walletId: string;
+    type: string;
+    amount: number;
+    currency: string;
+    balance: number;
+    isFirstDeposit?: boolean;
+  }>('wallet.deposit.completed', async (event: IntegrationEvent<{
+    transactionId: string;
+    walletId: string;
+    type: string;
+    amount: number;
+    currency: string;
+    balance: number;
+    isFirstDeposit?: boolean;
+  }>) => {
+    await handleWalletEvent(event, 'deposit');
+  });
+  
+  // Listen to wallet withdrawal events
+  on<{
+    transactionId: string;
+    walletId: string;
+    type: string;
+    amount: number;
+    currency: string;
+    balance: number;
+  }>('wallet.withdrawal.completed', async (event: IntegrationEvent<{
+    transactionId: string;
+    walletId: string;
+    type: string;
+    amount: number;
+    currency: string;
+    balance: number;
+  }>) => {
+    await handleWalletEvent(event, 'withdrawal');
+  });
+  
+  // Listen to wallet purchase events (for first_purchase bonus)
+  on<{
+    transactionId: string;
+    walletId: string;
+    type: string;
+    amount: number;
+    currency: string;
+    balance: number;
+  }>('wallet.purchase.completed', async (event: IntegrationEvent<{
+    transactionId: string;
+    walletId: string;
+    type: string;
+    amount: number;
+    currency: string;
+    balance: number;
+  }>) => {
+    await handleWalletEvent(event, 'purchase');
+  });
+  
+  // Listen to wallet bet events (for first_action bonus - gaming context)
+  // First bet can be considered first action
+  on<{
+    transactionId: string;
+    walletId: string;
+    type: string;
+    amount: number;
+    currency: string;
+    balance: number;
+  }>('wallet.bet.completed', async (event: IntegrationEvent<{
+    transactionId: string;
+    walletId: string;
+    type: string;
+    amount: number;
+    currency: string;
+    balance: number;
+  }>) => {
+    await handleWalletEvent(event, 'action');
+  });
+  
+  // Listen to generic wallet action events (for first_action bonus)
+  on<{
+    transactionId: string;
+    walletId: string;
+    type: string;
+    amount: number;
+    currency: string;
+    balance: number;
+  }>('wallet.action.completed', async (event: IntegrationEvent<{
+    transactionId: string;
+    walletId: string;
+    type: string;
+    amount: number;
+    currency: string;
+    balance: number;
+  }>) => {
+    await handleWalletEvent(event, 'action');
+  });
+  
+  logger.info('Event handlers registered', {
+    handlers: [
+      'wallet.deposit.completed → update user.metadata (type: deposit)',
+      'wallet.withdrawal.completed → update user.metadata (type: withdrawal)',
+      'wallet.purchase.completed → update user.metadata (type: purchase)',
+      'wallet.bet.completed → update user.metadata (type: action)',
+      'wallet.action.completed → update user.metadata (type: action)',
+    ],
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -303,7 +555,8 @@ async function main() {
   if (process.env.REDIS_URL) {
     try {
       const channels = [
-        'integration:auth',
+        'integration:auth',      // Auth service events
+        'integration:wallet',    // Payment service events (wallet.deposit.completed, etc.)
       ];
       await startListening(channels);
       logger.info('Started listening on event channels', { channels });

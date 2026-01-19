@@ -9,7 +9,7 @@
  * - UserBonus.referrerId: who referred (for referee bonuses)
  */
 
-import { getDatabase, logger } from 'core-service';
+import { getDatabase, logger, findOneById, updateOneById, normalizeDocument, normalizeDocuments, deleteOneById, generateMongoId } from 'core-service';
 import type { 
   BonusTemplate, 
   UserBonus, 
@@ -43,11 +43,13 @@ function getTransactionCollection() {
 
 export const templatePersistence = {
   async findById(id: string): Promise<BonusTemplate | null> {
-    const doc = await getTemplateCollection().findOne({ id });
-    return doc as unknown as BonusTemplate | null;
+    // Use optimized findOneById utility (performance-optimized)
+    const doc = await findOneById<BonusTemplate>(getTemplateCollection(), id, {});
+    return doc;
   },
 
   async findByCode(code: string): Promise<BonusTemplate | null> {
+    // findByCode uses code field (not id), so keep manual query
     const doc = await getTemplateCollection().findOne({ code });
     return doc as unknown as BonusTemplate | null;
   },
@@ -102,8 +104,10 @@ export const templatePersistence = {
   },
 
   async incrementUsage(templateId: string): Promise<void> {
-    await getTemplateCollection().updateOne(
-      { id: templateId },
+    // Use optimized updateOneById utility (performance-optimized)
+    await updateOneById(
+      getTemplateCollection(),
+      templateId,
       { $inc: { currentUsesTotal: 1 } }
     );
   },
@@ -115,13 +119,15 @@ export const templatePersistence = {
 
 export const userBonusPersistence = {
   async findById(id: string): Promise<UserBonus | null> {
-    const doc = await getUserBonusCollection().findOne({ id });
-    return doc as unknown as UserBonus | null;
+    // Use optimized findOneById utility (performance-optimized)
+    const doc = await findOneById<UserBonus>(getUserBonusCollection(), id, {});
+    return normalizeDocument(doc);
   },
 
   async findByUserId(userId: string, filter?: Record<string, unknown>): Promise<UserBonus[]> {
     const docs = await getUserBonusCollection().find({ userId, ...filter }).toArray();
-    return docs as unknown as UserBonus[];
+    // Normalize all documents to map _id to id
+    return normalizeDocuments(docs as any[]) as UserBonus[];
   },
 
   async findActiveByUserId(userId: string): Promise<UserBonus[]> {
@@ -129,7 +135,8 @@ export const userBonusPersistence = {
       userId,
       status: { $in: ['active', 'in_progress', 'pending'] },
     }).toArray();
-    return docs as unknown as UserBonus[];
+    // Normalize all documents to map _id to id
+    return normalizeDocuments(docs as any[]) as UserBonus[];
   },
 
   async countByTemplate(userId: string, templateId: string): Promise<number> {
@@ -168,16 +175,21 @@ export const userBonusPersistence = {
 
   /**
    * Create a user bonus
+   * Uses MongoDB ObjectId for performant single-insert operation
    */
-  async create(bonus: UserBonus): Promise<UserBonus> {
+  async create(bonus: Omit<UserBonus, 'id'>): Promise<UserBonus> {
     const now = new Date();
+    // Generate MongoDB ObjectId for performant single-insert operation
+    const { objectId, idString } = generateMongoId();
     const bonusWithTimestamps = {
+      _id: objectId,
+      id: idString,
       ...bonus,
       createdAt: now,
       updatedAt: now,
     };
     await getUserBonusCollection().insertOne(bonusWithTimestamps as any);
-    return bonusWithTimestamps;
+    return bonusWithTimestamps as UserBonus;
   },
 
   /**
@@ -189,8 +201,10 @@ export const userBonusPersistence = {
     historyEntry: BonusHistoryEntry,
     additionalFields?: Record<string, unknown>
   ): Promise<void> {
-    await getUserBonusCollection().updateOne(
-      { id: bonusId },
+    // Use optimized updateOneById utility (performance-optimized)
+    await updateOneById(
+      getUserBonusCollection(),
+      bonusId,
       {
         $set: {
           status: newStatus,
@@ -211,8 +225,10 @@ export const userBonusPersistence = {
     newStatus: BonusStatus,
     historyEntry: BonusHistoryEntry
   ): Promise<void> {
-    await getUserBonusCollection().updateOne(
-      { id: bonusId },
+    // Use optimized updateOneById utility (performance-optimized)
+    await updateOneById(
+      getUserBonusCollection(),
+      bonusId,
       {
         $set: {
           turnoverProgress,
@@ -225,6 +241,14 @@ export const userBonusPersistence = {
   },
 
   /**
+   * Delete a user bonus by ID
+   */
+  async delete(bonusId: string): Promise<void> {
+    // Use optimized deleteOneById utility (performance-optimized)
+    await deleteOneById(getUserBonusCollection(), bonusId);
+  },
+
+  /**
    * Find bonuses expiring soon (for cron job)
    */
   async findExpiring(): Promise<UserBonus[]> {
@@ -232,7 +256,8 @@ export const userBonusPersistence = {
       status: { $in: ['pending', 'active', 'in_progress'] },
       expiresAt: { $lt: new Date() },
     }).toArray();
-    return docs as unknown as UserBonus[];
+    // Normalize all documents to map _id to id
+    return normalizeDocuments(docs as any[]) as UserBonus[];
   },
 
   /**
@@ -244,7 +269,8 @@ export const userBonusPersistence = {
       userId,
       type: 'referral',
     }).toArray();
-    const referralBonuses = docs as unknown as UserBonus[];
+    // Normalize all documents to map _id to id
+    const referralBonuses = normalizeDocuments(docs as any[]) as UserBonus[];
     
     const qualified = referralBonuses.filter(b => 
       ['active', 'in_progress', 'converted', 'claimed'].includes(b.status)
@@ -282,32 +308,40 @@ export const userBonusPersistence = {
 
 export const transactionPersistence = {
   async findById(id: string): Promise<BonusTransaction | null> {
-    const doc = await getTransactionCollection().findOne({ id });
-    return doc as unknown as BonusTransaction | null;
+    // Use optimized findOneById utility (performance-optimized)
+    const doc = await findOneById<BonusTransaction>(getTransactionCollection(), id, {});
+    return normalizeDocument(doc);
   },
 
   async findByBonusId(userBonusId: string): Promise<BonusTransaction[]> {
     const docs = await getTransactionCollection().find({ userBonusId }).toArray();
-    return docs as unknown as BonusTransaction[];
+    // Normalize all documents to map _id to id
+    return normalizeDocuments(docs as any[]) as BonusTransaction[];
   },
 
   async findByUserId(userId: string): Promise<BonusTransaction[]> {
     const docs = await getTransactionCollection().find({ userId }).toArray();
-    return docs as unknown as BonusTransaction[];
+    // Normalize all documents to map _id to id
+    return normalizeDocuments(docs as any[]) as BonusTransaction[];
   },
 
   /**
    * Create transaction
+   * Uses MongoDB ObjectId for performant single-insert operation
    */
-  async create(transaction: BonusTransaction): Promise<BonusTransaction> {
+  async create(transaction: Omit<BonusTransaction, 'id'>): Promise<BonusTransaction> {
     const now = new Date();
+    // Generate MongoDB ObjectId for performant single-insert operation
+    const { objectId, idString } = generateMongoId();
     const txWithTimestamps = {
+      _id: objectId,
+      id: idString,
       ...transaction,
       createdAt: now,
       updatedAt: now,
     };
     await getTransactionCollection().insertOne(txWithTimestamps as any);
-    return txWithTimestamps;
+    return txWithTimestamps as BonusTransaction;
   },
 
   /**

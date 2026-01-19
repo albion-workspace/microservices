@@ -5,14 +5,14 @@
  */
 
 // ═══════════════════════════════════════════════════════════════════
-// Re-export from new type system
+// Re-export from new type system (import first to avoid circular dependencies)
 // ═══════════════════════════════════════════════════════════════════
 
-export type {
-  IdentifierType,
+import type {
+  IdentifierType as UserIdentifierType,
   AccountStatus,
-  AuthProvider,
-  User,
+  AuthProvider as UserAuthProvider,
+  User as UserType,
   SocialProfile,
   UserFilter,
   UserQueryOptions,
@@ -24,34 +24,36 @@ export type {
   BettingMetadata,
 } from './types/user-types.js';
 
-// Role types are now imported from access-engine
+// Re-export with original names
+export type {
+  UserIdentifierType as IdentifierType,
+  AccountStatus,
+  UserAuthProvider as AuthProvider,
+  UserType as User,
+  SocialProfile,
+  UserFilter,
+  UserQueryOptions,
+  UpdateUserInput,
+  UpdateUserMetadataInput,
+  BankingMetadata,
+  CryptoMetadata,
+  ForexMetadata,
+  BettingMetadata,
+};
+
+// Role types from role-types module
 export type {
   RoleContext,
   UserRole,
+  RoleGraph,
   ResolvedPermissions,
   RoleResolutionOptions,
-  Role,
-} from 'access-engine';
+  AssignRoleInput,
+  RevokeRoleInput,
+} from './types/role-types.js';
 
-// Auth-service specific types
-export interface AssignRoleInput {
-  userId: string;
-  tenantId: string;
-  role: string;
-  context?: string;
-  expiresAt?: Date;
-  assignedBy?: string;
-  metadata?: Record<string, any>;
-}
-
-export interface RevokeRoleInput {
-  userId: string;
-  tenantId: string;
-  role: string;
-  context?: string;
-  revokedBy?: string;
-  reason?: string;
-}
+// Role type from access-engine
+export type { Role } from 'access-engine';
 
 // SocialProfile is exported from user-types.ts
 
@@ -60,7 +62,7 @@ export interface RevokeRoleInput {
 // ═══════════════════════════════════════════════════════════════════
 
 export interface Session {
-  sessionId: string; // Renamed from 'id' to avoid confusion with user.id
+  sessionId?: string; // MongoDB will automatically generate _id, which we map to sessionId
   userId: string;
   tenantId: string;
   
@@ -107,7 +109,7 @@ export type OTPChannel = 'email' | 'sms' | 'whatsapp' | 'telegram';
 export type OTPPurpose = 'registration' | 'login' | 'password_reset' | 'email_verification' | 'phone_verification' | '2fa';
 
 export interface OTP {
-  id: string;
+  id?: string; // MongoDB will automatically generate _id, which we map to id
   userId?: string; // Optional for registration
   tenantId: string;
   
@@ -139,7 +141,7 @@ export interface OTP {
 // ═══════════════════════════════════════════════════════════════════
 
 export interface RefreshToken {
-  id: string;
+  id?: string; // MongoDB will automatically generate _id, which we map to id
   userId: string;
   tenantId: string;
   
@@ -209,7 +211,7 @@ export interface LoginInput {
   
   // Identifier (one required)
   identifier: string; // can be username, email, or phone
-  identifierType?: IdentifierType;
+  identifierType?: UserIdentifierType;
   
   // Credentials
   password: string;
@@ -225,7 +227,7 @@ export interface LoginInput {
 
 export interface SocialAuthInput {
   tenantId: string;
-  provider: AuthProvider;
+  provider: UserAuthProvider;
   accessToken: string;
   
   // Optional metadata for new users
@@ -289,7 +291,7 @@ export interface RefreshTokenInput {
 export interface AuthResponse {
   success: boolean;
   message?: string;
-  user?: User;
+  user?: UserType;
   tokens?: TokenPair;
   requiresOTP?: boolean;
   otpSentTo?: string;
