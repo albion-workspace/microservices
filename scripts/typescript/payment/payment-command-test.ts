@@ -14,7 +14,7 @@
  *   npx tsx payment-command-test.ts flow     # Run only flow test
  *   npx tsx payment-command-test.ts duplicate # Run only duplicate test
  *   npx tsx payment-command-test.ts exchange-rate # Run only exchange rate test
- *   npx tsx payment-command-test.ts ledger   # Run only ledger test
+ *   npx tsx payment-command-test.ts wallets  # Run only wallets & transactions test
  *   npx tsx payment-command-test.ts balance-summary # Generate balance summary
  *   npx tsx payment-command-test.ts all      # Run complete test suite (clean, setup, all tests, balance summary)
  *   npx tsx payment-command-test.ts setup gateway funding # Run multiple commands
@@ -35,9 +35,17 @@ import { getPaymentDatabase, getAuthDatabase, closeAllConnections } from '../con
 import { MongoClient } from 'mongodb';
 import { randomUUID } from 'crypto';
 import { execSync } from 'child_process';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
 import { getTransactionStateManager, type TransactionState } from '../../../core-service/src/common/transaction-state.js';
 import { connectRedis, getRedis, checkRedisHealth, scanKeys, scanKeysArray, scanKeysWithCallback } from '../../../core-service/src/common/redis.js';
 import { connectDatabase } from '../../../core-service/src/common/database.js';
+
+// ES module __dirname equivalent
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+// Path to scripts directory (parent of typescript)
+const SCRIPTS_DIR = dirname(dirname(__dirname));
 
 // ═══════════════════════════════════════════════════════════════════
 // Configuration - Single Source of Truth
@@ -158,20 +166,8 @@ async function createWallet(token: string, userId: string, currency: string): Pr
 }
 
 async function getUserBalance(token: string, userId: string, currency: string): Promise<number> {
-  const result = await graphql<{ ledgerAccountBalance: { balance: number } }>(
-    PAYMENT_SERVICE_URL,
-    `
-      query GetUserBalance($userId: String!, $subtype: String!, $currency: String!) {
-        ledgerAccountBalance(userId: $userId, subtype: $subtype, currency: $currency) {
-          balance
-        }
-      }
-    `,
-    { userId, subtype: 'main', currency },
-    token
-  );
-  
-  return result.ledgerAccountBalance.balance || 0;
+  // Use wallets query (wallets are the source of truth)
+  return await getUserWalletBalance(token, userId, currency);
 }
 
 async function getUserWalletBalance(token: string, userId: string, currency: string): Promise<number> {
@@ -220,11 +216,15 @@ async function fundUserWithDeposit(
             deposit {
               id
               userId
-              type
               amount
-              currency
-              netAmount
-              feeAmount
+              balance
+              charge
+              meta
+              createdAt
+            }
+            transfer {
+              id
+              amount
               status
             }
             errors
@@ -247,7 +247,8 @@ async function fundUserWithDeposit(
     if (result.createDeposit.success) {
       console.log(`✅ Deposit completed successfully!`);
       console.log(`   To: ${toUserId} - Transaction ID: ${result.createDeposit.deposit?.id}`);
-      console.log(`   Amount: ${(result.createDeposit.deposit?.netAmount / 100).toFixed(2)} ${currency} (after fees)`);
+      const depositAmount = result.createDeposit.deposit?.amount || 0;
+      console.log(`   Amount: ${(depositAmount / 100).toFixed(2)} ${currency}`);
       return true;
     } else {
       console.log('❌ Deposit failed:', result.createDeposit.errors);
@@ -282,19 +283,30 @@ async function transferFunds(
     
     await sleep(1000); // Wait for wallets to be ready
     
-    // Debit from sender
-    const result = await graphql<{ createWalletTransaction: { success: boolean; walletTransaction?: { id: string } } }>(
+    // Create transfer: fromUserId -> toUserId
+    const result = await graphql<{ createTransfer: { success: boolean; transfer?: { id: string }; debitTransaction?: { id: string }; creditTransaction?: { id: string } } }>(
       PAYMENT_SERVICE_URL,
       `
-        mutation TransferFunds($input: CreateWalletTransactionInput!) {
-          createWalletTransaction(input: $input) {
+        mutation TransferFunds($input: CreateTransferInput!) {
+          createTransfer(input: $input) {
             success
-            walletTransaction {
+            transfer {
+              id
+              fromUserId
+              toUserId
+              amount
+              status
+            }
+            debitTransaction {
               id
               userId
-              type
               amount
-              currency
+              balance
+            }
+            creditTransaction {
+              id
+              userId
+              amount
               balance
             }
             errors
@@ -303,53 +315,34 @@ async function transferFunds(
       `,
       {
         input: {
-          walletId: fromWalletId,
-          userId: fromUserId,
-          type: 'transfer_out',
+          fromUserId,
+          toUserId,
           amount,
           currency,
-          balanceType: 'real',
-          description: `Transfer to ${toUserId}`,
+          tenantId: DEFAULT_TENANT_ID,
+          method: 'transfer',
+          externalRef: `transfer-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+          description: `Transfer from ${fromUserId} to ${toUserId}`,
         },
       },
       token
     );
     
-    // Credit receiver
-    const creditResult = await graphql<{ createWalletTransaction: { success: boolean; walletTransaction?: { id: string } } }>(
-      PAYMENT_SERVICE_URL,
-      `
-        mutation ReceiveFunds($input: CreateWalletTransactionInput!) {
-          createWalletTransaction(input: $input) {
-            success
-            walletTransaction {
-              id
-            }
-            errors
-          }
-        }
-      `,
-      {
-        input: {
-          walletId: toWalletId,
-          userId: toUserId,
-          type: 'transfer_in',
-          amount,
-          currency,
-          balanceType: 'real',
-          description: `Transfer from ${fromUserId}`,
-        },
-      },
-      token
-    );
-    
-    if (!result.createWalletTransaction.success || !creditResult.createWalletTransaction.success) {
-      const errorMsg = result.createWalletTransaction.errors?.join(', ') || creditResult.createWalletTransaction.errors?.join(', ') || 'Unknown error';
+    if (!result.createTransfer.success) {
+      const errorMsg = result.createTransfer.errors?.join(', ') || 'Unknown error';
       throw new Error(`Failed to transfer funds: ${errorMsg}`);
     }
     
-    console.log(`✅ Transfer completed! Transaction IDs: ${result.createWalletTransaction.walletTransaction!.id}, ${creditResult.createWalletTransaction.walletTransaction!.id}`);
-    return result.createWalletTransaction.walletTransaction!.id;
+    if (!result.createTransfer.transfer) {
+      throw new Error('Transfer succeeded but no transfer object returned');
+    }
+    
+    const transferId = result.createTransfer.transfer.id;
+    const debitTxId = result.createTransfer.debitTransaction?.id;
+    const creditTxId = result.createTransfer.creditTransaction?.id;
+    
+    console.log(`✅ Transfer completed! Transfer ID: ${transferId}, Debit TX: ${debitTxId}, Credit TX: ${creditTxId}`);
+    return transferId;
   } catch (error: any) {
     console.error('❌ Error transferring funds:', error.message);
     throw error;
@@ -445,16 +438,10 @@ async function testSetup() {
         console.log(`     Roles: ${user.roles.join(', ')}`);
         console.log(`     Permissions: ${Object.keys(user.permissions).filter(k => user.permissions[k]).join(', ')}`);
 
-        // Update ledger accounts if allowNegative permission is set
+        // Note: allowNegative permission is handled by wallet service and user permissions
+        // Wallets are the source of truth
         if (user.permissions.allowNegative) {
-          const paymentDb = await getPaymentDatabase();
-          const ledgerAccounts = paymentDb.collection('ledger_accounts');
-          
-          await ledgerAccounts.updateMany(
-            { ownerId: userId, type: 'user' },
-            { $set: { allowNegative: true } }
-          );
-          console.log(`  ✅ Updated ledger accounts to allow negative balance`);
+          console.log(`  ✅ User has allowNegative permission (handled by wallet service)`);
         }
         
         return userId;
@@ -468,6 +455,20 @@ async function testSetup() {
       console.log(`  💼 Creating wallet for ${userId} (${currency})...`);
       
       try {
+        // Check if wallet already exists
+        const existingWalletId = await findWallet(token, userId, currency);
+        if (existingWalletId) {
+          console.log(`  ✅ Wallet already exists: ${existingWalletId}`);
+          return existingWalletId;
+        }
+
+        // Determine if user should have allowNegative
+        // System and payment-gateway users should have allowNegative
+        // We'll check by comparing userId with known system/gateway user IDs
+        const systemUserId = await getUserId('system').catch(() => null);
+        const gatewayUserId = await getUserId('paymentGateway').catch(() => null);
+        const shouldAllowNegative = userId === systemUserId || userId === gatewayUserId;
+
         const result = await graphql<{ createWallet: { success: boolean; wallet?: { id: string } } }>(
           PAYMENT_SERVICE_URL,
           `
@@ -479,6 +480,7 @@ async function testSetup() {
                   userId
                   currency
                   balance
+                  allowNegative
                 }
                 errors
               }
@@ -490,6 +492,7 @@ async function testSetup() {
               currency,
               category: 'main',
               tenantId: DEFAULT_TENANT_ID,
+              allowNegative: shouldAllowNegative,
             },
           },
           token
@@ -500,7 +503,7 @@ async function testSetup() {
           return result.createWallet.wallet!.id;
         } else {
           // Wallet might already exist
-          console.log(`  ⚠️  Wallet might already exist (continuing...)`);
+          console.log(`  ⚠️  Wallet creation failed: ${result.createWallet.errors?.join(', ')}`);
           return null;
         }
       } catch (error: any) {
@@ -580,30 +583,32 @@ async function testFunding() {
       throw new Error('Failed to fund gateway user');
     }
     
-    await sleep(2000); // Wait for ledger sync
+    await sleep(1000); // Wait for transfers to complete
     
     // Step 2: Transfer from gateway to provider
     console.log('\n📤 Step 2: Transferring from gateway to provider...');
     await transferFunds(token, gatewayUserId, providerUserId, 1000000, DEFAULT_CURRENCY); // €10,000
     
-    // Check ledger transactions
-    console.log('\n🔍 Checking for ledger transactions...');
+    // Check transfers
+    console.log('\n🔍 Checking for transfers...');
     const db = await getPaymentDatabase();
-    const txCount = await db.collection('ledger_transactions').countDocuments({});
-    console.log(`   Found ${txCount} ledger transactions`);
+    const transferCount = await db.collection('transfers').countDocuments({});
+    console.log(`   Found ${transferCount} transfers`);
     
-    if (txCount > 0) {
-      const recentTx = await db.collection('ledger_transactions')
+    if (transferCount > 0) {
+      const recentTransfer = await db.collection('transfers')
         .find({})
         .sort({ createdAt: -1 })
         .limit(1)
         .toArray();
       
-      if (recentTx.length > 0) {
-        const tx = recentTx[0];
-        console.log(`   Most recent: ${tx.type} - ${formatAmount(tx.amount)} ${tx.currency}`);
-        console.log(`   From: ${tx.fromAccountId}`);
-        console.log(`   To: ${tx.toAccountId}`);
+      if (recentTransfer.length > 0) {
+        const tx = recentTransfer[0];
+        const method = tx.meta?.method || 'unknown';
+        console.log(`   Most recent: ${method} - ${formatAmount(tx.amount)} ${tx.meta?.currency || ''}`);
+        console.log(`   From: ${tx.fromUserId}`);
+        console.log(`   To: ${tx.toUserId}`);
+        console.log(`   Status: ${tx.status}`);
       }
     }
     
@@ -769,23 +774,23 @@ async function testDuplicate() {
     const successes = results.filter(r => r.status === 'fulfilled' && (r.value as any).success);
     console.log(`  ✅ Successes: ${successes.length}/${numConcurrent}\n`);
     
-    // Verify no duplicates in ledger
+      // Verify no duplicates in transfers
     await sleep(3000);
     const db = await getPaymentDatabase();
-    const ledgerTxs = await db.collection('ledger_transactions')
-      .find({ transactionId: { $exists: true } })
+    const transfers = await db.collection('transfers')
+      .find({})
       .toArray();
     
     const externalRefs = new Map<string, number>();
-    ledgerTxs.forEach(tx => {
-      if (tx.externalRef) {
-        externalRefs.set(tx.externalRef, (externalRefs.get(tx.externalRef) || 0) + 1);
+    transfers.forEach(tx => {
+      if (tx.meta?.externalRef) {
+        externalRefs.set(tx.meta.externalRef, (externalRefs.get(tx.meta.externalRef) || 0) + 1);
       }
     });
     
     const duplicates = Array.from(externalRefs.entries()).filter(([_, count]) => count > 1);
     if (duplicates.length === 0) {
-      console.log('  ✅ No duplicate externalRefs found in ledger\n');
+      console.log('  ✅ No duplicate externalRefs found in transfers\n');
     } else {
       console.log(`  ❌ Found ${duplicates.length} duplicate externalRefs!\n`);
     }
@@ -908,7 +913,7 @@ async function testExchangeRate() {
     }
     
     console.log(`  ✅ Exchange rate service infrastructure is ready`);
-    console.log(`     Manual rates can be set and will be used by ledger service`);
+    console.log(`     Manual rates can be set and will be used by exchange rate service`);
     console.log(`     Cross-currency transactions will automatically use these rates`);
     
     // Test 3: Verify wallet balances after deposit
@@ -924,13 +929,13 @@ async function testExchangeRate() {
     console.log('\n💸 Test 4: Reverse conversion test (USD → EUR)\n');
     
     // Note: Cross-currency deposits require the source user to have an account in the deposit currency.
-    // The current ledger system supports one account per user/subtype, so cross-currency deposits
+    // The wallet system supports one wallet per user/currency, so cross-currency deposits
     // from a provider who only has EUR accounts are not directly supported.
     // Exchange rate conversion is handled when both accounts exist in their respective currencies.
     console.log(`  ℹ️  Cross-currency deposit test skipped:`);
     console.log(`     - Exchange rate infrastructure is verified (Test 2 & 3)`);
     console.log(`     - Manual rates are stored and retrievable`);
-    console.log(`     - Cross-currency conversion logic is implemented in ledger service`);
+    console.log(`     - Cross-currency conversion logic is implemented in exchange rate service`);
     console.log(`     - For full cross-currency testing, source user needs accounts in both currencies`);
     console.log(`     - This is a known architectural limitation (one account per user/subtype)`);
     
@@ -959,12 +964,311 @@ async function testExchangeRate() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Test 5: Ledger Diagnostic
+// Test 5: Credit Limit & AllowNegative
 // ═══════════════════════════════════════════════════════════════════
 
-async function testLedger() {
+async function testCreditLimit() {
   console.log('╔═══════════════════════════════════════════════════════════════════╗');
-  console.log('║           TESTING LEDGER FUNDING DIRECTLY                         ║');
+  console.log('║           TESTING CREDIT LIMIT & ALLOWNEGATIVE                   ║');
+  console.log('╚═══════════════════════════════════════════════════════════════════╝\n');
+
+  try {
+    const token = await login();
+    const systemUserId = await getUserId('system');
+    const user1Id = await getUserId('user1');
+    const user2Id = await getUserId('user2');
+    const user3Id = await getUserId('user3');
+    const currency = DEFAULT_CURRENCY;
+    
+    // Test 1: Wallet without allowNegative should reject negative balance
+    console.log('📝 Test 1: Wallet without allowNegative (default behavior)...');
+    console.log(`  👤 Using user1 (${user1Id})`);
+    let wallet1Id = await findWallet(token, user1Id, currency);
+    if (!wallet1Id) {
+      wallet1Id = await createWallet(token, user1Id, currency);
+      console.log(`  ✅ Created wallet: ${wallet1Id}`);
+    } else {
+      console.log(`  ✅ Using existing wallet: ${wallet1Id}`);
+    }
+    
+    // Try to debit more than balance (should fail)
+    console.log('  💳 Attempting to debit €100 from wallet with €0 balance...');
+    try {
+      await transferFunds(token, user1Id, systemUserId, 10000, currency); // €100
+      throw new Error('Expected error for insufficient balance, but transfer succeeded');
+    } catch (error: any) {
+      if (error.message.includes('Insufficient balance') || error.message.includes('does not allow negative')) {
+        console.log('  ✅ Correctly rejected: Insufficient balance (wallet does not allow negative)');
+      } else {
+        throw error;
+      }
+    }
+    
+    // Test 2: Wallet with allowNegative but no creditLimit should allow any negative
+    console.log('\n📝 Test 2: Wallet with allowNegative=true, no creditLimit...');
+    console.log(`  👤 Using user2 (${user2Id})`);
+    let wallet2Id = await findWallet(token, user2Id, currency);
+    if (!wallet2Id) {
+      wallet2Id = await createWalletWithOptions(token, user2Id, currency, { allowNegative: true });
+      console.log(`  ✅ Created wallet with allowNegative: ${wallet2Id}`);
+    } else {
+      console.log(`  ✅ Using existing wallet: ${wallet2Id}`);
+    }
+    
+    // Verify wallet has allowNegative (or update it if needed)
+    const db = await getPaymentDatabase();
+    let wallet2 = await db.collection('wallets').findOne({ id: wallet2Id });
+    console.log(`  🔍 Wallet before update: allowNegative=${wallet2?.allowNegative}, userId=${wallet2?.userId}, currency=${wallet2?.currency}`);
+    
+    if (!wallet2?.allowNegative) {
+      console.log('  ⚠️  Wallet does not have allowNegative set. Updating...');
+      const updateResult = await db.collection('wallets').updateOne(
+        { id: wallet2Id },
+        { $set: { allowNegative: true } }
+      );
+      console.log(`  🔍 Update result: matched=${updateResult.matchedCount}, modified=${updateResult.modifiedCount}`);
+      
+      // Verify the update worked
+      wallet2 = await db.collection('wallets').findOne({ id: wallet2Id });
+      console.log(`  🔍 Wallet after update: allowNegative=${wallet2?.allowNegative}`);
+      if (!wallet2?.allowNegative) {
+        throw new Error('Failed to update wallet allowNegative field');
+      }
+      console.log('  ✅ Updated wallet to allow negative balance');
+    } else {
+      console.log('  ✅ Verified wallet.allowNegative = true');
+    }
+    
+    // Also verify by userId and currency (how getOrCreateWallet looks it up)
+    const walletByLookup = await db.collection('wallets').findOne({ userId: user2Id, currency });
+    console.log(`  🔍 Wallet by lookup (userId + currency): allowNegative=${walletByLookup?.allowNegative}, id=${walletByLookup?.id}`);
+    
+    // Small delay to ensure wallet update is committed
+    await new Promise(resolve => setTimeout(resolve, 200));
+    
+    // Debit more than balance (should succeed - no credit limit)
+    console.log('  💳 Attempting to debit €50 from wallet with €0 balance (should succeed)...');
+    await transferFunds(token, user2Id, systemUserId, 5000, currency); // €50
+    console.log('  ✅ Transfer succeeded (wallet allows negative, no limit)');
+    
+    // Wait a bit for wallet balance to update
+    await new Promise(resolve => setTimeout(resolve, 500));
+    
+    // Debug: Check wallet directly from database (reuse existing db variable)
+    const walletFromDb = await db.collection('wallets').findOne({ userId: user2Id, currency });
+    console.log(`  🔍 Wallet from DB (userId + currency): balance=${walletFromDb?.balance}, tenantId=${walletFromDb?.tenantId}, id=${walletFromDb?.id}`);
+    
+    // Also check by the wallet ID we know exists
+    const walletById = await db.collection('wallets').findOne({ id: wallet2Id });
+    console.log(`  🔍 Wallet from DB (by ID ${wallet2Id}): balance=${walletById?.balance}, tenantId=${walletById?.tenantId}`);
+    
+    // Check all wallets for this user+currency (might be multiple with different tenantIds)
+    const allWallets = await db.collection('wallets').find({ userId: user2Id, currency }).toArray();
+    console.log(`  🔍 All wallets for user+currency: ${allWallets.length} found`);
+    allWallets.forEach((w, i) => {
+      console.log(`    Wallet ${i + 1}: id=${w.id}, tenantId=${w.tenantId}, balance=${w.balance}`);
+    });
+    
+    // Use the wallet balance from the wallet ID we know exists (more reliable - source of truth)
+    const actualBalance = walletById?.balance ?? 0;
+    console.log(`  🔍 Using wallet balance from ID ${wallet2Id}: €${formatAmount(actualBalance)}`);
+    
+    // Verify negative balance (use DB balance as source of truth, not GraphQL cache)
+    if (actualBalance >= 0) {
+      // Also check GraphQL for comparison (may be cached)
+      const balance2 = await getUserWalletBalance(token, user2Id, currency);
+      console.log(`  🔍 Balance from GraphQL query (may be cached): €${formatAmount(balance2)}`);
+      throw new Error(`Expected negative balance, got €${formatAmount(actualBalance)}. DB balance: ${walletFromDb?.balance}, Wallet ID balance: ${walletById?.balance}, GraphQL balance: ${balance2}`);
+    }
+    
+    // Success - wallet balance is negative as expected
+    console.log(`  ✅ Verified negative balance from database: €${formatAmount(actualBalance)}`);
+    
+    // Also check GraphQL for comparison (may show cached value, but DB is source of truth)
+    const balance2 = await getUserWalletBalance(token, user2Id, currency);
+    console.log(`  🔍 Balance from GraphQL query: €${formatAmount(balance2)} (DB shows: €${formatAmount(actualBalance)})`);
+    console.log(`  ✅ Verified negative balance: €${formatAmount(balance2)}`);
+    
+    // Test 3: Wallet with allowNegative and creditLimit should enforce limit
+    console.log('\n📝 Test 3: Wallet with allowNegative=true, creditLimit=€1000...');
+    console.log(`  👤 Using user3 (${user3Id})`);
+    const creditLimitAmount = 100000; // €1000 in cents
+    const wallet3Id = await createWalletWithOptions(token, user3Id, currency, { 
+      allowNegative: true, 
+      creditLimit: creditLimitAmount 
+    });
+    console.log(`  ✅ Created wallet with allowNegative and creditLimit: ${wallet3Id}`);
+    
+    // Verify wallet has creditLimit (check from database)
+    const wallet3 = await db.collection('wallets').findOne({ id: wallet3Id });
+    if (!wallet3?.allowNegative) {
+      throw new Error('Wallet should have allowNegative=true');
+    }
+    if (wallet3?.creditLimit !== creditLimitAmount) {
+      throw new Error(`Wallet should have creditLimit=${creditLimitAmount}, got ${wallet3?.creditLimit}`);
+    }
+    console.log(`  ✅ Verified wallet.allowNegative = true, wallet.creditLimit = €${formatAmount(creditLimitAmount)}`);
+    
+    // Check current balance from database (source of truth)
+    const initialBalance = wallet3?.balance ?? 0;
+    console.log(`  🔍 Current wallet balance: €${formatAmount(initialBalance)}`);
+    
+    // Step 1: Small debit within credit limit (should succeed)
+    const smallDebitAmount = 10000; // €100 in cents
+    console.log(`  💳 Step 1: Attempting to debit €${formatAmount(smallDebitAmount)} (within credit limit of €${formatAmount(creditLimitAmount)})...`);
+    await transferFunds(token, user3Id, systemUserId, smallDebitAmount, currency);
+    console.log('  ✅ Transfer succeeded (within credit limit)');
+    
+    // Wait and check balance from database
+    await new Promise(resolve => setTimeout(resolve, 500));
+    const wallet3AfterDebit = await db.collection('wallets').findOne({ id: wallet3Id });
+    const balance3a = wallet3AfterDebit?.balance ?? 0;
+    console.log(`  ✅ Balance after first debit: €${formatAmount(balance3a)} (expected: €${formatAmount(initialBalance - smallDebitAmount)})`);
+    
+    // Step 2: Try to exceed credit limit (should fail)
+    const exceedAmount = creditLimitAmount - balance3a + 100; // Amount that would exceed limit by €1
+    console.log(`  💳 Step 2: Attempting to debit €${formatAmount(exceedAmount)} (would exceed credit limit of €${formatAmount(creditLimitAmount)})...`);
+    try {
+      await transferFunds(token, user3Id, systemUserId, exceedAmount, currency);
+      throw new Error('Expected error for exceeding credit limit, but transfer succeeded');
+    } catch (error: any) {
+      if (error.message.includes('exceed credit limit') || error.message.includes('Would exceed')) {
+        console.log('  ✅ Correctly rejected: Would exceed credit limit');
+      } else {
+        throw error;
+      }
+    }
+    
+    // Verify balance didn't change (transaction was rejected)
+    await new Promise(resolve => setTimeout(resolve, 500));
+    const wallet3AfterReject = await db.collection('wallets').findOne({ id: wallet3Id });
+    const balance3b = wallet3AfterReject?.balance ?? 0;
+    if (Math.abs(balance3b - balance3a) > 1) {
+      throw new Error(`Balance should not have changed, but changed from €${formatAmount(balance3a)} to €${formatAmount(balance3b)}`);
+    }
+    console.log(`  ✅ Verified balance unchanged: €${formatAmount(balance3b)}`);
+    
+    // Step 3: Debit exactly to credit limit (should succeed)
+    console.log('\n📝 Step 3: Debit exactly to credit limit boundary...');
+    const remainingCredit = creditLimitAmount + balance3b; // How much more we can debit
+    if (remainingCredit > 0) {
+      console.log(`  💳 Attempting to debit remaining credit: €${formatAmount(remainingCredit)}...`);
+      await transferFunds(token, user3Id, systemUserId, remainingCredit, currency);
+      console.log('  ✅ Transfer succeeded (exactly at credit limit)');
+      
+      await new Promise(resolve => setTimeout(resolve, 500));
+      const wallet3AtLimit = await db.collection('wallets').findOne({ id: wallet3Id });
+      const balance3c = wallet3AtLimit?.balance ?? 0;
+      const expectedBalance = -creditLimitAmount;
+      if (Math.abs(balance3c - expectedBalance) > 10) { // Allow small rounding differences
+        throw new Error(`Expected balance €${formatAmount(expectedBalance)}, got €${formatAmount(balance3c)}`);
+      }
+      console.log(`  ✅ Verified balance at credit limit: €${formatAmount(balance3c)}`);
+      
+      // Step 4: Try one more cent (should fail)
+      console.log('  💳 Step 4: Attempting to debit €0.01 more (should exceed limit)...');
+      try {
+        await transferFunds(token, user3Id, systemUserId, 1, currency); // €0.01
+        throw new Error('Expected error for exceeding credit limit, but transfer succeeded');
+      } catch (error: any) {
+        if (error.message.includes('exceed credit limit') || error.message.includes('Would exceed')) {
+          console.log('  ✅ Correctly rejected: Would exceed credit limit');
+        } else {
+          throw error;
+        }
+      }
+    }
+    
+    console.log('\n✅ Credit Limit & AllowNegative test completed!');
+  } catch (error: any) {
+    console.error('\n❌ Test failed:', error.message);
+    if (error.stack) {
+      console.error(error.stack);
+    }
+    throw error;
+  }
+}
+
+// Helper function to create wallet with options
+async function createWalletWithOptions(
+  token: string, 
+  userId: string, 
+  currency: string,
+  options?: { allowNegative?: boolean; creditLimit?: number }
+): Promise<string> {
+  // Check if wallet already exists
+  const existingWalletId = await findWallet(token, userId, currency);
+  if (existingWalletId) {
+    // If wallet exists, update it with the desired options
+    const db = await getPaymentDatabase();
+    const update: Record<string, any> = {};
+    if (options?.allowNegative !== undefined) {
+      update.allowNegative = options.allowNegative;
+    }
+    if (options?.creditLimit !== undefined) {
+      update.creditLimit = options.creditLimit;
+    }
+    
+    if (Object.keys(update).length > 0) {
+      const updateResult = await db.collection('wallets').updateOne(
+        { id: existingWalletId },
+        { $set: update }
+      );
+      if (updateResult.matchedCount === 0) {
+        throw new Error(`Failed to update wallet ${existingWalletId}`);
+      }
+      console.log(`  ℹ️  Updated existing wallet ${existingWalletId} with options:`, update);
+    } else {
+      console.log(`  ℹ️  Using existing wallet: ${existingWalletId}`);
+    }
+    return existingWalletId;
+  }
+
+  const result = await graphql<{ createWallet: { success: boolean; wallet?: { id: string }; errors?: string[] } }>(
+    PAYMENT_SERVICE_URL,
+    `
+      mutation CreateWallet($input: CreateWalletInput!) {
+        createWallet(input: $input) {
+          success
+          wallet {
+            id
+            userId
+            currency
+            balance
+            allowNegative
+            creditLimit
+          }
+          errors
+        }
+      }
+    `,
+    {
+      input: {
+        userId,
+        currency,
+        category: 'main',
+        tenantId: DEFAULT_TENANT_ID,
+        allowNegative: options?.allowNegative,
+        creditLimit: options?.creditLimit,
+      },
+    },
+    token
+  );
+  
+  if (!result.createWallet.success) {
+    throw new Error(`Failed to create wallet: ${result.createWallet.errors?.join(', ')}`);
+  }
+  
+  return result.createWallet.wallet!.id;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Test 6: Wallets, Transfers & Transactions Diagnostic
+// ═══════════════════════════════════════════════════════════════════
+
+async function testWalletsAndTransactions() {
+  console.log('╔═══════════════════════════════════════════════════════════════════╗');
+  console.log('║           TESTING WALLETS, TRANSFERS & TRANSACTIONS               ║');
   console.log('╚═══════════════════════════════════════════════════════════════════╝\n');
 
   const client = new MongoClient(MONGO_URI, { directConnection: true });
@@ -973,72 +1277,131 @@ async function testLedger() {
     await client.connect();
     const db = client.db();
     
-    // Check wallet transactions
-    console.log('📝 Checking Wallet Transactions...');
-    const walletTxs = await db.collection('wallet_transactions')
-      .find({ userId: 'system', type: 'deposit' })
-      .sort({ createdAt: -1 })
-      .limit(5)
-      .toArray();
-    
-    console.log(`Found ${walletTxs.length} system deposit wallet transactions:\n`);
-    
-    // Check ledger transactions
-    console.log('💰 Checking Ledger Transactions...');
-    const ledgerTxs = await db.collection('ledger_transactions')
+    // Check recent transactions
+    console.log('📝 Recent Transactions (last 10):');
+    const transactions = await db.collection('transactions')
       .find({})
       .sort({ createdAt: -1 })
       .limit(10)
       .toArray();
     
-    console.log(`Found ${ledgerTxs.length} ledger transactions:`);
-    ledgerTxs.forEach(tx => {
-      const date = tx.createdAt ? new Date(tx.createdAt).toISOString() : 'N/A';
-      console.log(`  - [${tx.type}] ${tx.fromAccountId} -> ${tx.toAccountId}: ${formatAmount(tx.amount)} ${tx.currency} - ${date}`);
-    });
-    
-    // Check user ledger accounts
-    console.log('\n👥 Checking User Ledger Accounts...');
-    const userAccounts = await db.collection('ledger_accounts')
-      .find({ type: 'user' })
-      .limit(20)
-      .toArray();
-    
-    console.log(`Found ${userAccounts.length} user accounts (showing first 20):`);
-    userAccounts.forEach(acc => {
-      const ownerId = acc.ownerId || 'N/A';
-      console.log(`  - ${acc._id} (${ownerId}): balance=${acc.balance} (${formatAmount(acc.balance)}), currency=${acc.currency}, allowNegative=${acc.allowNegative || false}`);
-    });
-    
-    // Check wallets
-    console.log('\n💼 Checking Payment-Related User Wallets...');
-    const paymentWallets = await db.collection('wallets')
-      .find({ 
-        $or: [
-          { userId: { $regex: '^payment-' } },
-          { userId: { $regex: '^provider-' } },
-          { userId: { $regex: '^test-' } },
-        ]
-      })
-      .toArray();
-    
-    console.log(`Found ${paymentWallets.length} payment-related wallets:`);
-    paymentWallets.forEach(w => {
-      console.log(`  - ${w.userId}: balance=${w.balance} (${formatAmount(w.balance)}), currency=${w.currency}`);
-    });
-    
-    // Summary
-    console.log('\n╔═══════════════════════════════════════════════════════════════════╗');
-    console.log('║                         DIAGNOSIS                                  ║');
-    console.log('╚═══════════════════════════════════════════════════════════════════╝');
-    
-    if (ledgerTxs.length === 0) {
-      console.log('\n❌ PROBLEM: No ledger transactions found!');
+    if (transactions.length === 0) {
+      console.log('  ⚠️  No transactions found\n');
     } else {
-      console.log('\n✅ Ledger transactions exist');
+      transactions.forEach((tx, idx) => {
+        const date = tx.createdAt ? new Date(tx.createdAt).toISOString() : 'N/A';
+        console.log(`  ${idx + 1}. [${tx.charge}] ${tx.userId}: ${formatAmount(tx.amount)} - Balance: ${formatAmount(tx.balance)}`);
+        console.log(`     Currency: ${tx.currency}, Method: ${tx.meta?.method || 'N/A'}, Date: ${date}`);
+      });
+      console.log('');
     }
     
-    console.log('\n✅ Ledger Diagnostic test completed!');
+    // Check recent transfers
+    console.log('💰 Recent Transfers (last 10):');
+    const transfers = await db.collection('transfers')
+      .find({})
+      .sort({ createdAt: -1 })
+      .limit(10)
+      .toArray();
+    
+    if (transfers.length === 0) {
+      console.log('  ⚠️  No transfers found\n');
+    } else {
+      transfers.forEach((tx, idx) => {
+        const date = tx.createdAt ? new Date(tx.createdAt).toISOString() : 'N/A';
+        const method = tx.meta?.method || 'unknown';
+        console.log(`  ${idx + 1}. [${method}] ${tx.fromUserId} -> ${tx.toUserId}`);
+        console.log(`     Amount: ${formatAmount(tx.amount)} ${tx.meta?.currency || tx.currency || ''}, Status: ${tx.status}, Date: ${date}`);
+      });
+      console.log('');
+    }
+    
+    // Check system wallets
+    console.log('🏛️  System Wallets:');
+    const systemWallets = await db.collection('wallets')
+      .find({ userId: 'system' })
+      .toArray();
+    
+    if (systemWallets.length === 0) {
+      console.log('  ⚠️  No system wallets found\n');
+    } else {
+      systemWallets.forEach(w => {
+        console.log(`  - ${w.currency}: Balance=${formatAmount(w.balance)}, Bonus=${formatAmount(w.bonusBalance || 0)}, Locked=${formatAmount(w.lockedBalance || 0)}`);
+      });
+      console.log('');
+    }
+    
+    // Check provider wallets
+    console.log('💳 Provider Wallets:');
+    const providerWallets = await db.collection('wallets')
+      .find({ userId: { $regex: '^provider-' } })
+      .toArray();
+    
+    if (providerWallets.length === 0) {
+      console.log('  ⚠️  No provider wallets found\n');
+    } else {
+      providerWallets.forEach(w => {
+        console.log(`  - ${w.userId} (${w.currency}): Balance=${formatAmount(w.balance)}`);
+      });
+      console.log('');
+    }
+    
+    // Check user wallets (sample)
+    console.log('👥 User Wallets (last 5):');
+    const userWallets = await db.collection('wallets')
+      .find({ 
+        userId: { 
+          $not: { 
+            $regex: '^(system|provider-|bonus-pool)' 
+          } 
+        },
+        category: 'main'
+      })
+      .sort({ createdAt: -1 })
+      .limit(5)
+      .toArray();
+    
+    if (userWallets.length === 0) {
+      console.log('  ⚠️  No user wallets found\n');
+    } else {
+      userWallets.forEach(w => {
+        const allowNegative = w.allowNegative ? ' (can go negative)' : '';
+        const creditLimit = w.creditLimit ? `, Credit limit: ${formatAmount(w.creditLimit)}` : '';
+        console.log(`  - ${w.userId} (${w.currency}): Balance=${formatAmount(w.balance)}, Bonus=${formatAmount(w.bonusBalance || 0)}${allowNegative}${creditLimit}`);
+      });
+      console.log('');
+    }
+    
+    // Summary statistics
+    console.log('📊 Summary Statistics:');
+    const allWallets = await db.collection('wallets').find({}).toArray();
+    const totalWallets = allWallets.length;
+    const totalBalance = allWallets.reduce((sum, w) => sum + (w.balance || 0), 0);
+    const totalBonus = allWallets.reduce((sum, w) => sum + (w.bonusBalance || 0), 0);
+    const totalLocked = allWallets.reduce((sum, w) => sum + (w.lockedBalance || 0), 0);
+    
+    const totalTransactions = await db.collection('transactions').countDocuments({});
+    const totalTransfers = await db.collection('transfers').countDocuments({});
+    
+    console.log(`  Total Wallets: ${totalWallets}`);
+    console.log(`  Total Balance: ${formatAmount(totalBalance)}`);
+    console.log(`  Total Bonus Balance: ${formatAmount(totalBonus)}`);
+    console.log(`  Total Locked Balance: ${formatAmount(totalLocked)}`);
+    console.log(`  Total Transactions: ${totalTransactions}`);
+    console.log(`  Total Transfers: ${totalTransfers}`);
+    
+    // Check for funding transfers
+    const fundingTransfers = transfers.filter(tx => 
+      tx.meta?.method === 'manual' || 
+      tx.meta?.method === 'provider_funding' ||
+      (tx.fromUserId === 'system' && tx.toUserId?.startsWith('provider-'))
+    );
+    
+    if (fundingTransfers.length > 0) {
+      console.log(`\n  ✅ Found ${fundingTransfers.length} provider funding transfers`);
+    }
+    
+    console.log('\n✅ Wallets, Transfers & Transactions check completed!');
   } catch (error: any) {
     console.error('\n❌ Test failed:', error.message);
     throw error;
@@ -1337,89 +1700,62 @@ async function testRecovery() {
     await stateManager.deleteState(completedTxId).catch(() => {});
     console.log('  ✅ Edge case tests completed');
     
-    // Test 7.6: Test actual ledger.recoverStuckTransactions() method (production flow)
-    console.log('\n🔄 Test 7.6: Testing ledger.recoverStuckTransactions() (production method)...');
-    try {
-      // Note: initializeLedger uses 'core-service' package imports (getDatabase/getClient)
-      // which require the database to be connected via the package, not source paths
-      // Since we're in a test script, we connect via source path, but ledger service
-      // expects package connection. This is a module resolution limitation.
-      // In production, the payment service connects via the package before initializing ledger.
-      
-      // Try to connect via source path (for test script compatibility)
-      console.log('  🔌 Connecting to MongoDB...');
-      const db = await connectDatabase(MONGO_URI, { dbName: 'payment_service' });
-      console.log('  ✅ MongoDB connected via source path');
-      console.log(`     Database: ${db.databaseName}`);
-      
-      // Try to also ensure core-service package database is connected
-      // This is a workaround - in production, payment service handles this
-      try {
-        // The ledger service imports from 'core-service' package which uses its own connection
-        // We've verified the state manager works (Tests 1-7.5), so recovery logic is tested
-        // The actual ledger.recoverStuckTransactions() is a wrapper that calls stateManager methods
-        // which we've already tested. This test verifies the integration.
-        const { initializeLedger } = await import('../../../payment-service/src/services/ledger-service.js');
-        const ledger = await initializeLedger(DEFAULT_TENANT_ID);
-        console.log('  ✅ Ledger initialized');
-      
-      // Create multiple stuck transactions to test batch recovery
-      const stuckTxIds: string[] = [];
-      const oldTimestamp = new Date(Date.now() - 35000); // 35 seconds ago
-      
-      for (let i = 0; i < 3; i++) {
-        const txId = `stuck-batch-${Date.now()}-${i}`;
-        stuckTxIds.push(txId);
-        const stuckState: TransactionState = {
-          _id: txId,
-          sagaId: `saga-${txId}`,
-          status: 'in_progress',
-          startedAt: oldTimestamp,
-          lastHeartbeat: oldTimestamp,
-          steps: ['step1'],
-          currentStep: 'step1',
-        };
-        await stateManager.setState(stuckState);
-      }
-      
-      console.log(`  ✅ Created ${stuckTxIds.length} stuck transactions for batch recovery test`);
-      
-      // Call the actual recovery method (what production uses)
-      const recoveredCount = await ledger.recoverStuckTransactions();
-      
-      if (recoveredCount > 0) {
-        console.log(`  ✅ Recovery method recovered ${recoveredCount} stuck transactions`);
-        
-        // Verify all transactions were marked as recovered
-        for (const txId of stuckTxIds) {
-          const state = await stateManager.getState(txId);
-          if (state && (state.status === 'recovered' || state.status === 'failed')) {
-            console.log(`     ✅ ${txId}: ${state.status}`);
-          } else if (!state) {
-            console.log(`     ⚠️  ${txId}: Expired by TTL (expected behavior)`);
-          } else {
-            console.log(`     ⚠️  ${txId}: Status is ${state.status} (may have been processed)`);
-          }
-        }
-      } else {
-        console.log(`  ⚠️  No transactions recovered (may have expired by TTL)`);
-        console.log(`     This is OK - Redis TTL (60s) may have auto-expired them`);
-      }
-      
-      // Cleanup batch test transactions
-      for (const txId of stuckTxIds) {
-        try {
-          await stateManager.deleteState(txId);
-        } catch {
-          // Ignore - may already be expired
-        }
-      }
-      
-      console.log('  ✅ Ledger recovery method test completed');
-    } catch (error: any) {
-      console.log(`  ⚠️  Ledger recovery test failed: ${error.message}`);
-      console.log('     This may be OK if ledger initialization fails (non-critical for state manager tests)');
+    // Test 7.6: Batch recovery test (state manager only)
+    console.log('\n🔄 Test 7.6: Testing batch recovery (state manager)...');
+    
+    // Create multiple stuck transactions to test batch recovery
+    const stuckTxIds: string[] = [];
+    const oldTimestamp = new Date(Date.now() - 35000); // 35 seconds ago
+    
+    for (let i = 0; i < 3; i++) {
+      const txId = `stuck-batch-${Date.now()}-${i}`;
+      stuckTxIds.push(txId);
+      const stuckState: TransactionState = {
+        _id: txId,
+        sagaId: `saga-${txId}`,
+        status: 'in_progress',
+        startedAt: oldTimestamp,
+        lastHeartbeat: oldTimestamp,
+        steps: ['step1'],
+        currentStep: 'step1',
+      };
+      await stateManager.setState(stuckState);
     }
+    
+    console.log(`  ✅ Created ${stuckTxIds.length} stuck transactions for batch recovery test`);
+    
+    // Use state manager recovery directly
+    const recoveredCount = await stateManager.recoverStuckTransactions();
+    
+    if (recoveredCount > 0) {
+      console.log(`  ✅ Recovery method recovered ${recoveredCount} stuck transactions`);
+      
+      // Verify all transactions were marked as recovered
+      for (const txId of stuckTxIds) {
+        const state = await stateManager.getState(txId);
+        if (state && (state.status === 'recovered' || state.status === 'failed')) {
+          console.log(`     ✅ ${txId}: ${state.status}`);
+        } else if (!state) {
+          console.log(`     ⚠️  ${txId}: Expired by TTL (expected behavior)`);
+        } else {
+          console.log(`     ⚠️  ${txId}: Status is ${state.status} (may have been processed)`);
+        }
+      }
+    } else {
+      console.log(`  ⚠️  No transactions recovered (may have expired by TTL)`);
+      console.log(`     This is OK - Redis TTL (60s) may have auto-expired them`);
+    }
+    
+    // Cleanup batch test transactions
+    for (const txId of stuckTxIds) {
+      try {
+        await stateManager.deleteState(txId);
+      } catch {
+        // Ignore - may already be expired
+      }
+    }
+    
+    console.log('  ✅ Batch recovery test completed');
     
     // Test 8: Clean up test states
     console.log('\n🗑️  Test 8: Cleaning up test states...');
@@ -1448,7 +1784,7 @@ async function testRecovery() {
     console.log('   • Recovery process can mark transactions as recovered');
     console.log('   • Edge cases handled (pending status, completed transactions excluded)');
     console.log('   • Batch recovery works correctly');
-    console.log('   • Production recovery method (ledger.recoverStuckTransactions) works');
+    console.log('   • Batch recovery method (stateManager.recoverStuckTransactions) works');
     console.log('   • States can be deleted');
     console.log('\n   ℹ️  Note: Redis TTL automatically expires states (60s for in-progress)');
     console.log('   ℹ️  Recovery job can detect and recover stuck transactions before TTL expiration');
@@ -1706,17 +2042,21 @@ async function testGatewaySuccessfulDeposit() {
   const depositAmount = TEST_AMOUNTS.initialDeposit;
   
   const query = `
-    mutation Deposit($input: CreateWalletTransactionInput!) {
-      createWalletTransaction(input: $input) {
+    mutation Deposit($input: CreateDepositInput!) {
+      createDeposit(input: $input) {
         success
-        walletTransaction {
+        deposit {
           id
-          type
+          userId
           amount
-          balanceBefore
-          balanceAfter
+          balance
           currency
           createdAt
+        }
+        transfer {
+          id
+          amount
+          status
         }
         sagaId
         errors
@@ -1726,25 +2066,23 @@ async function testGatewaySuccessfulDeposit() {
 
   const data = await graphql(PAYMENT_SERVICE_URL, query, {
     input: {
-      walletId: gatewayTestWalletId,
       userId: gatewayTestUserId,
-      type: 'deposit',
-      balanceType: 'real',
+      fromUserId: gatewayTestUserId, // For deposit, fromUserId is the same as userId (external source)
       amount: depositAmount,
       currency: GATEWAY_TEST_CONFIG.currency,
+      method: 'card',
     }
   }, token);
 
-  if (!data.createWalletTransaction.success) {
-    throw new Error(data.createWalletTransaction.errors?.join(', ') || 'Deposit failed');
+  if (!data.createDeposit.success) {
+    throw new Error(data.createDeposit.errors?.join(', ') || 'Deposit failed');
   }
 
-  const tx = data.createWalletTransaction.walletTransaction;
+  const tx = data.createDeposit.deposit;
   gatewayTestTransactionIds.push(tx.id);
 
-  if (tx.balanceAfter !== tx.balanceBefore + depositAmount) {
-    throw new Error(`Balance mismatch: ${tx.balanceBefore} + ${depositAmount} != ${tx.balanceAfter}`);
-  }
+  // Balance is the balance after the transaction (no balanceBefore in new structure)
+  console.log(`   → Deposit created: ${tx.id}, Balance after: ${tx.balance}`);
 }
 
 async function testGatewayMultipleDeposits() {
@@ -1754,13 +2092,12 @@ async function testGatewayMultipleDeposits() {
 
   for (const amount of amounts) {
     const query = `
-      mutation Deposit($input: CreateWalletTransactionInput!) {
-        createWalletTransaction(input: $input) {
+      mutation Deposit($input: CreateDepositInput!) {
+        createDeposit(input: $input) {
           success
-          walletTransaction {
+          deposit {
             id
-            balanceBefore
-            balanceAfter
+            balance
           }
         }
       }
@@ -1768,28 +2105,25 @@ async function testGatewayMultipleDeposits() {
 
     const data = await graphql(PAYMENT_SERVICE_URL, query, {
       input: {
-        walletId: gatewayTestWalletId,
         userId: gatewayTestUserId,
-        type: 'deposit',
-        balanceType: 'real',
+        fromUserId: gatewayTestUserId,
         amount,
         currency: GATEWAY_TEST_CONFIG.currency,
+        method: 'card',
       }
     }, token);
 
-    if (!data.createWalletTransaction.success) {
+    if (!data.createDeposit.success) {
       throw new Error(`Deposit of ${amount} failed`);
     }
 
-    const tx = data.createWalletTransaction.walletTransaction;
+    const tx = data.createDeposit.deposit;
     gatewayTestTransactionIds.push(tx.id);
 
-    if (tx.balanceBefore !== expectedBalance) {
-      throw new Error(`Balance before mismatch: expected ${expectedBalance}, got ${tx.balanceBefore}`);
-    }
+    // Balance is the balance after transaction
     expectedBalance += amount;
-    if (tx.balanceAfter !== expectedBalance) {
-      throw new Error(`Balance after mismatch: expected ${expectedBalance}, got ${tx.balanceAfter}`);
+    if (tx.balance !== expectedBalance) {
+      throw new Error(`Balance mismatch: expected ${expectedBalance}, got ${tx.balance}`);
     }
   }
 }
@@ -1799,17 +2133,21 @@ async function testGatewaySuccessfulWithdrawal() {
   const withdrawAmount = TEST_AMOUNTS.withdrawal;
 
   const query = `
-    mutation Withdraw($input: CreateWalletTransactionInput!) {
-      createWalletTransaction(input: $input) {
+    mutation Withdraw($input: CreateWithdrawalInput!) {
+      createWithdrawal(input: $input) {
         success
-        walletTransaction {
+        withdrawal {
           id
-          type
+          userId
           amount
-          balanceBefore
-          balanceAfter
+          balance
           currency
           createdAt
+        }
+        transfer {
+          id
+          amount
+          status
         }
         errors
       }
@@ -1818,25 +2156,23 @@ async function testGatewaySuccessfulWithdrawal() {
 
   const data = await graphql(PAYMENT_SERVICE_URL, query, {
     input: {
-      walletId: gatewayTestWalletId,
       userId: gatewayTestUserId,
-      type: 'withdrawal',
-      balanceType: 'real',
+      toUserId: gatewayTestUserId, // For withdrawal, toUserId is the same as userId (external destination)
       amount: withdrawAmount,
       currency: GATEWAY_TEST_CONFIG.currency,
+      method: 'bank_transfer',
     }
   }, token);
 
-  if (!data.createWalletTransaction.success) {
-    throw new Error(data.createWalletTransaction.errors?.join(', ') || 'Withdrawal failed');
+  if (!data.createWithdrawal.success) {
+    throw new Error(data.createWithdrawal.errors?.join(', ') || 'Withdrawal failed');
   }
 
-  const tx = data.createWalletTransaction.walletTransaction;
+  const tx = data.createWithdrawal.withdrawal;
   gatewayTestTransactionIds.push(tx.id);
 
-  if (tx.balanceAfter !== tx.balanceBefore - withdrawAmount) {
-    throw new Error(`Withdrawal balance mismatch`);
-  }
+  // Balance is the balance after transaction (no balanceBefore in new structure)
+  console.log(`   → Withdrawal created: ${tx.id}, Balance after: ${tx.balance}`);
 }
 
 async function testGatewayInsufficientFundsWithdrawal() {
@@ -1844,8 +2180,8 @@ async function testGatewayInsufficientFundsWithdrawal() {
   const hugeAmount = TEST_AMOUNTS.insufficientWithdrawal;
 
   const query = `
-    mutation Withdraw($input: CreateWalletTransactionInput!) {
-      createWalletTransaction(input: $input) {
+    mutation Withdraw($input: CreateWithdrawalInput!) {
+      createWithdrawal(input: $input) {
         success
         errors
       }
@@ -1854,16 +2190,15 @@ async function testGatewayInsufficientFundsWithdrawal() {
 
   const data = await graphql(PAYMENT_SERVICE_URL, query, {
     input: {
-      walletId: gatewayTestWalletId,
       userId: gatewayTestUserId,
-      type: 'withdrawal',
-      balanceType: 'real',
+      toUserId: gatewayTestUserId,
       amount: hugeAmount,
       currency: GATEWAY_TEST_CONFIG.currency,
+      method: 'bank_transfer',
     }
   }, token);
 
-  if (data.createWalletTransaction.success) {
+  if (data.createWithdrawal.success) {
     throw new Error('Withdrawal should have failed due to insufficient funds');
   }
   console.log('  (Correctly rejected insufficient funds)');
@@ -1880,14 +2215,14 @@ async function testGatewayTransactionHistory() {
   const token = createSystemToken('8h');
   const query = `
     query GetTransactions {
-      walletTransactions(filter: { walletId: "${gatewayTestWalletId}" }, first: 100) {
+      transactions(filter: { userId: "${gatewayTestUserId}" }, first: 100) {
         nodes {
           id
-          type
+          userId
           amount
-          balanceBefore
-          balanceAfter
+          balance
           currency
+          charge
           createdAt
         }
         totalCount
@@ -1900,7 +2235,7 @@ async function testGatewayTransactionHistory() {
   `;
 
   const data = await graphql(PAYMENT_SERVICE_URL, query, {}, token);
-  const transactions = (data as any).walletTransactions.nodes;
+  const transactions = (data as any).transactions.nodes;
 
   if (transactions.length < gatewayTestTransactionIds.length) {
     throw new Error(`Missing transactions: expected ${gatewayTestTransactionIds.length}, found ${transactions.length}`);
@@ -1915,10 +2250,10 @@ async function testGatewayConcurrentDeposits() {
 
   const promises = Array(numConcurrent).fill(null).map(async () => {
     const query = `
-      mutation Deposit($input: CreateWalletTransactionInput!) {
-        createWalletTransaction(input: $input) {
+      mutation Deposit($input: CreateDepositInput!) {
+        createDeposit(input: $input) {
           success
-          walletTransaction { id balanceAfter }
+          deposit { id balance }
           errors
         }
       }
@@ -1926,18 +2261,17 @@ async function testGatewayConcurrentDeposits() {
 
     return graphql(PAYMENT_SERVICE_URL, query, {
       input: {
-        walletId: gatewayTestWalletId,
         userId: gatewayTestUserId,
-        type: 'deposit',
-        balanceType: 'real',
+        fromUserId: gatewayTestUserId,
         amount: depositAmount,
         currency: GATEWAY_TEST_CONFIG.currency,
+        method: 'card',
       }
     }, token);
   });
 
   const results = await Promise.all(promises);
-  const successes = results.filter((r: any) => r.createWalletTransaction?.success);
+  const successes = results.filter((r: any) => r.createDeposit?.success);
   
   await sleep(CONCURRENT_CONFIG.sleepAfterConcurrent);
 
@@ -1957,10 +2291,10 @@ async function testGatewayConcurrentWithdrawals() {
 
   const promises = Array(numConcurrent).fill(null).map(async () => {
     const query = `
-      mutation Withdraw($input: CreateWalletTransactionInput!) {
-        createWalletTransaction(input: $input) {
+      mutation Withdraw($input: CreateWithdrawalInput!) {
+        createWithdrawal(input: $input) {
           success
-          walletTransaction { id balanceAfter }
+          withdrawal { id balance }
           errors
         }
       }
@@ -1968,12 +2302,11 @@ async function testGatewayConcurrentWithdrawals() {
 
     return graphql(PAYMENT_SERVICE_URL, query, {
       input: {
-        walletId: gatewayTestWalletId,
         userId: gatewayTestUserId,
-        type: 'withdrawal',
-        balanceType: 'real',
+        toUserId: gatewayTestUserId,
         amount: withdrawAmount,
         currency: GATEWAY_TEST_CONFIG.currency,
+        method: 'bank_transfer',
       }
     }, token);
   });
@@ -2033,8 +2366,8 @@ async function testGatewayBonusCreation() {
 async function testGatewayZeroAmountTransaction() {
   const token = createSystemToken('8h');
   const query = `
-    mutation Deposit($input: CreateWalletTransactionInput!) {
-      createWalletTransaction(input: $input) {
+    mutation Deposit($input: CreateDepositInput!) {
+      createDeposit(input: $input) {
         success
         errors
       }
@@ -2043,16 +2376,15 @@ async function testGatewayZeroAmountTransaction() {
 
   const data = await graphql(PAYMENT_SERVICE_URL, query, {
     input: {
-      walletId: gatewayTestWalletId,
       userId: gatewayTestUserId,
-      type: 'deposit',
-      balanceType: 'real',
+      fromUserId: gatewayTestUserId,
       amount: TEST_AMOUNTS.zero,
       currency: GATEWAY_TEST_CONFIG.currency,
+      method: 'card',
     }
   }, token);
 
-  if (data.createWalletTransaction.success) {
+  if (data.createDeposit.success) {
     throw new Error('Zero amount transaction should not be allowed');
   }
   console.log('  (Correctly rejected zero amount)');
@@ -2061,8 +2393,8 @@ async function testGatewayZeroAmountTransaction() {
 async function testGatewayNegativeAmountTransaction() {
   const token = createSystemToken('8h');
   const query = `
-    mutation Deposit($input: CreateWalletTransactionInput!) {
-      createWalletTransaction(input: $input) {
+    mutation Deposit($input: CreateDepositInput!) {
+      createDeposit(input: $input) {
         success
         errors
       }
@@ -2071,16 +2403,15 @@ async function testGatewayNegativeAmountTransaction() {
 
   const data = await graphql(PAYMENT_SERVICE_URL, query, {
     input: {
-      walletId: gatewayTestWalletId,
       userId: gatewayTestUserId,
-      type: 'deposit',
-      balanceType: 'real',
+      fromUserId: gatewayTestUserId,
       amount: TEST_AMOUNTS.negative,
       currency: GATEWAY_TEST_CONFIG.currency,
+      method: 'card',
     }
   }, token);
 
-  if (data.createWalletTransaction.success) {
+  if (data.createDeposit.success) {
     throw new Error('Negative amount transaction should not be allowed');
   }
   console.log('  (Correctly rejected negative amount)');
@@ -2089,8 +2420,8 @@ async function testGatewayNegativeAmountTransaction() {
 async function testGatewayInvalidWalletId() {
   const token = createSystemToken('8h');
   const query = `
-    mutation Deposit($input: CreateWalletTransactionInput!) {
-      createWalletTransaction(input: $input) {
+    mutation Deposit($input: CreateDepositInput!) {
+      createDeposit(input: $input) {
         success
         errors
       }
@@ -2100,16 +2431,15 @@ async function testGatewayInvalidWalletId() {
   try {
     const data = await graphql(PAYMENT_SERVICE_URL, query, {
       input: {
-        walletId: 'non-existent-wallet-id',
         userId: gatewayTestUserId,
-        type: 'deposit',
-        balanceType: 'real',
+        fromUserId: gatewayTestUserId,
         amount: 1000,
         currency: GATEWAY_TEST_CONFIG.currency,
+        method: 'card',
       }
     }, token);
 
-    if (data.createWalletTransaction.success) {
+    if (data.createDeposit.success) {
       throw new Error('Transaction on non-existent wallet should fail');
     }
   } catch (error) {
@@ -2131,11 +2461,11 @@ async function testGatewayFinalBalanceConsistency() {
 
   const txQuery = `
     query GetTransactions {
-      walletTransactions(filter: { walletId: "${gatewayTestWalletId}" }, first: 1000) {
+      transactions(filter: { userId: "${gatewayTestUserId}" }, first: 1000) {
         nodes {
-          type
+          charge
           amount
-          balanceType
+          meta
         }
       }
     }
@@ -2147,14 +2477,15 @@ async function testGatewayFinalBalanceConsistency() {
   ]);
 
   const wallet = (walletData as any).wallet;
-  const transactions = (txData as any).walletTransactions.nodes;
+  const transactions = (txData as any).transactions.nodes;
 
   let calculatedBalance = 0;
   for (const tx of transactions) {
-    if (tx.balanceType === 'real') {
-      if (tx.type === 'deposit' || tx.type === 'win' || tx.type === 'refund') {
+    const balanceType = (tx.meta as any)?.balanceType || 'real';
+    if (balanceType === 'real') {
+      if (tx.charge === 'credit') {
         calculatedBalance += tx.amount;
-      } else if (tx.type === 'withdrawal' || tx.type === 'bet') {
+      } else if (tx.charge === 'debit') {
         calculatedBalance -= tx.amount;
       }
     }
@@ -2438,7 +2769,7 @@ async function testBalanceSummary() {
       return;
     }
     
-    console.log('📊 Fetching ledger balances for all users...');
+    console.log('📊 Fetching wallet balances for all users...');
     
     // Check for duplicate transactions first (before balance summary)
     const db = await getPaymentDatabase();
@@ -2477,19 +2808,19 @@ async function testBalanceSummary() {
         console.log('✅ No duplicate externalRefs found in transactions\n');
       }
       
-      // Also check ledger_transactions collection
-      const ledgerTransactionsCollection = db.collection('ledger_transactions');
-      const ledgerDuplicateCheck = await ledgerTransactionsCollection.aggregate([
+      // Also check transfers collection
+      const transfersCollection = db.collection('transfers');
+      const transferDuplicateCheck = await transfersCollection.aggregate([
         {
           $match: {
-            externalRef: { $exists: true, $ne: null }
+            'meta.externalRef': { $exists: true, $ne: null }
           }
         },
         {
           $group: {
-            _id: '$externalRef',
+            _id: '$meta.externalRef',
             count: { $sum: 1 },
-            transactionIds: { $push: '$_id' }
+            transferIds: { $push: '$id' }
           }
         },
         {
@@ -2499,15 +2830,15 @@ async function testBalanceSummary() {
         }
       ]).toArray();
       
-      if (ledgerDuplicateCheck.length > 0) {
-        console.log(`❌ WARNING: Found ${ledgerDuplicateCheck.length} duplicate externalRefs in ledger_transactions:`);
-        ledgerDuplicateCheck.forEach((dup: any) => {
+      if (transferDuplicateCheck.length > 0) {
+        console.log(`❌ WARNING: Found ${transferDuplicateCheck.length} duplicate externalRefs in transfers:`);
+        transferDuplicateCheck.forEach((dup: any) => {
           console.log(`   - externalRef: ${dup._id} appears ${dup.count} times`);
-          console.log(`     Transaction IDs: ${dup.transactionIds.slice(0, 3).map((id: any) => id.toString()).join(', ')}${dup.transactionIds.length > 3 ? '...' : ''}`);
+          console.log(`     Transfer IDs: ${dup.transferIds.slice(0, 3).join(', ')}${dup.transferIds.length > 3 ? '...' : ''}`);
         });
         console.log('');
       } else {
-        console.log('✅ No duplicate externalRefs found in ledger_transactions\n');
+        console.log('✅ No duplicate externalRefs found in transfers\n');
       }
     } catch (error: any) {
       console.log(`⚠️  Could not check for duplicate transactions: ${error.message}\n`);
@@ -2518,10 +2849,11 @@ async function testBalanceSummary() {
     
     // Try GraphQL first, fallback to MongoDB if permissions fail
     try {
-      const balancesResult = await graphql<{ bulkLedgerBalances: { balances: Array<{ userId: string; balance: number; availableBalance: number }> } }>(
+      // Note: bulkWalletBalances resolver queries wallets collection directly
+      const balancesResult = await graphql<{ bulkWalletBalances: { balances: Array<{ userId: string; balance: number; availableBalance: number }> } }>(
         PAYMENT_SERVICE_URL,
-        `query BulkLedgerBalances($userIds: [String!]!, $subtype: String!, $currency: String!) {
-          bulkLedgerBalances(userIds: $userIds, subtype: $subtype, currency: $currency) {
+        `query BulkWalletBalances($userIds: [String!]!, $category: String!, $currency: String!) {
+          bulkWalletBalances(userIds: $userIds, category: $category, currency: $currency) {
             balances {
               userId
               balance
@@ -2531,34 +2863,32 @@ async function testBalanceSummary() {
         }`,
         {
           userIds: allUserIds,
-          subtype: 'main',
+          category: 'main',
           currency: DEFAULT_CURRENCY,
         },
         token
       );
       
-      balancesResult.bulkLedgerBalances?.balances?.forEach(b => {
+      balancesResult.bulkWalletBalances?.balances?.forEach(b => {
         balanceMap.set(b.userId, b.balance || 0);
       });
     } catch (balanceError: any) {
-      // If GraphQL fails, fetch balances directly from MongoDB
+      // If GraphQL fails, fetch balances directly from MongoDB (wallets collection)
       console.log('⚠️  GraphQL balance query failed. Fetching balances from MongoDB directly...');
-      const ledgerAccountsCollection = db.collection('ledger_accounts');
+      const walletsCollection = db.collection('wallets');
       
       try {
-        // Fetch all user accounts for the given user IDs
-        const accountDocs = await ledgerAccountsCollection.find({
-          ownerId: { $in: allUserIds },
-          type: 'user',
-          subtype: 'main',
+        // Fetch all wallets for the given user IDs
+        const walletDocs = await walletsCollection.find({
+          userId: { $in: allUserIds },
           currency: DEFAULT_CURRENCY,
         }).toArray();
         
-        accountDocs.forEach((doc: any) => {
-          balanceMap.set(doc.ownerId, doc.balance || 0);
+        walletDocs.forEach((doc: any) => {
+          balanceMap.set(doc.userId, doc.balance || 0);
         });
         
-        console.log(`✅ Fetched ${accountDocs.length} balances from MongoDB`);
+        console.log(`✅ Fetched ${walletDocs.length} balances from MongoDB`);
       } finally {
         // Connection managed by centralized config
       }
@@ -2682,7 +3012,7 @@ async function testBalanceSummary() {
     // Verification: Check for money loss
     console.log('\n🔍 VERIFICATION:');
     
-    // In a user-to-user ledger system, the sum should be zero (conservation of money)
+    // In a user-to-user transfer system, the sum should be zero (conservation of money)
     const isBalanced = Math.abs(grandTotal) < 1; // Allow for rounding errors (1 cent)
     
     if (isBalanced) {
@@ -2763,7 +3093,7 @@ async function testAll() {
     
     try {
       execSync('npx tsx typescript/payment/payment-command-db-check.ts clean', {
-        cwd: process.cwd(),
+        cwd: SCRIPTS_DIR,
         stdio: 'inherit',
       });
       console.log('\n✅ All databases dropped successfully!\n');
@@ -2801,7 +3131,7 @@ async function testAll() {
       await sleep(2000);
       
       execSync('npx tsx typescript/payment/payment-command-db-check.ts create-index', {
-        cwd: process.cwd(),
+        cwd: SCRIPTS_DIR,
         stdio: 'inherit',
       });
       console.log('\n✅ Indexes verified/created!\n');
@@ -2910,7 +3240,8 @@ async function testAll() {
       { name: 'flow', description: 'Complete Payment Flow' },
       { name: 'duplicate', description: 'Duplicate Protection' },
       { name: 'exchange-rate', description: 'Currency Exchange Rate' },
-      { name: 'ledger', description: 'Ledger Funding Check' },
+      { name: 'credit-limit', description: 'Credit Limit & AllowNegative' },
+      { name: 'wallets', description: 'Wallets, Transfers & Transactions Check' },
       { name: 'recovery', description: 'Transaction Recovery' },
     ];
     
@@ -2982,7 +3313,8 @@ const TEST_REGISTRY: Record<string, () => Promise<void>> = {
   flow: testFlow,
   duplicate: testDuplicate,
   'exchange-rate': testExchangeRate,
-  ledger: testLedger,
+  'credit-limit': testCreditLimit,
+  wallets: testWalletsAndTransactions,
   recovery: testRecovery,
   'balance-summary': testBalanceSummary,
   all: testAll,

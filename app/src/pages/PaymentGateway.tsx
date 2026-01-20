@@ -680,6 +680,10 @@ function WalletsTab() {
                 amount
                 currency
               }
+              transfer {
+                id
+                status
+              }
               errors
             }
           }
@@ -710,26 +714,26 @@ function WalletsTab() {
       queryClient.invalidateQueries({ queryKey: ['deposits'] })
       
       // Auto-approve deposit to complete the flow (like in tests)
-      const depositId = result?.createDeposit?.deposit?.id
-      if (depositId) {
+      const transferId = result?.createDeposit?.transfer?.id
+      if (transferId) {
         try {
-          // Wait a moment for transaction to be created
+          // Wait a moment for transfer to be created
           await new Promise(resolve => setTimeout(resolve, 500))
           
-          // Approve the transaction to complete the deposit flow
+          // Approve the transfer to complete the deposit flow
           await graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
-            mutation ApproveTransaction($transactionId: String!) {
-              approveTransaction(transactionId: $transactionId) {
+            mutation ApproveTransfer($transferId: String!) {
+              approveTransfer(transferId: $transferId) {
                 success
-                transaction {
+                transfer {
                   id
                   status
                 }
               }
             }
-          `, { transactionId: depositId }, authToken)
+          `, { transferId }, authToken)
           
-          console.log('[Deposit] Transaction approved successfully')
+          console.log('[Deposit] Transfer approved successfully')
         } catch (approveError: any) {
           console.warn('[Deposit] Auto-approval failed (may need manual approval):', approveError)
           // Don't fail the deposit creation - user can approve manually
@@ -765,6 +769,10 @@ function WalletsTab() {
                 amount
                 currency
               }
+              transfer {
+                id
+                status
+              }
               errors
             }
           }
@@ -794,26 +802,26 @@ function WalletsTab() {
       queryClient.invalidateQueries({ queryKey: ['withdrawals'] })
       
       // Auto-approve withdrawal to complete the flow (like in tests)
-      const withdrawalId = result?.createWithdrawal?.withdrawal?.id
-      if (withdrawalId) {
+      const transferId = result?.createWithdrawal?.transfer?.id
+      if (transferId) {
         try {
-          // Wait a moment for transaction to be created
+          // Wait a moment for transfer to be created
           await new Promise(resolve => setTimeout(resolve, 500))
           
-          // Approve the transaction to complete the withdrawal flow
+          // Approve the transfer to complete the withdrawal flow
           await graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
-            mutation ApproveTransaction($transactionId: String!) {
-              approveTransaction(transactionId: $transactionId) {
+            mutation ApproveTransfer($transferId: String!) {
+              approveTransfer(transferId: $transferId) {
                 success
-                transaction {
+                transfer {
                   id
                   status
                 }
               }
             }
-          `, { transactionId: withdrawalId }, authToken)
+          `, { transferId }, authToken)
           
-          console.log('[Withdrawal] Transaction approved successfully')
+          console.log('[Withdrawal] Transfer approved successfully')
         } catch (approveError: any) {
           console.warn('[Withdrawal] Auto-approval failed (may need manual approval):', approveError)
           // Don't fail the withdrawal creation - user can approve manually
@@ -2569,6 +2577,8 @@ function TransactionsTab() {
             createdAt
             description
             metadata
+            objectId
+            objectModel
           }
           totalCount
           pageInfo {
@@ -2631,6 +2641,10 @@ function TransactionsTab() {
             amount
             currency
           }
+          transfer {
+            id
+            status
+          }
           errors
         }
       }
@@ -2658,6 +2672,10 @@ function TransactionsTab() {
             amount
             currency
           }
+          transfer {
+            id
+            status
+          }
           errors
         }
       }
@@ -2667,21 +2685,21 @@ function TransactionsTab() {
       queryClient.invalidateQueries({ queryKey: ['withdrawals'] })
       
       // Auto-approve withdrawal to complete the flow
-      const withdrawalId = result?.createWithdrawal?.withdrawal?.id
-      if (withdrawalId) {
+      const transferId = result?.createWithdrawal?.transfer?.id
+      if (transferId) {
         try {
           await new Promise(resolve => setTimeout(resolve, 500))
           await graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
-            mutation ApproveTransaction($transactionId: String!) {
-              approveTransaction(transactionId: $transactionId) {
+            mutation ApproveTransfer($transferId: String!) {
+              approveTransfer(transferId: $transferId) {
                 success
-                transaction {
+                transfer {
                   id
                   status
                 }
               }
             }
-          `, { transactionId: withdrawalId }, authToken)
+          `, { transferId }, authToken)
         } catch (approveError: any) {
           console.warn('[Withdrawal] Auto-approval failed:', approveError)
         }
@@ -3116,33 +3134,39 @@ function TransactionsTab() {
                             <span className="status-badge-dot" />
                             {tx._displayStatus}
                           </span>
-                          {tx._displayStatus === 'processing' && tx._source !== 'wallet' && (
-                            <button
-                              className="btn btn-sm btn-primary"
-                              onClick={async () => {
-                                try {
-                                  await graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
-                                    mutation ApproveTransaction($transactionId: String!) {
-                                      approveTransaction(transactionId: $transactionId) {
-                                        success
-                                        transaction {
-                                          id
-                                          status
+                          {tx._displayStatus === 'processing' && tx._source !== 'wallet' && (() => {
+                            // Get transferId from transaction metadata or objectId
+                            const transferId = (tx.metadata as any)?.transferId || (tx.objectModel === 'transfer' ? tx.objectId : null)
+                            if (!transferId) return null
+                            
+                            return (
+                              <button
+                                className="btn btn-sm btn-primary"
+                                onClick={async () => {
+                                  try {
+                                    await graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
+                                      mutation ApproveTransfer($transferId: String!) {
+                                        approveTransfer(transferId: $transferId) {
+                                          success
+                                          transfer {
+                                            id
+                                            status
+                                          }
                                         }
                                       }
-                                    }
-                                  `, { transactionId: String(tx.id) }, authToken)
-                                  refetchAll()
-                                  setTimeout(() => refetchAll(), 1000) // Refresh after sync
-                                } catch (err: any) {
-                                  alert(`Failed to approve: ${err.message}`)
-                                }
-                              }}
-                              style={{ fontSize: 10, padding: '2px 8px' }}
-                            >
-                              Approve
-                            </button>
-                          )}
+                                    `, { transferId }, authToken)
+                                    refetchAll()
+                                    setTimeout(() => refetchAll(), 1000) // Refresh after sync
+                                  } catch (err: any) {
+                                    alert(`Failed to approve: ${err.message}`)
+                                  }
+                                }}
+                                style={{ fontSize: 10, padding: '2px 8px' }}
+                              >
+                                Approve
+                              </button>
+                            )
+                          })()}
                         </div>
                       </td>
                       <td style={{ padding: '10px 8px', fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis' }}>
