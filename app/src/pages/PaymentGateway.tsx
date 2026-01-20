@@ -255,10 +255,10 @@ function WalletsTab() {
       
       // Check if usersByRole queries succeeded (they return empty nodes on error)
       const providerUsersCount = providerResult?.usersByRole?.nodes?.length || 0
-      const systemRoleUsersCount = allUsersResult?.usersByRole?.nodes?.length || 0
+      const systemUsersCount = systemResult?.usersByRole?.nodes?.length || 0
       
       // If all usersByRole queries returned empty AND we have users from GetAllUsers, use fallback
-      const usersByRoleFailed = (providerUsersCount === 0 && systemRoleUsersCount === 0 && allUsersFallback.length > 0)
+      const usersByRoleFailed = (providerUsersCount === 0 && systemUsersCount === 0 && allUsersFallback.length > 0)
       
       // If usersByRole queries failed OR if we have users but no role-based results, use fallback
       if (usersByRoleFailed) {
@@ -302,20 +302,23 @@ function WalletsTab() {
       }
       
       // Normal flow: use results from usersByRole queries
-      // Filter system users from allUsers (admin is now a business role, only system has full access)
-      const allUsers = allUsersResult?.users?.nodes || []
-      const systemRoleUsers = allUsers.filter((u: any) => {
-        return hasRole(u.roles || [], 'system')
-      })
-      const system = [...systemRoleUsers]
-        .filter((u, idx, arr) => arr.findIndex(v => v.id === u.id) === idx) // Remove duplicates
-      
+      // ✅ FIX: Use systemResult directly (from GetSystemUsers query)
+      const systemFromQuery = systemResult?.usersByRole?.nodes || []
       const providers = providerResult?.usersByRole?.nodes || []
+      
+      // Use GetAllUsers result for regular users and fallback
+      const allUsers = allUsersResult2?.users?.nodes || []
+      
+      // Combine system users from query (deduplicate)
+      const system = [...systemFromQuery]
+        .filter((u, idx, arr) => arr.findIndex(v => v.id === u.id) === idx) // Remove duplicates
       
       console.log('[Users] Normal flow results:', {
         systemUsers: system.length,
-        systemRoleUsers: systemRoleUsers.length,
+        systemFromQuery: systemFromQuery.length,
         providers: providers.length,
+        allUsers: allUsers.length,
+        systemDetails: system.map((s: any) => ({ id: s.id, email: s.email, roles: s.roles })),
         providerDetails: providers.map((p: any) => ({ id: p.id, email: p.email, roles: p.roles })),
       });
       
@@ -1232,12 +1235,27 @@ function WalletsTab() {
     }
   }
 
-  // Calculate totals using REAL data
+  // Calculate totals using REAL data from GraphQL
+  // ✅ System balance comes from GraphQL wallets query (systemWallets) - NOT calculated
   // System Reserve = System user balances (can go negative, represents platform net position)
   // System users fund providers, and providers fund end users
   const systemWalletsInBaseCurrency = systemWallets.filter((w: any) => w.currency === baseCurrency)
   
-  // Debug: Log system wallets to verify they're being found
+  // Debug: Log system wallets to verify they're being found from GraphQL
+  if (systemWallets.length === 0) {
+    console.warn('[Balance] ⚠️ No system wallets found from GraphQL!', {
+      baseCurrency,
+      systemUsersCount: systemUsers.length,
+      systemUserIds: Array.from(systemUserIds),
+      allWalletsCount: allWallets.length,
+      walletsWithNegativeBalance: allWallets.filter((w: any) => (w.balance || 0) < 0 && w.currency === baseCurrency).map((w: any) => ({
+        id: w.id,
+        userId: w.userId,
+        balance: w.balance,
+        currency: w.currency
+      }))
+    })
+  }
   if (systemWalletsInBaseCurrency.length === 0 && systemWallets.length > 0) {
     console.warn('[Balance] ⚠️ No system wallets found in base currency:', {
       baseCurrency,
@@ -1246,9 +1264,10 @@ function WalletsTab() {
       systemUserIds: Array.from(systemUserIds)
     })
   }
-  console.log('[Balance] System wallets:', {
+  console.log('[Balance] System wallets from GraphQL:', {
     total: systemWallets.length,
     inBaseCurrency: systemWalletsInBaseCurrency.length,
+    systemUsersCount: systemUsers.length,
     balances: systemWalletsInBaseCurrency.map((w: any) => ({ 
       id: w.id, 
       userId: w.userId, 
@@ -1257,7 +1276,7 @@ function WalletsTab() {
     }))
   })
   
-  // Calculate system user wallet balances from wallets (source of truth)
+  // ✅ Calculate system balance from GraphQL wallets (source of truth from GraphQL)
   const systemUsersBalanceFromWallets = systemWalletsInBaseCurrency.reduce((sum: number, w: any) => sum + (w.balance || 0), 0)
   
   // Calculate system user wallet balances from bulk query (source of truth)
@@ -1268,14 +1287,15 @@ function WalletsTab() {
     return sum + balance
   }, 0)
   
-  // ✅ ALWAYS use wallet balances directly from wallets collection (source of truth)
-  // Wallets are updated atomically via createTransferWithTransactions - no sync needed
+  // ✅ System balance comes from GraphQL wallets query (systemWalletsInBaseCurrency)
+  // Wallets are fetched from GraphQL and updated atomically via createTransferWithTransactions
   // System users can go negative, representing platform net position
-  // Use wallet balances directly (more reliable than bulk query which might miss some wallets)
+  // This is the source of truth from GraphQL, NOT calculated from accounting equation
   const systemUsersBalance = systemUsersBalanceFromWallets
   
-  // System balance = sum of all system user balances (can be negative, represents platform net position)
-  // Accounting equation: System Balance + Provider Balance + End User Balance = 0
+  // ✅ System balance = sum of all system user wallet balances from GraphQL (can be negative)
+  // Accounting equation verification: System Balance + Provider Balance + End User Balance = 0
+  // But balance comes from GraphQL wallets, not calculated
   const systemBalance = systemUsersBalance
   
   // Log balance source for debugging
@@ -1405,9 +1425,12 @@ function WalletsTab() {
   // ✅ BALANCE VERIFICATION: System balance should match -(Provider + End User)
   // Accounting equation: System Balance + Provider Balance + End User Balance = 0
   // This means: System Balance = -(Provider Balance + End User Balance)
+  // NOTE: System balance comes from GraphQL (systemWallets), NOT calculated
+  // Expected balance is for verification only - assumes end users don't have negative balances
   const totalCredited = finalProviderBalance + userTotalBalance // Total credited to providers + end users
   const expectedSystemBalance = -totalCredited // System should be negative of what it credited
   const balanceDifference = Math.abs(systemBalance - expectedSystemBalance)
+  // If end users have negative balances, the expected balance will be incorrect (they shouldn't have negatives)
   const isBalanced = balanceDifference < 100 // Allow 1€ difference for rounding/fees
   
   // Log balances summary with detailed breakdown
