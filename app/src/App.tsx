@@ -12,8 +12,10 @@ import {
   LogOut,
   Bell,
   Shield,
+  Zap,
 } from 'lucide-react'
 import { AuthProvider, useAuth } from './lib/auth-context'
+import { hasRole } from './lib/access'
 import ProtectedRoute from './components/ProtectedRoute'
 import Dashboard from './pages/Dashboard'
 import PaymentGateway from './pages/PaymentGateway'
@@ -29,9 +31,22 @@ import Profile from './pages/Profile'
 import AuthCallback from './pages/AuthCallback'
 import Notifications from './pages/Notifications'
 import UserManagement from './pages/UserManagement'
+import UseCases from './pages/UseCases'
 
 function AppContent() {
-  const { isAuthenticated, user, logout } = useAuth()
+  const { isAuthenticated, user, logout, isLoading } = useAuth()
+
+  // Show loading spinner while checking authentication
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="text-center">
+          <div className="w-12 h-12 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+          <p className="text-gray-600">Loading...</p>
+        </div>
+      </div>
+    )
+  }
 
   // Public routes (no auth required)
   const publicRoutes = (
@@ -65,7 +80,7 @@ function AppContent() {
           </div>
           <div className="user-info">
             <div className="user-name">{user?.email || user?.username}</div>
-            <div className="user-role">{user?.roles?.[0] || 'User'}</div>
+            <div className="user-role">{Array.isArray(user?.roles) && typeof user.roles[0] === 'string' ? user.roles[0] : (user?.roles?.[0] as any)?.role || 'User'}</div>
           </div>
           <button onClick={logout} className="user-logout" title="Logout">
             <LogOut className="w-4 h-4" />
@@ -99,15 +114,19 @@ function AppContent() {
               <Gift />
               <span>Bonus Service</span>
             </NavLink>
+            <NavLink to="/use-cases" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
+              <Zap />
+              <span>Use Cases</span>
+            </NavLink>
             <NavLink to="/notifications" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
               <Bell />
               <span>Notifications</span>
             </NavLink>
           </div>
 
-          {user?.roles?.includes('admin') && (
+          {hasRole(user?.roles, 'system') && (
             <div className="nav-section">
-              <div className="nav-section-title">Admin</div>
+              <div className="nav-section-title">System</div>
               <NavLink to="/users" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
                 <Shield />
                 <span>User Management</span>
@@ -148,9 +167,10 @@ function AppContent() {
           <Route path="/health" element={<ProtectedRoute><HealthMonitor /></ProtectedRoute>} />
           <Route path="/payment" element={<ProtectedRoute><PaymentGateway /></ProtectedRoute>} />
           <Route path="/bonus" element={<ProtectedRoute><BonusService /></ProtectedRoute>} />
+          <Route path="/use-cases" element={<ProtectedRoute><UseCases /></ProtectedRoute>} />
           <Route path="/notifications" element={<ProtectedRoute><Notifications /></ProtectedRoute>} />
-          <Route path="/users" element={<ProtectedRoute requireRoles={['admin']}><UserManagement /></ProtectedRoute>} />
-          <Route path="/webhooks" element={<ProtectedRoute requireRoles={['admin']}><Webhooks /></ProtectedRoute>} />
+          <Route path="/users" element={<ProtectedRoute requireRoles={['system']}><UserManagement /></ProtectedRoute>} />
+          <Route path="/webhooks" element={<ProtectedRoute requireRoles={['system']}><Webhooks /></ProtectedRoute>} />
           <Route path="/realtime" element={<ProtectedRoute><RealtimeTest /></ProtectedRoute>} />
           <Route path="/playground" element={<ProtectedRoute><GraphQLPlayground /></ProtectedRoute>} />
           <Route path="/settings" element={<ProtectedRoute><SettingsPage /></ProtectedRoute>} />

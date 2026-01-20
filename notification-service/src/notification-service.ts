@@ -4,7 +4,7 @@
  * Manages all notification channels and providers
  */
 
-import { logger, getDatabase } from 'core-service';
+import { logger, getDatabase, updateOneById, generateMongoId } from 'core-service';
 import type { 
   NotificationRequest, 
   NotificationResponse, 
@@ -74,22 +74,27 @@ export class NotificationService {
         throw new Error(`Provider not configured for channel: ${request.channel}`);
       }
       
-      // Save notification request to database
+      // Save notification request to database - use MongoDB ObjectId for performant single-insert operation
+      const { objectId, idString } = request.id 
+        ? { objectId: null as any, idString: request.id } // Use provided ID if exists
+        : generateMongoId();
       const notification = {
-        id: request.id || crypto.randomUUID(),
+        ...(objectId && { _id: objectId }),
+        id: idString,
         ...request,
         status: 'queued',
         createdAt: new Date(),
       };
       
-      await db.collection('notifications').insertOne(notification);
+      await db.collection('notifications').insertOne(notification as any);
       
       // Send via provider
       const result = await provider.send(request as any);
       
-      // Update status in database
-      await db.collection('notifications').updateOne(
-        { id: notification.id },
+      // Use optimized updateOneById utility (performance-optimized)
+      await updateOneById(
+        db.collection('notifications'),
+        notification.id,
         {
           $set: {
             status: result.status,
@@ -116,8 +121,9 @@ export class NotificationService {
         channel: request.channel,
       });
       
+      const idString = request.id || generateMongoId().idString;
       return {
-        id: request.id || crypto.randomUUID(),
+        id: idString,
         status: 'failed',
         channel: request.channel,
         error: error.message,

@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { getDatabase } from './database.js';
 import { cached, deleteCache, deleteCachePattern } from './cache.js';
 import { logger } from './logger.js';
+import { normalizeDocument, generateMongoId } from './mongodb-utils.js';
 import type { 
   Repository, 
   FindManyOptions, 
@@ -193,7 +194,17 @@ export function createRepository<T extends { id: string }>(
 
     async create(entity: T, options?: WriteOptions): Promise<T> {
       const col = await getCollection();
-      let doc = { ...entity };
+      // Remove id if present - we'll generate it using MongoDB ObjectId
+      const { id, ...entityWithoutId } = entity as any;
+      
+      // Generate MongoDB ObjectId for performant single-insert operation
+      const { objectId, idString } = generateMongoId();
+      
+      let doc = {
+        _id: objectId,
+        id: idString,
+        ...entityWithoutId,
+      };
       
       // Apply timestamps (like Mongoose) unless skipped
       if (tsConfig.enabled && !options?.skipTimestamps) {
@@ -206,7 +217,7 @@ export function createRepository<T extends { id: string }>(
         }
       }
       
-      // Use session for transactional operations
+      // Single insert operation - much more performant than insert + update
       await col.insertOne(doc as unknown as Document, { session: options?.session });
       
       // Invalidate list and count caches (skip during transaction - will be invalidated on commit)

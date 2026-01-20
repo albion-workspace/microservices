@@ -10,7 +10,7 @@ async function checkUser() {
     await client.connect();
     const db = client.db('auth_service');
     const user = await db.collection('users').findOne(
-      { email: 'admin@demo.com' },
+      { email: 'system@demo.com' },
       { 
         projection: { 
           email: 1, 

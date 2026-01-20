@@ -3,7 +3,7 @@
  * Handles password reset, change, and forgot password flows
  */
 
-import { getDatabase, logger } from 'core-service';
+import { getDatabase, logger, generateMongoId } from 'core-service';
 import type { 
   ForgotPasswordInput, 
   ResetPasswordInput, 
@@ -266,8 +266,14 @@ export class PasswordService {
     const tokenHash = await hashToken(token);
     
     const now = new Date();
-    const resetToken: PasswordResetToken = {
-      id: crypto.randomUUID(),
+    // Use MongoDB ObjectId for performant single-insert operation
+    const { objectId, idString } = generateMongoId();
+    if (!user.id) {
+      throw new Error('User ID is required for password reset token');
+    }
+    const resetToken = {
+      _id: objectId,
+      id: idString,
       userId: user.id,
       tenantId: user.tenantId,
       token,
@@ -284,7 +290,7 @@ export class PasswordService {
     );
     
     // Store new token
-    await db.collection('password_reset_tokens').insertOne(resetToken);
+    await db.collection('password_reset_tokens').insertOne(resetToken as any);
     
       // Send email (via OTP provider - uses notification service)
     try {
@@ -316,8 +322,11 @@ export class PasswordService {
     
     const now = new Date();
     
+    // Use MongoDB ObjectId for performant single-insert operation
+    const { objectId, idString } = generateMongoId();
     await db.collection('otps').insertOne({
-      id: crypto.randomUUID(),
+      _id: objectId,
+      id: idString,
       userId: user.id,
       tenantId: user.tenantId,
       code,
@@ -330,7 +339,7 @@ export class PasswordService {
       isUsed: false,
       createdAt: now,
       expiresAt: addMinutes(now, this.config.otpExpiryMinutes),
-    });
+    } as any);
     
     // Send via SMS
     try {

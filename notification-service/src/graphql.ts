@@ -126,8 +126,8 @@ export function createNotificationResolvers(notificationService: NotificationSer
       },
       
       notificationStats: async (args: any, context: ResolverContext) => {
-        if (!context.user!.roles?.includes('admin')) {
-          throw new Error('Admin access required');
+        if (!context.user!.roles?.includes('system')) {
+          throw new Error('System access required');
         }
         
         const { getDatabase } = await import('core-service');

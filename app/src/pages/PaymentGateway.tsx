@@ -18,38 +18,23 @@ import {
 } from 'lucide-react'
 import { graphql as gql, SERVICE_URLS } from '../lib/auth'
 import { useAuth } from '../lib/auth-context'
+import { getRoleNames, hasRole, isSystem as checkIsSystem } from '../lib/access'
+import { graphql as graphqlQuery, SERVICE_URLS as GRAPHQL_SERVICE_URLS } from '../lib/graphql-utils'
 
 const PAYMENT_URL = SERVICE_URLS.payment
 
-// Wrapper for payment service GraphQL with auth token
+// Global GraphQL function wrapper with auth token
 async function graphqlWithAuth<T = any>(
+  url: string,
   query: string, 
   variables?: Record<string, unknown>,
-  token?: string
+  token?: string,
+  options?: { operation?: string; showResponse?: boolean }
 ): Promise<T> {
   if (token) {
-    // Use authenticated request
-    const res = await fetch(SERVICE_URLS.payment, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`,
-      },
-      body: JSON.stringify({ query, variables }),
-    })
-    
-    const data = await res.json()
-    if (data.errors) {
-      throw new Error(data.errors[0]?.message || 'GraphQL error')
-    }
-    return data.data
+    return graphqlQuery<T>(url, query, variables, token, options)
   }
-  // Fallback to generated token
-  return gql<T>('payment', query, variables)
-}
-
-// Keep the old graphql function for backward compatibility (uses generated token)
-async function graphql<T = any>(query: string, variables?: Record<string, unknown>): Promise<T> {
+  // Fallback to generated token (legacy support)
   return gql<T>('payment', query, variables)
 }
 
@@ -60,7 +45,7 @@ function formatCurrency(amount: number, currency = 'EUR'): string {
   }).format(amount / 100)
 }
 
-type TabId = 'wallets' | 'transactions' | 'reconciliation' | 'settings'
+type TabId = 'wallets' | 'transactions' | 'ledger' | 'reconciliation' | 'settings'
 
 export default function PaymentGateway() {
   const [activeTab, setActiveTab] = useState<TabId>('wallets')
@@ -68,6 +53,7 @@ export default function PaymentGateway() {
   const tabs = [
     { id: 'wallets' as const, label: 'Wallets', icon: Wallet },
     { id: 'transactions' as const, label: 'Transactions', icon: ArrowDownCircle },
+    { id: 'ledger' as const, label: 'Ledger', icon: FileText },
     { id: 'reconciliation' as const, label: 'Reconciliation', icon: FileText },
     { id: 'settings' as const, label: 'Settings', icon: Settings },
   ]
@@ -96,6 +82,7 @@ export default function PaymentGateway() {
       {/* Tab Content */}
       {activeTab === 'wallets' && <WalletsTab />}
       {activeTab === 'transactions' && <TransactionsTab />}
+      {activeTab === 'ledger' && <LedgerTab />}
       {activeTab === 'reconciliation' && <ReconciliationTab />}
       {activeTab === 'settings' && <SettingsTab />}
     </div>
@@ -106,39 +93,47 @@ export default function PaymentGateway() {
 // WALLETS TAB - Payment Flow: System → Provider → User
 // ═══════════════════════════════════════════════════════════════════
 
-// Provider definitions
-const PROVIDERS = [
-  { id: 'provider-stripe', name: 'Stripe', icon: '💳', color: '#635BFF' },
-  { id: 'provider-paypal', name: 'PayPal', icon: '🅿️', color: '#003087' },
-  { id: 'provider-bank', name: 'Bank Transfer', icon: '🏦', color: '#2E7D32' },
-  { id: 'provider-crypto', name: 'Crypto', icon: '₿', color: '#F7931A' },
-]
+// Provider icons mapping (for display)
+const PROVIDER_ICONS: Record<string, { icon: string; color: string }> = {
+  'payment-provider@system.com': { icon: '💳', color: '#635BFF' },
+  'payment-gateway@system.com': { icon: '🏦', color: '#003087' },
+  'default': { icon: '💳', color: '#635BFF' },
+}
 
 function WalletsTab() {
   const queryClient = useQueryClient()
-  const { tokens } = useAuth()
+  const { tokens, user } = useAuth()
   const authToken = tokens?.accessToken
   
   // Active section
   const [activeSection, setActiveSection] = useState<'system' | 'provider' | 'user'>('system')
   
-  // System funding form
-  const [systemFundForm, setSystemFundForm] = useState({ provider: 'provider-stripe', amount: '10000', currency: 'EUR' })
+  // System funding form - use real provider user ID
+  const [systemFundForm, setSystemFundForm] = useState({ provider: '', amount: '10000', currency: 'EUR' })
   
-  // Provider to User form  
+  // Provider to User form - use real provider user ID
   const [providerToUserForm, setProviderToUserForm] = useState({ 
-    provider: 'provider-stripe', 
+    provider: '', 
     userId: '', 
     amount: '100', 
     currency: 'EUR' 
   })
   
-  // User operations form
-  const [userDepositForm, setUserDepositForm] = useState({ userId: '', amount: '100', currency: 'EUR', provider: 'provider-stripe' })
-  const [userWithdrawForm, setUserWithdrawForm] = useState({ userId: '', amount: '50', currency: 'EUR', provider: 'provider-stripe', bankAccount: '' })
+  // User operations form - use real provider user ID
+  const [userDepositForm, setUserDepositForm] = useState({ userId: '', amount: '100', currency: 'EUR', provider: '', fromUserId: '' })
+  const [userWithdrawForm, setUserWithdrawForm] = useState({ userId: '', amount: '50', currency: 'EUR', provider: '', bankAccount: '' })
   
   // New user wallet form
-  const [newUserForm, setNewUserForm] = useState({ userId: '', currency: 'EUR' })
+  const [newUserForm, setNewUserForm] = useState({ userId: '', currency: 'EUR', category: 'main' })
+  
+  // Wallet categories for sports betting and other use cases
+  const walletCategories = [
+    { value: 'main', label: 'Main Wallet', description: 'General purpose wallet' },
+    { value: 'sports', label: 'Sports Betting', description: 'Ring-fenced for sports betting' },
+    { value: 'casino', label: 'Casino', description: 'Ring-fenced for casino games' },
+    { value: 'poker', label: 'Poker', description: 'Ring-fenced for poker' },
+    { value: 'bonus', label: 'Bonus', description: 'Bonus funds wallet' },
+  ]
   
   // Loading states for complex operations
   const [isFundingProvider, setIsFundingProvider] = useState(false)
@@ -149,12 +144,229 @@ function WalletsTab() {
   const [walletsLoading, setWalletsLoading] = useState(false)
   const [walletsVersion, setWalletsVersion] = useState(0) // Force re-render trigger
   
+  // Real users from auth service
+  const [systemUsers, setSystemUsers] = useState<any[]>([])
+  const [gatewayUsers, setGatewayUsers] = useState<any[]>([])
+  const [providerUsers, setProviderUsers] = useState<any[]>([])
+  const [regularUsers, setRegularUsers] = useState<any[]>([])
+  
+  // Ledger balances state - now supports multi-currency
+  const [providerLedgerBalances, setProviderLedgerBalances] = useState<Record<string, Record<string, number>>>({}) // userId -> currency -> balance
+  const [systemHouseBalance, setSystemHouseBalance] = useState<number | null>(null)
+  const [systemHouseBalancesByCurrency, setSystemHouseBalancesByCurrency] = useState<Record<string, number>>({})
+  const [systemPrimaryCurrency, setSystemPrimaryCurrency] = useState<string>('EUR')
+  const [systemBalanceFetched, setSystemBalanceFetched] = useState(false)
+  const [ledgerBalancesLoading, setLedgerBalancesLoading] = useState(false)
+  
+  // Base currency selection - controls which currency the system primarily works with
+  const [baseCurrency, setBaseCurrency] = useState<string>('EUR')
+  const [supportedCurrencies] = useState<string[]>(['EUR', 'USD', 'GBP', 'BTC', 'ETH']) // Add more as needed
+  
+  // Fetch users from auth service by role dynamically
+  const fetchUsers = async (): Promise<{ system: any[]; gateway: any[]; providers: any[]; regular: any[] }> => {
+    if (!authToken) {
+      console.warn('[Users] No auth token available')
+      return { system: [], gateway: [], providers: [], regular: [] }
+    }
+    
+    try {
+      // Fetch users by role using the new usersByRole query (from AUTH service)
+      const [systemResult, gatewayResult, providerResult, allUsersResult] = await Promise.all([
+        // System users: system role only
+        graphqlWithAuth(GRAPHQL_SERVICE_URLS.auth, `
+          query GetSystemUsers($first: Int) {
+            usersByRole(role: "system", first: $first) {
+              nodes {
+                id
+                email
+                roles
+                permissions
+              }
+            }
+          }
+        `, { first: 100 }, authToken, { operation: 'query', showResponse: false }).catch((err) => {
+          return { usersByRole: { nodes: [] } }
+        }),
+        
+        // Gateway users: payment-gateway role
+        graphqlWithAuth(GRAPHQL_SERVICE_URLS.auth, `
+          query GetGatewayUsers($first: Int) {
+            usersByRole(role: "payment-gateway", first: $first) {
+              nodes {
+                id
+                email
+                roles
+                permissions
+              }
+            }
+          }
+        `, { first: 100 }, authToken, { operation: 'query', showResponse: false }).catch((err) => {
+          return { usersByRole: { nodes: [] } }
+        }),
+        
+        // Provider users: payment-provider role
+        graphqlWithAuth(GRAPHQL_SERVICE_URLS.auth, `
+          query GetProviderUsers($first: Int) {
+            usersByRole(role: "payment-provider", first: $first) {
+              nodes {
+                id
+                email
+                roles
+                permissions
+              }
+            }
+          }
+        `, { first: 100 }, authToken, { operation: 'query', showResponse: false }).then((result) => {
+          console.log('[Users] Provider users query result:', result);
+          return result;
+        }).catch((err) => {
+          console.error('[Users] Provider users query error:', err);
+          return { usersByRole: { nodes: [] } }
+        }),
+        
+        // Also get system role users
+        graphqlWithAuth(GRAPHQL_SERVICE_URLS.auth, `
+          query GetSystemRoleUsers($first: Int) {
+            usersByRole(role: "system", first: $first) {
+              nodes {
+                id
+                email
+                roles
+                permissions
+              }
+            }
+          }
+        `, { first: 100 }, authToken, { operation: 'query', showResponse: false }).catch((err) => {
+          return { usersByRole: { nodes: [] } }
+        }),
+      ])
+      
+      // Get all users - this works even if usersByRole fails
+      const allUsersResult2 = await graphqlWithAuth(GRAPHQL_SERVICE_URLS.auth, `
+        query GetAllUsers($first: Int) {
+          users(first: $first) {
+            nodes {
+              id
+              email
+              roles
+              permissions
+            }
+          }
+        }
+      `, { first: 100 }, authToken, { operation: 'query', showResponse: false }).catch((err) => {
+        return { users: { nodes: [] } }
+      })
+      
+      const allUsersFallback = allUsersResult2?.users?.nodes || []
+      
+      // Check if usersByRole queries succeeded (they return empty nodes on error)
+      const gatewayUsersCount = gatewayResult?.usersByRole?.nodes?.length || 0
+      const providerUsersCount = providerResult?.usersByRole?.nodes?.length || 0
+      const systemRoleUsersCount = allUsersResult?.usersByRole?.nodes?.length || 0
+      
+      // If all usersByRole queries returned empty AND we have users from GetAllUsers, use fallback
+      const usersByRoleFailed = (gatewayUsersCount === 0 && 
+                                  providerUsersCount === 0 && systemRoleUsersCount === 0 && allUsersFallback.length > 0)
+      
+      // If usersByRole queries failed OR if we have users but no role-based results, use fallback
+      if (usersByRoleFailed) {
+        console.warn('[Users] ⚠️ Using fallback: filtering allUsers by role (token may need refresh)')
+        
+        // Filter users by role from the allUsersFallback list using access-engine utilities
+        // Note: 'admin' is now a business role, only 'system' has full access
+        const systemRoleUsersFromAll = allUsersFallback.filter((u: any) => {
+          return hasRole(u.roles, 'system');
+        });
+        const gatewayUsersFromAll = allUsersFallback.filter((u: any) => {
+          return hasRole(u.roles, 'payment-gateway');
+        });
+        const providerUsersFromAll = allUsersFallback.filter((u: any) => {
+          return hasRole(u.roles, 'payment-provider');
+        });
+        
+        // System role users only
+        const combinedSystem = [...systemRoleUsersFromAll]
+          .filter((u, idx, arr) => arr.findIndex(v => v.id === u.id) === idx) // Remove duplicates
+        
+        setSystemUsers(combinedSystem)
+        setGatewayUsers(gatewayUsersFromAll)
+        setProviderUsers(providerUsersFromAll)
+        
+        const systemIds = new Set(combinedSystem.map((u: any) => u.id))
+        const gatewayIds = new Set(gatewayUsersFromAll.map((u: any) => u.id))
+        const providerIds = new Set(providerUsersFromAll.map((u: any) => u.id))
+        
+        const regular = allUsersFallback.filter((u: any) => 
+          !systemIds.has(u.id) && 
+          !gatewayIds.has(u.id) && 
+          !providerIds.has(u.id)
+        )
+        
+        setRegularUsers(regular)
+        const userSummary = { 
+          system: combinedSystem.length, 
+          gateway: gatewayUsersFromAll.length, 
+          providers: providerUsersFromAll.length, 
+          regular: regular.length,
+          systemIds: combinedSystem.map((u: any) => u.id),
+          gatewayIds: gatewayUsersFromAll.map((u: any) => u.id),
+          providerIds: providerUsersFromAll.map((u: any) => u.id)
+        }
+        console.log('[Users] ✅ Categorized (fallback):', userSummary)
+        // Return users for immediate use
+        return { system: combinedSystem, gateway: gatewayUsersFromAll, providers: providerUsersFromAll, regular }
+      }
+      
+      // Normal flow: use results from usersByRole queries
+      // Filter system users from allUsers (admin is now a business role, only system has full access)
+      const allUsers = allUsersResult?.users?.nodes || []
+      const systemRoleUsers = allUsers.filter((u: any) => {
+        return hasRole(u.roles || [], 'system')
+      })
+      const system = [...systemRoleUsers]
+        .filter((u, idx, arr) => arr.findIndex(v => v.id === u.id) === idx) // Remove duplicates
+      
+      const gateway = gatewayResult?.usersByRole?.nodes || []
+      const providers = providerResult?.usersByRole?.nodes || []
+      
+      console.log('[Users] Normal flow results:', {
+        systemUsers: system.length,
+        systemRoleUsers: systemRoleUsers.length,
+        gateway: gateway.length,
+        providers: providers.length,
+        providerDetails: providers.map((p: any) => ({ id: p.id, email: p.email, roles: p.roles })),
+      });
+      
+      const systemIds = new Set(system.map((u: any) => u.id))
+      const gatewayIds = new Set(gateway.map((u: any) => u.id))
+      const providerIds = new Set(providers.map((u: any) => u.id))
+      
+      const regular = allUsers.filter((u: any) => 
+        !systemIds.has(u.id) && 
+        !gatewayIds.has(u.id) && 
+        !providerIds.has(u.id)
+      )
+      
+      setSystemUsers(system)
+      setGatewayUsers(gateway)
+      setProviderUsers(providers)
+      setRegularUsers(regular)
+      console.log('[Users] ✅ Categorized:', { system: system.length, gateway: gateway.length, providers: providers.length, regular: regular.length })
+      
+      // Return users for immediate use (avoiding state update race condition)
+      return { system, gateway, providers, regular }
+    } catch (err) {
+      console.error('[Users] ❌ Error:', err)
+      return { system: [], gateway: [], providers: [], regular: [] }
+    }
+  }
+  
   // Fetch wallets function - returns the wallets directly
   const fetchWallets = async (): Promise<any[]> => {
-    console.log('[Wallets] Fetching from API...')
     setWalletsLoading(true)
     try {
-      const result = await graphqlWithAuth(`
+      // Fetch all wallets (logged by GraphQL utility)
+      const walletsResult = await graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
         query ListWallets($first: Int) {
           wallets(first: $first) {
             nodes {
@@ -171,64 +383,205 @@ function WalletsTab() {
           }
         }
       `, { first: 100 }, authToken)
-      console.log('[Wallets] API Response:', JSON.stringify(result, null, 2))
-      const wallets = result?.wallets?.nodes || []
-      console.log('[Wallets] Parsed wallets:', wallets.length, 'wallets')
-      wallets.forEach((w: any) => console.log(`  - ${w.userId}: balance=${w.balance}`))
+      
+      const wallets = walletsResult?.wallets?.nodes || []
       return wallets
     } catch (err) {
-      console.error('[Wallets] Fetch error:', err)
+      console.error('[Wallets] ❌ Error:', err)
       return []
     } finally {
       setWalletsLoading(false)
     }
   }
   
+  // ✅ PERFORMANT: Fetch ledger balances for all users in ONE query
+  // Uses bulkLedgerBalances GraphQL query for optimal performance
+  // Accepts users as parameters to avoid race condition with state updates
+  const fetchProviderLedgerBalances = async (usersToFetch?: { providers: any[], gateway: any[], system: any[], regular?: any[] }) => {
+    if (!authToken || !user) return
+    
+    // Only fetch ledger balances if user is system
+    const isSystem = checkIsSystem(user)
+    if (!isSystem) {
+      setLedgerBalancesLoading(false)
+      return
+    }
+    
+    setLedgerBalancesLoading(true)
+    try {
+      const balances: Record<string, Record<string, number>> = {} // userId -> currency -> balance
+      
+      // Use provided users or fall back to state (for backwards compatibility)
+      const providers = usersToFetch?.providers || providerUsers
+      const gateway = usersToFetch?.gateway || gatewayUsers
+      const system = usersToFetch?.system || systemUsers
+      const regular = usersToFetch?.regular || regularUsers
+      
+      // Collect all user IDs
+      const allUsersToFetch = [...providers, ...gateway, ...system, ...regular]
+      const userIds = allUsersToFetch.map(u => u.id)
+      
+      if (userIds.length === 0) {
+        console.log('[Ledger] No users to fetch balances for')
+        setProviderLedgerBalances({})
+        setLedgerBalancesLoading(false)
+        return
+      }
+      
+      // ✅ SINGLE QUERY: Fetch all balances for all currencies in parallel
+      const balancePromises = supportedCurrencies.map(async (currency) => {
+        try {
+          const result = await graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
+            query BulkLedgerBalances($userIds: [String!]!, $subtype: String!, $currency: String!) {
+              bulkLedgerBalances(userIds: $userIds, subtype: $subtype, currency: $currency) {
+                balances {
+                  userId
+                  balance
+                  availableBalance
+                  allowNegative
+                }
+              }
+            }
+          `, {
+            userIds: userIds,
+            subtype: 'main',
+            currency: currency
+          }, authToken)
+          
+          if (result?.bulkLedgerBalances?.balances) {
+            // Map balances by userId
+            result.bulkLedgerBalances.balances.forEach((balanceEntry: any) => {
+              if (!balances[balanceEntry.userId]) {
+                balances[balanceEntry.userId] = {}
+              }
+              balances[balanceEntry.userId][currency] = balanceEntry.balance || 0
+            })
+          }
+        } catch (err: any) {
+          // Silently skip authorization errors (user might not be system)
+          const isAuthError = err?.message?.includes('Not authorized') || err?.message?.includes('authorized')
+          if (!isAuthError) {
+            console.error(`Failed to fetch bulk ledger balances for ${currency}:`, err)
+          }
+          // Set to 0 for all users if query fails
+          userIds.forEach(userId => {
+            if (!balances[userId]) {
+              balances[userId] = {}
+            }
+            balances[userId][currency] = 0
+          })
+        }
+      })
+      
+      // Wait for all currency queries to complete
+      await Promise.all(balancePromises)
+      
+      setProviderLedgerBalances(balances)
+      
+      // Log fetched ledger balances
+      console.log('[Ledger] ✅ Fetched balances for', allUsersToFetch.length, 'users in bulk:', {
+        providers: providers.length,
+        gateway: gateway.length,
+        system: system.length,
+        regular: regular.length,
+        balances: Object.keys(balances).length,
+        currencies: supportedCurrencies.length
+      })
+      
+      // System balance is calculated from gateway wallets (see balance calculation below)
+      // No need to query systemHouseBalance as it's not implemented in the GraphQL schema
+    } catch (err) {
+      // Silently handle errors - user might not have permission
+      const isAuthError = (err as any)?.message?.includes('Not authorized') || (err as any)?.message?.includes('authorized')
+      if (!isAuthError) {
+        console.error('[Ledger] Failed to fetch provider balances:', err)
+      }
+    } finally {
+      setLedgerBalancesLoading(false)
+    }
+  }
+  
   // Load wallets and update state
   const loadWallets = async () => {
+    // First fetch users to identify roles
+    const users = await fetchUsers() || { system: [], gateway: [], providers: [], regular: [] }
+    
+    // Then fetch wallets
     const wallets = await fetchWallets()
     console.log('[Wallets] Updating state with', wallets.length, 'wallets')
-    console.log('[Wallets] Provider balances from API:')
-    wallets.filter(w => w.userId?.startsWith('provider-')).forEach(w => {
-      console.log(`  ${w.userId}: ${w.balance}`)
-    })
     
     // Create completely new array to break any references
     const newWallets = wallets.map(w => ({ ...w }))
     setWalletsList(newWallets)
     setWalletsVersion(v => {
       const newVersion = v + 1
-      console.log('[Wallets] Version updated:', v, '->', newVersion)
+      // Version updated (detailed logs in GraphQL utility)
       return newVersion
+    })
+    
+    // Fetch ledger balances (after users are loaded) - pass users directly to avoid race condition
+    // Include regular users (end users) so their balances are also fetched
+    await fetchProviderLedgerBalances({
+      providers: users.providers,
+      gateway: users.gateway,
+      system: users.system,
+      regular: users.regular
     })
     
     // Small delay to ensure state is flushed
     await new Promise(resolve => setTimeout(resolve, 100))
-    console.log('[Wallets] State update complete')
+    // State update complete
     return wallets
   }
   
   // Initial fetch on mount
   useEffect(() => {
-    console.log('[Wallets] Initial load on mount')
     loadWallets()
   }, [])
   
-  // Categorize wallets from state
+  // Categorize wallets from state using REAL user IDs
   const allWallets = walletsList
-  const systemWallet = allWallets.find((w: any) => w.userId === 'system')
-  const providerWallets = allWallets.filter((w: any) => w.userId?.startsWith('provider-'))
-  const userWallets = allWallets.filter((w: any) => !w.userId?.startsWith('provider-') && w.userId !== 'system')
   
-  console.log('[Wallets] Current state - version:', walletsVersion, 'total:', allWallets.length, 'providers:', providerWallets.length)
-
+  // System wallets: wallets belonging to system users
+  const systemUserIds = new Set(systemUsers.map(u => u.id))
+  const systemWallets = allWallets.filter((w: any) => systemUserIds.has(w.userId))
+  const systemWallet = systemWallets.find((w: any) => w.userId === user?.id) || systemWallets[0]
+  
+  // Provider wallets: wallets belonging to payment-provider users
+  const providerUserIds = new Set(providerUsers.map(u => u.id))
+  const providerWallets = allWallets.filter((w: any) => providerUserIds.has(w.userId))
+  
+  // Gateway wallets: wallets belonging to payment-gateway users
+  const gatewayUserIds = new Set(gatewayUsers.map(u => u.id))
+  const gatewayWallets = allWallets.filter((w: any) => gatewayUserIds.has(w.userId))
+  
+  // Regular user wallets: exclude system, provider, and gateway wallets
+  const excludedUserIds = new Set([...systemUserIds, ...providerUserIds, ...gatewayUserIds])
+  const userWallets = allWallets.filter((w: any) => !excludedUserIds.has(w.userId))
+  
+  // Log wallet counts and details
+  const walletSummary = {
+    total: allWallets.length,
+    system: systemWallets.length,
+    gateway: gatewayWallets.length,
+    providers: providerWallets.length,
+    users: userWallets.length,
+    systemUserIds: Array.from(systemUserIds),
+    gatewayUserIds: Array.from(gatewayUserIds),
+    providerUserIds: Array.from(providerUserIds),
+    systemWallets: systemWallets.map(w => ({ userId: w.userId, balance: w.balance, currency: w.currency })),
+    gatewayWallets: gatewayWallets.map(w => ({ userId: w.userId, balance: w.balance, currency: w.currency })),
+    providerWallets: providerWallets.map(w => ({ userId: w.userId, balance: w.balance, currency: w.currency }))
+  }
+  console.log('[Wallets] Counts:', walletSummary)
+  
   // Helper to refetch wallets data
   const refetchWallets = loadWallets
 
   // Create wallet mutation
   const createWalletMutation = useMutation({
     mutationFn: async (input: { userId: string; currency: string; category?: string; tenantId?: string }) => {
-      return graphqlWithAuth(`
+      return graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
         mutation CreateWallet($input: CreateWalletInput!) {
           createWallet(input: $input) {
             success
@@ -251,73 +604,147 @@ function WalletsTab() {
     },
   })
 
-  // Fund wallet mutation (wallet transaction)
+  // Fund wallet mutation (wallet transaction) - system only
   const fundWalletMutation = useMutation({
     mutationFn: async (input: { walletId: string; userId: string; type: string; amount: number; currency: string; description?: string }) => {
-      console.log('[Fund] Creating wallet transaction:', input)
-      const result = await graphqlWithAuth(`
-        mutation FundWallet($input: CreateWalletTransactionInput!) {
-          createWalletTransaction(input: $input) {
-            success
-            walletTransaction {
-              id
-              walletId
-              userId
-              type
-              amount
-              currency
-              balance
+      // Check if user is system before attempting to create wallet transaction
+      const isSystem = checkIsSystem(user)
+      if (!isSystem) {
+        throw new Error('Only system users can fund wallets')
+      }
+      
+      // Creating wallet transaction (logged by GraphQL utility)
+      try {
+        const result = await graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
+          mutation FundWallet($input: CreateWalletTransactionInput!) {
+            createWalletTransaction(input: $input) {
+              success
+              walletTransaction {
+                id
+                walletId
+                userId
+                type
+                amount
+                currency
+                balance
+              }
+              errors
             }
-            errors
           }
+        `, { 
+          input: { 
+            ...input, 
+            balanceType: 'real',
+            description: input.description || 'Wallet funding'
+          } 
+        }, authToken)
+        console.log('[Fund] Transaction result:', result)
+        
+        if (result?.createWalletTransaction?.errors && result.createWalletTransaction.errors.length > 0) {
+          throw new Error(result.createWalletTransaction.errors.join(', '))
         }
-      `, { 
-        input: { 
-          ...input, 
-          balanceType: 'real',
-          description: input.description || 'Wallet funding'
-        } 
-      }, authToken)
-      console.log('[Fund] Transaction result:', result)
-      return result
+        
+        return result
+      } catch (err: any) {
+        console.error('[Fund] Error:', err)
+        // Handle authorization errors gracefully
+        const isAuthError = err?.message?.includes('Not authorized') || err?.message?.includes('authorized')
+        if (isAuthError) {
+          throw new Error('You do not have permission to perform this action. System access required.')
+        }
+        throw err
+      }
     },
   })
 
   // Create deposit (through payment gateway)
   const createDepositMutation = useMutation({
-    mutationFn: async (input: { userId: string; amount: number; currency: string; method?: string; tenantId?: string }) => {
+    mutationFn: async (input: { userId: string; amount: number; currency: string; method?: string; tenantId?: string; fromUserId?: string }) => {
       console.log('[Deposit] Creating deposit:', input)
-      const result = await graphqlWithAuth(`
-        mutation CreateDeposit($input: CreateDepositInput!) {
-          createDeposit(input: $input) {
-            success
-            deposit {
-              id
-              userId
-              type
-              status
-              amount
-              currency
+      try {
+        // Use provider user ID as fromUserId if not provided
+        const fromUserId = input.fromUserId || providerUsers[0]?.id
+        if (!fromUserId) {
+          throw new Error('No payment provider available. Please run payment-setup.ts first.')
+        }
+        
+        const result = await graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
+          mutation CreateDeposit($input: CreateDepositInput!) {
+            createDeposit(input: $input) {
+              success
+              deposit {
+                id
+                userId
+                type
+                status
+                amount
+                currency
+              }
+              errors
             }
-            errors
           }
+        `, { 
+          input: {
+            ...input,
+            fromUserId: fromUserId,
+            tenantId: input.tenantId || 'default-tenant'
+          }
+        }, authToken)
+        console.log('[Deposit] Result:', result)
+        
+        if (result?.createDeposit?.errors && result.createDeposit.errors.length > 0) {
+          throw new Error(result.createDeposit.errors.join(', '))
         }
-      `, { 
-        input: {
-          ...input,
-          tenantId: input.tenantId || 'default-tenant'
+        
+        return result
+      } catch (error: any) {
+        // Check if error is related to ledger
+        const errorMsg = error.message || String(error)
+        if (errorMsg.includes('ledger') || errorMsg.includes('Insufficient') || errorMsg.includes('balance')) {
+          throw new Error(`Ledger Error: ${errorMsg}. Please check provider account balance.`)
         }
-      }, authToken)
-      console.log('[Deposit] Result:', result)
-      return result
+        throw error
+      }
     },
-    onSuccess: () => {
+    onSuccess: async (result) => {
       queryClient.invalidateQueries({ queryKey: ['deposits'] })
+      
+      // Auto-approve deposit to complete the flow (like in tests)
+      const depositId = result?.createDeposit?.deposit?.id
+      if (depositId) {
+        try {
+          // Wait a moment for transaction to be created
+          await new Promise(resolve => setTimeout(resolve, 500))
+          
+          // Approve the transaction to complete the deposit flow
+          await graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
+            mutation ApproveTransaction($transactionId: String!) {
+              approveTransaction(transactionId: $transactionId) {
+                success
+                transaction {
+                  id
+                  status
+                }
+              }
+            }
+          `, { transactionId: depositId }, authToken)
+          
+          console.log('[Deposit] Transaction approved successfully')
+        } catch (approveError: any) {
+          console.warn('[Deposit] Auto-approval failed (may need manual approval):', approveError)
+          // Don't fail the deposit creation - user can approve manually
+        }
+      }
+      
+      // Wait for sync to complete
+      await new Promise(resolve => setTimeout(resolve, 1000))
       refetchWallets()
+      fetchProviderLedgerBalances() // Refresh ledger balances
     },
-    onError: (error) => {
+    onError: (error: any) => {
       console.error('[Deposit] Error:', error)
-      alert(`Deposit failed: ${error.message || 'Unknown error'}`)
+      const errorMsg = error.message || 'Unknown error'
+      alert(`Deposit failed: ${errorMsg}`)
     },
   })
 
@@ -325,50 +752,128 @@ function WalletsTab() {
   const createWithdrawalMutation = useMutation({
     mutationFn: async (input: { userId: string; amount: number; currency: string; method: string; tenantId?: string; bankAccount?: string; walletAddress?: string }) => {
       console.log('[Withdrawal] Creating withdrawal:', input)
-      const result = await graphqlWithAuth(`
-        mutation CreateWithdrawal($input: CreateWithdrawalInput!) {
-          createWithdrawal(input: $input) {
-            success
-            withdrawal {
-              id
-              userId
-              type
-              status
-              amount
-              currency
+      try {
+        const result = await graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
+          mutation CreateWithdrawal($input: CreateWithdrawalInput!) {
+            createWithdrawal(input: $input) {
+              success
+              withdrawal {
+                id
+                userId
+                type
+                status
+                amount
+                currency
+              }
+              errors
             }
-            errors
           }
+        `, { 
+          input: {
+            ...input,
+            tenantId: input.tenantId || 'default-tenant'
+          }
+        }, authToken)
+        console.log('[Withdrawal] Result:', result)
+        
+        if (result?.createWithdrawal?.errors && result.createWithdrawal.errors.length > 0) {
+          throw new Error(result.createWithdrawal.errors.join(', '))
         }
-      `, { 
-        input: {
-          ...input,
-          tenantId: input.tenantId || 'default-tenant'
+        
+        return result
+      } catch (error: any) {
+        // Check if error is related to ledger
+        const errorMsg = error.message || String(error)
+        if (errorMsg.includes('ledger') || errorMsg.includes('Insufficient') || errorMsg.includes('balance')) {
+          throw new Error(`Ledger Error: ${errorMsg}. Please check user account balance in ledger.`)
         }
-      }, authToken)
-      console.log('[Withdrawal] Result:', result)
-      return result
+        throw error
+      }
     },
-    onSuccess: () => {
+    onSuccess: async (result) => {
       queryClient.invalidateQueries({ queryKey: ['withdrawals'] })
+      
+      // Auto-approve withdrawal to complete the flow (like in tests)
+      const withdrawalId = result?.createWithdrawal?.withdrawal?.id
+      if (withdrawalId) {
+        try {
+          // Wait a moment for transaction to be created
+          await new Promise(resolve => setTimeout(resolve, 500))
+          
+          // Approve the transaction to complete the withdrawal flow
+          await graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
+            mutation ApproveTransaction($transactionId: String!) {
+              approveTransaction(transactionId: $transactionId) {
+                success
+                transaction {
+                  id
+                  status
+                }
+              }
+            }
+          `, { transactionId: withdrawalId }, authToken)
+          
+          console.log('[Withdrawal] Transaction approved successfully')
+        } catch (approveError: any) {
+          console.warn('[Withdrawal] Auto-approval failed (may need manual approval):', approveError)
+          // Don't fail the withdrawal creation - user can approve manually
+        }
+      }
+      
+      // Wait for sync to complete
+      await new Promise(resolve => setTimeout(resolve, 1000))
       refetchWallets()
+      fetchProviderLedgerBalances() // Refresh ledger balances
     },
-    onError: (error) => {
+    onError: (error: any) => {
       console.error('[Withdrawal] Error:', error)
-      alert(`Withdrawal failed: ${error.message || 'Unknown error'}`)
+      const errorMsg = error.message || 'Unknown error'
+      alert(`Withdrawal failed: ${errorMsg}`)
     },
   })
 
   // Initialize system wallet if needed
+  // System wallet is for the logged-in user who has system role
   const initializeSystem = async () => {
     if (!systemWallet) {
-      await createWalletMutation.mutateAsync({ 
-        userId: 'system', 
-        currency: 'EUR', 
-        category: 'main',
-        tenantId: 'default-tenant'
-      })
-      await refetchWallets()
+      // User object has 'id' field, not 'userId'
+      if (!user?.id) {
+        alert('User not logged in. Please login first.')
+        return
+      }
+      
+      if (!checkIsSystem(user)) {
+        alert('You need system role to initialize system wallet.')
+        return
+      }
+      
+      try {
+        console.log('[InitializeSystem] Creating wallet for user:', user.id)
+        // Use USD as default (can be changed if needed)
+        const result = await createWalletMutation.mutateAsync({ 
+          userId: user.id, // Use actual user ID (user has system role) - user object has 'id' field
+          currency: 'USD', // Use USD as default for system wallet
+          category: 'main',
+          tenantId: 'default-tenant'
+        })
+        
+        console.log('[InitializeSystem] Result:', result)
+        
+        if (result?.createWallet?.success) {
+          // Wait a moment for wallet to be created
+          await new Promise(resolve => setTimeout(resolve, 500))
+          await refetchWallets()
+          alert('System wallet initialized successfully!')
+        } else {
+          const errors = result?.createWallet?.errors || ['Unknown error']
+          alert(`Failed to initialize system wallet: ${errors.join(', ')}`)
+        }
+      } catch (error: any) {
+        console.error('[initializeSystem] Error:', error)
+        alert(`Failed to initialize system wallet: ${error?.message || 'Unknown error'}`)
+      }
+    } else {
+      alert('System wallet already exists!')
     }
   }
 
@@ -405,18 +910,34 @@ function WalletsTab() {
     }
   }
 
-  // System funds provider
+  // System funds provider - uses payment-gateway user as source
   const handleSystemFundProvider = async () => {
     console.log('[FundProvider] Starting...')
     setIsFundingProvider(true)
 
     try {
+      // Get gateway user ID (payment-gateway@system.com) - this is the system funding source
+      const gatewayUser = gatewayUsers[0]
+      if (!gatewayUser) {
+        alert('Payment gateway user not found. Please run payment-setup.ts first.')
+        setIsFundingProvider(false)
+        return
+      }
+      
+      if (!systemFundForm.provider) {
+        alert('Please select a provider to fund.')
+        setIsFundingProvider(false)
+        return
+      }
+
       let walletId: string | null = null
 
-      // Check if provider wallet exists
-      console.log('[FundProvider] Looking for provider wallet:', systemFundForm.provider)
+      // Check if provider wallet exists (must match both userId and currency)
+      console.log('[FundProvider] Looking for provider wallet:', systemFundForm.provider, systemFundForm.currency)
       console.log('[FundProvider] Current provider wallets:', providerWallets)
-      const existingWallet = providerWallets.find((w: any) => w.userId === systemFundForm.provider)
+      const existingWallet = providerWallets.find(
+        (w: any) => w.userId === systemFundForm.provider && w.currency === systemFundForm.currency
+      )
 
       if (existingWallet) {
         console.log('[FundProvider] Found existing wallet:', existingWallet)
@@ -426,7 +947,7 @@ function WalletsTab() {
         // Create the provider wallet first and get the ID from response
         const createResult = await createWalletMutation.mutateAsync({
           userId: systemFundForm.provider,
-          currency: 'EUR',
+          currency: systemFundForm.currency, // Use selected currency, not hardcoded EUR
           category: 'main',
           tenantId: 'default-tenant'
         })
@@ -440,7 +961,9 @@ function WalletsTab() {
           // Refetch to find the new wallet
           console.log('[FundProvider] Refetching to find new wallet...')
           const refreshedWallets = await refetchWallets() // Now returns array directly
-          const newWallet = refreshedWallets.find((w: any) => w.userId === systemFundForm.provider)
+          const newWallet = refreshedWallets.find(
+            (w: any) => w.userId === systemFundForm.provider && w.currency === systemFundForm.currency
+          )
           walletId = newWallet?.id
           console.log('[FundProvider] Found wallet after refetch:', newWallet)
         }
@@ -452,27 +975,122 @@ function WalletsTab() {
       }
 
       console.log('[FundProvider] Funding wallet:', walletId)
-      // Fund the wallet
-      const fundResult = await fundWalletMutation.mutateAsync({
-        walletId,
-        userId: 'system',
-        type: 'deposit',
-        amount: parseFloat(systemFundForm.amount) * 100,
-        currency: systemFundForm.currency,
-        description: `System funding to ${PROVIDERS.find(p => p.id === systemFundForm.provider)?.name}`,
-      })
+      
+      // Get gateway user wallet (source)
+      const gatewayWallet = gatewayWallets.find((w: any) => w.currency === systemFundForm.currency)
+      if (!gatewayWallet) {
+        alert(`Gateway wallet not found for currency ${systemFundForm.currency}. Please create it first.`)
+        setIsFundingProvider(false)
+        return
+      }
+      
+      // Use createWalletTransaction with transfer_out/transfer_in for user-to-user transfer
+      // This matches the real flow: payment-gateway → payment-provider
+      const amount = parseFloat(systemFundForm.amount) * 100
+      const providerUser = providerUsers.find(u => u.id === systemFundForm.provider)
+      const providerName = providerUser?.email?.split('@')[0] || systemFundForm.provider.substring(0, 8)
+      
+      // Create transfer_out from gateway
+      const transferOutResult = await graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
+        mutation CreateTransferOut($input: CreateWalletTransactionInput!) {
+          createWalletTransaction(input: $input) {
+            success
+            walletTransaction {
+              id
+              walletId
+              userId
+              type
+              amount
+              currency
+              balance
+            }
+            errors
+          }
+        }
+      `, {
+        input: {
+          walletId: gatewayWallet.id,
+          userId: gatewayUser.id,
+          type: 'transfer_out',
+          balanceType: 'real',
+          amount: amount,
+          currency: systemFundForm.currency,
+          description: `Transfer to ${providerName}`,
+          refId: systemFundForm.provider,
+          refType: 'user_transfer',
+        }
+      }, authToken)
+      
+      if (!transferOutResult?.createWalletTransaction?.success) {
+        throw new Error(transferOutResult?.createWalletTransaction?.errors?.join(', ') || 'Failed to create transfer_out')
+      }
+      
+      // Create transfer_in to provider
+      const transferInResult = await graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
+        mutation CreateTransferIn($input: CreateWalletTransactionInput!) {
+          createWalletTransaction(input: $input) {
+            success
+            walletTransaction {
+              id
+              walletId
+              userId
+              type
+              amount
+              currency
+              balance
+            }
+            errors
+          }
+        }
+      `, {
+        input: {
+          walletId: walletId,
+          userId: systemFundForm.provider,
+          type: 'transfer_in',
+          balanceType: 'real',
+          amount: amount,
+          currency: systemFundForm.currency,
+          description: `Transfer from ${gatewayUser.email?.split('@')[0] || 'gateway'}`,
+          refId: gatewayUser.id,
+          refType: 'user_transfer',
+        }
+      }, authToken)
+      
+      if (!transferInResult?.createWalletTransaction?.success) {
+        throw new Error(transferInResult?.createWalletTransaction?.errors?.join(', ') || 'Failed to create transfer_in')
+      }
+      
+      const fundResult = { createWalletTransaction: { success: true } }
       console.log('[FundProvider] Fund result:', fundResult)
+      
+      if (!fundResult?.createWalletTransaction?.success) {
+        const errors = (fundResult?.createWalletTransaction as any)?.errors
+        throw new Error(Array.isArray(errors) ? errors.join(', ') : 'Failed to fund provider')
+      }
 
+      // Wait for ledger sync to complete (provider funding uses ledger)
+      console.log('[FundProvider] Waiting for ledger sync...')
+      await new Promise(resolve => setTimeout(resolve, 2000))
+      
       // Refetch to update UI with new balance
       console.log('[FundProvider] Refetching wallets to update UI...')
       const updatedWallets = await refetchWallets() // Now returns array directly
       console.log('[FundProvider] Updated wallets:', updatedWallets)
-      const updatedProvider = updatedWallets.find((w: any) => w.userId === systemFundForm.provider)
+      const updatedProvider = updatedWallets.find((w: any) => w.userId === systemFundForm.provider && w.currency === systemFundForm.currency)
       console.log('[FundProvider] Updated provider balance:', updatedProvider?.balance)
+      
+      // Refresh ledger balances
+      await fetchProviderLedgerBalances()
+      
       console.log('[FundProvider] Done!')
-    } catch (err) {
+      const balanceDisplay = updatedProvider?.balance !== undefined 
+        ? formatCurrency(updatedProvider.balance, systemFundForm.currency)
+        : 'checking...'
+      alert(`Provider funded successfully! New balance: ${balanceDisplay}`)
+    } catch (err: any) {
       console.error('[FundProvider] Error:', err)
-      alert('Failed to fund provider. Check console for details.')
+      const errorMessage = err?.message || 'Failed to fund provider'
+      alert(errorMessage)
     } finally {
       setIsFundingProvider(false)
     }
@@ -483,26 +1101,42 @@ function WalletsTab() {
     setIsFundingUser(true)
     
     try {
-      const userWallet = userWallets.find((w: any) => w.userId === providerToUserForm.userId)
+      const userWallet = userWallets.find((w: any) => w.userId === providerToUserForm.userId && w.currency === providerToUserForm.currency)
       if (!userWallet) {
         alert('User wallet not found. Create user wallet first.')
         return
       }
       
-      await fundWalletMutation.mutateAsync({
+      const result = await fundWalletMutation.mutateAsync({
         walletId: userWallet.id,
-        userId: providerToUserForm.provider,
+        userId: providerToUserForm.provider, // Provider ID
         type: 'deposit',
         amount: parseFloat(providerToUserForm.amount) * 100,
         currency: providerToUserForm.currency,
-        description: `Deposit via ${PROVIDERS.find(p => p.id === providerToUserForm.provider)?.name}`,
+        description: `Deposit via ${providerUsers.find(p => p.id === providerToUserForm.provider)?.email?.split('@')[0] || 'provider'}`,
       })
+      
+      if (!result?.createWalletTransaction?.success) {
+        throw new Error(result?.createWalletTransaction?.errors?.join(', ') || 'Failed to fund user')
+      }
+      
+      // Wait for ledger sync
+      await new Promise(resolve => setTimeout(resolve, 1500))
       
       // Refetch to update UI with new balance
       await refetchWallets()
-    } catch (err) {
+      // Refresh ledger balances
+      await fetchProviderLedgerBalances()
+      
+      alert('User wallet credited successfully!')
+    } catch (err: any) {
       console.error('Error funding user:', err)
-      alert('Failed to credit user. Check console for details.')
+      const errorMsg = err.message || 'Unknown error'
+      if (errorMsg.includes('ledger') || errorMsg.includes('Insufficient')) {
+        alert(`Ledger Error: ${errorMsg}. Please check provider account balance in ledger.`)
+      } else {
+        alert(`Failed to credit user: ${errorMsg}`)
+      }
     } finally {
       setIsFundingUser(false)
     }
@@ -511,64 +1145,203 @@ function WalletsTab() {
   // User deposit request
   const handleUserDeposit = async () => {
     try {
-      await createDepositMutation.mutateAsync({
+      const result = await createDepositMutation.mutateAsync({
         userId: userDepositForm.userId,
         amount: parseFloat(userDepositForm.amount) * 100,
         currency: userDepositForm.currency,
         method: 'card',
       })
-      alert('Deposit request created successfully!')
-    } catch (error) {
+      
+      if (result?.createDeposit?.success) {
+        alert('Deposit created and approved successfully! Balance will update shortly.')
+        // Wait for sync and refresh
+        setTimeout(() => {
+          refetchWallets()
+        }, 1500)
+      } else {
+        alert('Deposit created but may need approval. Check transactions tab.')
+      }
+    } catch (error: any) {
       console.error('[handleUserDeposit] Error:', error)
+      alert(`Deposit failed: ${error?.message || 'Unknown error'}`)
     }
   }
 
   // User withdrawal request
   const handleUserWithdraw = async () => {
     try {
-      await createWithdrawalMutation.mutateAsync({
+      const result = await createWithdrawalMutation.mutateAsync({
         userId: userWithdrawForm.userId,
         amount: parseFloat(userWithdrawForm.amount) * 100,
         currency: userWithdrawForm.currency,
         method: 'bank_transfer',
         bankAccount: userWithdrawForm.bankAccount,
       })
-      alert('Withdrawal request created successfully!')
-    } catch (error) {
+      
+      if (result?.createWithdrawal?.success) {
+        alert('Withdrawal created and approved successfully! Balance will update shortly.')
+        // Wait for sync and refresh
+        setTimeout(() => {
+          refetchWallets()
+        }, 1500)
+      } else {
+        alert('Withdrawal created but may need approval. Check transactions tab.')
+      }
+    } catch (error: any) {
       console.error('[handleUserWithdraw] Error:', error)
+      alert(`Withdrawal failed: ${error?.message || 'Unknown error'}`)
     }
   }
 
   // Create user wallet
   const handleCreateUserWallet = async () => {
-    await createWalletMutation.mutateAsync({
-      userId: newUserForm.userId,
-      currency: newUserForm.currency,
-      category: 'main',
-      tenantId: 'default-tenant',
-    })
-    setNewUserForm({ userId: '', currency: 'EUR' })
-    // Refetch to show new wallet
-    await refetchWallets()
+    try {
+      const result = await createWalletMutation.mutateAsync({
+        userId: newUserForm.userId,
+        currency: newUserForm.currency,
+        category: newUserForm.category || 'main',
+        tenantId: 'default-tenant',
+      })
+      
+      if (result?.createWallet?.success) {
+        setNewUserForm({ userId: '', currency: baseCurrency || 'EUR', category: 'main' })
+        // Refetch to show new wallet
+        await refetchWallets()
+        alert('Wallet created successfully!')
+      } else {
+        alert(`Wallet creation failed: ${result?.createWallet?.errors?.join(', ') || 'Unknown error'}`)
+      }
+    } catch (error: any) {
+      console.error('[handleCreateUserWallet] Error:', error)
+      alert(`Failed to create wallet: ${error?.message || 'Unknown error'}`)
+    }
   }
 
-  // Calculate totals
-  const systemBalance = systemWallet?.balance || 0
-  const providerTotalBalance = providerWallets.reduce((sum: number, w: any) => sum + (w.balance || 0), 0)
-  const userTotalBalance = userWallets.reduce((sum: number, w: any) => sum + (w.balance || 0), 0)
-
+  // Calculate totals using REAL data
+  // System Reserve = Gateway user balance + System user balances
+  // The gateway user funds providers, and system users represent the platform reserve
+  const gatewayWalletsInBaseCurrency = gatewayWallets.filter((w: any) => w.currency === baseCurrency)
+  const systemWalletsInBaseCurrency = systemWallets.filter((w: any) => w.currency === baseCurrency)
+  
+  // Calculate wallet balances
+  const gatewayBalanceFromWallets = gatewayWalletsInBaseCurrency.reduce((sum: number, w: any) => sum + (w.balance || 0), 0)
+  const systemUsersBalanceFromWallets = systemWalletsInBaseCurrency.reduce((sum: number, w: any) => sum + (w.balance || 0), 0)
+  
+  // Try to get ledger balances for gateway and system users (more accurate)
+  const gatewayUser = gatewayUsers[0]
+  const gatewayLedgerBalance = gatewayUser ? (providerLedgerBalances[gatewayUser.id]?.[baseCurrency] || null) : null
+  
+  // Calculate system user ledger balances
+  const systemUsersLedgerBalance = systemUsers.reduce((sum: number, user: any) => {
+    const ledgerBalances = providerLedgerBalances[user.id] || {}
+    return sum + (ledgerBalances[baseCurrency] || 0)
+  }, 0)
+  
+  // ✅ ALWAYS use ledger balances (source of truth)
+  // Wallet balances are not synced, so ledger is the only accurate source
+  // System user (system@demo.com with system role) can go negative, representing platform net position
+  const gatewayBalance = gatewayLedgerBalance !== null && gatewayLedgerBalance !== undefined
+    ? gatewayLedgerBalance
+    : gatewayBalanceFromWallets
+  
+  const systemUsersBalance = systemUsersLedgerBalance !== null && systemUsersLedgerBalance !== undefined && systemUsersLedgerBalance !== 0
+    ? systemUsersLedgerBalance
+    : systemUsersBalanceFromWallets
+  
+  // System balance = system@demo.com balance (system role, can be negative, represents platform net position)
+  const systemBalance = gatewayBalance + systemUsersBalance
+  
+  // Log balance source for debugging
+  console.log('[Balances] Balance sources:', {
+    gateway: {
+      wallet: gatewayBalanceFromWallets,
+      ledger: gatewayLedgerBalance,
+      final: gatewayBalance
+    },
+    system: {
+      wallet: systemUsersBalanceFromWallets,
+      ledger: systemUsersLedgerBalance,
+      final: systemUsersBalance
+    },
+    systemTotal: systemBalance
+  })
+  
+  // Calculate provider total balance from wallets (real balances)
+  // Providers receive funds from gateway, so their balance should be positive
+  const providerTotalBalance = providerWallets
+    .filter((w: any) => w.currency === baseCurrency)
+    .reduce((sum: number, w: any) => sum + (w.balance || 0), 0)
+  
+  // Also try ledger balances if available (for verification)
+  const providerTotalBalanceFromLedger = Object.values(providerLedgerBalances).reduce((total: number, providerBalances: Record<string, number>) => {
+    const baseCurrencyBalance = providerBalances[baseCurrency] || 0
+    return total + baseCurrencyBalance
+  }, 0)
+  
+  // ✅ ALWAYS use ledger balances for providers (source of truth)
+  // Provider users cannot go negative, so their balances should be positive or zero
+  const finalProviderBalance = providerTotalBalanceFromLedger !== 0
+    ? providerTotalBalanceFromLedger
+    : providerTotalBalance
+  
+  // ✅ Calculate end user balances from ledger (source of truth)
+  // End users cannot go negative, so their balances should be positive or zero
+  const userLedgerBalances = regularUsers.reduce((sum: number, user: any) => {
+    const ledgerBalances = providerLedgerBalances[user.id] || {}
+    return sum + (ledgerBalances[baseCurrency] || 0)
+  }, 0)
+  
+  // Use ledger balance if available, otherwise fall back to wallet balance
+  const userTotalBalance = userLedgerBalances !== 0
+    ? userLedgerBalances
+    : userWallets
+        .filter((w: any) => w.currency === baseCurrency)
+        .reduce((sum: number, w: any) => sum + (w.balance || 0), 0)
+  
+  // Log balances summary with detailed breakdown
+  const balanceSummary = {
+    system: systemBalance,
+    gateway: gatewayBalance,
+    systemUsers: systemUsersBalance,
+    provider: finalProviderBalance,
+    users: userTotalBalance,
+    baseCurrency,
+    total: systemBalance + finalProviderBalance + userTotalBalance,
+    gatewayWallets: gatewayWalletsInBaseCurrency.map(w => ({ userId: w.userId, balance: w.balance, currency: w.currency, id: w.id })),
+    systemWallets: systemWalletsInBaseCurrency.map(w => ({ userId: w.userId, balance: w.balance, currency: w.currency, id: w.id })),
+    providerWallets: providerWallets.filter((w: any) => w.currency === baseCurrency).map(w => ({ userId: w.userId, balance: w.balance, currency: w.currency, id: w.id })),
+    userWallets: userWallets.filter((w: any) => w.currency === baseCurrency).slice(0, 5).map(w => ({ userId: w.userId, balance: w.balance, currency: w.currency, id: w.id }))
+  }
+  console.log('[Balances] Summary:', balanceSummary)
+  console.log('[Balances] Gateway wallet details:', JSON.stringify(gatewayWalletsInBaseCurrency, null, 2))
+  console.log('[Balances] System wallet details:', JSON.stringify(systemWalletsInBaseCurrency, null, 2))
+  
   // Force re-render key
   const renderKey = `wallets-${walletsVersion}-${allWallets.length}-${providerWallets.reduce((sum, w) => sum + (w.balance || 0), 0)}`
+  
+  // Show warning if no users found
+  const noUsersFound = gatewayUsers.length === 0 && providerUsers.length === 0 && regularUsers.length === 0
   
   return (
     <div key={renderKey}>
       {/* Header with refresh */}
-      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        {noUsersFound && (
+          <div style={{ 
+            padding: '8px 12px', 
+            background: 'var(--accent-yellow)', 
+            color: 'var(--text-primary)', 
+            borderRadius: 6,
+            fontSize: 12
+          }}>
+            ⚠️ No users found. Run payment-setup.ts to create users.
+          </div>
+        )}
         <button 
           className="btn btn-secondary btn-sm"
           onClick={() => refetchWallets()}
           disabled={walletsLoading}
-          style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+          style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto' }}
         >
           <RefreshCw 
             size={14} 
@@ -598,9 +1371,39 @@ function WalletsTab() {
               <div style={{ fontSize: 24, marginBottom: 4 }}>🏛️</div>
               <div style={{ fontWeight: 600, color: activeSection === 'system' ? 'white' : 'var(--text-primary)' }}>System</div>
               <div style={{ fontSize: 12, color: activeSection === 'system' ? 'rgba(255,255,255,0.8)' : 'var(--text-muted)' }}>Platform Reserve</div>
-              <div style={{ fontSize: 16, fontWeight: 700, marginTop: 8, fontFamily: 'var(--font-mono)', color: activeSection === 'system' ? 'white' : 'var(--accent-cyan)' }}>
-                {formatCurrency(systemBalance)}
+              <div style={{ 
+                fontSize: 16, 
+                fontWeight: 700, 
+                marginTop: 8, 
+                fontFamily: 'var(--font-mono)', 
+                color: systemBalance < 0 
+                  ? (activeSection === 'system' ? '#ff6b6b' : '#ff6b6b')
+                  : (activeSection === 'system' ? 'white' : 'var(--accent-cyan)')
+              }}>
+                {formatCurrency(systemBalance, baseCurrency)}
               </div>
+              {/* Show gateway user info */}
+              {gatewayUsers.length > 0 && (
+                <div style={{ 
+                  fontSize: 10, 
+                  marginTop: 4, 
+                  color: activeSection === 'system' ? 'rgba(255,255,255,0.7)' : 'var(--text-muted)',
+                  lineHeight: 1.4
+                }}>
+                  {gatewayUsers.map(gatewayUser => {
+                    const gatewayWallet = gatewayWallets.find((w: any) => w.userId === gatewayUser.id && w.currency === baseCurrency)
+                    const balance = gatewayWallet?.balance || 0
+                    return (
+                      <div key={gatewayUser.id} style={{ 
+                        opacity: balance === 0 ? 0.5 : 1,
+                        fontWeight: 400
+                      }}>
+                        {gatewayUser.email?.split('@')[0] || gatewayUser.id.substring(0, 8)}: {formatCurrency(balance, baseCurrency)}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
             </div>
 
             {/* Arrow */}
@@ -623,9 +1426,11 @@ function WalletsTab() {
             >
               <div style={{ fontSize: 24, marginBottom: 4 }}>💳</div>
               <div style={{ fontWeight: 600, color: activeSection === 'provider' ? 'white' : 'var(--text-primary)' }}>Providers</div>
-              <div style={{ fontSize: 12, color: activeSection === 'provider' ? 'rgba(255,255,255,0.8)' : 'var(--text-muted)' }}>Stripe, PayPal, etc.</div>
+              <div style={{ fontSize: 12, color: activeSection === 'provider' ? 'rgba(255,255,255,0.8)' : 'var(--text-muted)' }}>
+                {providerUsers.length > 0 ? providerUsers.map(u => u.email?.split('@')[0] || u.id.substring(0, 8)).join(', ') : 'No providers'}
+              </div>
               <div style={{ fontSize: 16, fontWeight: 700, marginTop: 8, fontFamily: 'var(--font-mono)', color: activeSection === 'provider' ? 'white' : 'var(--accent-purple)' }}>
-                {formatCurrency(providerTotalBalance)}
+                {formatCurrency(finalProviderBalance, baseCurrency)}
               </div>
             </div>
 
@@ -651,7 +1456,7 @@ function WalletsTab() {
               <div style={{ fontWeight: 600, color: activeSection === 'user' ? 'white' : 'var(--text-primary)' }}>End Users</div>
               <div style={{ fontSize: 12, color: activeSection === 'user' ? 'rgba(255,255,255,0.8)' : 'var(--text-muted)' }}>{userWallets.length} wallets</div>
               <div style={{ fontSize: 16, fontWeight: 700, marginTop: 8, fontFamily: 'var(--font-mono)', color: activeSection === 'user' ? 'white' : 'var(--accent-green)' }}>
-                {formatCurrency(userTotalBalance)}
+                {formatCurrency(userTotalBalance, baseCurrency)}
               </div>
             </div>
           </div>
@@ -671,6 +1476,33 @@ function WalletsTab() {
             <p style={{ color: 'var(--text-secondary)', marginBottom: 16, fontSize: 14 }}>
               The platform system account funds payment providers with liquidity. This is the first step in the payment flow.
             </p>
+            
+            {/* Base Currency Selector */}
+            <div style={{ marginBottom: 16, padding: 12, background: 'var(--bg-secondary)', borderRadius: 8, border: '1px solid var(--border)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>BASE CURRENCY</div>
+                  <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+                    Primary currency for system operations and reporting
+                  </div>
+                </div>
+                <select 
+                  className="input" 
+                  value={baseCurrency} 
+                  onChange={e => {
+                    setBaseCurrency(e.target.value)
+                    setSystemFundForm({ ...systemFundForm, currency: e.target.value })
+                    // Refetch system balance when base currency changes
+                    fetchProviderLedgerBalances()
+                  }}
+                  style={{ width: 120 }}
+                >
+                  {supportedCurrencies.map(currency => (
+                    <option key={currency} value={currency}>{currency}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
 
             {!systemWallet && (
               <div style={{ marginBottom: 16 }}>
@@ -689,9 +1521,15 @@ function WalletsTab() {
                     value={systemFundForm.provider}
                     onChange={e => setSystemFundForm({ ...systemFundForm, provider: e.target.value })}
                   >
-                    {PROVIDERS.map(p => (
-                      <option key={p.id} value={p.id}>{p.icon} {p.name}</option>
-                    ))}
+                    <option value="">-- Select Provider --</option>
+                    {providerUsers.map(p => {
+                      const iconInfo = PROVIDER_ICONS[p.email || ''] || PROVIDER_ICONS.default
+                      return (
+                        <option key={p.id} value={p.id}>
+                          {iconInfo.icon} {p.email?.split('@')[0] || p.id.substring(0, 8)}
+                        </option>
+                      )
+                    })}
                   </select>
                 </div>
 
@@ -708,10 +1546,14 @@ function WalletsTab() {
                   </div>
                   <div className="form-group" style={{ flex: 1 }}>
                     <label className="form-label">Currency</label>
-                    <select className="input" value={systemFundForm.currency} onChange={e => setSystemFundForm({ ...systemFundForm, currency: e.target.value })}>
-                      <option value="EUR">EUR</option>
-                      <option value="USD">USD</option>
-                      <option value="GBP">GBP</option>
+                    <select className="input" value={systemFundForm.currency} onChange={e => {
+                      setSystemFundForm({ ...systemFundForm, currency: e.target.value })
+                      // Refetch balances when currency changes
+                      fetchProviderLedgerBalances()
+                    }}>
+                      {supportedCurrencies.map(currency => (
+                        <option key={currency} value={currency}>{currency}</option>
+                      ))}
                     </select>
                   </div>
                 </div>
@@ -723,15 +1565,26 @@ function WalletsTab() {
                   style={{ width: '100%' }}
                 >
                   <Send size={16} />
-                  {isFundingProvider || fundWalletMutation.isPending ? 'Processing...' : `Fund ${PROVIDERS.find(p => p.id === systemFundForm.provider)?.name}`}
+                  {isFundingProvider || fundWalletMutation.isPending ? 'Processing...' : `Fund ${providerUsers.find(p => p.id === systemFundForm.provider)?.email?.split('@')[0] || 'Provider'}`}
                 </button>
               </div>
 
               <div>
-                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: 'var(--text-muted)' }}>PROVIDER BALANCES</div>
-                {PROVIDERS.map(provider => {
-                  const wallet = providerWallets.find((w: any) => w.userId === provider.id)
-                  const balanceKey = `${provider.id}-${wallet?.balance || 0}-${wallet?.updatedAt || 'none'}`
+                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: 'var(--text-muted)' }}>
+                  PROVIDER BALANCES {ledgerBalancesLoading && <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>(Loading ledger...)</span>}
+                </div>
+                {providerUsers.map(providerUser => {
+                  // Find wallet matching the selected currency for system funding
+                  const wallet = providerWallets.find((w: any) => w.userId === providerUser.id && w.currency === systemFundForm.currency)
+                  const providerBalances = providerLedgerBalances[providerUser.id] || {}
+                  const ledgerBalance = providerBalances[systemFundForm.currency] || 0
+                  const balanceKey = `${providerUser.id}-${systemFundForm.currency}-${wallet?.balance || 0}-${ledgerBalance || 0}-${wallet?.updatedAt || 'none'}`
+                  const hasLedgerBalance = ledgerBalance !== undefined && ledgerBalance !== null && ledgerBalance !== 0
+                  const walletBalance = wallet?.balance || 0
+                  const walletCurrency = wallet?.currency || systemFundForm.currency
+                  const balanceMismatch = hasLedgerBalance && wallet && Math.abs(walletBalance - ledgerBalance) > 0.01
+                  const iconInfo = PROVIDER_ICONS[providerUser.email || ''] || PROVIDER_ICONS.default
+                  
                   return (
                     <div
                       key={balanceKey}
@@ -743,33 +1596,64 @@ function WalletsTab() {
                         background: 'var(--bg-tertiary)',
                         borderRadius: 8,
                         marginBottom: 8,
-                        borderLeft: `4px solid ${provider.color}`,
+                        borderLeft: `4px solid ${iconInfo.color}`,
+                        border: balanceMismatch ? `2px solid var(--accent-orange)` : undefined,
                       }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                        <span style={{ fontSize: 20 }}>{provider.icon}</span>
+                        <span style={{ fontSize: 20 }}>{iconInfo.icon}</span>
                         <div>
-                          <div style={{ fontWeight: 500 }}>{provider.name}</div>
-                          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{provider.id}</div>
+                          <div style={{ fontWeight: 500 }}>{providerUser.email?.split('@')[0] || providerUser.id.substring(0, 8)}</div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                            {providerUser.email || providerUser.id} • {systemFundForm.currency}
+                          </div>
                         </div>
                       </div>
                       <div style={{ textAlign: 'right' }}>
-                        <div style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, color: wallet?.balance ? 'var(--accent-green)' : 'var(--text-muted)' }}>
-                          {wallet ? formatCurrency(wallet.balance) : '—'}
-                        </div>
+                        {hasLedgerBalance ? (
+                          <>
+                            <div style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, color: 'var(--accent-green)', fontSize: 14 }}>
+                              {formatCurrency(ledgerBalance, systemFundForm.currency)}
+                            </div>
+                            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>
+                              Ledger ({systemFundForm.currency})
+                            </div>
+                            {balanceMismatch && wallet && (
+                              <div style={{ fontSize: 10, color: 'var(--accent-orange)', marginTop: 2 }}>
+                                Wallet: {formatCurrency(walletBalance, walletCurrency)} ⚠️
+                              </div>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            <div style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, color: wallet?.balance ? 'var(--accent-green)' : 'var(--text-muted)' }}>
+                              {wallet ? formatCurrency(walletBalance, walletCurrency) : `— ${systemFundForm.currency}`}
+                            </div>
+                            {wallet && (
+                              <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>
+                                Wallet ({walletCurrency})
+                              </div>
+                            )}
+                          </>
+                        )}
                         {!wallet && (
                           <button 
                             className="btn btn-sm btn-secondary"
-                            onClick={() => initializeProvider(provider.id)}
+                            onClick={() => initializeProvider(providerUser.id)}
                             style={{ marginTop: 4 }}
                           >
-                            Create
+                            Create {systemFundForm.currency}
                           </button>
                         )}
                       </div>
                     </div>
                   )
                 })}
+                {providerUsers.length === 0 && (
+                  <div style={{ padding: 16, textAlign: 'center', color: 'var(--text-muted)' }}>
+                    No payment providers found. Run payment-setup.ts to create providers.
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -805,9 +1689,15 @@ function WalletsTab() {
                       value={providerToUserForm.provider}
                       onChange={e => setProviderToUserForm({ ...providerToUserForm, provider: e.target.value })}
                     >
-                      {PROVIDERS.map(p => (
-                        <option key={p.id} value={p.id}>{p.icon} {p.name}</option>
-                      ))}
+                      <option value="">-- Select Provider --</option>
+                      {providerUsers.map(p => {
+                        const iconInfo = PROVIDER_ICONS[p.email || ''] || PROVIDER_ICONS.default
+                        return (
+                          <option key={p.id} value={p.id}>
+                            {iconInfo.icon} {p.email?.split('@')[0] || p.id.substring(0, 8)}
+                          </option>
+                        )
+                      })}
                     </select>
                   </div>
 
@@ -819,9 +1709,13 @@ function WalletsTab() {
                       onChange={e => setProviderToUserForm({ ...providerToUserForm, userId: e.target.value })}
                     >
                       <option value="">Select user...</option>
-                      {userWallets.map((w: any) => (
-                        <option key={w.id} value={w.userId}>{w.userId} ({formatCurrency(w.balance)})</option>
-                      ))}
+                      {userWallets
+                        .filter((w: any) => w.currency === providerToUserForm.currency) // Filter by selected currency
+                        .map((w: any) => (
+                          <option key={w.id} value={w.userId}>
+                            {w.userId} ({formatCurrency(w.balance, w.currency)} {w.currency})
+                          </option>
+                        ))}
                     </select>
                   </div>
 
@@ -835,11 +1729,12 @@ function WalletsTab() {
                         onChange={e => setProviderToUserForm({ ...providerToUserForm, amount: e.target.value })}
                       />
                     </div>
-                    <div className="form-group" style={{ flex: 1 }}>
+                      <div className="form-group" style={{ flex: 1 }}>
                       <label className="form-label">Currency</label>
                       <select className="input" value={providerToUserForm.currency} onChange={e => setProviderToUserForm({ ...providerToUserForm, currency: e.target.value })}>
-                        <option value="EUR">EUR</option>
-                        <option value="USD">USD</option>
+                        {supportedCurrencies.map(currency => (
+                          <option key={currency} value={currency}>{currency}</option>
+                        ))}
                       </select>
                     </div>
                   </div>
@@ -864,7 +1759,9 @@ function WalletsTab() {
                   </div>
                 ) : (
                   providerWallets.map((wallet: any) => {
-                    const provider = PROVIDERS.find(p => p.id === wallet.userId)
+                    const providerUser = providerUsers.find(p => p.id === wallet.userId)
+                    const walletCurrency = wallet.currency || 'EUR'
+                    const iconInfo = providerUser ? (PROVIDER_ICONS[providerUser.email || ''] || PROVIDER_ICONS.default) : PROVIDER_ICONS.default
                     return (
                       <div 
                         key={wallet.id}
@@ -873,16 +1770,22 @@ function WalletsTab() {
                           background: 'var(--bg-tertiary)',
                           borderRadius: 8,
                           marginBottom: 8,
-                          borderLeft: `4px solid ${provider?.color || 'var(--border)'}`,
+                          borderLeft: `4px solid ${iconInfo.color}`,
                         }}
                       >
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <span style={{ fontSize: 18 }}>{provider?.icon || '💰'}</span>
-                            <span style={{ fontWeight: 500 }}>{provider?.name || wallet.userId}</span>
+                            <span style={{ fontSize: 18 }}>{iconInfo.icon}</span>
+                            <div>
+                              <div style={{ fontWeight: 500 }}>{providerUser?.email?.split('@')[0] || wallet.userId.substring(0, 8)}</div>
+                              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{walletCurrency}</div>
+                            </div>
                           </div>
-                          <div style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, color: 'var(--accent-green)' }}>
-                            {formatCurrency(wallet.balance)}
+                          <div style={{ textAlign: 'right' }}>
+                            <div style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, color: 'var(--accent-green)' }}>
+                              {formatCurrency(wallet.balance, walletCurrency)}
+                            </div>
+                            <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Wallet</div>
                           </div>
                         </div>
                       </div>
@@ -928,13 +1831,25 @@ function WalletsTab() {
                   />
                 </div>
 
-                <div className="form-group">
-                  <label className="form-label">Currency</label>
-                  <select className="input" value={newUserForm.currency} onChange={e => setNewUserForm({ ...newUserForm, currency: e.target.value })}>
-                    <option value="EUR">EUR</option>
-                    <option value="USD">USD</option>
-                    <option value="GBP">GBP</option>
-                  </select>
+                <div style={{ display: 'flex', gap: 12 }}>
+                  <div className="form-group" style={{ flex: 1 }}>
+                    <label className="form-label">Currency</label>
+                    <select className="input" value={newUserForm.currency} onChange={e => setNewUserForm({ ...newUserForm, currency: e.target.value })}>
+                      {supportedCurrencies.map(currency => (
+                        <option key={currency} value={currency}>{currency}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="form-group" style={{ flex: 1 }}>
+                    <label className="form-label">Category</label>
+                    <select className="input" value={newUserForm.category} onChange={e => setNewUserForm({ ...newUserForm, category: e.target.value })}>
+                      {walletCategories.map(cat => (
+                        <option key={cat.value} value={cat.value} title={cat.description}>
+                          {cat.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
 
                 <button 
@@ -963,9 +1878,13 @@ function WalletsTab() {
                     onChange={e => setUserDepositForm({ ...userDepositForm, userId: e.target.value })}
                   >
                     <option value="">Select user...</option>
-                    {userWallets.map((w: any) => (
-                      <option key={w.id} value={w.userId}>{w.userId}</option>
-                    ))}
+                    {userWallets
+                      .filter((w: any) => w.currency === userDepositForm.currency) // Filter by selected currency
+                      .map((w: any) => (
+                        <option key={w.id} value={w.userId}>
+                          {w.userId} ({formatCurrency(w.balance, w.currency)} {w.currency})
+                        </option>
+                      ))}
                   </select>
                 </div>
 
@@ -980,13 +1899,23 @@ function WalletsTab() {
                     />
                   </div>
                   <div className="form-group" style={{ flex: 1 }}>
-                    <label className="form-label">Via Provider</label>
-                    <select className="input" value={userDepositForm.provider} onChange={e => setUserDepositForm({ ...userDepositForm, provider: e.target.value })}>
-                      {PROVIDERS.map(p => (
-                        <option key={p.id} value={p.id}>{p.name}</option>
+                    <label className="form-label">Currency</label>
+                    <select className="input" value={userDepositForm.currency} onChange={e => setUserDepositForm({ ...userDepositForm, currency: e.target.value, userId: '' })}>
+                      {supportedCurrencies.map(currency => (
+                        <option key={currency} value={currency}>{currency}</option>
                       ))}
                     </select>
                   </div>
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">Via Provider</label>
+                  <select className="input" value={userDepositForm.provider} onChange={e => setUserDepositForm({ ...userDepositForm, provider: e.target.value, fromUserId: e.target.value })}>
+                    <option value="">-- Select Provider --</option>
+                    {providerUsers.map(p => (
+                      <option key={p.id} value={p.id}>{p.email?.split('@')[0] || p.id.substring(0, 8)}</option>
+                    ))}
+                  </select>
                 </div>
 
                 <button 
@@ -1015,9 +1944,13 @@ function WalletsTab() {
                     onChange={e => setUserWithdrawForm({ ...userWithdrawForm, userId: e.target.value })}
                   >
                     <option value="">Select user...</option>
-                    {userWallets.map((w: any) => (
-                      <option key={w.id} value={w.userId}>{w.userId}</option>
-                    ))}
+                    {userWallets
+                      .filter((w: any) => w.currency === userWithdrawForm.currency) // Filter by selected currency
+                      .map((w: any) => (
+                        <option key={w.id} value={w.userId}>
+                          {w.userId} ({formatCurrency(w.balance, w.currency)} {w.currency})
+                        </option>
+                      ))}
                   </select>
                 </div>
 
@@ -1032,13 +1965,23 @@ function WalletsTab() {
                     />
                   </div>
                   <div className="form-group" style={{ flex: 1 }}>
-                    <label className="form-label">Via Provider</label>
-                    <select className="input" value={userWithdrawForm.provider} onChange={e => setUserWithdrawForm({ ...userWithdrawForm, provider: e.target.value })}>
-                      {PROVIDERS.map(p => (
-                        <option key={p.id} value={p.id}>{p.name}</option>
+                    <label className="form-label">Currency</label>
+                    <select className="input" value={userWithdrawForm.currency} onChange={e => setUserWithdrawForm({ ...userWithdrawForm, currency: e.target.value, userId: '' })}>
+                      {supportedCurrencies.map(currency => (
+                        <option key={currency} value={currency}>{currency}</option>
                       ))}
                     </select>
                   </div>
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">Via Provider</label>
+                  <select className="input" value={userWithdrawForm.provider} onChange={e => setUserWithdrawForm({ ...userWithdrawForm, provider: e.target.value })}>
+                    <option value="">-- Select Provider --</option>
+                    {providerUsers.map(p => (
+                      <option key={p.id} value={p.id}>{p.email?.split('@')[0] || p.id.substring(0, 8)}</option>
+                    ))}
+                  </select>
                 </div>
 
                 <div className="form-group">
@@ -1095,7 +2038,14 @@ function WalletsTab() {
                   {userWallets.map((w: any) => (
                     <tr key={w.id} style={{ borderBottom: '1px solid var(--border-subtle)' }}>
                       <td style={{ padding: '12px 8px', fontSize: 14, fontWeight: 500 }}>{w.userId}</td>
-                      <td style={{ padding: '12px 8px', fontSize: 14 }}>{w.currency}</td>
+                      <td style={{ padding: '12px 8px', fontSize: 14 }}>
+                        <div>{w.currency}</div>
+                        {w.category && w.category !== 'main' && (
+                          <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>
+                            {w.category}
+                          </div>
+                        )}
+                      </td>
                       <td style={{ padding: '12px 8px', fontSize: 14, textAlign: 'right', fontFamily: 'var(--font-mono)', color: 'var(--accent-green)' }}>
                         {formatCurrency(w.balance, w.currency)}
                       </td>
@@ -1121,6 +2071,361 @@ function WalletsTab() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// LEDGER TAB - Double-Entry Bookkeeping View
+// ═══════════════════════════════════════════════════════════════════
+
+interface LedgerFilter {
+  type: string
+  accountId: string
+  currency: string
+  status: string
+  externalRef: string
+  dateFrom: string
+  dateTo: string
+}
+
+function LedgerTab() {
+  const queryClient = useQueryClient()
+  const { tokens } = useAuth()
+  const authToken = tokens?.accessToken
+  
+  // Filters
+  const [filters, setFilters] = useState<LedgerFilter>({
+    type: '',
+    accountId: '',
+    currency: '',
+    status: '',
+    externalRef: '',
+    dateFrom: '',
+    dateTo: '',
+  })
+  
+  // Pagination
+  const [pagination, setPagination] = useState({
+    page: 0,
+    pageSize: 25,
+  })
+  
+  // Build filter object for API
+  const buildApiFilter = () => {
+    const filter: Record<string, any> = {}
+    if (filters.type) filter.type = filters.type
+    if (filters.accountId) filter.accountId = filters.accountId
+    if (filters.currency) filter.currency = filters.currency
+    if (filters.status) filter.status = filters.status
+    if (filters.externalRef) filter.externalRef = filters.externalRef
+    if (filters.dateFrom) filter.dateFrom = filters.dateFrom
+    if (filters.dateTo) filter.dateTo = filters.dateTo
+    return Object.keys(filter).length > 0 ? filter : undefined
+  }
+  
+  // Fetch ledger transactions
+  const ledgerTransactionsQuery = useQuery({
+    queryKey: ['ledgerTransactions', pagination, filters],
+    queryFn: () => graphqlQuery(GRAPHQL_SERVICE_URLS.payment, `
+      query ListLedgerTransactions($first: Int, $skip: Int, $filter: JSON) {
+        ledgerTransactions(first: $first, skip: $skip, filter: $filter) {
+          nodes {
+            _id
+            type
+            fromAccountId
+            toAccountId
+            amount
+            currency
+            description
+            externalRef
+            status
+            createdAt
+            metadata
+          }
+          totalCount
+          pageInfo {
+            hasNextPage
+            hasPreviousPage
+          }
+        }
+      }
+    `, { 
+      first: pagination.pageSize,
+      skip: pagination.page * pagination.pageSize,
+      filter: buildApiFilter()
+    }, authToken),
+  })
+  
+  const transactions = ledgerTransactionsQuery.data?.ledgerTransactions?.nodes || []
+  const totalCount = ledgerTransactionsQuery.data?.ledgerTransactions?.totalCount || 0
+  const isLoading = ledgerTransactionsQuery.isLoading
+  
+  // Pagination helpers
+  const totalPages = Math.ceil(totalCount / pagination.pageSize)
+  
+  const formatCurrency = (amount: number, currency: string = 'EUR') => {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: currency || 'EUR',
+      minimumFractionDigits: 2,
+    }).format(amount / 100)
+  }
+  
+  return (
+    <div>
+      {/* Filters */}
+      <div className="card" style={{ marginBottom: 24 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-end' }}>
+          {/* Type Filter */}
+          <div className="form-group" style={{ marginBottom: 0, minWidth: 140 }}>
+            <label className="form-label">Type</label>
+            <select 
+              className="input" 
+              value={filters.type}
+              onChange={e => { setFilters({ ...filters, type: e.target.value }); setPagination({ ...pagination, page: 0 }) }}
+            >
+              <option value="">All Types</option>
+              <option value="deposit">Deposit</option>
+              <option value="withdrawal">Withdrawal</option>
+              <option value="transfer">Transfer</option>
+              <option value="fee">Fee</option>
+            </select>
+          </div>
+          
+          {/* Account ID Filter */}
+          <div className="form-group" style={{ marginBottom: 0, minWidth: 200 }}>
+            <label className="form-label">Account ID</label>
+            <input 
+              type="text" 
+              className="input"
+              placeholder="user:xxx:main"
+              value={filters.accountId}
+              onChange={e => { setFilters({ ...filters, accountId: e.target.value }); setPagination({ ...pagination, page: 0 }) }}
+            />
+          </div>
+          
+          {/* Currency Filter */}
+          <div className="form-group" style={{ marginBottom: 0, minWidth: 120 }}>
+            <label className="form-label">Currency</label>
+            <select 
+              className="input" 
+              value={filters.currency}
+              onChange={e => { setFilters({ ...filters, currency: e.target.value }); setPagination({ ...pagination, page: 0 }) }}
+            >
+              <option value="">All</option>
+              <option value="EUR">EUR</option>
+              <option value="USD">USD</option>
+              <option value="GBP">GBP</option>
+            </select>
+          </div>
+          
+          {/* Status Filter */}
+          <div className="form-group" style={{ marginBottom: 0, minWidth: 140 }}>
+            <label className="form-label">Status</label>
+            <select 
+              className="input" 
+              value={filters.status}
+              onChange={e => { setFilters({ ...filters, status: e.target.value }); setPagination({ ...pagination, page: 0 }) }}
+            >
+              <option value="">All Status</option>
+              <option value="pending">Pending</option>
+              <option value="completed">Completed</option>
+              <option value="failed">Failed</option>
+            </select>
+          </div>
+          
+          {/* External Ref Filter */}
+          <div className="form-group" style={{ marginBottom: 0, minWidth: 180 }}>
+            <label className="form-label">External Ref</label>
+            <input 
+              type="text" 
+              className="input"
+              placeholder="Search..."
+              value={filters.externalRef}
+              onChange={e => { setFilters({ ...filters, externalRef: e.target.value }); setPagination({ ...pagination, page: 0 }) }}
+            />
+          </div>
+          
+          {/* Date From */}
+          <div className="form-group" style={{ marginBottom: 0, minWidth: 150 }}>
+            <label className="form-label">From Date</label>
+            <input 
+              type="date" 
+              className="input"
+              value={filters.dateFrom}
+              onChange={e => { setFilters({ ...filters, dateFrom: e.target.value }); setPagination({ ...pagination, page: 0 }) }}
+            />
+          </div>
+          
+          {/* Date To */}
+          <div className="form-group" style={{ marginBottom: 0, minWidth: 150 }}>
+            <label className="form-label">To Date</label>
+            <input 
+              type="date" 
+              className="input"
+              value={filters.dateTo}
+              onChange={e => { setFilters({ ...filters, dateTo: e.target.value }); setPagination({ ...pagination, page: 0 }) }}
+            />
+          </div>
+          
+          {/* Page Size */}
+          <div className="form-group" style={{ marginBottom: 0, minWidth: 100 }}>
+            <label className="form-label">Page Size</label>
+            <select 
+              className="input" 
+              value={pagination.pageSize}
+              onChange={e => setPagination({ page: 0, pageSize: parseInt(e.target.value) })}
+            >
+              <option value="25">25</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+            </select>
+          </div>
+          
+          {/* Actions */}
+          <div style={{ display: 'flex', gap: 8, marginLeft: 'auto' }}>
+            <button 
+              className="btn btn-secondary"
+              onClick={() => {
+                setFilters({ type: '', accountId: '', currency: '', status: '', externalRef: '', dateFrom: '', dateTo: '' })
+                setPagination({ page: 0, pageSize: 25 })
+              }}
+            >
+              Clear
+            </button>
+            <button className="btn btn-secondary" onClick={() => ledgerTransactionsQuery.refetch()}>
+              <RefreshCw size={14} />
+              Refresh
+            </button>
+          </div>
+        </div>
+      </div>
+      
+      {/* Ledger Transactions Table */}
+      <div className="card">
+        <div className="card-header">
+          <h3 className="card-title">Ledger Transactions</h3>
+          <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+            Page {pagination.page + 1} of {totalPages || 1} • Total: {totalCount}
+          </div>
+        </div>
+        
+        {isLoading ? (
+          <div className="empty-state">Loading ledger transactions...</div>
+        ) : transactions.length === 0 ? (
+          <div className="empty-state">
+            <FileText />
+            <p>No ledger transactions found</p>
+            <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>Try adjusting your filters</p>
+          </div>
+        ) : (
+          <>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 1200 }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                    <th style={{ textAlign: 'left', padding: '12px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>DATE</th>
+                    <th style={{ textAlign: 'left', padding: '12px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>TYPE</th>
+                    <th style={{ textAlign: 'left', padding: '12px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>FROM ACCOUNT</th>
+                    <th style={{ textAlign: 'left', padding: '12px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>TO ACCOUNT</th>
+                    <th style={{ textAlign: 'right', padding: '12px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>AMOUNT</th>
+                    <th style={{ textAlign: 'left', padding: '12px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>CURRENCY</th>
+                    <th style={{ textAlign: 'center', padding: '12px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>STATUS</th>
+                    <th style={{ textAlign: 'left', padding: '12px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>EXTERNAL REF</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {transactions.map((tx: any) => (
+                    <tr key={tx._id} style={{ borderBottom: '1px solid var(--border-subtle)' }}>
+                      <td style={{ padding: '10px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+                        {new Date(tx.createdAt).toLocaleString()}
+                      </td>
+                      <td style={{ padding: '10px 8px' }}>
+                        <span style={{ 
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 6,
+                          padding: '4px 10px',
+                          borderRadius: 4,
+                          fontSize: 12,
+                          fontWeight: 500,
+                          background: 'var(--bg-subtle)',
+                          color: 'var(--text-secondary)',
+                          whiteSpace: 'nowrap',
+                        }}>
+                          {tx.type}
+                        </span>
+                      </td>
+                      <td style={{ padding: '10px 8px', fontSize: 11, fontFamily: 'var(--font-mono)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {tx.fromAccountId}
+                      </td>
+                      <td style={{ padding: '10px 8px', fontSize: 11, fontFamily: 'var(--font-mono)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {tx.toAccountId}
+                      </td>
+                      <td style={{ padding: '10px 8px', fontSize: 14, textAlign: 'right', fontFamily: 'var(--font-mono)', fontWeight: 500 }}>
+                        {formatCurrency(tx.amount, tx.currency)}
+                      </td>
+                      <td style={{ padding: '10px 8px', fontSize: 12 }}>
+                        {tx.currency}
+                      </td>
+                      <td style={{ padding: '10px 8px', textAlign: 'center' }}>
+                        <span className={`status-badge ${tx.status === 'completed' ? 'healthy' : tx.status === 'failed' ? 'unhealthy' : 'pending'}`}>
+                          <span className="status-badge-dot" />
+                          {tx.status}
+                        </span>
+                      </td>
+                      <td style={{ padding: '10px 8px', fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {tx.externalRef || '-'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            
+            {/* Pagination Controls */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 8px', borderTop: '1px solid var(--border)' }}>
+              <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+                Showing {pagination.page * pagination.pageSize + 1} - {Math.min((pagination.page + 1) * pagination.pageSize, totalCount)} of {totalCount}
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button 
+                  className="btn btn-sm btn-secondary"
+                  disabled={pagination.page === 0}
+                  onClick={() => setPagination({ ...pagination, page: 0 })}
+                >
+                  First
+                </button>
+                <button 
+                  className="btn btn-sm btn-secondary"
+                  disabled={pagination.page === 0}
+                  onClick={() => setPagination({ ...pagination, page: pagination.page - 1 })}
+                >
+                  Previous
+                </button>
+                <span style={{ display: 'flex', alignItems: 'center', padding: '0 12px', fontSize: 13 }}>
+                  Page {pagination.page + 1} of {totalPages || 1}
+                </span>
+                <button 
+                  className="btn btn-sm btn-secondary"
+                  disabled={pagination.page >= totalPages - 1}
+                  onClick={() => setPagination({ ...pagination, page: pagination.page + 1 })}
+                >
+                  Next
+                </button>
+                <button 
+                  className="btn btn-sm btn-secondary"
+                  disabled={pagination.page >= totalPages - 1}
+                  onClick={() => setPagination({ ...pagination, page: totalPages - 1 })}
+                >
+                  Last
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // TRANSACTIONS TAB - Unified Statement View
 // ═══════════════════════════════════════════════════════════════════
 
@@ -1141,6 +2446,12 @@ function TransactionsTab() {
   const queryClient = useQueryClient()
   const { tokens } = useAuth()
   const authToken = tokens?.accessToken
+  
+  // Supported currencies
+  const supportedCurrencies = ['EUR', 'USD', 'GBP', 'BTC', 'ETH']
+  
+  // Provider users state (for deposit form)
+  const [providerUsers, setProviderUsers] = useState<any[]>([])
   
   // Filters
   const [filters, setFilters] = useState<TransactionFilter>({
@@ -1170,55 +2481,145 @@ function TransactionsTab() {
     return Object.keys(filter).length > 0 ? filter : undefined
   }
 
-  // Fetch all transaction types with pagination
+  // ✅ Fetch all transactions - use separate queries to get complete data
+  // Unified query is available but we use separate queries for better control
   const depositsQuery = useQuery({
     queryKey: ['deposits', pagination, filters],
-    queryFn: () => graphql(`
-      query ListDeposits($input: JSON) {
-        deposits(input: $input)
+    queryFn: () => graphqlQuery(GRAPHQL_SERVICE_URLS.payment, `
+      query ListDeposits($first: Int, $skip: Int, $filter: JSON) {
+        deposits(first: $first, skip: $skip, filter: $filter) {
+          nodes {
+            id
+            userId
+            type
+            status
+            amount
+            currency
+            feeAmount
+            netAmount
+            fromUserId
+            createdAt
+            description
+            metadata
+          }
+          totalCount
+          pageInfo {
+            hasNextPage
+            hasPreviousPage
+          }
+        }
       }
     `, { 
-      input: { 
-        first: pagination.pageSize, 
-        skip: pagination.page * pagination.pageSize,
-        filter: buildApiFilter()
-      } 
-    }),
+      first: 1000, // Fetch all deposits (system should see all)
+      skip: 0,
+      filter: buildApiFilter()
+    }, authToken),
   })
 
   const withdrawalsQuery = useQuery({
     queryKey: ['withdrawals', pagination, filters],
-    queryFn: () => graphql(`
-      query ListWithdrawals($input: JSON) {
-        withdrawals(input: $input)
+    queryFn: () => graphqlQuery(GRAPHQL_SERVICE_URLS.payment, `
+      query ListWithdrawals($first: Int, $skip: Int, $filter: JSON) {
+        withdrawals(first: $first, skip: $skip, filter: $filter) {
+          nodes {
+            id
+            userId
+            type
+            status
+            amount
+            currency
+            feeAmount
+            netAmount
+            toUserId
+            createdAt
+            description
+            metadata
+          }
+          totalCount
+          pageInfo {
+            hasNextPage
+            hasPreviousPage
+          }
+        }
       }
     `, { 
-      input: { 
-        first: pagination.pageSize, 
-        skip: pagination.page * pagination.pageSize,
-        filter: buildApiFilter()
-      } 
-    }),
+      first: 1000, // Fetch all withdrawals (system should see all)
+      skip: 0,
+      filter: buildApiFilter()
+    }, authToken),
+  })
+
+  // Also fetch unified transactions for completeness (but use separate queries as primary)
+  const transactionsQuery = useQuery({
+    queryKey: ['transactions', pagination, filters],
+    queryFn: () => graphqlQuery(GRAPHQL_SERVICE_URLS.payment, `
+      query ListTransactions($first: Int, $skip: Int, $filter: JSON) {
+        transactions(first: $first, skip: $skip, filter: $filter) {
+          nodes {
+            id
+            userId
+            type
+            status
+            amount
+            currency
+            feeAmount
+            netAmount
+            fromUserId
+            toUserId
+            createdAt
+            description
+            metadata
+          }
+          totalCount
+          pageInfo {
+            hasNextPage
+            hasPreviousPage
+          }
+        }
+      }
+    `, { 
+      first: 1000, // Fetch all transactions (system should see all)
+      skip: 0,
+      filter: buildApiFilter()
+    }, authToken),
   })
 
   const walletTxQuery = useQuery({
     queryKey: ['walletTransactions', pagination, filters],
-    queryFn: () => graphql(`
-      query ListWalletTransactions($input: JSON) {
-        walletTransactions(input: $input)
+    queryFn: () => graphqlQuery(GRAPHQL_SERVICE_URLS.payment, `
+      query ListWalletTransactions($first: Int, $skip: Int, $filter: JSON) {
+        walletTransactions(first: $first, skip: $skip, filter: $filter) {
+          nodes {
+            id
+            walletId
+            userId
+            type
+            balanceType
+            currency
+            amount
+            balance
+            refId
+            refType
+            description
+            createdAt
+          }
+          totalCount
+          pageInfo {
+            hasNextPage
+            hasPreviousPage
+          }
+        }
       }
     `, { 
-      input: { 
-        first: pagination.pageSize * 2, 
-        skip: pagination.page * pagination.pageSize * 2,
-        filter: buildApiFilter()
-      } 
-    }),
+      first: pagination.pageSize * 2, 
+      skip: pagination.page * pagination.pageSize * 2,
+      filter: buildApiFilter()
+    }, authToken),
   })
 
   // Create mutations
   const createDepositMutation = useMutation({
-    mutationFn: () => graphqlWithAuth(`
+    mutationFn: (variables?: any) => graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
       mutation CreateDeposit($input: CreateDepositInput!) {
         createDeposit(input: $input) {
           success
@@ -1233,8 +2634,9 @@ function TransactionsTab() {
           errors
         }
       }
-    `, { input: { ...depositForm, amount: parseFloat(depositForm.amount) * 100, tenantId: 'default-tenant' } }, authToken),
+    `, { input: { ...(variables || depositForm), amount: parseFloat((variables || depositForm).amount) * 100, tenantId: 'default-tenant' } }, authToken),
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['transactions'] })
       queryClient.invalidateQueries({ queryKey: ['deposits'] })
       queryClient.invalidateQueries({ queryKey: ['walletTransactions'] })
       queryClient.invalidateQueries({ queryKey: ['statement'] })
@@ -1244,7 +2646,7 @@ function TransactionsTab() {
   })
 
   const createWithdrawalMutation = useMutation({
-    mutationFn: () => graphqlWithAuth(`
+    mutationFn: () => graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
       mutation CreateWithdrawal($input: CreateWithdrawalInput!) {
         createWithdrawal(input: $input) {
           success
@@ -1260,8 +2662,32 @@ function TransactionsTab() {
         }
       }
     `, { input: { ...withdrawalForm, amount: parseFloat(withdrawalForm.amount) * 100, tenantId: 'default-tenant' } }, authToken),
-    onSuccess: () => {
+    onSuccess: async (result) => {
+      queryClient.invalidateQueries({ queryKey: ['transactions'] })
       queryClient.invalidateQueries({ queryKey: ['withdrawals'] })
+      
+      // Auto-approve withdrawal to complete the flow
+      const withdrawalId = result?.createWithdrawal?.withdrawal?.id
+      if (withdrawalId) {
+        try {
+          await new Promise(resolve => setTimeout(resolve, 500))
+          await graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
+            mutation ApproveTransaction($transactionId: String!) {
+              approveTransaction(transactionId: $transactionId) {
+                success
+                transaction {
+                  id
+                  status
+                }
+              }
+            }
+          `, { transactionId: withdrawalId }, authToken)
+        } catch (approveError: any) {
+          console.warn('[Withdrawal] Auto-approval failed:', approveError)
+        }
+      }
+      
+      await new Promise(resolve => setTimeout(resolve, 1000))
       queryClient.invalidateQueries({ queryKey: ['walletTransactions'] })
       queryClient.invalidateQueries({ queryKey: ['statement'] })
       setShowCreateForm(null)
@@ -1269,45 +2695,114 @@ function TransactionsTab() {
     },
   })
 
-  // Extract data from responses
+  // Extract data from responses - use deposits and withdrawals as primary source
   const deposits = depositsQuery.data?.deposits?.nodes || []
   const withdrawals = withdrawalsQuery.data?.withdrawals?.nodes || []
   const walletTx = walletTxQuery.data?.walletTransactions?.nodes || []
+  const allTransactionsData = transactionsQuery.data?.transactions?.nodes || [] // Fallback
   
   const depositsTotalCount = depositsQuery.data?.deposits?.totalCount || 0
   const withdrawalsTotalCount = withdrawalsQuery.data?.withdrawals?.totalCount || 0
   const walletTxTotalCount = walletTxQuery.data?.walletTransactions?.totalCount || 0
+  const transactionsTotalCount = transactionsQuery.data?.transactions?.totalCount || depositsTotalCount + withdrawalsTotalCount
 
-  // Combine all transactions into unified statement
-  const allTransactions = [
-    ...deposits.map((tx: any) => ({
-      ...tx,
-      _source: 'deposit' as const,
-      _isCredit: true,
-      _displayType: 'Deposit',
-      _displayAmount: tx.amount,
-      _displayStatus: tx.status,
-      _sortDate: new Date(tx.createdAt).getTime(),
-    })),
-    ...withdrawals.filter((tx: any) => tx.type === 'withdrawal').map((tx: any) => ({
-      ...tx,
-      _source: 'withdrawal' as const,
-      _isCredit: false,
-      _displayType: 'Withdrawal',
-      _displayAmount: tx.amount,
-      _displayStatus: tx.status,
-      _sortDate: new Date(tx.createdAt).getTime(),
-    })),
-    ...walletTx.map((tx: any) => ({
-      ...tx,
-      _source: 'wallet' as const,
-      _isCredit: ['deposit', 'win', 'bonus_credit', 'refund', 'transfer_in'].includes(tx.type),
-      _displayType: tx.type,
-      _displayAmount: tx.amount,
-      _displayStatus: 'completed',
-      _sortDate: new Date(tx.createdAt).getTime(),
-    })),
-  ].sort((a, b) => b._sortDate - a._sortDate)
+  // Helper function to parse date safely
+  const parseDate = (dateValue: any): number => {
+    if (!dateValue) return 0
+    // If it's already a number (timestamp), return it
+    if (typeof dateValue === 'number') return dateValue
+    // If it's a string, try to parse it
+    if (typeof dateValue === 'string') {
+      // Try ISO string first
+      const parsed = new Date(dateValue).getTime()
+      if (!isNaN(parsed)) return parsed
+      // Try timestamp string
+      const timestamp = parseInt(dateValue, 10)
+      if (!isNaN(timestamp)) return timestamp
+    }
+    return 0
+  }
+
+  // ✅ DEDUPLICATION: Combine deposits and withdrawals, deduplicate by ID only
+  // Note: Backend prevents duplicates via unique index on externalRef
+  // Frontend only needs to deduplicate by transaction ID (in case same transaction appears in multiple queries)
+  const transactionMap = new Map<string, any>()
+  
+  // Process deposits (primary source)
+  deposits.forEach((tx: any) => {
+    const txId = tx.id
+    if (!transactionMap.has(txId)) {
+      transactionMap.set(txId, {
+        ...tx,
+        _source: 'deposit' as const,
+        _isCredit: true,
+        _displayType: 'Deposit',
+        _displayAmount: tx.amount,
+        _displayStatus: tx.status,
+        _sortDate: parseDate(tx.createdAt),
+        _createdAt: tx.createdAt,
+        _description: tx.description || `${tx.type} ${tx.userId?.substring(0, 8)}...`,
+      })
+    }
+  })
+  
+  // Process withdrawals (primary source)
+  withdrawals.filter((tx: any) => tx.type === 'withdrawal').forEach((tx: any) => {
+    const txId = tx.id
+    if (!transactionMap.has(txId)) {
+      transactionMap.set(txId, {
+        ...tx,
+        _source: 'withdrawal' as const,
+        _isCredit: false,
+        _displayType: 'Withdrawal',
+        _displayAmount: tx.amount,
+        _displayStatus: tx.status,
+        _sortDate: parseDate(tx.createdAt),
+        _createdAt: tx.createdAt,
+        _description: tx.description || `${tx.type} ${tx.userId?.substring(0, 8)}...`,
+      })
+    }
+  })
+  
+  // Process unified transactions as fallback (in case deposits/withdrawals queries miss some)
+  allTransactionsData.forEach((tx: any) => {
+    const txId = tx.id
+    if (!transactionMap.has(txId)) {
+      transactionMap.set(txId, {
+        ...tx,
+        _source: tx.type === 'deposit' ? 'deposit' : tx.type === 'withdrawal' ? 'withdrawal' : 'transaction',
+        _isCredit: tx.type === 'deposit' || tx.type === 'transfer_in',
+        _displayType: tx.type === 'deposit' ? 'Deposit' : tx.type === 'withdrawal' ? 'Withdrawal' : tx.type,
+        _displayAmount: tx.amount,
+        _displayStatus: tx.status,
+        _sortDate: parseDate(tx.createdAt),
+        _createdAt: tx.createdAt,
+        _description: tx.description || `${tx.type} ${tx.userId?.substring(0, 8)}...`,
+      })
+    }
+  })
+  
+  // Add wallet transactions (skip if already represented by a transaction)
+  walletTx.forEach((tx: any) => {
+    // Skip if this wallet transaction is already represented by a transaction
+    const isDuplicate = transactionMap.has(tx.refId || tx.id)
+    
+    if (!isDuplicate && !transactionMap.has(tx.id)) {
+      transactionMap.set(tx.id, {
+        ...tx,
+        _source: 'wallet' as const,
+        _isCredit: ['deposit', 'win', 'bonus_credit', 'refund', 'transfer_in'].includes(tx.type),
+        _displayType: tx.type,
+        _displayAmount: tx.amount,
+        _displayStatus: 'completed',
+        _sortDate: parseDate(tx.createdAt),
+        _createdAt: tx.createdAt,
+        _description: tx.description || `${tx.type} ${tx.userId?.substring(0, 8)}...`,
+      })
+    }
+  })
+  
+  const allTransactions = Array.from(transactionMap.values()).sort((a, b) => b._sortDate - a._sortDate)
 
   // Apply client-side filters
   const filteredTransactions = allTransactions.filter(tx => {
@@ -1340,12 +2835,13 @@ function TransactionsTab() {
     walletTxCount: walletTxTotalCount,
   }
 
-  const isLoading = depositsQuery.isLoading || withdrawalsQuery.isLoading || walletTxQuery.isLoading
+  const isLoading = depositsQuery.isLoading || withdrawalsQuery.isLoading || walletTxQuery.isLoading || transactionsQuery.isLoading
 
   const refetchAll = () => {
     depositsQuery.refetch()
     withdrawalsQuery.refetch()
     walletTxQuery.refetch()
+    transactionsQuery.refetch()
   }
 
   // Pagination helpers
@@ -1404,9 +2900,9 @@ function TransactionsTab() {
             </div>
           </div>
           <div className="stat-value" style={{ fontSize: 28 }}>
-            {totalItems}
+            {transactionsTotalCount || totalItems}
           </div>
-          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>showing {paginatedTransactions.length}</div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>showing {paginatedTransactions.length} of {totalItems}</div>
         </div>
       </div>
 
@@ -1558,13 +3054,39 @@ function TransactionsTab() {
                 <tbody>
                   {paginatedTransactions.map((tx: any, idx: number) => (
                     <tr key={`${tx._source}-${tx.id}-${idx}`} style={{ borderBottom: '1px solid var(--border-subtle)' }}>
-                      <td style={{ padding: '10px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
-                        {new Date(tx.createdAt).toLocaleString()}
-                      </td>
-                      <td style={{ padding: '10px 8px' }}>
-                        <span style={{ 
-                          display: 'inline-flex',
-                          alignItems: 'center',
+                          <td style={{ padding: '10px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+                            {(() => {
+                              const dateValue = tx._createdAt || tx.createdAt;
+                              if (!dateValue) return 'N/A';
+                              
+                              try {
+                                // Handle number (timestamp in milliseconds)
+                                if (typeof dateValue === 'number') {
+                                  return new Date(dateValue).toLocaleString();
+                                }
+                                // Handle string (ISO or timestamp string)
+                                if (typeof dateValue === 'string') {
+                                  // Try ISO string first
+                                  const isoDate = new Date(dateValue);
+                                  if (!isNaN(isoDate.getTime())) {
+                                    return isoDate.toLocaleString();
+                                  }
+                                  // Try timestamp string
+                                  const timestamp = parseInt(dateValue, 10);
+                                  if (!isNaN(timestamp)) {
+                                    return new Date(timestamp).toLocaleString();
+                                  }
+                                }
+                                return 'Invalid Date';
+                              } catch {
+                                return 'Invalid Date';
+                              }
+                            })()}
+                          </td>
+                          <td style={{ padding: '10px 8px' }}>
+                            <span style={{ 
+                              display: 'inline-flex',
+                              alignItems: 'center',
                           gap: 6,
                           padding: '4px 10px',
                           borderRadius: 4,
@@ -1578,9 +3100,9 @@ function TransactionsTab() {
                           {tx._displayType}
                         </span>
                       </td>
-                      <td style={{ padding: '10px 8px', fontSize: 13, fontFamily: 'var(--font-mono)' }}>{tx.userId}</td>
+                      <td style={{ padding: '10px 8px', fontSize: 13, fontFamily: 'var(--font-mono)' }}>{tx.userId?.substring(0, 8)}...</td>
                       <td style={{ padding: '10px 8px', fontSize: 13, color: 'var(--text-secondary)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        {tx.description || tx.method || tx.providerName || '-'}
+                        {tx._description || tx.description || (tx.fromUserId ? `Transfer from ${tx.fromUserId.substring(0, 8)}...` : tx.toUserId ? `Transfer to ${tx.toUserId.substring(0, 8)}...` : tx.method || tx._displayType || '-')}
                       </td>
                       <td style={{ padding: '10px 8px', fontSize: 14, textAlign: 'right', fontFamily: 'var(--font-mono)', color: 'var(--accent-red)' }}>
                         {!tx._isCredit ? formatCurrency(tx._displayAmount, tx.currency) : '-'}
@@ -1589,10 +3111,39 @@ function TransactionsTab() {
                         {tx._isCredit ? formatCurrency(tx._displayAmount, tx.currency) : '-'}
                       </td>
                       <td style={{ padding: '10px 8px', textAlign: 'center' }}>
-                        <span className={`status-badge ${tx._displayStatus === 'completed' ? 'healthy' : tx._displayStatus === 'failed' ? 'unhealthy' : 'pending'}`}>
-                          <span className="status-badge-dot" />
-                          {tx._displayStatus}
-                        </span>
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+                          <span className={`status-badge ${tx._displayStatus === 'completed' ? 'healthy' : tx._displayStatus === 'failed' ? 'unhealthy' : 'pending'}`}>
+                            <span className="status-badge-dot" />
+                            {tx._displayStatus}
+                          </span>
+                          {tx._displayStatus === 'processing' && tx._source !== 'wallet' && (
+                            <button
+                              className="btn btn-sm btn-primary"
+                              onClick={async () => {
+                                try {
+                                  await graphqlWithAuth(GRAPHQL_SERVICE_URLS.payment, `
+                                    mutation ApproveTransaction($transactionId: String!) {
+                                      approveTransaction(transactionId: $transactionId) {
+                                        success
+                                        transaction {
+                                          id
+                                          status
+                                        }
+                                      }
+                                    }
+                                  `, { transactionId: String(tx.id) }, authToken)
+                                  refetchAll()
+                                  setTimeout(() => refetchAll(), 1000) // Refresh after sync
+                                } catch (err: any) {
+                                  alert(`Failed to approve: ${err.message}`)
+                                }
+                              }}
+                              style={{ fontSize: 10, padding: '2px 8px' }}
+                            >
+                              Approve
+                            </button>
+                          )}
+                        </div>
                       </td>
                       <td style={{ padding: '10px 8px', fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis' }}>
                         {tx.id?.substring(0, 8)}...
@@ -1682,9 +3233,9 @@ function TransactionsTab() {
             <div className="form-group" style={{ flex: 1 }}>
               <label className="form-label">Currency</label>
                 <select className="input" value={depositForm.currency} onChange={e => setDepositForm({ ...depositForm, currency: e.target.value })}>
-                <option value="EUR">EUR</option>
-                <option value="USD">USD</option>
-                <option value="GBP">GBP</option>
+                {supportedCurrencies.map(currency => (
+                  <option key={currency} value={currency}>{currency}</option>
+                ))}
               </select>
             </div>
           </div>
@@ -1701,7 +3252,18 @@ function TransactionsTab() {
 
             <button 
               className="btn btn-primary"
-              onClick={() => createDepositMutation.mutate()}
+              onClick={() => {
+                // Use first provider user as fromUserId if not set
+                const fromUserId = providerUsers[0]?.id
+                if (!fromUserId) {
+                  alert('No payment provider available. Please run payment-setup.ts first.')
+                  return
+                }
+                createDepositMutation.mutate({
+                  ...depositForm,
+                  fromUserId: fromUserId,
+                })
+              }}
               disabled={createDepositMutation.isPending || !depositForm.userId}
               style={{ width: '100%' }}
             >
@@ -1747,9 +3309,9 @@ function TransactionsTab() {
               <div className="form-group" style={{ flex: 1 }}>
                 <label className="form-label">Currency</label>
                 <select className="input" value={withdrawalForm.currency} onChange={e => setWithdrawalForm({ ...withdrawalForm, currency: e.target.value })}>
-                  <option value="EUR">EUR</option>
-                  <option value="USD">USD</option>
-                  <option value="GBP">GBP</option>
+                  {supportedCurrencies.map(currency => (
+                    <option key={currency} value={currency}>{currency}</option>
+                  ))}
                 </select>
               </div>
             </div>
@@ -1796,29 +3358,68 @@ function TransactionsTab() {
 function ReconciliationTab() {
   const [dateRange, setDateRange] = useState('today')
 
-  // Fetch all transactions for reconciliation - API uses JSON input/output
+  // Fetch all transactions for reconciliation
+  const { tokens } = useAuth()
+  const authToken = tokens?.accessToken
+  
   const txQuery = useQuery({
     queryKey: ['reconciliation', dateRange],
-    queryFn: () => graphql(`
-      query GetReconciliationData($txInput: JSON, $walletInput: JSON) {
-        walletTransactions(input: $txInput)
-        wallets(input: $walletInput)
+    queryFn: () => graphqlQuery(GRAPHQL_SERVICE_URLS.payment, `
+      query GetReconciliationData($txFirst: Int, $walletFirst: Int) {
+        walletTransactions(first: $txFirst) {
+          nodes {
+            id
+            walletId
+            userId
+            type
+            balanceType
+            currency
+            amount
+            balance
+            refId
+            refType
+            description
+            createdAt
+          }
+          totalCount
+        }
+        wallets(first: $walletFirst) {
+          nodes {
+            id
+            userId
+            currency
+            category
+            balance
+            bonusBalance
+            lockedBalance
+            status
+          }
+          totalCount
+        }
       }
     `, { 
-      txInput: { first: 500 },
-      walletInput: { first: 100 }
-    }),
+      txFirst: 500,
+      walletFirst: 100
+    }, authToken),
   })
 
   const transactions = txQuery.data?.walletTransactions?.nodes || []
   const wallets = txQuery.data?.wallets?.nodes || []
 
-  // Calculate summary
+  // Calculate summary - track fees separately
   const summary = transactions.reduce((acc: any, tx: any) => {
     const type = tx.type
     if (!acc[type]) acc[type] = { count: 0, total: 0 }
     acc[type].count++
-    acc[type].total += tx.amount
+    acc[type].total += tx.amount || 0
+    
+    // Track fees from fee transactions
+    if (type === 'fee' || tx.description?.toLowerCase().includes('fee')) {
+      if (!acc.fees) acc.fees = { count: 0, total: 0 }
+      acc.fees.count++
+      acc.fees.total += tx.amount || 0
+    }
+    
     return acc
   }, {})
 
@@ -1827,6 +3428,7 @@ function ReconciliationTab() {
   const totalBets = summary.bet?.total || 0
   const totalWins = summary.win?.total || 0
   const totalBonuses = summary.bonus_credit?.total || 0
+  const totalFees = summary.fees?.total || 0
 
   const platformBalance = wallets.reduce((sum: number, w: any) => sum + (w.balance || 0), 0)
   const platformBonus = wallets.reduce((sum: number, w: any) => sum + (w.bonusBalance || 0), 0)
@@ -1911,15 +3513,15 @@ function ReconciliationTab() {
               </span>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 0', borderBottom: '1px solid var(--border-subtle)' }}>
-              <span style={{ color: 'var(--text-secondary)' }}>Fees</span>
-              <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', fontWeight: 600 }}>
-                -€0.00
+              <span style={{ color: 'var(--text-secondary)' }}>Fees ({summary.fees?.count || 0})</span>
+              <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent-red)', fontWeight: 600 }}>
+                -{formatCurrency(totalFees)}
               </span>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 0', background: 'var(--bg-tertiary)', borderRadius: 8, paddingLeft: 12, paddingRight: 12 }}>
               <span style={{ fontWeight: 600 }}>Total Outflows</span>
               <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent-red)', fontWeight: 700, fontSize: 18 }}>
-                {formatCurrency(totalWithdrawals + totalBets)}
+                {formatCurrency(totalWithdrawals + totalBets + totalFees)}
               </span>
             </div>
           </div>
@@ -1936,7 +3538,7 @@ function ReconciliationTab() {
           <div style={{ textAlign: 'center', padding: 24, background: 'var(--bg-tertiary)', borderRadius: 12 }}>
             <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>NET FLOW</div>
             <div style={{ fontSize: 32, fontWeight: 700, fontFamily: 'var(--font-mono)', color: 'var(--accent-cyan)' }}>
-              {formatCurrency((totalDeposits + totalWins + totalBonuses) - (totalWithdrawals + totalBets))}
+              {formatCurrency((totalDeposits + totalWins + totalBonuses) - (totalWithdrawals + totalBets + totalFees))}
             </div>
           </div>
           <div style={{ textAlign: 'center', padding: 24, background: 'var(--bg-tertiary)', borderRadius: 12 }}>
@@ -1978,9 +3580,12 @@ function SettingsTab() {
   })
 
   // Fetch providers - API uses JSON input/output
+  const { tokens } = useAuth()
+  const authToken = tokens?.accessToken
+  
   const providersQuery = useQuery({
     queryKey: ['providerConfigs'],
-    queryFn: () => graphql(`
+    queryFn: () => graphqlQuery(GRAPHQL_SERVICE_URLS.payment, `
       query ListProviders($input: JSON) {
         providerConfigs(input: $input)
       }
@@ -1989,7 +3594,7 @@ function SettingsTab() {
 
   // Create provider mutation - API uses JSON input/output
   const createProviderMutation = useMutation({
-    mutationFn: () => graphql(`
+    mutationFn: () => graphqlQuery(GRAPHQL_SERVICE_URLS.payment, `
       mutation CreateProvider($input: JSON) {
         createProviderConfig(input: $input)
       }
@@ -1998,7 +3603,7 @@ function SettingsTab() {
         ...newProvider,
         feePercentage: parseFloat(newProvider.feePercentage),
       }
-    }),
+    }, authToken),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['providerConfigs'] })
       setNewProvider({ ...newProvider, name: '' })

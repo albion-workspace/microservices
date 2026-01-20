@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { CreditCard, Gift, Database, Wifi, Shield, Bell } from 'lucide-react'
+import { CreditCard, Gift, Database, Wifi, Shield, Bell, Zap } from 'lucide-react'
 
 interface ServiceHealth {
   status: string
@@ -126,21 +126,25 @@ export default function Dashboard() {
             <h3 className="card-title">Quick Actions</h3>
           </div>
           <div className="flex gap-3 flex-wrap">
+            <Link to="/use-cases" className="btn btn-primary">
+              <Zap size={16} />
+              Use Cases
+            </Link>
             <Link to="/payment" className="btn btn-secondary">
               <CreditCard size={16} />
-              Test Payment
+              Payment Gateway
             </Link>
             <Link to="/bonus" className="btn btn-secondary">
               <Gift size={16} />
-              Test Bonus
+              Bonus Service
             </Link>
             <Link to="/notifications" className="btn btn-secondary">
               <Bell size={16} />
-              Test Notifications
+              Notifications
             </Link>
             <Link to="/realtime" className="btn btn-secondary">
               <Wifi size={16} />
-              Test Realtime
+              Realtime (SSE/WS)
             </Link>
             <Link to="/playground" className="btn btn-secondary">
               <Database size={16} />
@@ -163,9 +167,9 @@ export default function Dashboard() {
 │                                                                             │
 │  ┌──────────────────────────────────────────────────────────────────────┐  │
 │  │                        React Dashboard (Port 5173)                    │  │
-│  │  • User Management  • Payment Gateway  • Bonus Service              │  │
-│  │  • Notifications     • Health Monitor   • GraphQL Playground         │  │
-│  │  • User Management  • Webhooks          • Settings                   │  │
+│  │  • Use Cases (Real-world scenarios)  • Payment Gateway               │  │
+│  │  • Bonus Service  • Notifications  • Health Monitor                  │  │
+│  │  • GraphQL Playground  • Webhooks  • User Management                 │  │
 │  └──────────────────────────────────────────────────────────────────────┘  │
 │                                    │                                        │
 │                                    ▼                                        │
@@ -180,7 +184,8 @@ export default function Dashboard() {
 │  │  │ • Authentication │  │ • Wallets        │  │ • Templates      │   │  │
 │  │  │ • Authorization │  │ • Deposits       │  │ • User Bonuses   │   │  │
 │  │  │ • OAuth         │  │ • Withdrawals    │  │ • Wagering       │   │  │
-│  │  │ • Sessions      │  │ • Providers      │  │ • Eligibility    │   │  │
+│  │  │ • Sessions      │  │ • User Transfers │  │ • Eligibility    │   │  │
+│  │  │ • Permissions   │  │ • Generic Ledger │  │ • Generic Ledger │   │  │
 │  │  │ • Webhooks      │  │                  │  │                  │   │  │
 │  │  └──────────────────┘  └──────────────────┘  └──────────────────┘   │  │
 │  │                                                                      │  │
@@ -190,7 +195,7 @@ export default function Dashboard() {
 │  │  │Port: 3006        │  │  • GraphQL Gateway & Schema Merging     │ │  │
 │  │  │                  │  │  • Saga Pattern (Distributed Txns)       │ │  │
 │  │  │ • Email          │  │  • Access Engine (URN Permissions)      │ │  │
-│  │  │ • SMS            │  │  • Ledger System                        │ │  │
+│  │  │ • SMS            │  │  • Generic Ledger System                 │ │  │
 │  │  │ • Push           │  │  • Webhook Management                   │ │  │
 │  │  │ • SSE/WebSocket  │  │  • Common Types & Utilities             │ │  │
 │  │  │ • Socket.IO      │  │                                          │ │  │

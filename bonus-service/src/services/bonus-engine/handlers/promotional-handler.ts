@@ -145,7 +145,7 @@ export class SelectionHandler extends BaseBonusHandler {
     context: BonusContext,
     calculation: BonusCalculation,
     now: Date
-  ): UserBonus {
+  ): Omit<UserBonus, 'id'> {
     const bonus = super.buildUserBonus(template, context, calculation, now);
     (bonus as any).metadata = {
       ...((bonus as any).metadata || {}),
@@ -214,7 +214,7 @@ export class ComboHandler extends BaseBonusHandler {
     context: BonusContext,
     calculation: BonusCalculation,
     now: Date
-  ): UserBonus {
+  ): Omit<UserBonus, 'id'> {
     const bonus = super.buildUserBonus(template, context, calculation, now);
     (bonus as any).metadata = {
       ...((bonus as any).metadata || {}),
@@ -278,7 +278,7 @@ export class BundleHandler extends BaseBonusHandler {
     context: BonusContext,
     calculation: BonusCalculation,
     now: Date
-  ): UserBonus {
+  ): Omit<UserBonus, 'id'> {
     const bonus = super.buildUserBonus(template, context, calculation, now);
     (bonus as any).metadata = {
       ...((bonus as any).metadata || {}),

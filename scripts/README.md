@@ -1,43 +1,30 @@
 # Scripts Directory
 
-This directory contains all utility scripts for the microservices platform.
+This directory contains all utility scripts for the microservices platform, organized by type and service.
 
 ## Structure
 
 ```
 scripts/
-├── bin/                          # Executable commands (user-facing scripts)
-│   ├── Database Scripts
-│   │   └── promote-to-admin.js   # Promote user to admin via MongoDB (located in scripts/)
-│   │
-│   ├── Service Management
-│   │   ├── start-all.ps1         # Start all services (with build)
-│   │   ├── start-all-services.ps1 # Start all services (dev mode)
-│   │   ├── start-auth-no-redis.ps1 # Start auth service without Redis
-│   │   ├── clean-all.ps1         # Clean all build artifacts
-│   │   ├── clean-build-run.ps1   # Clean + Install + Build + Run all
-│   │   └── setup-dev.ps1         # Development environment setup
-│   │
-│   └── Testing Scripts
-│       ├── auth-test.ps1         # Comprehensive Auth Service tests (consolidated)
-│       ├── test-all-api.ps1      # Comprehensive GraphQL API tests
-│       ├── test-payment-transactions.ps1 # Payment transaction flow tests
-│       └── test-payment-transactions.sh
+├── bin/                    # PowerShell scripts (.ps1)
+│   ├── auth-test.ps1
+│   ├── clean-all.ps1
+│   ├── clean-build-run.ps1
+│   ├── start-service-dev.ps1
+│   └── test-all-api.ps1
 │
-├── Test Utilities (TypeScript)
-│   ├── payment-gateway-tests.ts
-│   ├── payment-gateway-demo.ts
-│   ├── bonus-service-tests.ts
-│   ├── channels-tests.ts          # Real-time channels (WebSocket, SSE, Socket.IO, Webhooks)
-│   ├── benchmark.ts
-│   └── load-test.ts
-│
-├── promote-to-admin.js            # Database utility (requires node_modules)
-│
-└── GraphQL Test Files
-    ├── payment-quick-test.graphql
-    └── payment-transaction-testing.graphql
+└── typescript/             # TypeScript/JavaScript scripts
+    ├── auth/               # Auth service scripts
+    ├── bonus/              # Bonus service scripts
+    ├── ledger/             # Ledger scripts (general/common)
+    ├── payment/            # Payment service scripts
+    ├── benchmark.ts        # Generic microservice benchmark
+    ├── channels-tests.ts   # Real-time communication tests
+    ├── load-test.ts        # Generic load testing
+    └── README.md           # Detailed documentation
 ```
+
+See `typescript/README.md` for detailed script organization and usage.
 
 ## Service Ports
 
@@ -82,9 +69,9 @@ scripts/
 ### Promote User to Admin
 ```powershell
 cd scripts/bin
-node promote-to-admin.js admin@demo.com
+node promote-to-system.js system@demo.com
 # Or from project root:
-npm run promote-to-admin -- admin@demo.com
+npm run promote-to-system -- system@demo.com
 ```
 
 ## Notes

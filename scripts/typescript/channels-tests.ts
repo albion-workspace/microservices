@@ -8,11 +8,11 @@
  * 
  * Note: Native WebSocket (graphql-ws) is not supported - Socket.IO is used instead.
  * 
- * Usage: npx tsx scripts/channels-tests.ts
+ * Usage: npx tsx scripts/typescript/channels-tests.ts
  */
 
 import http from 'node:http';
-import { createHmac } from 'node:crypto';
+import { loginAs, users, createJWT, createSystemToken, createTokenForUser, decodeJWT } from './config/users.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Configuration
@@ -27,61 +27,23 @@ const CONFIG = {
   webhookSecret: 'test-webhook-secret-12345',
   // All services use the same shared JWT secret
   jwtSecret: process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || 'shared-jwt-secret-change-in-production',
-  // Admin credentials for webhook tests
-  adminEmail: process.env.ADMIN_EMAIL || 'admin@demo.com',
-  adminPassword: process.env.ADMIN_PASSWORD || 'Admin123!@#',
+  // System credentials for webhook tests (using centralized config)
+  systemEmail: process.env.SYSTEM_EMAIL || users.system.email,
+  systemPassword: process.env.SYSTEM_PASSWORD || users.system.password,
 };
 
 // ═══════════════════════════════════════════════════════════════════
-// JWT Token Generation
+// JWT Token Generation (using centralized utilities)
 // ═══════════════════════════════════════════════════════════════════
 
-function base64UrlEncode(data: string): string {
-  return Buffer.from(data).toString('base64url');
+async function generateToken(secret?: string): Promise<string> {
+  // Use centralized createSystemToken, secret is handled internally
+  return createSystemToken('1h');
 }
 
-async function generateToken(secret: string = CONFIG.jwtSecret): Promise<string> {
-  const header = { alg: 'HS256', typ: 'JWT' };
-  const now = Math.floor(Date.now() / 1000);
-  const payload = {
-    sub: 'test-user',
-    tid: 'default-tenant',
-    roles: ['admin'],
-    permissions: ['*:*:*'],
-    type: 'access',
-    iat: now,
-    exp: now + 3600,
-  };
-  
-  const headerB64 = base64UrlEncode(JSON.stringify(header));
-  const payloadB64 = base64UrlEncode(JSON.stringify(payload));
-  const signature = createHmac('sha256', secret)
-    .update(`${headerB64}.${payloadB64}`)
-    .digest('base64url');
-  
-  return `${headerB64}.${payloadB64}.${signature}`;
-}
-
-function generateAdminToken(secret: string = CONFIG.jwtSecret): string {
-  const header = { alg: 'HS256', typ: 'JWT' };
-  const now = Math.floor(Date.now() / 1000);
-  const payload = {
-    sub: 'dev',
-    tid: 'default-tenant', // Use default-tenant for consistency
-    roles: ['admin'],
-    permissions: ['*:*:*'],
-    type: 'access',
-    iat: now,
-    exp: now + 8 * 60 * 60, // 8 hours
-  };
-  
-  const headerB64 = base64UrlEncode(JSON.stringify(header));
-  const payloadB64 = base64UrlEncode(JSON.stringify(payload));
-  const signature = createHmac('sha256', secret)
-    .update(`${headerB64}.${payloadB64}`)
-    .digest('base64url');
-  
-  return `Bearer ${headerB64}.${payloadB64}.${signature}`;
+function generateAdminToken(secret?: string): string {
+  // Use centralized createSystemToken with Bearer prefix
+  return createSystemToken('8h', true);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -404,84 +366,10 @@ async function graphql<T = unknown>(
   });
 }
 
-// Login helper to get real admin token from auth service
-async function loginAsAdmin(): Promise<string> {
-  try {
-    const loginQuery = `
-      mutation Login($input: LoginInput!) {
-        login(input: $input) {
-          success
-          tokens {
-            accessToken
-          }
-          user {
-            id
-            roles
-          }
-        }
-      }
-    `;
-    
-    const loginVars = {
-      input: {
-        tenantId: 'default-tenant',
-        identifier: CONFIG.adminEmail,
-        password: CONFIG.adminPassword,
-      },
-    };
-
-    const result = await graphql<{ login: { success: boolean; tokens?: { accessToken: string }; user?: { id: string; roles: string[] } } }>(
-      CONFIG.authServiceUrl,
-      loginQuery,
-      loginVars
-    );
-
-    if (result.login?.success && result.login.tokens?.accessToken) {
-      const roles = result.login.user?.roles || [];
-      if (roles.includes('admin')) {
-        return `Bearer ${result.login.tokens.accessToken}`;
-      } else {
-        throw new Error(`User ${CONFIG.adminEmail} does not have admin role. Roles: ${roles.join(', ')}`);
-      }
-    } else {
-      throw new Error('Login failed or user does not exist');
-    }
-  } catch (err) {
-    // If login fails, try to register admin user first
-    try {
-      const registerQuery = `
-        mutation Register($input: RegisterInput!) {
-          register(input: $input) {
-            success
-            message
-            user {
-              id
-              roles
-            }
-          }
-        }
-      `;
-      
-      const registerVars = {
-        input: {
-          tenantId: 'default-tenant',
-          email: CONFIG.adminEmail,
-          password: CONFIG.adminPassword,
-          autoVerify: true,
-        },
-      };
-
-      await graphql(CONFIG.authServiceUrl, registerQuery, registerVars);
-      
-      // Wait a moment for user to be created
-      await new Promise(r => setTimeout(r, 1000));
-      
-      // Try login again
-      return await loginAsAdmin();
-    } catch (registerErr) {
-      throw new Error(`Failed to login or register admin user: ${(err as Error).message}. Register error: ${(registerErr as Error).message}`);
-    }
-  }
+// Login helper to get real system token from auth service
+async function loginAsSystem(): Promise<string> {
+  const { token } = await loginAs('system', { verifyToken: true, retry: true });
+  return `Bearer ${token}`;
 }
 
 // Webhook Receiver
@@ -584,20 +472,20 @@ async function testWebhooks(): Promise<void> {
     PAYMENT_TOKEN = generateAdminToken(CONFIG.jwtSecret);
   }
 
-  // Get real admin tokens from auth service (more reliable than generated tokens)
+  // Get real system tokens from auth service (more reliable than generated tokens)
   if (!BONUS_TOKEN) {
     try {
-      console.log(`  [INFO] Logging in as admin (${CONFIG.adminEmail})...`);
-      const adminToken = await loginAsAdmin();
-      BONUS_TOKEN = adminToken;
-      PAYMENT_TOKEN = adminToken;
-      console.log('  [OK] Admin token obtained from auth service');
+      console.log(`  [INFO] Logging in as system user (${CONFIG.systemEmail})...`);
+      const systemToken = await loginAsSystem();
+      BONUS_TOKEN = systemToken;
+      PAYMENT_TOKEN = systemToken;
+      console.log('  [OK] System token obtained from auth service');
     } catch (err) {
-      console.log(`  [WARN] Failed to get admin token: ${(err as Error).message}`);
+      console.log(`  [WARN] Failed to get system token: ${(err as Error).message}`);
       console.log('  [INFO] Falling back to generated tokens (may fail authorization)');
       // Fallback to generated tokens
-      BONUS_TOKEN = generateAdminToken(CONFIG.jwtSecret);
-      PAYMENT_TOKEN = generateAdminToken(CONFIG.jwtSecret);
+      BONUS_TOKEN = generateAdminToken();
+      PAYMENT_TOKEN = generateAdminToken();
     }
   }
 

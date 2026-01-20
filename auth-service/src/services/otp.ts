@@ -3,7 +3,7 @@
  * Handles OTP generation, sending, and verification across multiple channels
  */
 
-import { getDatabase, logger } from 'core-service';
+import { getDatabase, logger, generateMongoId } from 'core-service';
 import type { SendOTPInput, VerifyOTPInput, OTP, OTPResponse } from '../types.js';
 import { generateOTP, hashToken, addMinutes } from '../utils.js';
 import type { AuthConfig } from '../types.js';
@@ -65,9 +65,11 @@ export class OTPService {
       const now = new Date();
       const expiresAt = addMinutes(now, this.config.otpExpiryMinutes);
       
-      // Store OTP in database
-      const otp: OTP = {
-        id: crypto.randomUUID(),
+      // Store OTP in database - use MongoDB ObjectId for performant single-insert operation
+      const { objectId, idString } = generateMongoId();
+      const otp = {
+        _id: objectId,
+        id: idString,
         userId: input.userId,
         tenantId: input.tenantId,
         code,
@@ -82,7 +84,7 @@ export class OTPService {
         expiresAt,
       };
       
-      await db.collection('otps').insertOne(otp);
+      await db.collection('otps').insertOne(otp as any);
       
       // Send OTP via provider (uses notification service)
       const provider = this.otpProviders.getProvider(input.channel);

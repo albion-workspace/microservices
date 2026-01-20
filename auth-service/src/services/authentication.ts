@@ -8,7 +8,14 @@
  * is now handled by Passport strategies.
  */
 
-import { getDatabase, logger, createTokenPair as coreCreateTokenPair } from 'core-service';
+import { 
+  getDatabase, 
+  logger, 
+  createTokenPair as coreCreateTokenPair,
+  findById,
+  normalizeDocument,
+  generateMongoId,
+} from 'core-service';
 import type { UserContext } from 'core-service';
 import type { LoginInput, User, AuthResponse, TokenPair, Session, RefreshToken, DeviceInfo } from '../types.js';
 import { 
@@ -18,6 +25,7 @@ import {
   hashToken,
   addDays,
   addSeconds,
+  rolesToArray,
 } from '../utils.js';
 import type { AuthConfig } from '../types.js';
 import { authenticateLocal } from '../providers/passport-strategies.js';
@@ -41,6 +49,36 @@ export class AuthenticationService {
         twoFactorCode: input.twoFactorCode,
       });
       
+      if (!user || !user._id) {
+        return {
+          success: false,
+          message: 'Authentication failed: invalid user data',
+        };
+      }
+      
+      // Ensure id matches _id.toString() for consistency
+      if (user.id !== user._id.toString()) {
+        user.id = user._id.toString();
+      }
+      
+      // Refresh user roles/permissions from database if needed
+      if (user.email) {
+        try {
+          const db = getDatabase();
+          const dbUser = await db.collection('users').findOne({ _id: user._id }) as any;
+          
+          if (dbUser) {
+            user.roles = dbUser.roles || user.roles;
+            user.permissions = dbUser.permissions || user.permissions;
+          }
+        } catch (dbError: any) {
+          logger.error('Error refreshing user roles/permissions', {
+            error: dbError.message,
+            userId: user.id,
+          });
+        }
+      }
+      
       // If authentication failed
       if (!user) {
         return {
@@ -63,6 +101,50 @@ export class AuthenticationService {
         };
       }
       
+      // Log what Passport found - CRITICAL for debugging
+      logger.info('User authenticated by Passport', {
+        userId: user.id,
+        _id: (user as any)._id, // MongoDB _id if present
+        email: user.email,
+        tenantId: user.tenantId,
+        roles: user.roles,
+        permissions: user.permissions,
+        identifier: input.identifier,
+        userObjectKeys: Object.keys(user),
+      });
+      
+      // CRITICAL: Verify user.id exists and is valid (not a random UUID or _id)
+      if (!user.id || typeof user.id !== 'string') {
+        logger.error('User object missing or invalid id field', {
+          userId: user.id,
+          _id: (user as any)._id,
+          email: user.email,
+          identifier: input.identifier,
+        });
+        return {
+          success: false,
+          message: 'Authentication failed: invalid user ID',
+        };
+      }
+      
+      // CRITICAL: If logging in with email, verify the user email matches
+      // This prevents token creation with wrong user if Passport finds wrong user
+      if (input.identifier.includes('@')) {
+        const normalizedIdentifier = input.identifier.toLowerCase().trim();
+        const normalizedUserEmail = user.email?.toLowerCase().trim();
+        if (normalizedUserEmail !== normalizedIdentifier) {
+          logger.error('User email mismatch during login', {
+            identifier: input.identifier,
+            userEmail: user.email,
+            userId: user.id,
+          });
+          return {
+            success: false,
+            message: 'Authentication failed: user email mismatch',
+          };
+        }
+      }
+      
       // Authentication successful! Generate tokens and session
       const deviceInfo = this.extractDeviceInfo(input);
       const tokens = await this.createSessionAndTokens(user, deviceInfo);
@@ -72,10 +154,21 @@ export class AuthenticationService {
         tenantId: user.tenantId 
       });
       
+      // Normalize permissions (object → array) for GraphQL compatibility
+      const normalizedUser = { ...user };
+      if (normalizedUser.permissions && !Array.isArray(normalizedUser.permissions)) {
+        const permissionsObj = normalizedUser.permissions as Record<string, boolean>;
+        normalizedUser.permissions = Object.keys(permissionsObj).filter(
+          key => permissionsObj[key] === true
+        );
+      } else if (!normalizedUser.permissions) {
+        normalizedUser.permissions = [];
+      }
+      
       return {
         success: true,
         message: 'Login successful',
-        user,
+        user: normalizedUser,
         tokens,
       };
       
@@ -104,10 +197,63 @@ export class AuthenticationService {
   
   /**
    * Create session and generate tokens
+   * Simple flow: Use the user object from Passport directly
+   * If roles/permissions need updating, user should refresh token or log out/in
    */
   private async createSessionAndTokens(user: User, deviceInfo: DeviceInfo): Promise<TokenPair> {
     const db = getDatabase();
     const now = new Date();
+    
+    // Extract roles and permissions from UserRole[] format
+    let roles: string[] = [];
+    let permissions: string[] = [];
+    
+    // Handle roles - extract role names from UserRole[] format
+    if (user.roles !== undefined && user.roles !== null && Array.isArray(user.roles)) {
+      roles = user.roles
+        .filter((r: any) => {
+          // Handle both UserRole objects and string arrays
+          if (typeof r === 'string') return true;
+          return r.active !== false;
+        })
+        .filter((r: any) => {
+          if (typeof r === 'string') return true;
+          return !r.expiresAt || new Date(r.expiresAt) > new Date();
+        })
+        .map((r: any) => {
+          // Handle both UserRole objects and string arrays
+          if (typeof r === 'string') return r;
+          return r.role;
+        })
+        .filter((r: any) => r !== undefined && r !== null); // Remove any undefined/null values
+    }
+    
+    // Handle permissions - check if it exists (empty array is valid)
+    if (user.permissions !== undefined && user.permissions !== null) {
+      if (Array.isArray(user.permissions)) {
+        permissions = user.permissions;
+      } else if (typeof user.permissions === 'object' && !Array.isArray(user.permissions)) {
+        // Convert object format { "permission1": true, "permission2": false } to array
+        const permissionsObj = user.permissions as Record<string, boolean>;
+        permissions = Object.keys(permissionsObj).filter(
+          key => permissionsObj[key] === true
+        );
+      }
+    }
+    
+    // Log for debugging
+    logger.info('Creating JWT token with roles and permissions', {
+      userId: user.id,
+      email: user.email,
+      roles,
+      permissions,
+      rolesCount: roles.length,
+      permissionsCount: permissions.length,
+      rawRoles: user.roles,
+      rawRolesType: Array.isArray(user.roles) ? 'array' : typeof user.roles,
+      rawRolesLength: Array.isArray(user.roles) ? user.roles.length : 0,
+      rawRolesSample: Array.isArray(user.roles) && user.roles.length > 0 ? user.roles[0] : null,
+    });
     
     // Generate refresh token
     const refreshTokenValue = generateRefreshToken();
@@ -117,11 +263,38 @@ export class AuthenticationService {
     const accessExpiresIn = this.parseExpiry(this.config.jwtExpiresIn);
     const refreshExpiresIn = this.parseExpiry(this.config.jwtRefreshExpiresIn);
     
-    // Create refresh token record
-    const refreshTokenId = crypto.randomUUID();
-    const refreshToken: RefreshToken = {
+    // Ensure user.id is defined (should be guaranteed by checks above)
+    if (!user.id) {
+      // Try to get id from _id if not set
+      if ((user as any)._id) {
+        user.id = (user as any)._id.toString();
+        logger.warn('User.id was missing, derived from _id', { 
+          userId: user.id,
+          _id: (user as any)._id.toString(),
+        });
+      } else {
+        throw new Error('User ID is required for token creation');
+      }
+    }
+    
+    // Ensure user has id field (normalize if needed)
+    const userId = user.id || (user as any)._id?.toString();
+    if (!userId) {
+      throw new Error('User missing id field - cannot create refresh token');
+    }
+    
+    logger.info('Creating refresh token', {
+      userId,
+      email: user.email,
+      tenantId: user.tenantId,
+    });
+    
+    // Create refresh token record - use MongoDB ObjectId for performant single-insert operation
+    const { objectId: refreshTokenObjectId, idString: refreshTokenId } = generateMongoId();
+    const refreshToken = {
+      _id: refreshTokenObjectId,
       id: refreshTokenId,
-      userId: user.id,
+      userId,
       tenantId: user.tenantId,
       token: refreshTokenValue,
       tokenHash: refreshTokenHash,
@@ -132,12 +305,18 @@ export class AuthenticationService {
       isValid: true,
     };
     
-    await db.collection('refresh_tokens').insertOne(refreshToken);
+    await db.collection('refresh_tokens').insertOne(refreshToken as any);
     
-    // Create session
-    const session: Session = {
-      id: crypto.randomUUID(),
-      userId: user.id,
+    // Create session - use MongoDB ObjectId for performant single-insert operation
+    // Ensure user.id is defined (should be guaranteed by checks above)
+    if (!user.id) {
+      throw new Error('User ID is required for session creation');
+    }
+    const { objectId: sessionObjectId, idString: sessionId } = generateMongoId();
+    const session = {
+      _id: sessionObjectId,
+      sessionId,
+      userId: user.id, // Explicitly use user.id to ensure we're using the correct user ID
       tenantId: user.tenantId,
       refreshTokenId,
       deviceInfo,
@@ -147,14 +326,35 @@ export class AuthenticationService {
       isValid: true,
     };
     
-    await db.collection('sessions').insertOne(session);
+    await db.collection('sessions').insertOne(session as any);
     
-    // Generate JWT access token
-    const userContext: UserContext = {
+    // Generate JWT access token with roles and permissions from Passport user
+    // CRITICAL: Use user.id (from Passport user object), NOT session.sessionId
+    // Double-check that user.id is valid before creating token
+    if (!user.id || typeof user.id !== 'string') {
+      logger.error('Cannot create token: user.id is missing or invalid in createSessionAndTokens', {
+        userId: user.id,
+        _id: (user as any)._id,
+        email: user.email,
+        userObjectKeys: Object.keys(user),
+      });
+      throw new Error(`Invalid user ID in createSessionAndTokens: ${user.id}`);
+    }
+    
+    logger.info('Creating UserContext for JWT token', {
       userId: user.id,
+      email: user.email,
+      roles,
+      permissions,
+      rolesCount: roles.length,
+      permissionsCount: permissions.length,
+    });
+    
+    const userContext: UserContext = {
+      userId: user.id, // Explicitly use user.id to ensure correct user ID in token
       tenantId: user.tenantId,
-      roles: user.roles,
-      permissions: user.permissions,
+      roles: roles,
+      permissions: permissions,
     };
     
     const jwtTokens = coreCreateTokenPair(userContext, {
@@ -199,11 +399,25 @@ export class AuthenticationService {
       }) as unknown as RefreshToken | null;
       
       if (!refreshToken) {
+        logger.error('Refresh token not found', {
+          tokenHash: refreshTokenHash.substring(0, 10) + '...',
+          tenantId,
+        });
         return {
           success: false,
           message: 'Invalid refresh token',
         };
       }
+      
+      logger.info('Refresh token found', {
+        refreshTokenId: refreshToken.id,
+        refreshTokenUserId: refreshToken.userId,
+        refreshTokenUserIdType: typeof refreshToken.userId,
+        refreshTokenUserIdLength: refreshToken.userId?.length,
+        tenantId,
+        expiresAt: refreshToken.expiresAt,
+        isValid: refreshToken.isValid,
+      });
       
       // Check if expired
       if (refreshToken.expiresAt < new Date()) {
@@ -224,13 +438,52 @@ export class AuthenticationService {
         { $set: { lastUsedAt: new Date() } }
       );
       
-      // Get user
-      const user = await db.collection('users').findOne({
-        id: refreshToken.userId,
+      // Get user using generic helper function with automatic ObjectId handling
+      logger.info('Looking up user for token refresh', {
+        refreshTokenUserId: refreshToken.userId,
         tenantId,
-      }) as unknown as User | null;
+      });
       
-      if (!user || user.status !== 'active') {
+      const user = await findById<User>(db.collection('users'), refreshToken.userId, { tenantId });
+      
+      if (!user) {
+        // Check what users exist to help debug
+        const allUsers = await db.collection('users').find({ tenantId }).limit(5).toArray();
+        const sampleUserIds = allUsers.map((u: any) => ({ 
+          _id: u._id?.toString(), 
+          id: u.id,
+          email: u.email 
+        }));
+        
+        logger.error('User not found during token refresh', {
+          refreshTokenUserId: refreshToken.userId,
+          tenantId,
+          sampleUserIds,
+          userCount: await db.collection('users').countDocuments({ tenantId }),
+        });
+        return {
+          success: false,
+          message: 'User not found or inactive',
+        };
+      }
+      
+      // Normalize user document (ensure id field exists)
+      const normalizedUser = normalizeDocument(user);
+      
+      logger.info('User found during token refresh', {
+        userId: normalizedUser?.id,
+        email: normalizedUser?.email,
+        status: normalizedUser?.status,
+      });
+      
+      if (!normalizedUser) {
+        return {
+          success: false,
+          message: 'User not found or inactive',
+        };
+      }
+      
+      if (normalizedUser.status !== 'active') {
         return {
           success: false,
           message: 'User not found or inactive',
@@ -238,11 +491,31 @@ export class AuthenticationService {
       }
       
       // Generate new access token
+      if (!normalizedUser.id) {
+        logger.error('User missing id field after refresh token lookup', {
+          userId: refreshToken.userId,
+        });
+        return {
+          success: false,
+          message: 'User ID is required for token refresh',
+        };
+      }
+      
+      // Extract role names using utility function
+      const rolesForContext = rolesToArray(normalizedUser.roles);
+      
+      logger.info('Extracted roles for token refresh', {
+        userId: normalizedUser.id,
+        rolesForContext,
+        rawRoles: normalizedUser.roles,
+        rolesType: Array.isArray(normalizedUser.roles) && normalizedUser.roles.length > 0 ? typeof normalizedUser.roles[0] : 'unknown',
+      });
+      
       const userContext: UserContext = {
-        userId: user.id,
-        tenantId: user.tenantId,
-        roles: user.roles,
-        permissions: user.permissions,
+        userId: normalizedUser.id!,
+        tenantId: normalizedUser.tenantId,
+        roles: rolesForContext,
+        permissions: normalizedUser.permissions || [],
       };
       
       const jwtTokens = coreCreateTokenPair(userContext, {
@@ -262,11 +535,15 @@ export class AuthenticationService {
           refreshExpiresIn: this.parseExpiry(this.config.jwtRefreshExpiresIn),
         },
       };
-    } catch (error) {
-      logger.error('Token refresh error', { error });
+    } catch (error: any) {
+      logger.error('Token refresh error', { 
+        error: error.message,
+        stack: error.stack,
+        name: error.name,
+      });
       return {
         success: false,
-        message: 'Failed to refresh token',
+        message: `Failed to refresh token: ${error.message || 'Unknown error'}`,
       };
     }
   }

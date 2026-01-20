@@ -14,10 +14,10 @@
  */
 
 import http from 'node:http';
-import { createHmac } from 'node:crypto';
+import { createSystemToken } from './config/users.js';
 
 // ═══════════════════════════════════════════════════════════════════
-// JWT Token Generation
+// JWT Token Generation (using centralized utilities)
 // ═══════════════════════════════════════════════════════════════════
 
 const SERVICE_SECRETS: Record<string, string> = {
@@ -26,30 +26,9 @@ const SERVICE_SECRETS: Record<string, string> = {
   retail: process.env.RETAIL_JWT_SECRET || 'retail-app-secret-change-in-production',
 };
 
-function base64UrlEncode(data: string): string {
-  return Buffer.from(data).toString('base64url');
-}
-
-function generateAdminToken(secret: string): string {
-  const header = { alg: 'HS256', typ: 'JWT' };
-  const now = Math.floor(Date.now() / 1000);
-  const payload = {
-    sub: 'load-test-user',
-    tid: 'load-test',
-    roles: ['admin'],
-    permissions: ['*:*:*'],
-    type: 'access',
-    iat: now,
-    exp: now + 8 * 60 * 60, // 8 hours
-  };
-  
-  const headerB64 = base64UrlEncode(JSON.stringify(header));
-  const payloadB64 = base64UrlEncode(JSON.stringify(payload));
-  const signature = createHmac('sha256', secret)
-    .update(`${headerB64}.${payloadB64}`)
-    .digest('base64url');
-  
-  return `Bearer ${headerB64}.${payloadB64}.${signature}`;
+function generateAdminToken(secret?: string): string {
+  // Use centralized token generation (secret is handled internally)
+  return createSystemToken('8h', true); // true = include Bearer prefix
 }
 
 // ═══════════════════════════════════════════════════════════════════

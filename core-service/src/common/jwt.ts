@@ -97,6 +97,8 @@ export function verifyToken(token: string, config: JwtConfig): UserContext | nul
       return null;
     }
 
+    // Token verification successful - no logging needed (expected behavior)
+
     return {
       userId: payload.sub,
       tenantId: payload.tid,

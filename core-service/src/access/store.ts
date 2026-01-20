@@ -7,7 +7,7 @@
 
 import type { Collection, Db } from 'mongodb';
 import { getDatabase } from '../common/database.js';
-import { generateId } from '../saga/index.js';
+import { generateMongoId } from '../common/mongodb-utils.js';
 import type {
   Role,
   Policy,
@@ -65,8 +65,11 @@ export class AccessStore {
   
   async createRole(input: CreateRoleInput, createdBy?: string): Promise<Role> {
     const now = new Date();
-    const role: Role = {
-      id: generateId(),
+    // Use MongoDB ObjectId for performant single-insert operation
+    const { objectId, idString } = generateMongoId();
+    const role = {
+      _id: objectId,
+      id: idString,
       name: input.name,
       tenantId: input.tenantId || 'default',
       description: input.description,
@@ -79,7 +82,8 @@ export class AccessStore {
       updatedAt: now,
     };
     
-    await this.roles().insertOne(role);
+    await this.roles().insertOne(role as any);
+    return role as Role;
     
     if (this.config.audit.logWrites) {
       await this.logAudit({
@@ -259,8 +263,11 @@ export class AccessStore {
   
   async createPolicy(input: CreatePolicyInput, createdBy?: string): Promise<Policy> {
     const now = new Date();
-    const policy: Policy = {
-      id: generateId(),
+    // Use MongoDB ObjectId for performant single-insert operation
+    const { objectId, idString } = generateMongoId();
+    const policy = {
+      _id: objectId,
+      id: idString,
       name: input.name,
       tenantId: input.tenantId || 'default',
       // Support both singular and plural forms
@@ -279,7 +286,8 @@ export class AccessStore {
       updatedAt: now,
     };
     
-    await this.policies().insertOne(policy);
+    await this.policies().insertOne(policy as any);
+    return policy as Policy;
     
     if (this.config.audit.logWrites) {
       await this.logAudit({
@@ -415,8 +423,11 @@ export class AccessStore {
   // ─────────────────────────────────────────────────────────────────
   
   async createACLGrant(input: CreateACLGrantInput, grantedBy: string): Promise<ACLGrant> {
-    const grant: ACLGrant = {
-      id: generateId(),
+    // Use MongoDB ObjectId for performant single-insert operation
+    const { objectId, idString } = generateMongoId();
+    const grant = {
+      _id: objectId,
+      id: idString,
       tenantId: input.tenantId || 'default',
       userId: input.userId,
       subjectType: input.subjectType,
@@ -432,7 +443,8 @@ export class AccessStore {
       updatedAt: new Date(),
     };
     
-    await this.aclGrants().insertOne(grant);
+    await this.aclGrants().insertOne(grant as any);
+    return grant as ACLGrant;
     
     if (this.config.audit.logWrites) {
       await this.logAudit({
@@ -565,11 +577,14 @@ export class AccessStore {
   private async logAudit(entry: Omit<AuditLogEntry, 'id' | 'timestamp'>): Promise<void> {
     if (!this.config.audit.enabled) return;
     
+    // Use MongoDB ObjectId for performant single-insert operation
+    const { objectId, idString } = generateMongoId();
     await this.auditLog().insertOne({
-      id: generateId(),
+      _id: objectId,
+      id: idString,
       timestamp: new Date(),
       ...entry,
-    });
+    } as any);
   }
   
   async logAccessCheck(

@@ -51,8 +51,9 @@
  *    - Consistent across all entities
  */
 
-import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, getDatabase, deleteCache, deleteCachePattern, logger, validateInput } from 'core-service';
+import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, getDatabase, deleteCache, deleteCachePattern, logger, validateInput, findOneById, findOneAndUpdateById } from 'core-service';
 import type { Wallet, WalletTransaction, WalletCategory, WalletTransactionType } from '../types.js';
+import { SYSTEM_CURRENCY } from '../constants.js';
 import { emitPaymentEvent } from '../event-dispatcher.js';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -91,6 +92,7 @@ interface UserWalletsResponse {
     withdrawableBalance: number;
     lifetimeDeposits: number;
     lifetimeWithdrawals: number;
+    lifetimeFees: number;
   };
   wallets: {
     id: string;
@@ -133,16 +135,19 @@ export const userWalletResolvers = {
       const db = getDatabase();
       const walletsCollection = db.collection('wallets');
       
+      // Handle JSON input (args.input) or direct args
+      const input = (args.input as Record<string, unknown>) || args;
+      
       // Use authenticated user's ID if not provided (self-service)
-      const userId = (args.userId as string) || ctx.user?.userId;
+      const userId = (input.userId as string) || ctx.user?.userId;
       if (!userId) {
         throw new Error('userId is required');
       }
       
       // Build query
       const query: Record<string, unknown> = { userId };
-      if (args.currency) query.currency = args.currency as string;
-      if (args.category) query.category = args.category as string;
+      if (input.currency) query.currency = input.currency as string;
+      if (input.category) query.category = input.category as string;
       
       // Fetch wallets for this user (filtered by category if specified)
       const walletDocs = await walletsCollection.find(query).toArray();
@@ -172,6 +177,7 @@ export const userWalletResolvers = {
         withdrawableBalance: acc.withdrawableBalance + w.realBalance, // Only real balance is withdrawable
         lifetimeDeposits: acc.lifetimeDeposits,
         lifetimeWithdrawals: acc.lifetimeWithdrawals,
+        lifetimeFees: acc.lifetimeFees,
       }), {
         realBalance: 0,
         bonusBalance: 0,
@@ -180,11 +186,12 @@ export const userWalletResolvers = {
         withdrawableBalance: 0,
         lifetimeDeposits: walletDocs.reduce((sum: number, w: any) => sum + (w.lifetimeDeposits || 0), 0),
         lifetimeWithdrawals: walletDocs.reduce((sum: number, w: any) => sum + (w.lifetimeWithdrawals || 0), 0),
+        lifetimeFees: walletDocs.reduce((sum: number, w: any) => sum + (w.lifetimeFees || 0), 0),
       });
       
       return {
         userId,
-        currency: args.currency || walletDocs[0]?.currency || 'EUR',
+        currency: (input.currency as string) || walletDocs[0]?.currency || SYSTEM_CURRENCY,
         totals,
         wallets,
       };
@@ -209,20 +216,23 @@ export const userWalletResolvers = {
       const db = getDatabase();
       const walletsCollection = db.collection('wallets');
       
+      // Handle JSON input (args.input) or direct args
+      const input = (args.input as Record<string, unknown>) || args;
+      
       let wallet: any;
       
-      if (args.walletId) {
-        // Direct lookup by ID
-        wallet = await walletsCollection.findOne({ id: args.walletId as string });
+      if (input.walletId) {
+        // Use optimized findOneById utility (performance-optimized)
+        wallet = await findOneById(walletsCollection, input.walletId as string, {});
       } else {
         // Lookup by user + category + currency
-        const userId = (args.userId as string) || ctx.user?.userId;
+        const userId = (input.userId as string) || ctx.user?.userId;
         if (!userId) throw new Error('userId or walletId is required');
         
         wallet = await walletsCollection.findOne({
           userId,
-          category: (args.category as string) || 'main',
-          currency: (args.currency as string) || 'EUR',
+          category: (input.category as string) || 'main',
+          currency: (input.currency as string) || SYSTEM_CURRENCY,
         });
       }
       
@@ -323,6 +333,7 @@ const walletSaga = [
         lastActivityAt: now,
         lifetimeDeposits: 0,
         lifetimeWithdrawals: 0,
+        lifetimeFees: 0,
       } as Wallet;
       
       await repo.create(wallet);
@@ -358,6 +369,7 @@ export const walletService = createService<Wallet, CreateWalletInput>({
         verificationLevel: String!
         lifetimeDeposits: Float!
         lifetimeWithdrawals: Float!
+        lifetimeFees: Float!
         lastActivityAt: String!
       }
       type WalletConnection { nodes: [Wallet!]! totalCount: Int! pageInfo: PageInfo! }
@@ -440,7 +452,8 @@ const walletTxSaga = [
       // Load wallet from DB to get real balance
       const db = getDatabase();
       const walletsCollection = db.collection('wallets');
-      const walletDoc = await walletsCollection.findOne({ id: input.walletId });
+      // Use optimized findOneById utility (performance-optimized)
+      const walletDoc = await findOneById(walletsCollection, input.walletId, {});
       
       if (!walletDoc) {
         throw new Error(`Wallet not found: ${input.walletId}`);
@@ -460,10 +473,10 @@ const walletTxSaga = [
       data.balanceField = balanceField;
       data.currentBalance = currentBalance; // Store for calculating balance
 
-      // For debit operations, preliminary check (atomic check happens during update)
-      if (!isCredit && currentBalance < input.amount) {
-        throw new Error(`Insufficient funds. Available: ${currentBalance}, Required: ${input.amount}`);
-      }
+      // For debit operations, check balance with allowNegative permission
+      // Note: The actual balance check with permissions happens in updateWalletBalance step
+      // This is just a preliminary check - we don't throw here if allowNegative might be true
+      // The real check happens later when we call checkUserBalance which reads permissions from auth_service
       
       return { ...ctx, input, data };
     },
@@ -477,39 +490,317 @@ const walletTxSaga = [
       const isCredit = data.isCredit as boolean;
       const balanceField = data.balanceField as string;
       
-      // Calculate the delta (positive for credit, negative for debit)
-      const delta = isCredit ? input.amount : -input.amount;
-      
-      // Use atomic $inc for concurrency safety
-      const incUpdate: Record<string, number> = { [balanceField]: delta };
-      
-      // Update lifetime stats atomically
-      if (input.type === 'deposit') incUpdate.lifetimeDeposits = input.amount;
-      else if (input.type === 'withdrawal') incUpdate.lifetimeWithdrawals = input.amount;
-      
-      // Build query - for debits, add balance check condition
-      const query: Record<string, unknown> = { id: input.walletId };
-      if (!isCredit) query[balanceField] = { $gte: input.amount };
-      
-      // Atomic update
-      const result = await walletsCollection.findOneAndUpdate(
-        query,
-        { 
-          $inc: incUpdate,
-          $set: { lastActivityAt: new Date(), updatedAt: new Date() } 
-        },
-        { returnDocument: 'after' }
-      );
-      
-      if (!result) {
-        throw new Error(
-          !isCredit 
-            ? `Insufficient funds for ${input.type}. Required: ${input.amount}`
-            : `Failed to update wallet balance`
-        );
+      // For real balance operations, use ledger (source of truth)
+      if (balanceField === 'balance') {
+        try {
+          const { 
+            getLedger, 
+            getOrCreateUserAccount,
+            syncWalletBalanceFromLedger 
+          } = await import('./ledger-service.js');
+          const ledger = getLedger();
+          const wallet = data.wallet as any;
+          
+          // Simplified: Everything is a user wallet - check permissions for negative balance
+          // Check user balance if debit operation
+          let allowNegative = false;
+          if (!isCredit) {
+            const { getOrCreateUserAccount, checkUserBalance } = await import('./ledger-service.js');
+            const balanceCheck = await checkUserBalance(input.userId, input.amount, input.currency, 'main');
+            allowNegative = balanceCheck.allowNegative;
+            if (!balanceCheck.sufficient && !balanceCheck.allowNegative) {
+              throw new Error(
+                `Insufficient balance. Available: ${balanceCheck.available}, Required: ${input.amount}`
+              );
+            }
+          }
+          data.allowNegative = allowNegative;
+          
+          {
+            // User wallet operations - record in ledger FIRST (ledger is source of truth)
+            // For wallet transactions like bet, win, etc., we need to record them in ledger
+            // Skip ledger recording for deposit/withdrawal (handled by their own sagas)
+            const skipLedgerTypes = ['deposit', 'withdrawal'];
+            // For transfer_out/transfer_in, handle as user-to-user transfers
+            // Extract the other user ID from description (format: "Transfer to/from {userId}")
+            const isTransfer = input.type === 'transfer_out' || input.type === 'transfer_in';
+            
+            if (isTransfer && input.description) {
+              try {
+                // Extract user ID from description (e.g., "Transfer to 4fc6cac9-..." or "Transfer from 89166b84-...")
+                const transferMatch = input.description.match(/Transfer (to|from) ([a-f0-9-]+)/i);
+                if (transferMatch) {
+                  const direction = transferMatch[1].toLowerCase(); // "to" or "from"
+                  const otherUserId = transferMatch[2];
+                  
+                  const { recordUserTransferLedgerEntry } = await import('./ledger-service.js');
+                  const wallet = data.wallet as any;
+                  const tenantId = wallet?.tenantId || 'default';
+                  
+                  if (input.type === 'transfer_out') {
+                    // transfer_out: from input.userId to otherUserId
+                    await recordUserTransferLedgerEntry(
+                      input.userId,
+                      otherUserId,
+                      input.amount,
+                      input.currency,
+                      tenantId,
+                      input.description,
+                      input.refId || `transfer-${input.userId}-${otherUserId}-${Date.now()}`
+                    );
+                  } else {
+                    // transfer_in: from otherUserId to input.userId
+                    await recordUserTransferLedgerEntry(
+                      otherUserId,
+                      input.userId,
+                      input.amount,
+                      input.currency,
+                      tenantId,
+                      input.description,
+                      input.refId || `transfer-${otherUserId}-${input.userId}-${Date.now()}`
+                    );
+                  }
+                  
+                  // Mark that we should sync from ledger instead of direct update
+                  (data as any).syncFromLedger = true;
+                  (data as any).skipDirectUpdate = true;
+                  
+                  logger.info('User-to-user transfer recorded in ledger', {
+                    userId: input.userId,
+                    otherUserId,
+                    type: input.type,
+                    amount: input.amount,
+                    currency: input.currency,
+                  });
+                } else {
+                  // Fallback: use recordWalletTransactionLedgerEntry if we can't extract user ID
+                  logger.warn('Could not extract user ID from transfer description, using fallback', {
+                    description: input.description,
+                  });
+                  const { recordWalletTransactionLedgerEntry } = await import('./ledger-service.js');
+                  const wallet = data.wallet as any;
+                  const tenantId = wallet?.tenantId || 'default';
+                  
+                  await recordWalletTransactionLedgerEntry(
+                    input.userId,
+                    input.type,
+                    input.amount,
+                    input.currency,
+                    tenantId,
+                    undefined,
+                    input.description
+                  );
+                  
+                  (data as any).syncFromLedger = true;
+                  (data as any).skipDirectUpdate = true;
+                }
+              } catch (transferError: any) {
+                logger.error('Failed to record user-to-user transfer in ledger', {
+                  error: transferError?.message || String(transferError),
+                  userId: input.userId,
+                  type: input.type,
+                  amount: input.amount,
+                });
+                // Don't fail - allow direct wallet update as fallback
+                (data as any).skipDirectUpdate = false;
+              }
+            } else if (!skipLedgerTypes.includes(input.type)) {
+              try {
+                const { recordWalletTransactionLedgerEntry } = await import('./ledger-service.js');
+                const wallet = data.wallet as any;
+                const tenantId = wallet?.tenantId || 'default';
+                
+                // Record wallet transaction in ledger BEFORE updating wallet
+                // This ensures ledger is always the source of truth
+                await recordWalletTransactionLedgerEntry(
+                  input.userId,
+                  input.type,
+                  input.amount,
+                  input.currency,
+                  tenantId,
+                  undefined, // walletTransactionId will be set after creation
+                  input.description
+                );
+                
+                // Mark that we should sync from ledger instead of direct update
+                (data as any).syncFromLedger = true;
+                (data as any).skipDirectUpdate = true;
+                
+                logger.info('Wallet transaction recorded in ledger', {
+                  userId: input.userId,
+                  type: input.type,
+                  amount: input.amount,
+                  currency: input.currency,
+                });
+              } catch (ledgerError: any) {
+                // If ledger recording fails, log error but allow wallet update as fallback
+                // This ensures backward compatibility
+                logger.error('Failed to record wallet transaction in ledger', {
+                  error: ledgerError?.message || String(ledgerError),
+                  stack: ledgerError?.stack,
+                  userId: input.userId,
+                  type: input.type,
+                  amount: input.amount,
+                });
+                // Don't fail - allow direct wallet update as fallback
+                (data as any).skipDirectUpdate = false;
+              }
+            } else {
+              // For deposit/withdrawal, just check balance (ledger entry created by their sagas)
+              const userAccountId = await getOrCreateUserAccount(input.userId, 'real', input.currency);
+              
+              // Check balance for debits
+              if (!isCredit) {
+                const balance = await ledger.getBalance(userAccountId);
+                if (balance.balance < input.amount) {
+                  throw new Error(
+                    `Insufficient balance in ledger. Available: ${balance.balance}, Required: ${input.amount}`
+                  );
+                }
+              }
+            }
+          }
+        } catch (ledgerError) {
+          // If ledger check fails, fall back to wallet check (for backward compatibility)
+          logger.warn('Ledger check failed, using wallet balance', { error: ledgerError });
+        }
       }
       
-      const balance = (result as any)[balanceField] || 0;
+      // Check if we should skip direct update (for ledger-recorded transactions)
+      let skipDirectUpdate = (data as any).skipDirectUpdate === true;
+      let balance: number = 0;
+      
+      if (skipDirectUpdate && balanceField === 'balance') {
+        // For ledger-recorded transactions, sync directly from ledger (don't update wallet directly)
+        // Wait for ledger transaction to be committed
+        await new Promise(resolve => setTimeout(resolve, 300));
+        
+        try {
+          const { syncWalletBalanceFromLedger } = await import('./ledger-service.js');
+          await syncWalletBalanceFromLedger(input.userId, input.walletId, input.currency);
+          
+          // Get the updated balance from wallet after sync
+          // Use optimized findOneById utility (performance-optimized)
+          const syncedWallet = await findOneById(walletsCollection, input.walletId, {});
+          balance = (syncedWallet as any)?.[balanceField] || 0;
+          
+          logger.info('Wallet balance synced from ledger (skipped direct update)', {
+            walletId: input.walletId,
+            userId: input.userId,
+            balance,
+          });
+        } catch (syncError) {
+          logger.error('Failed to sync wallet balance from ledger', { 
+            error: syncError,
+            walletId: input.walletId,
+            userId: input.userId,
+          });
+          // Fall back to direct update if sync fails
+          skipDirectUpdate = false;
+        }
+      }
+      
+      if (!skipDirectUpdate) {
+        // Calculate the delta (positive for credit, negative for debit)
+        const delta = isCredit ? input.amount : -input.amount;
+        
+        // Use atomic $inc for concurrency safety
+        const incUpdate: Record<string, number> = { [balanceField]: delta };
+        
+        // Update lifetime stats atomically
+        if (input.type === 'deposit') incUpdate.lifetimeDeposits = input.amount;
+        else if (input.type === 'withdrawal') incUpdate.lifetimeWithdrawals = input.amount;
+        
+        // Build query - for debits, add balance check condition only if allowNegative is false
+        const query: Record<string, unknown> = { id: input.walletId };
+        const allowNegative = (data.allowNegative as boolean) || false;
+        if (!isCredit && !allowNegative) {
+          // Only check balance if user cannot go negative
+          query[balanceField] = { $gte: input.amount };
+        }
+        
+        // Atomic update
+        const result = await walletsCollection.findOneAndUpdate(
+          query,
+          { 
+            $inc: incUpdate,
+            $set: { lastActivityAt: new Date(), updatedAt: new Date() } 
+          },
+          { returnDocument: 'after' }
+        );
+        
+        if (!result) {
+          throw new Error(
+            !isCredit 
+              ? `Insufficient funds for ${input.type}. Required: ${input.amount}`
+              : `Failed to update wallet balance`
+          );
+        }
+        
+        balance = (result as any)[balanceField] || 0;
+        
+        // Sync wallet balance from ledger for real balance (if not already synced)
+        // IMPORTANT: Sync AFTER wallet update to ensure ledger transaction is complete
+        if (balanceField === 'balance') {
+          try {
+            const { syncWalletBalanceFromLedger } = await import('./ledger-service.js');
+            // Small delay to ensure ledger transaction is committed
+            await new Promise(resolve => setTimeout(resolve, 100));
+            await syncWalletBalanceFromLedger(input.userId, input.walletId, input.currency);
+            // Re-read balance after sync to get the correct value
+            // Use optimized findOneById utility (performance-optimized)
+          const syncedWallet = await findOneById(walletsCollection, input.walletId, {});
+            if (syncedWallet) {
+              balance = (syncedWallet as any)[balanceField] || balance;
+            }
+          } catch (syncError) {
+            logger.warn('Could not sync wallet balance from ledger', { error: syncError });
+            // Don't fail the transaction if sync fails - wallet balance was already updated
+          }
+        }
+      } else {
+        // For ledger-recorded transactions, sync wallet from ledger (don't update directly)
+        // Wait for ledger transaction to be committed
+        await new Promise(resolve => setTimeout(resolve, 200));
+        
+        try {
+          const { syncWalletBalanceFromLedger } = await import('./ledger-service.js');
+          await syncWalletBalanceFromLedger(input.userId, input.walletId, input.currency);
+          
+          // Get the updated balance from wallet after sync
+          // Use optimized findOneById utility (performance-optimized)
+          const syncedWallet = await findOneById(walletsCollection, input.walletId, {});
+          balance = (syncedWallet as any)?.[balanceField] || 0;
+          
+          logger.info('Wallet balance synced from ledger (ledger-recorded transaction)', {
+            walletId: input.walletId,
+            userId: input.userId,
+            type: input.type,
+            balance,
+          });
+        } catch (syncError) {
+          logger.error('Failed to sync wallet balance from ledger after ledger transaction', { 
+            error: syncError,
+            walletId: input.walletId,
+            userId: input.userId,
+            type: input.type,
+          });
+          // Fall back to direct update if sync fails
+          const delta = isCredit ? input.amount : -input.amount;
+          // Use optimized findOneAndUpdateById utility (performance-optimized)
+          const result = await findOneAndUpdateById(
+            walletsCollection,
+            input.walletId,
+            { 
+              $inc: { [balanceField]: delta },
+              $set: { lastActivityAt: new Date(), updatedAt: new Date() } 
+            },
+            {},
+            { returnDocument: 'after' }
+          );
+          balance = result ? ((result as any)[balanceField] || 0) : 0;
+        }
+      }
       
       // Update input with calculated balance (will be stored in transaction)
       input.balance = balance;

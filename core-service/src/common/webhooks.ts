@@ -44,13 +44,14 @@ import { createHmac, timingSafeEqual } from 'crypto';
 import { logger } from './logger.js';
 import { getDatabase } from './database.js';
 import { getErrorMessage } from './errors.js';
+import { generateMongoId, normalizeDocument } from './mongodb-utils.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
 // ═══════════════════════════════════════════════════════════════════
 
 export interface WebhookConfig {
-  id: string;
+  id?: string; // MongoDB will automatically generate _id, which we map to id
   /** Tenant this webhook belongs to */
   tenantId: string;
   /** Display name for the webhook */
@@ -84,7 +85,7 @@ export interface WebhookConfig {
 }
 
 export interface WebhookDelivery {
-  id: string;
+  id?: string; // MongoDB will automatically generate _id, which we map to id
   webhookId: string;
   tenantId: string;
   eventId: string;
@@ -373,8 +374,11 @@ export class WebhookManager<TEvents extends string = string> {
    * Register a new webhook endpoint.
    */
   async register(input: Omit<RegisterWebhookInput, 'events'> & { events: TEvents[] }): Promise<WebhookConfig> {
-    const webhook: WebhookConfig = {
-      id: crypto.randomUUID(),
+    // Use MongoDB ObjectId for performant single-insert operation
+    const { objectId, idString } = generateMongoId();
+    const webhook = {
+      _id: objectId,
+      id: idString,
       tenantId: input.tenantId,
       name: input.name,
       url: input.url,
@@ -400,7 +404,7 @@ export class WebhookManager<TEvents extends string = string> {
       events: webhook.events,
     });
     
-    return webhook;
+    return webhook as WebhookConfig;
   }
 
   /**
@@ -523,9 +527,12 @@ export class WebhookManager<TEvents extends string = string> {
     webhook: WebhookConfig,
     event: { eventId: string; eventType: string; tenantId: string; userId?: string; data: T }
   ): Promise<WebhookDelivery> {
-    const delivery: WebhookDelivery = {
-      id: crypto.randomUUID(),
-      webhookId: webhook.id,
+    // Use MongoDB ObjectId for performant single-insert operation
+    const { objectId, idString } = generateMongoId();
+    const delivery: Partial<WebhookDelivery> & { _id: typeof objectId; id: string; webhookId: string; tenantId: string; eventId: string; eventType: string; status: WebhookDelivery['status']; attempts: number; createdAt: Date } = {
+      _id: objectId as any,
+      id: idString,
+      webhookId: webhook.id!,
       tenantId: webhook.tenantId,
       eventId: event.eventId,
       eventType: event.eventType,
@@ -678,26 +685,28 @@ export class WebhookManager<TEvents extends string = string> {
       );
 
       // Auto-disable if too many failures
-      const updatedWebhook = await this.get(webhook.id, webhook.tenantId);
-      if (updatedWebhook && updatedWebhook.consecutiveFailures >= this.config.maxConsecutiveFailures) {
-        await this.update(webhook.id, webhook.tenantId, { isActive: false });
-        await this.getWebhooksCollection().updateOne(
-          { id: webhook.id },
-          { $set: { disabledReason: `Auto-disabled after ${this.config.maxConsecutiveFailures} consecutive failures` } }
-        );
+      if (webhook.id) {
+        const updatedWebhook = await this.get(webhook.id, webhook.tenantId);
+        if (updatedWebhook && updatedWebhook.consecutiveFailures >= this.config.maxConsecutiveFailures) {
+          await this.update(webhook.id, webhook.tenantId, { isActive: false });
+          await this.getWebhooksCollection().updateOne(
+            { id: webhook.id },
+            { $set: { disabledReason: `Auto-disabled after ${this.config.maxConsecutiveFailures} consecutive failures` } }
+          );
 
-        logger.error('Webhook auto-disabled due to failures', {
-          service: this.config.serviceName,
-          webhookId: webhook.id,
-          consecutiveFailures: updatedWebhook.consecutiveFailures,
-        });
+          logger.error('Webhook auto-disabled due to failures', {
+            service: this.config.serviceName,
+            webhookId: webhook.id,
+            consecutiveFailures: updatedWebhook.consecutiveFailures,
+          });
+        }
       }
     }
 
-    // Save delivery record
+    // Save delivery record - single insert operation (already has _id and id set)
     await this.getDeliveriesCollection().insertOne(delivery as any);
 
-    return delivery;
+    return delivery as WebhookDelivery;
   }
 
   // ─────────────────────────────────────────────────────────────────

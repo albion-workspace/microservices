@@ -100,7 +100,13 @@ export function createService<TEntity extends { id: string }, TInput>(
       
       [entities]: async (args) => {
         const { first = 20, skip = 0, filter } = args as { first?: number; skip?: number; filter?: Record<string, unknown> };
-        const result = await repository.findMany({ filter: filter ?? {}, skip, take: first });
+        // Sort by createdAt descending by default (newest first)
+        const result = await repository.findMany({ 
+          filter: filter ?? {}, 
+          skip, 
+          take: first,
+          sort: { createdAt: -1 } // Sort by createdAt descending
+        });
         return {
           nodes: result.items,
           totalCount: result.total,

@@ -43,7 +43,19 @@ export type {
   TransactionType,
   TransactionStatus,
   BalanceCalculator,
+  TransactionState,
 } from './common/ledger.js';
+
+// Account ID Management (Unified Account ID System)
+export {
+  getSystemAccountId,
+  getProviderAccountId,
+  getUserAccountId,
+  parseAccountId,
+} from './common/account-ids.js';
+export type {
+  AccountIdOptions,
+} from './common/account-ids.js';
 
 // Auth & Permissions
 export { 
@@ -58,7 +70,7 @@ export {
   isTokenExpired,
   getTokenExpiration,
 } from './common/jwt.js';
-export { allow, deny, isAuthenticated, hasRole, hasAnyRole, can, and, or, isOwner, sameTenant, hasPermission } from './common/permissions.js';
+export { allow, deny, isAuthenticated, hasRole, hasAnyRole, can, and, or, isOwner, sameTenant, hasPermission, isSystem } from './common/permissions.js';
 
 // Database (optimized)
 export { 
@@ -66,12 +78,64 @@ export {
   getDatabase, 
   closeDatabase,
   checkDatabaseHealth,
-  getDatabaseStats,
   getClient,
+  getDatabaseStats,
   registerIndexes,
   DEFAULT_MONGO_CONFIG,
 } from './common/database.js';
 export type { MongoConfig } from './common/database.js';
+
+// MongoDB Utilities
+export {
+  // Re-export MongoDB types
+  ObjectId,
+  type Collection,
+  type Filter,
+  type Document,
+  // ObjectId utilities
+  isValidObjectId,
+  toObjectId,
+  objectIdToString,
+  generateMongoId,
+  // Query builders
+  buildIdQuery,
+  buildIdQueryWithOr,
+  buildUpdateQuery,
+  // Document lookup (performance-optimized)
+  findById,
+  findOneById,
+  findUserById, // Deprecated: use findById instead
+  // Document normalization
+  normalizeDocument,
+  normalizeDocuments,
+  // Common operations (performance-optimized)
+  updateOneById,
+  deleteOneById,
+  findOneAndUpdateById,
+} from './common/mongodb-utils.js';
+
+// MongoDB Error Handling (sharding-optimized)
+export {
+  isDuplicateKeyError,
+  handleDuplicateKeyError,
+  executeWithDuplicateHandling,
+  type DuplicateKeyErrorOptions,
+} from './common/mongodb-errors.js';
+
+// Pagination Utilities (cursor-based, sharding-optimized)
+export {
+  paginateCollection,
+  convertOffsetToCursor,
+  type CursorPaginationOptions,
+  type CursorPaginationResult,
+} from './common/pagination.js';
+
+// Configuration Management (unified, multi-source)
+export {
+  loadConfig as loadServiceConfig,
+  createConfigLoader,
+  type ConfigLoaderOptions,
+} from './common/config-loader.js';
 
 // Repository (with caching)
 export { createRepository, generateId as generateUUID, bulkInsert, bulkUpdate } from './common/repository.js';
@@ -90,8 +154,20 @@ export {
 } from './common/cache.js';
 
 // Redis
-export { connectRedis, getRedis, publish, subscribe, closeRedis, checkRedisHealth } from './common/redis.js';
-export type { RedisConfig } from './common/redis.js';
+export { 
+  connectRedis, 
+  getRedis, 
+  publish, 
+  subscribe, 
+  closeRedis, 
+  checkRedisHealth,
+  scanKeys,
+  scanKeysIterator,
+  scanKeysArray,
+  scanKeysWithCallback,
+  batchGetValues,
+} from './common/redis.js';
+export type { RedisConfig, ScanOptions } from './common/redis.js';
 
 // Logger
 export { logger, setLogLevel, setLogFormat, configureLogger, createChildLogger } from './common/logger.js';
@@ -103,10 +179,41 @@ export type { ShutdownOptions } from './common/lifecycle.js';
 
 // Service Lifecycle (cleanup tasks, event listeners)
 export { setupCleanupTask, setupCleanupTasks, setupEventListener } from './common/service-lifecycle.js';
+export { initializeService, initializeDatabase, initializeRedis, safeInitialize } from './common/startup-helpers.js';
 export type { CleanupTask, EventListenerConfig } from './common/service-lifecycle.js';
 
 // Validation
 export { validateInput } from './common/validation.js';
+
+// Generic Utilities
+export {
+  // Date/Time utilities
+  addMinutes,
+  addHours,
+  addDays,
+  addSeconds,
+  addMonths,
+  addYears,
+  // Token/Hash utilities
+  hashToken,
+  generateToken,
+  generateOTP,
+  generateRefreshToken,
+  generateBackupCodes,
+  // String/Identifier utilities
+  normalizeEmail,
+  normalizePhone,
+  isValidEmail,
+  isValidPhone,
+  isValidUsername,
+  detectIdentifierType,
+  type IdentifierType,
+  // Expiry parsing
+  parseExpiry,
+  // Device/User Agent utilities
+  parseUserAgent,
+  generateDeviceId,
+} from './common/utils.js';
 
 // Error Utilities
 export { getErrorMessage, normalizeError } from './common/errors.js';
@@ -156,8 +263,8 @@ export type {
   WriteOptions,
   Repository, 
   FindManyOptions,
-  CursorPaginationOptions,
-  CursorPaginationResult,
+  CursorPaginationOptions as RepositoryCursorPaginationOptions,
+  CursorPaginationResult as RepositoryCursorPaginationResult,
   IndexConfig,
   CacheTTLConfig,
   RepositoryOptions,

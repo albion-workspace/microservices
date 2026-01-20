@@ -4,7 +4,7 @@
  * Uses core-service's SSE support for real-time notifications to end users
  */
 
-import { logger } from 'core-service';
+import { logger, generateId } from 'core-service';
 import type { NotificationProvider, SseNotification, NotificationResponse } from '../types.js';
 
 export class SseProvider implements NotificationProvider {
@@ -45,7 +45,7 @@ export class SseProvider implements NotificationProvider {
     if (!connection) {
       logger.warn('No SSE connection for user', { userId: notification.userId });
       return {
-        id: crypto.randomUUID(),
+        id: generateId(),
         status: 'failed',
         channel: 'sse',
         error: 'No active SSE connection',
@@ -63,7 +63,7 @@ export class SseProvider implements NotificationProvider {
       });
       
       return {
-        id: crypto.randomUUID(),
+        id: generateId(),
         status: 'sent',
         channel: 'sse',
         sentAt: new Date(),
@@ -75,7 +75,7 @@ export class SseProvider implements NotificationProvider {
       });
       
       return {
-        id: crypto.randomUUID(),
+        id: generateId(),
         status: 'failed',
         channel: 'sse',
         error: error.message,

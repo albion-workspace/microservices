@@ -2,8 +2,12 @@
  * Bonus Service - Saga-based bonus management
  */
 
-import { createService, generateId, type, type Repository, type SagaContext, validateInput } from 'core-service';
+import { createService, type, type Repository, type SagaContext, validateInput } from 'core-service';
 import type { BonusTemplate, UserBonus, BonusTransaction, BonusStatus } from '../types.js';
+import { bonusEngine } from './bonus-engine/index.js';
+import { templatePersistence } from './bonus-engine/persistence.js';
+import type { BonusContext } from './bonus-engine/types.js';
+import { getHandler } from './bonus-engine/handler-registry.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Bonus Template Types & Validation
@@ -45,10 +49,17 @@ const bonusTemplateSaga = [
     critical: true,
     execute: async ({ input, data, ...ctx }: BonusTemplateCtx): Promise<BonusTemplateCtx> => {
       const repo = data._repository as Repository<BonusTemplate>;
-      const id = (data._generateId as typeof generateId)();
       
-      const template: BonusTemplate = {
-        id,
+      // Check if template with same code already exists (code is unique index)
+      const existing = await repo.findOne({ code: input.code });
+      if (existing) {
+        // Template exists, return it (prevents duplicates)
+        return { ...ctx, input, data, entity: existing };
+      }
+      
+      // Template doesn't exist, create new one
+      // Repository will automatically generate MongoDB ObjectId via generateMongoId()
+      const template: Omit<BonusTemplate, 'id'> & { id?: string } = {
         name: input.name,
         code: input.code,
         type: input.type as any,
@@ -64,10 +75,11 @@ const bonusTemplateSaga = [
         stackable: true,
         priority: 0,
         isActive: true,
-      } as BonusTemplate;
+      };
       
-      await repo.create(template);
-      return { ...ctx, input, data, entity: template };
+      // Repository.create() will generate MongoDB ObjectId automatically
+      const created = await repo.create(template as BonusTemplate);
+      return { ...ctx, input, data, entity: created };
     },
     compensate: async ({ entity, data }: BonusTemplateCtx) => {
       if (entity) {
@@ -187,55 +199,111 @@ const userBonusSaga = [
     name: 'loadTemplate',
     critical: true,
     execute: async ({ input, data, ...ctx }: UserBonusCtx): Promise<UserBonusCtx> => {
-      // In real impl, this would search by code - simplified for example
+      // Load template by code
+      const template = await templatePersistence.findByCode(input.templateCode);
+      if (!template) {
+        throw new Error(`Template not found: ${input.templateCode}`);
+      }
+      if (!template.isActive) {
+        throw new Error(`Template ${input.templateCode} is not active`);
+      }
+      data.template = template;
       data.templateCode = input.templateCode;
       return { ...ctx, input, data };
+    },
+  },
+  {
+    name: 'checkEligibility',
+    critical: true,
+    execute: async ({ input, data, ...ctx }: UserBonusCtx): Promise<UserBonusCtx> => {
+      const template = data.template as BonusTemplate;
+      if (!template) {
+        throw new Error('Template not loaded');
+      }
+
+      // Get handler for this bonus type
+      const handler = getHandler(template.type as any);
+      if (!handler) {
+        throw new Error(`No handler for bonus type: ${template.type}`);
+      }
+
+      // Build context for eligibility check
+      const context: BonusContext = {
+        userId: input.userId,
+        tenantId: input.tenantId || 'default',
+        depositAmount: input.depositAmount,
+        currency: input.currency as any,
+      };
+
+      // Check eligibility with the specific template (not by type lookup)
+      // We need to run validators manually since checkEligibility finds templates by type
+      // First, run common validators
+      const commonResult = await (handler as any).runCommonValidators(template, context);
+      if (!commonResult.eligible) {
+        throw new Error(commonResult.reason || 'User is not eligible for this bonus');
+      }
+
+      // Then run specific validators
+      const specificResult = await (handler as any).validateSpecific(template, context);
+      if (!specificResult.eligible) {
+        throw new Error(specificResult.reason || 'User is not eligible for this bonus');
+      }
+
+      // Award bonus using the handler with the specific template
+      const result = await handler.award(template, context);
+      
+      if (!result.success) {
+        throw new Error(result.error || 'Bonus award failed');
+      }
+
+      if (!result.bonus) {
+        throw new Error('Bonus award failed - no bonus returned');
+      }
+
+      // Verify the bonus was created with the correct template
+      if (result.bonus.templateCode !== input.templateCode && result.bonus.templateId !== template.id) {
+        // Delete the incorrectly awarded bonus and throw error
+        const repo = data._repository as Repository<UserBonus>;
+        await repo.delete(result.bonus.id);
+        throw new Error(`Bonus was created with wrong template`);
+      }
+
+      // Store the awarded bonus
+      data.awardedBonus = result.bonus;
+      return { ...ctx, input, data };
+    },
+    compensate: async ({ data }: UserBonusCtx) => {
+      // If eligibility check fails, no bonus was created, so nothing to compensate
+      const awardedBonus = data.awardedBonus as UserBonus | undefined;
+      if (awardedBonus) {
+        // If bonus was created but saga failed later, delete it
+        const repo = data._repository as Repository<UserBonus>;
+        try {
+          await repo.delete(awardedBonus.id);
+        } catch (err) {
+          // Ignore errors during compensation
+        }
+      }
     },
   },
   {
     name: 'createUserBonus',
     critical: true,
     execute: async ({ input, data, ...ctx }: UserBonusCtx): Promise<UserBonusCtx> => {
+      const awardedBonus = data.awardedBonus as UserBonus;
+      
+      if (!awardedBonus) {
+        throw new Error('Bonus not awarded');
+      }
+
+      // Bonus was already created by the engine, just verify and return it
       const repo = data._repository as Repository<UserBonus>;
-      const id = (data._generateId as typeof generateId)();
-      
-      const bonusValue = input.depositAmount || 100; // Simplified
-      const turnoverRequired = bonusValue * 30; // 30x turnover requirement
-      
-      const expiresAt = new Date();
-      expiresAt.setDate(expiresAt.getDate() + 30);
-      
-      const userBonus: UserBonus = {
-        id,
-        userId: input.userId,
-        tenantId: input.tenantId || 'default',
-        templateId: 'template-id', // Would come from loaded template
-        templateCode: input.templateCode,
-        type: 'first_deposit',
-        domain: 'universal', // Generic domain
-        status: 'active' as BonusStatus,
-        currency: input.currency as any,
-        originalValue: bonusValue,
-        currentValue: bonusValue,
-        turnoverRequired,
-        turnoverProgress: 0,
-        depositId: undefined,
-        referrerId: undefined,
-        qualifiedAt: new Date(),
-        claimedAt: new Date(),
-        activatedAt: new Date(),
-        expiresAt,
-        history: [{
-          timestamp: new Date(),
-          action: 'claimed',
-          newStatus: 'active' as BonusStatus,
-          amount: bonusValue,
-          triggeredBy: 'user',
-        }],
-      } as UserBonus;
-      
-      await repo.create(userBonus);
-      return { ...ctx, input, data, entity: userBonus };
+      const existing = await repo.findById(awardedBonus.id);
+      if (!existing) {
+        throw new Error('Awarded bonus not found in database');
+      }
+
+      return { ...ctx, input, data, entity: existing };
     },
     compensate: async ({ entity, data }: UserBonusCtx) => {
       if (entity) {
@@ -315,13 +383,12 @@ const bonusTransactionSaga = [
     critical: true,
     execute: async ({ input, data, ...ctx }: BonusTxCtx): Promise<BonusTxCtx> => {
       const repo = data._repository as Repository<BonusTransaction>;
-      const id = (data._generateId as typeof generateId)();
       
-      const transaction: BonusTransaction = {
-        id,
+      // Repository will automatically generate MongoDB ObjectId
+      const transaction: Omit<BonusTransaction, 'id'> = {
         userBonusId: input.userBonusId,
         userId: input.userId,
-        tenantId: 'default',
+        tenantId: 'default', // Default tenant
         type: input.type,
         currency: input.currency as any,
         amount: input.amount,
@@ -337,10 +404,11 @@ const bonusTransactionSaga = [
         turnoverContribution: input.type === 'turnover' ? input.amount : undefined,
         relatedTransactionId: input.relatedTransactionId,
         activityCategory: input.activityCategory,
-      } as BonusTransaction;
+      };
       
-      await repo.create(transaction);
-      return { ...ctx, input, data, entity: transaction };
+      // Repository.create() will generate MongoDB ObjectId automatically
+      const created = await repo.create(transaction as BonusTransaction);
+      return { ...ctx, input, data, entity: created };
     },
     compensate: async ({ entity, data }: BonusTxCtx) => {
       if (entity) {

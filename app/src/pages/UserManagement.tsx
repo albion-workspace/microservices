@@ -5,6 +5,7 @@
 
 import { useState, useEffect } from 'react'
 import { useAuth, useAuthRequest } from '../lib/auth-context'
+import { hasRole, isSystem as checkIsSystem } from '../lib/access'
 import { Shield, Edit, Check, X, Search, Filter, Users, Key, Lock, Unlock, Database, Crown, UserCheck, BookOpen, ChevronDown, ChevronUp } from 'lucide-react'
 
 interface User {
@@ -27,7 +28,8 @@ interface User {
 
 // Available roles in the system
 const AVAILABLE_ROLES = [
-  { value: 'admin', label: 'Admin', description: 'Full system access', color: 'bg-red-500' },
+  { value: 'admin', label: 'Admin', description: 'Business administrator role', color: 'bg-blue-500' },
+  { value: 'system', label: 'System', description: 'Full system access', color: 'bg-red-500' },
   { value: 'moderator', label: 'Moderator', description: 'Content moderation access', color: 'bg-orange-500' },
   { value: 'user', label: 'User', description: 'Standard user access', color: 'bg-blue-500' },
   { value: 'viewer', label: 'Viewer', description: 'Read-only access', color: 'bg-gray-500' },
@@ -35,8 +37,8 @@ const AVAILABLE_ROLES = [
 
 // Available permissions (URNs) - Comprehensive list based on all services
 const AVAILABLE_PERMISSIONS = [
-  // Admin - Full access
-  { value: '*:*:*', label: 'All Permissions (Super Admin)', category: 'Admin', description: 'Full system access' },
+  // System - Full access
+  { value: '*:*:*', label: 'All Permissions (System)', category: 'System', description: 'Full system access' },
   
   // Authentication Service
   { value: 'auth:*:*', label: 'Auth: All Operations', category: 'Authentication', description: 'Full auth service access' },
@@ -110,17 +112,17 @@ export default function UserManagement() {
   const [populatingDemo, setPopulatingDemo] = useState(false)
   const [showPermissionsGuide, setShowPermissionsGuide] = useState(false)
 
-  // Check if current user is admin
-  const isAdmin = currentUser?.roles?.includes('admin')
+  // Check if current user is system
+  const isSystem = checkIsSystem(currentUser)
 
   useEffect(() => {
-    if (!isAdmin) {
-      setError('Unauthorized: Admin access required')
+    if (!isSystem) {
+      setError('Unauthorized: System access required')
       setLoading(false)
       return
     }
     loadUsers()
-  }, [isAdmin])
+  }, [isSystem])
 
   const loadUsers = async () => {
     try {
@@ -268,7 +270,7 @@ export default function UserManagement() {
     }
   }
 
-  const handlePromoteToAdmin = async (user: User) => {
+  const handlePromoteToSystem = async (user: User) => {
     try {
       setError(null)
       
@@ -285,7 +287,7 @@ export default function UserManagement() {
         input: {
           userId: user.id,
           tenantId: user.tenantId,
-          roles: [...new Set([...user.roles, 'admin'])],
+          roles: [...new Set([...user.roles, 'system'])],
         },
       })
       
@@ -357,14 +359,14 @@ export default function UserManagement() {
         }
       }
       
-      // Promote first user to admin
+      // Promote first user to system
       if (createdUsers.length > 0) {
         // Ensure the user object has tenantId before promoting
         const userToPromote = { 
           ...createdUsers[0], 
           tenantId: createdUsers[0].tenantId || tenantId 
         }
-        await handlePromoteToAdmin(userToPromote)
+        await handlePromoteToSystem(userToPromote)
       }
       
       // Assign roles to other users
@@ -423,12 +425,12 @@ export default function UserManagement() {
     return matchesSearch && matchesStatus
   })
 
-  if (!isAdmin) {
+  if (!isSystem) {
     return (
       <div className="p-6">
         <div className="bg-red-50 border border-red-200 rounded-lg p-4">
           <h2 className="text-red-800 font-semibold">Access Denied</h2>
-          <p className="text-red-600 mt-1">You need admin privileges to access this page.</p>
+          <p className="text-red-600 mt-1">You need system privileges to access this page.</p>
         </div>
       </div>
     )
@@ -576,7 +578,7 @@ export default function UserManagement() {
                   </td>
                   <td className="px-6 py-4">
                     <div className="flex flex-wrap gap-1">
-                      {user.roles.map(role => {
+                      {getRoleNames(user.roles || []).map(role => {
                         const roleInfo = AVAILABLE_ROLES.find(r => r.value === role)
                         return (
                           <span
@@ -640,11 +642,11 @@ export default function UserManagement() {
                       >
                         <Edit className="w-4 h-4" />
                       </button>
-                      {!user.roles.includes('admin') && (
+                      {!hasRole(user.roles, 'system') && (
                         <button
-                          onClick={() => handlePromoteToAdmin(user)}
+                          onClick={() => handlePromoteToSystem(user)}
                           className="text-purple-600 hover:text-purple-900"
-                          title="Promote to Admin"
+                          title="Promote to System"
                         >
                           <Crown className="w-4 h-4" />
                         </button>
@@ -813,10 +815,10 @@ export default function UserManagement() {
         <div className="bg-white p-4 rounded-lg shadow">
           <div className="text-sm text-gray-600 flex items-center gap-2">
             <Crown className="w-4 h-4" />
-            Admins
+            System Users
           </div>
           <div className="text-2xl font-bold text-red-600 mt-1">
-            {users.filter(u => u.roles.includes('admin')).length}
+            {users.filter(u => hasRole(u.roles, 'system')).length}
           </div>
         </div>
         <div className="bg-white p-4 rounded-lg shadow">

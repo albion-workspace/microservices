@@ -1,76 +1,68 @@
 /**
  * Authentication Service Types
+ * 
+ * This file re-exports types from the new modular type system.
  */
 
 // ═══════════════════════════════════════════════════════════════════
-// User & Profile Types
+// Re-export from new type system (import first to avoid circular dependencies)
 // ═══════════════════════════════════════════════════════════════════
 
-export type IdentifierType = 'email' | 'phone' | 'username';
+import type {
+  IdentifierType as UserIdentifierType,
+  AccountStatus,
+  AuthProvider as UserAuthProvider,
+  User as UserType,
+  SocialProfile,
+  UserFilter,
+  UserQueryOptions,
+  UpdateUserInput,
+  UpdateUserMetadataInput,
+  BankingMetadata,
+  CryptoMetadata,
+  ForexMetadata,
+  BettingMetadata,
+} from './types/user-types.js';
 
-export type AccountStatus = 'pending' | 'active' | 'suspended' | 'locked' | 'deleted';
+// Re-export with original names
+export type {
+  UserIdentifierType as IdentifierType,
+  AccountStatus,
+  UserAuthProvider as AuthProvider,
+  UserType as User,
+  SocialProfile,
+  UserFilter,
+  UserQueryOptions,
+  UpdateUserInput,
+  UpdateUserMetadataInput,
+  BankingMetadata,
+  CryptoMetadata,
+  ForexMetadata,
+  BettingMetadata,
+};
 
-export type AuthProvider = 'local' | 'google' | 'facebook' | 'linkedin' | 'instagram';
+// Role types from role-types module
+export type {
+  RoleContext,
+  UserRole,
+  RoleGraph,
+  ResolvedPermissions,
+  RoleResolutionOptions,
+  AssignRoleInput,
+  RevokeRoleInput,
+} from './types/role-types.js';
 
-export interface User {
-  id: string;
-  tenantId: string;
-  
-  // Primary identifiers (at least one required)
-  username?: string;
-  email?: string;
-  phone?: string;
-  
-  // Password (only for local auth)
-  passwordHash?: string;
-  
-  // Account status
-  status: AccountStatus;
-  emailVerified: boolean;
-  phoneVerified: boolean;
-  
-  // Social auth profiles
-  socialProfiles?: SocialProfile[];
-  
-  // Security
-  twoFactorEnabled: boolean;
-  twoFactorSecret?: string;
-  failedLoginAttempts: number;
-  lastFailedLoginAt?: Date;
-  lockedUntil?: Date;
-  passwordChangedAt?: Date;
-  
-  // Roles & Permissions
-  roles: string[];
-  permissions: string[];
-  
-  // Flexible metadata (dynamic fields)
-  metadata: Record<string, any>;
-  
-  // Audit
-  createdAt: Date;
-  updatedAt: Date;
-  lastLoginAt?: Date;
-  lastActiveAt?: Date;
-}
+// Role type from access-engine
+export type { Role } from 'access-engine';
 
-export interface SocialProfile {
-  provider: AuthProvider;
-  providerId: string;
-  email?: string;
-  displayName?: string;
-  photoUrl?: string;
-  accessToken?: string;
-  refreshToken?: string;
-  connectedAt: Date;
-}
+// SocialProfile is exported from user-types.ts
 
 // ═══════════════════════════════════════════════════════════════════
 // Session Types
 // ═══════════════════════════════════════════════════════════════════
 
 export interface Session {
-  id: string;
+  sessionId?: string; // MongoDB will automatically generate _id, which we map to sessionId
   userId: string;
   tenantId: string;
   
@@ -117,7 +109,7 @@ export type OTPChannel = 'email' | 'sms' | 'whatsapp' | 'telegram';
 export type OTPPurpose = 'registration' | 'login' | 'password_reset' | 'email_verification' | 'phone_verification' | '2fa';
 
 export interface OTP {
-  id: string;
+  id?: string; // MongoDB will automatically generate _id, which we map to id
   userId?: string; // Optional for registration
   tenantId: string;
   
@@ -149,7 +141,7 @@ export interface OTP {
 // ═══════════════════════════════════════════════════════════════════
 
 export interface RefreshToken {
-  id: string;
+  id?: string; // MongoDB will automatically generate _id, which we map to id
   userId: string;
   tenantId: string;
   
@@ -219,7 +211,7 @@ export interface LoginInput {
   
   // Identifier (one required)
   identifier: string; // can be username, email, or phone
-  identifierType?: IdentifierType;
+  identifierType?: UserIdentifierType;
   
   // Credentials
   password: string;
@@ -235,7 +227,7 @@ export interface LoginInput {
 
 export interface SocialAuthInput {
   tenantId: string;
-  provider: AuthProvider;
+  provider: UserAuthProvider;
   accessToken: string;
   
   // Optional metadata for new users
@@ -299,7 +291,7 @@ export interface RefreshTokenInput {
 export interface AuthResponse {
   success: boolean;
   message?: string;
-  user?: User;
+  user?: UserType;
   tokens?: TokenPair;
   requiresOTP?: boolean;
   otpSentTo?: string;

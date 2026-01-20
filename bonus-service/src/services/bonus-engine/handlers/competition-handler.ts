@@ -82,7 +82,7 @@ export class TournamentHandler extends BaseBonusHandler {
     context: BonusContext,
     calculation: BonusCalculation,
     now: Date
-  ): UserBonus {
+  ): Omit<UserBonus, 'id'> {
     const bonus = super.buildUserBonus(template, context, calculation, now);
     (bonus as any).metadata = {
       ...((bonus as any).metadata || {}),
@@ -180,7 +180,7 @@ export class LeaderboardHandler extends BaseBonusHandler {
     context: BonusContext,
     calculation: BonusCalculation,
     now: Date
-  ): UserBonus {
+  ): Omit<UserBonus, 'id'> {
     const bonus = super.buildUserBonus(template, context, calculation, now);
     (bonus as any).metadata = {
       ...((bonus as any).metadata || {}),
@@ -233,7 +233,7 @@ export class CustomHandler extends BaseBonusHandler {
     context: BonusContext,
     calculation: BonusCalculation,
     now: Date
-  ): UserBonus {
+  ): Omit<UserBonus, 'id'> {
     const bonus = super.buildUserBonus(template, context, calculation, now);
     // Pass through any custom metadata
     (bonus as any).metadata = {

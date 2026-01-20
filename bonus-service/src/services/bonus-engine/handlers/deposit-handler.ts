@@ -8,6 +8,7 @@ import { getDatabase } from 'core-service';
 import type { BonusTemplate, BonusType } from '../../../types.js';
 import { BaseBonusHandler } from '../base-handler.js';
 import type { BonusContext, EligibilityResult } from '../types.js';
+import { hasMadeFirstDeposit } from '../user-status.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // First Deposit Handler
@@ -23,7 +24,7 @@ export class FirstDepositHandler extends BaseBonusHandler {
     const db = getDatabase();
     const userBonuses = db.collection('user_bonuses');
 
-    // Check if user already has a first deposit bonus
+    // Check if user already has a first deposit bonus (primary check)
     const existing = await userBonuses.findOne({
       userId: context.userId,
       type: { $in: ['first_deposit', 'welcome'] },
@@ -36,23 +37,26 @@ export class FirstDepositHandler extends BaseBonusHandler {
       };
     }
 
-    // Verify this is actually the first deposit
-    const transactions = db.collection('transactions');
-    const depositCount = await transactions.countDocuments({
-      userId: context.userId,
-      type: 'deposit',
-      status: 'completed',
-    });
-
-    if (depositCount > 1) {
+    // Performance-optimized check: Use user status flag instead of querying transactions
+    // This avoids scanning the large transactions table
+    const hasDeposited = await hasMadeFirstDeposit(context.userId, context.tenantId);
+    
+    if (hasDeposited) {
       return {
         eligible: false,
-        reason: 'Not a first deposit',
+        reason: 'User has already made their first deposit',
       };
     }
 
     return { eligible: true, template };
   }
+  
+  /**
+   * Note: User metadata updates are handled by auth-service.
+   * Auth-service listens to wallet.deposit.completed events and updates
+   * user.metadata.hasMadeFirstDeposit automatically.
+   * No need to update here - bonus-service only queries metadata.
+   */
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -155,8 +159,24 @@ export class FirstPurchaseHandler extends BaseBonusHandler {
       };
     }
 
+    // Performance-optimized check: Use user status flag
+    const { hasMadeFirstPurchase } = await import('../user-status.js');
+    const hasPurchased = await hasMadeFirstPurchase(context.userId, context.tenantId);
+    
+    if (hasPurchased) {
+      return {
+        eligible: false,
+        reason: 'User has already made their first purchase',
+      };
+    }
+
     return { eligible: true, template };
   }
+
+  /**
+   * Note: User metadata updates are handled by auth-service via event listeners.
+   * Bonus-service only queries user metadata (read-only access).
+   */
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -186,8 +206,24 @@ export class FirstActionHandler extends BaseBonusHandler {
       };
     }
 
+    // Performance-optimized check: Use user status flag
+    const { hasCompletedFirstAction } = await import('../user-status.js');
+    const hasAction = await hasCompletedFirstAction(context.userId, context.tenantId);
+    
+    if (hasAction) {
+      return {
+        eligible: false,
+        reason: 'User has already completed their first action',
+      };
+    }
+
     return { eligible: true, template };
   }
+
+  /**
+   * Note: User metadata updates are handled by auth-service via event listeners.
+   * Bonus-service only queries user metadata (read-only access).
+   */
 }
 
 // ═══════════════════════════════════════════════════════════════════

@@ -13,21 +13,19 @@
 
 import {
   createGateway,
-  // Legacy permission helpers (work without graphql-shield runtime)
   hasRole,
+  hasAnyRole,
   isAuthenticated,
   allow,
-  and,
-  or,
   logger,
   on,
   startListening,
   getDatabase,
-  // Webhooks - plug-and-play service
   createWebhookService,
   type IntegrationEvent,
   type ResolverContext,
 } from 'core-service';
+import { initializeLedger } from './services/ledger-service.js';
 
 // Import unified event dispatcher (handles both internal events + webhooks)
 import {
@@ -70,7 +68,7 @@ import { bonusEngine } from './services/bonus-engine/index.js';
 import type { BonusTemplate } from './types.js';
 
 // ═══════════════════════════════════════════════════════════════════
-// Custom Resolvers for Client-Side Eligibility
+// Custom Resolvers for Client-Side Eligibility and Role-Based Filtering
 // ═══════════════════════════════════════════════════════════════════
 
 /**
@@ -141,6 +139,86 @@ const availableBonusesResolver = {
   Mutation: {}, // Required by Resolvers type
 };
 
+/**
+ * Custom resolver for userBonuss query to enforce role-based filtering.
+ * System/admin users can see all bonuses, regular users only see their own.
+ */
+const userBonussCustomResolver = {
+  Query: {
+    userBonuss: async (
+      args: Record<string, unknown>,
+      ctx: ResolverContext
+    ) => {
+      const user = ctx.user;
+      
+      // Get default resolver from userBonusService
+      const defaultResolver = userBonusService.resolvers?.Query?.userBonuss;
+      if (!defaultResolver) {
+        throw new Error('Default userBonuss resolver not found');
+      }
+      
+      // Check if user is system or admin
+      // Handle both string[] and object[] role formats
+      const userRoles = user?.roles ? (
+        Array.isArray(user.roles) 
+          ? (typeof user.roles[0] === 'string' 
+              ? user.roles as string[]
+              : (user.roles as any[]).map((r: any) => r.role || r).filter(Boolean))
+          : []
+      ) : [];
+      
+      const isSystemOrAdmin = user && (
+        userRoles.includes('system') || 
+        userRoles.includes('admin') || 
+        userRoles.includes('super-admin') ||
+        hasRole('system')(user) || 
+        hasAnyRole('system', 'admin', 'super-admin')(user)
+      );
+      
+      logger.debug('userBonuss query', { 
+        userId: user?.userId, 
+        roles: userRoles, 
+        isSystemOrAdmin,
+        hasFilter: !!args.filter,
+        filterKeys: args.filter ? Object.keys(args.filter as Record<string, unknown>) : []
+      });
+      
+      // If not system/admin, enforce userId filter
+      if (!isSystemOrAdmin && user) {
+        // Merge userId filter with existing filter
+        const existingFilter = (args.filter as Record<string, unknown>) || {};
+        const mergedFilter = {
+          ...existingFilter,
+          userId: user.userId,
+        };
+        
+        logger.debug('Applying userId filter for non-system user', { userId: user.userId, mergedFilter });
+        
+        // Call default resolver with merged filter
+        return defaultResolver({ ...args, filter: mergedFilter }, ctx);
+      }
+      
+      // System/admin users: use default resolver (no filtering)
+      // Remove filter entirely for system users to show all bonuses
+      const systemArgs = { ...args };
+      if (systemArgs.filter !== undefined) {
+        // If filter is empty object or undefined, remove it to show all bonuses
+        const filterObj = systemArgs.filter as Record<string, unknown>;
+        if (!filterObj || Object.keys(filterObj).length === 0) {
+          delete systemArgs.filter;
+        }
+      }
+      
+      logger.debug('System/admin user - showing all bonuses', { 
+        userId: user?.userId,
+        filterRemoved: !systemArgs.filter 
+      });
+      
+      return defaultResolver(systemArgs, ctx);
+    },
+  },
+};
+
 // GraphQL type extension for custom query
 const availableBonusesTypeDefs = `
   extend type Query {
@@ -168,7 +246,17 @@ const config = {
   },
   services: [
     { name: 'bonusTemplate', types: bonusTemplateService.types, resolvers: bonusTemplateService.resolvers },
-    { name: 'userBonus', types: userBonusService.types, resolvers: userBonusService.resolvers },
+    { 
+      name: 'userBonus', 
+      types: userBonusService.types, 
+      resolvers: {
+        Query: {
+          ...userBonusService.resolvers?.Query,
+          ...userBonussCustomResolver.Query,
+        },
+        Mutation: userBonusService.resolvers?.Mutation || {},
+      }
+    },
     { name: 'bonusTransaction', types: bonusTransactionService.types, resolvers: bonusTransactionService.resolvers },
     // Custom resolver for client-side eligibility
     { name: 'availableBonuses', types: availableBonusesTypeDefs, resolvers: availableBonusesResolver },
@@ -179,44 +267,47 @@ const config = {
   permissions: {
     Query: {
       health: allow,
-      // Templates (read) - any authenticated user
-      bonusTemplates: isAuthenticated,
-      bonusTemplate: isAuthenticated,
-      availableBonuses: isAuthenticated, // Client-side eligibility check
+      // Templates (read) - system/admin only
+      bonusTemplates: hasAnyRole('system', 'admin', 'super-admin'),
+      bonusTemplate: hasAnyRole('system', 'admin', 'super-admin'),
+      availableBonuses: isAuthenticated, // Client-side eligibility check (users need to see available bonuses)
       // User bonuses (includes referral bonuses)
+      // System/admin see all, regular users see only their own (enforced in resolver)
       userBonuss: isAuthenticated,
       userBonus: isAuthenticated,
       // Transactions (includes turnover tracking)
       bonusTransactions: isAuthenticated,
       bonusTransaction: isAuthenticated,
-      // Webhooks (admin only)
-      webhooks: hasRole('admin'),
-      webhook: hasRole('admin'),
-      webhookStats: hasRole('admin'),
-      webhookDeliveries: hasRole('admin'),
+      // Webhooks (system only)
+      webhooks: hasRole('system'),
+      webhook: hasRole('system'),
+      webhookStats: hasRole('system'),
+      webhookDeliveries: hasRole('system'),
     },
     Mutation: {
-      // Admin: Template management
-      createBonusTemplate: hasRole('admin'),
-      updateBonusTemplate: hasRole('admin'),
-      deleteBonusTemplate: hasRole('admin'),
+      // System: Template management
+      createBonusTemplate: hasRole('system'),
+      updateBonusTemplate: hasRole('system'),
+      deleteBonusTemplate: hasRole('system'),
       // User: Bonus operations (claim, forfeit)
       createUserBonus: isAuthenticated,
-      updateUserBonus: hasRole('admin'),
-      deleteUserBonus: hasRole('admin'),
+      updateUserBonus: hasRole('system'),
+      deleteUserBonus: hasRole('system'),
       // Transactions
       createBonusTransaction: isAuthenticated,
-      updateBonusTransaction: hasRole('admin'),
-      deleteBonusTransaction: hasRole('admin'),
-      // Webhooks (admin only)
-      registerWebhook: hasRole('admin'),
-      updateWebhook: hasRole('admin'),
-      deleteWebhook: hasRole('admin'),
-      testWebhook: hasRole('admin'),
+      updateBonusTransaction: hasRole('system'),
+      deleteBonusTransaction: hasRole('system'),
+      // Webhooks (system only)
+      registerWebhook: hasRole('system'),
+      updateWebhook: hasRole('system'),
+      deleteWebhook: hasRole('system'),
+      testWebhook: hasRole('system'),
     },
   },
-  mongoUri: process.env.MONGO_URI || 'mongodb://localhost:27017/bonus_service',
-  redisUrl: process.env.REDIS_URL,
+  // Note: When connecting from localhost, directConnection=true prevents replica set member discovery
+  mongoUri: process.env.MONGO_URI || 'mongodb://localhost:27017/bonus_service?directConnection=true',
+  // Redis password: default is redis123 (from Docker container), can be overridden via REDIS_PASSWORD env var
+  redisUrl: process.env.REDIS_URL || `redis://:${process.env.REDIS_PASSWORD || 'redis123'}@localhost:6379`,
   defaultPermission: 'deny' as const, // Secure default
 };
 
@@ -281,6 +372,106 @@ function setupEventHandlers() {
   });
   
   // ═══════════════════════════════════════════════════════════════════
+  // Purchase Events - Auto-award first_purchase bonuses
+  // ═══════════════════════════════════════════════════════════════════
+  
+  on<WalletEventData>('wallet.purchase.completed', async (event: IntegrationEvent<WalletEventData>) => {
+    logger.info('Processing purchase for bonus eligibility', {
+      eventId: event.eventId,
+      userId: event.userId,
+      amount: event.data.amount,
+      currency: event.data.currency,
+    });
+    
+    try {
+      // Use bonusEngine to check eligibility and award bonuses
+      // Metadata check (isFirstPurchase) happens in FirstPurchaseHandler.validateSpecific
+      const awardedBonuses = await bonusEngine.handlePurchase({
+        transactionId: event.data.transactionId,
+        walletId: event.data.walletId,
+        userId: event.userId!,
+        tenantId: event.tenantId,
+        amount: event.data.amount,
+        currency: event.data.currency,
+      });
+      
+      if (awardedBonuses.length > 0) {
+        logger.info('Bonuses awarded on purchase', {
+          userId: event.userId,
+          bonuses: awardedBonuses.map(b => ({ id: b.id, type: b.type, value: b.originalValue })),
+        });
+      }
+    } catch (err) {
+      logger.error('Failed to process purchase for bonuses', { error: err, eventId: event.eventId });
+    }
+  });
+  
+  // ═══════════════════════════════════════════════════════════════════
+  // Action Events - Auto-award first_action bonuses (bet, game action, etc.)
+  // ═══════════════════════════════════════════════════════════════════
+  
+  on<WalletEventData>('wallet.bet.completed', async (event: IntegrationEvent<WalletEventData>) => {
+    logger.info('Processing bet for bonus eligibility', {
+      eventId: event.eventId,
+      userId: event.userId,
+      amount: event.data.amount,
+      currency: event.data.currency,
+    });
+    
+    try {
+      // First bet can be considered first action
+      // Metadata check (hasCompletedFirstAction) happens in FirstActionHandler.validateSpecific
+      const awardedBonuses = await bonusEngine.handleAction({
+        transactionId: event.data.transactionId,
+        walletId: event.data.walletId,
+        userId: event.userId!,
+        tenantId: event.tenantId,
+        amount: event.data.amount,
+        currency: event.data.currency,
+      });
+      
+      if (awardedBonuses.length > 0) {
+        logger.info('Bonuses awarded on bet', {
+          userId: event.userId,
+          bonuses: awardedBonuses.map(b => ({ id: b.id, type: b.type, value: b.originalValue })),
+        });
+      }
+    } catch (err) {
+      logger.error('Failed to process bet for bonuses', { error: err, eventId: event.eventId });
+    }
+  });
+  
+  on<WalletEventData>('wallet.action.completed', async (event: IntegrationEvent<WalletEventData>) => {
+    logger.info('Processing action for bonus eligibility', {
+      eventId: event.eventId,
+      userId: event.userId,
+      amount: event.data.amount,
+      currency: event.data.currency,
+    });
+    
+    try {
+      // Metadata check (hasCompletedFirstAction) happens in FirstActionHandler.validateSpecific
+      const awardedBonuses = await bonusEngine.handleAction({
+        transactionId: event.data.transactionId,
+        walletId: event.data.walletId,
+        userId: event.userId!,
+        tenantId: event.tenantId,
+        amount: event.data.amount,
+        currency: event.data.currency,
+      });
+      
+      if (awardedBonuses.length > 0) {
+        logger.info('Bonuses awarded on action', {
+          userId: event.userId,
+          bonuses: awardedBonuses.map(b => ({ id: b.id, type: b.type, value: b.originalValue })),
+        });
+      }
+    } catch (err) {
+      logger.error('Failed to process action for bonuses', { error: err, eventId: event.eventId });
+    }
+  });
+  
+  // ═══════════════════════════════════════════════════════════════════
   // Withdrawal Events - Potential bonus forfeit
   // ═══════════════════════════════════════════════════════════════════
   
@@ -293,7 +484,6 @@ function setupEventHandlers() {
     
     // Note: Withdrawals while bonus is active may forfeit the bonus
     // This depends on business rules - implement if needed
-    // await bonusEngine.forfeit(bonusId, event.userId!, 'Withdrawal while bonus active');
   });
   
   // ═══════════════════════════════════════════════════════════════════
@@ -483,57 +673,50 @@ function setupEventHandlers() {
 }
 
 async function main() {
-  console.log(`
-╔═══════════════════════════════════════════════════════════════════════╗
-║                       BONUS SERVICE                                   ║
-╠═══════════════════════════════════════════════════════════════════════╣
-║                                                                       ║
-║  Design Patterns:                                                     ║
-║  • Strategy Pattern - Handler per bonus type                          ║
-║  • Template Method - Base handler defines algorithm                   ║
-║  • Factory/Registry - Dynamic handler registration                    ║
-║  • Chain of Responsibility - Validator chain                          ║
-║  • Facade Pattern - Clean BonusEngine API                             ║
-║                                                                       ║
-║  Bonus Types Supported:                                               ║
-║  • Welcome, First Deposit, Reload, Top-up                             ║
-║  • Referral (Referrer & Referee rewards, Commission)                  ║
-║  • Cashback, Consolation, Winback                                     ║
-║  • Loyalty, Loyalty Points, VIP, Tier Upgrade                         ║
-║  • Birthday, Anniversary, Seasonal                                    ║
-║  • Daily Login, Streak, Flash                                         ║
-║  • Achievement, Milestone, Task Completion, Challenge                 ║
-║  • Tournament, Leaderboard, Promo Code, Special Event                 ║
-║  • Free Credit, Trial, Selection, Combo                               ║
-║                                                                       ║
-║  Domains: betting, crypto, social, gaming, ecommerce, fintech         ║
-║                                                                       ║
-║  Events Listening:                                                    ║
-║  • wallet.deposit.completed → Auto-award deposit bonuses              ║
-║  • wallet.withdrawal.completed → Check forfeit rules                  ║
-║  • activity.completed → Track turnover progress                       ║
-║  • user.birthday, user.login, user.tier_upgraded                      ║
-║  • referral.qualified, achievement.unlocked                           ║
-║  • user.weekly_loss → Cashback bonuses                                ║
-║                                                                       ║
-╚═══════════════════════════════════════════════════════════════════════╝
-`);
-
-  console.log('Environment:');
-  console.log(`  PORT:       ${config.port}`);
-  console.log(`  MONGO_URI:  ${process.env.MONGO_URI || 'mongodb://localhost:27017/bonus_service'}`);
-  console.log(`  REDIS_URL:  ${process.env.REDIS_URL || 'not configured'}`);
-  console.log('');
+  logger.info('╔═══════════════════════════════════════════════════════════════════╗');
+  logger.info('║                       BONUS SERVICE                               ║');
+  logger.info('╠═══════════════════════════════════════════════════════════════════╣');
+  logger.info('║  Design Patterns: Strategy, Template Method, Factory, Facade     ║');
+  logger.info('║  Bonus Types: 38 types across 6 domains                           ║');
+  logger.info('║  Events: wallet, activity, user, referral, achievement           ║');
+  logger.info('╚═══════════════════════════════════════════════════════════════════╝');
+  
+  logger.info('Environment', {
+    port: config.port,
+    mongoUri: process.env.MONGO_URI || 'mongodb://localhost:27017/bonus_service',
+    redisUrl: process.env.REDIS_URL ? 'configured' : 'not configured',
+  });
 
   // Register event handlers before starting gateway
   setupEventHandlers();
 
+  // Create gateway first (this connects to database)
   await createGateway({
     ...config,
   });
+
+  // Initialize bonus webhooks AFTER database connection is established
+  try {
+    await initializeBonusWebhooks();
+  } catch (error) {
+    logger.error('Failed to initialize bonus webhooks', { error });
+    // Continue - webhooks are optional
+  }
   
-  // Initialize bonus webhooks (unified event dispatcher)
-  await initializeBonusWebhooks();
+  // Initialize ledger system AFTER database connection is established
+  const tenantId = 'default'; // Could be multi-tenant in future
+  try {
+    await initializeLedger(tenantId);
+    logger.info('Ledger system initialized for bonus service');
+  } catch (error) {
+    logger.error('Failed to initialize ledger system', { error });
+    // Ledger is critical - but we'll let it fail gracefully and log
+    // The service can still run, but ledger operations will fail
+    throw error; // Re-throw as ledger is critical for bonus service
+  }
+
+  // Note: User status flags are now stored in auth-service user.metadata
+  // No need for separate user_status collection - consistent with payment-service architecture
   
   // Cleanup old webhook deliveries daily
   setInterval(async () => {
@@ -583,8 +766,28 @@ async function main() {
 export { bonusWebhooks };
 
 main().catch((err) => {
-  logger.error('Failed to start bonus-service', { error: err.message });
+  logger.error('Failed to start bonus-service', {
+    error: err instanceof Error ? err.message : String(err),
+    stack: err instanceof Error ? err.stack : undefined,
+  });
   process.exit(1);
+});
+
+// Setup process-level error handlers
+process.on('uncaughtException', (error) => {
+  logger.error('Uncaught exception in bonus-service', {
+    error: error.message,
+    stack: error.stack,
+  });
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  logger.error('Unhandled rejection in bonus-service', {
+    reason: reason instanceof Error ? reason.message : String(reason),
+    stack: reason instanceof Error ? reason.stack : undefined,
+  });
+  // Don't exit - log and continue (some rejections are acceptable)
 });
 
 // Export types for consumers

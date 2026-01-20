@@ -1,5 +1,5 @@
 /**
- * Generic Reference Resolver
+ * Generic Reference Resolver.
  * 
  * Inspired by Mongoose's refPath/populate, but optimized for:
  * - MongoDB driver (no Mongoose overhead)
@@ -7,7 +7,7 @@
  * - Microservices (cross-service references)
  */
 
-import { getDatabase, logger } from 'core-service';
+import { getDatabase, getClient, logger, findOneById } from 'core-service';
 
 /**
  * Collection mapping for reference types
@@ -51,12 +51,41 @@ export async function resolveReference(
 ): Promise<any | null> {
   if (!refId || !refType) return null;
   
+  // CRITICAL: User references must come from auth_service database, not payment_service
+  // All other references come from payment_service database
+  if (refType === 'user' || refType === 'player') {
+    try {
+      const client = getClient();
+      const authDb = client.db('auth_service');
+      const usersCollection = authDb.collection('users');
+      // Use optimized findOneById utility (performance-optimized)
+      const doc = await findOneById(usersCollection, refId, {});
+      if (doc) {
+        // Remove _id from projection
+        const { _id, ...rest } = doc as any;
+        return rest;
+      }
+      return null;
+    } catch (error) {
+      logger.error(`Failed to resolve user reference ${refId} from auth_service`, { error });
+      return null;
+    }
+  }
+  
+  // All other references come from payment_service database
   const db = getDatabase();
   const collectionName = COLLECTION_MAP[refType] || refType;
   const collection = db.collection(collectionName);
   
   try {
-    return await collection.findOne({ id: refId }, { projection: { _id: 0 } });
+    // Use optimized findOneById utility (performance-optimized)
+    const doc = await findOneById(collection, refId, {});
+    if (doc) {
+      // Remove _id from projection
+      const { _id, ...rest } = doc as any;
+      return rest;
+    }
+    return null;
   } catch (error) {
     logger.error(`Failed to resolve reference ${refType}:${refId}`, { error });
     return null;
@@ -127,14 +156,31 @@ export async function batchResolveReferences<T extends Record<string, any>>(
   const refCache = new Map<string, any>();
   
   for (const [refType, items] of grouped.entries()) {
-    const collectionName = COLLECTION_MAP[refType] || refType;
-    const collection = db.collection(collectionName);
     const ids = items.map(item => item.refId);
     
     try {
-      const refs = await collection
-        .find({ id: { $in: ids } }, { projection: { _id: 0 } })
-        .toArray();
+      let refs: any[] = [];
+      
+      // CRITICAL: User references must come from auth_service database
+      if (refType === 'user' || refType === 'player') {
+        const client = getClient();
+        const authDb = client.db('auth_service');
+        const usersCollection = authDb.collection('users');
+        // Batch lookup: use $in query (efficient for multiple IDs)
+        const docs = await usersCollection
+          .find({ id: { $in: ids } }, { projection: { _id: 0 } })
+          .toArray();
+        refs = docs;
+      } else {
+        // All other references come from payment_service database
+        const collectionName = COLLECTION_MAP[refType] || refType;
+        const collection = db.collection(collectionName);
+        // Batch lookup: use $in query (efficient for multiple IDs)
+        const docs = await collection
+          .find({ id: { $in: ids } }, { projection: { _id: 0 } })
+          .toArray();
+        refs = docs;
+      }
       
       // Cache by ID
       for (const ref of refs) {
@@ -170,15 +216,23 @@ export async function referenceExists(
 ): Promise<boolean> {
   if (!refId || !refType) return false;
   
-  const db = getDatabase();
-  const collectionName = COLLECTION_MAP[refType] || refType;
-  const collection = db.collection(collectionName);
-  
   try {
-    const doc = await collection.findOne(
-      { id: refId },
-      { projection: { id: 1 } }
-    );
+    // CRITICAL: User references must come from auth_service database
+    if (refType === 'user' || refType === 'player') {
+      const client = getClient();
+      const authDb = client.db('auth_service');
+      const usersCollection = authDb.collection('users');
+      // Use optimized findOneById utility (performance-optimized)
+      const doc = await findOneById(usersCollection, refId, {});
+      return doc !== null;
+    }
+    
+    // All other references come from payment_service database
+    const db = getDatabase();
+    const collectionName = COLLECTION_MAP[refType] || refType;
+    const collection = db.collection(collectionName);
+    // Use optimized findOneById utility (performance-optimized)
+    const doc = await findOneById(collection, refId, {});
     return doc !== null;
   } catch {
     return false;

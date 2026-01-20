@@ -20,6 +20,10 @@ import type {
 } from './types.js';
 import { templatePersistence, userBonusPersistence } from './persistence.js';
 import { emitBonusEvent } from '../../event-dispatcher.js';
+import { 
+  recordBonusAwardLedgerEntry,
+  checkBonusPoolBalance,
+} from '../ledger-service.js';
 
 export abstract class BaseBonusHandler implements IBonusHandler {
   abstract readonly type: BonusType;
@@ -227,29 +231,86 @@ export abstract class BaseBonusHandler implements IBonusHandler {
       return { success: false, error: 'Bonus value is zero or negative' };
     }
 
-    const now = new Date();
-    const userBonus = this.buildUserBonus(template, context, calculation, now);
+    // Check ledger balance before awarding (prevent infinite money)
+    try {
+      const balanceCheck = await checkBonusPoolBalance(calculation.bonusValue, template.currency);
+      if (!balanceCheck.sufficient) {
+        logger.warn('Insufficient bonus pool balance', {
+          userId: context.userId,
+          templateId: template.id,
+          required: balanceCheck.required,
+          available: balanceCheck.available,
+        });
+        return { 
+          success: false, 
+          error: `Insufficient bonus pool balance. Available: ${balanceCheck.available}, Required: ${balanceCheck.required}` 
+        };
+      }
+    } catch (ledgerError) {
+      logger.error('Failed to check bonus pool balance', {
+        error: ledgerError,
+        userId: context.userId,
+        templateId: template.id,
+      });
+      // Continue - ledger might not be initialized yet, but log the error
+      // In production, you might want to fail here
+    }
 
-    // Use persistence layer for data operations
-    await userBonusPersistence.create(userBonus);
+    const now = new Date();
+    const userBonusData = this.buildUserBonus(template, context, calculation, now);
+
+    // Create bonus first to get MongoDB-generated ID
+    // MongoDB will automatically create _id, which will be normalized to id
+    const createdBonus = await userBonusPersistence.create(userBonusData);
+
+    // Record in ledger AFTER creating bonus record (we need the bonus ID)
+    // If ledger fails, the transaction will roll back the bonus creation
+    try {
+      await recordBonusAwardLedgerEntry(
+        context.userId,
+        calculation.bonusValue,
+        template.currency,
+        context.tenantId,
+        createdBonus.id,
+        template.type,
+        `Bonus awarded: ${template.name} (${template.code})`
+      );
+    } catch (ledgerError) {
+      logger.error('Failed to record bonus in ledger', {
+        error: ledgerError,
+        userId: context.userId,
+        bonusId: createdBonus.id,
+      });
+      // If ledger fails, delete the bonus (transaction will handle rollback if in transaction)
+      try {
+        await userBonusPersistence.delete(createdBonus.id);
+      } catch (deleteError) {
+        logger.error('Failed to delete bonus after ledger error', { error: deleteError });
+      }
+      // If ledger fails, we should not award the bonus
+      return { 
+        success: false, 
+        error: 'Failed to record bonus in ledger. Bonus not awarded.' 
+      };
+    }
 
     // Increment template usage via persistence layer
     await templatePersistence.incrementUsage(template.id);
 
     // Emit event
-    await this.emitAwardedEvent(userBonus, calculation);
+    await this.emitAwardedEvent(createdBonus, calculation);
 
     // Run post-award hook
-    await this.onAwarded(userBonus, context);
+    await this.onAwarded(createdBonus, context);
 
     logger.info('Bonus awarded', {
       userId: context.userId,
-      bonusId: userBonus.id,
+      bonusId: createdBonus.id,
       type: template.type,
       value: calculation.bonusValue,
     });
 
-    return { success: true, bonus: userBonus };
+    return { success: true, bonus: createdBonus };
   }
 
   /**
@@ -261,9 +322,9 @@ export abstract class BaseBonusHandler implements IBonusHandler {
     context: BonusContext,
     calculation: BonusCalculation,
     now: Date
-  ): UserBonus {
+  ): Omit<UserBonus, 'id'> {
+    // MongoDB will automatically create _id, which will be normalized to id when reading
     return {
-      id: crypto.randomUUID(),
       userId: context.userId,
       tenantId: context.tenantId,
       templateId: template.id,

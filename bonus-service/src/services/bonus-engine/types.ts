@@ -160,6 +160,26 @@ export interface DepositEvent {
   isFirstDeposit?: boolean;
 }
 
+export interface PurchaseEvent {
+  transactionId: string;
+  walletId: string;
+  userId: string;
+  tenantId: string;
+  amount: number;
+  currency: string;
+  isFirstPurchase?: boolean;
+}
+
+export interface ActionEvent {
+  transactionId: string;
+  walletId: string;
+  userId: string;
+  tenantId: string;
+  amount: number;
+  currency: string;
+  isFirstAction?: boolean;
+}
+
 export interface ActivityEvent {
   userId: string;
   tenantId: string;

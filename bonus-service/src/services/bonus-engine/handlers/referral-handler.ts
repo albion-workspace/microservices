@@ -77,7 +77,7 @@ export class ReferralHandler extends BaseBonusHandler {
     context: BonusContext,
     calculation: BonusCalculation,
     now: Date
-  ): UserBonus {
+  ): Omit<UserBonus, 'id'> {
     const bonus = super.buildUserBonus(template, context, calculation, now);
     // Store the referee ID for tracking
     bonus.refereeId = context.refereeId;
@@ -157,7 +157,7 @@ export class RefereeHandler extends BaseBonusHandler {
     context: BonusContext,
     calculation: BonusCalculation,
     now: Date
-  ): UserBonus {
+  ): Omit<UserBonus, 'id'> {
     const bonus = super.buildUserBonus(template, context, calculation, now);
     // Store the referrer ID for tracking
     bonus.referrerId = context.referrerId;
@@ -261,7 +261,7 @@ export class CommissionHandler extends BaseBonusHandler {
     context: BonusContext,
     calculation: BonusCalculation,
     now: Date
-  ): UserBonus {
+  ): Omit<UserBonus, 'id'> {
     const bonus = super.buildUserBonus(template, context, calculation, now);
     bonus.refereeId = context.refereeId;
     return bonus;

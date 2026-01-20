@@ -97,37 +97,37 @@ Write-Host "[INFO] Using shared JWT_SECRET for all services" -ForegroundColor Cy
 Write-Host "[INFO] JWT_SECRET: $sharedJwtSecret" -ForegroundColor Gray
 Write-Host ""
 
-# Step 6: Start all services
-Write-Host "[STEP 6] Starting all services..." -ForegroundColor Yellow
+# Step 6: Start all services in WATCH MODE using start-service-dev.ps1
+Write-Host "[STEP 6] Starting all services in WATCH MODE..." -ForegroundColor Yellow
 Write-Host ""
 
-# Notification Service (port 3006)
-Write-Host "  Starting Notification Service (port 3006)..." -ForegroundColor Cyan
-$notificationScript = "cd '$rootDir\notification-service'; `$env:PORT='3006'; `$env:MONGO_URI='mongodb://localhost:27017/notification_service'; `$env:JWT_SECRET='$sharedJwtSecret'; Write-Host '=== NOTIFICATION SERVICE (Port 3006) ===' -ForegroundColor Cyan; npm run build:run"
-Start-Process powershell -ArgumentList "-NoExit", "-Command", $notificationScript
+# Get path to start-service-dev.ps1 script
+$scriptsDir = Split-Path -Parent $PSScriptRoot
+$startServiceDevScript = Join-Path $scriptsDir "start-service-dev.ps1"
+
+# Notification Service (port 3006) - Watch Mode
+Write-Host "  Starting Notification Service (port 3006) in WATCH MODE..." -ForegroundColor Cyan
+Start-Process powershell -ArgumentList "-ExecutionPolicy", "Bypass", "-File", $startServiceDevScript, "notification-service"
 Start-Sleep -Seconds 3
 
-# Auth Service (port 3003)
-Write-Host "  Starting Auth Service (port 3003)..." -ForegroundColor Cyan
-$authScript = "cd '$rootDir\auth-service'; `$env:PORT='3003'; `$env:MONGO_URI='mongodb://localhost:27017/auth_service'; `$env:NOTIFICATION_SERVICE_URL='http://localhost:3006/graphql'; `$env:JWT_SECRET='$sharedJwtSecret'; Write-Host '=== AUTH SERVICE (Port 3003) ===' -ForegroundColor Cyan; npm run build:run"
-Start-Process powershell -ArgumentList "-NoExit", "-Command", $authScript
+# Auth Service (port 3003) - Watch Mode
+Write-Host "  Starting Auth Service (port 3003) in WATCH MODE..." -ForegroundColor Cyan
+Start-Process powershell -ArgumentList "-ExecutionPolicy", "Bypass", "-File", $startServiceDevScript, "auth-service"
 Start-Sleep -Seconds 3
 
-# Payment Service (port 3004)
-Write-Host "  Starting Payment Service (port 3004)..." -ForegroundColor Cyan
-$paymentScript = "cd '$rootDir\payment-service'; `$env:PORT='3004'; `$env:MONGO_URI='mongodb://localhost:27017/payment_service'; `$env:JWT_SECRET='$sharedJwtSecret'; Write-Host '=== PAYMENT SERVICE (Port 3004) ===' -ForegroundColor Cyan; npm run build:run"
-Start-Process powershell -ArgumentList "-NoExit", "-Command", $paymentScript
+# Payment Service (port 3004) - Watch Mode
+Write-Host "  Starting Payment Service (port 3004) in WATCH MODE..." -ForegroundColor Cyan
+Start-Process powershell -ArgumentList "-ExecutionPolicy", "Bypass", "-File", $startServiceDevScript, "payment-service"
 Start-Sleep -Seconds 3
 
-# Bonus Service (port 3005)
-Write-Host "  Starting Bonus Service (port 3005)..." -ForegroundColor Cyan
-$bonusScript = "cd '$rootDir\bonus-service'; `$env:PORT='3005'; `$env:MONGO_URI='mongodb://localhost:27017/bonus_service'; `$env:JWT_SECRET='$sharedJwtSecret'; Write-Host '=== BONUS SERVICE (Port 3005) ===' -ForegroundColor Cyan; npm run build:run"
-Start-Process powershell -ArgumentList "-NoExit", "-Command", $bonusScript
+# Bonus Service (port 3005) - Watch Mode
+Write-Host "  Starting Bonus Service (port 3005) in WATCH MODE..." -ForegroundColor Cyan
+Start-Process powershell -ArgumentList "-ExecutionPolicy", "Bypass", "-File", $startServiceDevScript, "bonus-service"
 Start-Sleep -Seconds 3
 
-# React App (port 5173)
-Write-Host "  Starting React App (port 5173)..." -ForegroundColor Cyan
-$reactScript = "cd '$rootDir\app'; Write-Host '=== REACT APP (Port 5173) ===' -ForegroundColor Cyan; npm run dev"
+# React App (port 5173) - Already in watch mode
+Write-Host "  Starting React App (port 5173) in WATCH MODE..." -ForegroundColor Cyan
+$reactScript = "cd '$rootDir\app'; Write-Host '=== REACT APP (Port 5173) - WATCH MODE ===' -ForegroundColor Cyan; npm run dev"
 Start-Process powershell -ArgumentList "-NoExit", "-Command", $reactScript
 Start-Sleep -Seconds 3
 
@@ -171,6 +171,7 @@ foreach ($service in $services) {
 }
 
 Write-Host ""
-Write-Host "[COMPLETE] All services are running in separate PowerShell windows." -ForegroundColor Cyan
+Write-Host "[COMPLETE] All services are running in WATCH MODE in separate CMD windows." -ForegroundColor Cyan
+Write-Host "          Services will auto-restart on code changes." -ForegroundColor Green
 Write-Host "          Check each window for detailed logs." -ForegroundColor Gray
 Write-Host ""

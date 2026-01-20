@@ -110,6 +110,8 @@ export type {
   IEligibilityValidator,
   IBonusCalculator,
   DepositEvent,
+  PurchaseEvent,
+  ActionEvent,
   ActivityEvent,
   WithdrawalEvent,
 } from './types.js';

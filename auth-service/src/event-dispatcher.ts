@@ -24,6 +24,20 @@ export type AuthWebhookEvents = {
   'user.unlocked': { userId: string };
   'user.suspended': { userId: string; reason: string };
   'user.deleted': { userId: string };
+  /**
+   * Generic user metadata update event
+   * Used for tracking user activity flags (deposit, withdrawal, purchase, action, etc.)
+   * Type field indicates what kind of metadata was updated
+   * Note: userId is passed separately to emitAuthEvent, not in data
+   */
+  'user.metadata': { 
+    type: 'deposit' | 'withdrawal' | 'purchase' | 'action' | string; // Activity type
+    metadata: Record<string, any>; // The metadata fields that were updated
+    transactionId?: string; // Optional: related transaction ID
+    amount?: number; // Optional: transaction amount
+    currency?: string; // Optional: transaction currency
+    timestamp: string; // When the metadata was updated
+  };
   'session.created': { userId: string; sessionId: string; deviceInfo: any };
   'session.expired': { userId: string; sessionId: string };
   'session.revoked': { userId: string; sessionId: string; reason: string };

@@ -7,7 +7,7 @@ Write-Host "================================================================" -F
 Write-Host ""
 
 # No hardcoded dev token - using dynamic authentication flow
-# Admin token will be created during test execution
+# System token will be created during test execution
 
 function Test-GraphQL {
     param(
@@ -118,53 +118,53 @@ if ($registerResult) {
         
         $testResults["auth_logout"] = Test-GraphQL -ServiceName "Auth" -Url $authUrl -Query "mutation Logout(`$refreshToken: String!) { logout(refreshToken: `$refreshToken) { success } }" -Variables @{ refreshToken = $refreshToken } -Token $userToken -Description "logout"
         
-        # Setup static admin user (admin@demo.com) - create if doesn't exist
+        # Setup static system user (system@demo.com) - create if doesn't exist
         Write-Host ""
-        Write-Host "Setting up admin user (admin@demo.com)..." -ForegroundColor Yellow
-        $adminEmail = "admin@demo.com"
-        $adminPassword = "Admin123!@#"
-        $adminToken = $null
+        Write-Host "Setting up system user (system@demo.com)..." -ForegroundColor Yellow
+        $systemEmail = "system@demo.com"
+        $systemPassword = "System123!@#"
+        $systemToken = $null
         
         # Step 1: Try to login first (user might already exist)
-        $adminLoginQuery = "mutation Login(`$input: LoginInput!) { login(input: `$input) { success tokens { accessToken } user { id roles } } }"
-        $adminLoginVars = @{ input = @{ tenantId = "default-tenant"; identifier = $adminEmail; password = $adminPassword } }
-        $adminLoginBody = @{ query = $adminLoginQuery; variables = $adminLoginVars } | ConvertTo-Json -Depth 10 -Compress
+        $systemLoginQuery = "mutation Login(`$input: LoginInput!) { login(input: `$input) { success tokens { accessToken } user { id roles } } }"
+        $systemLoginVars = @{ input = @{ tenantId = "default-tenant"; identifier = $systemEmail; password = $systemPassword } }
+        $systemLoginBody = @{ query = $systemLoginQuery; variables = $systemLoginVars } | ConvertTo-Json -Depth 10 -Compress
         
         try {
-            $adminLogin = Invoke-RestMethod -Uri $authUrl -Method POST -Body $adminLoginBody -ContentType "application/json" -TimeoutSec 10 -ErrorAction Stop
+            $systemLogin = Invoke-RestMethod -Uri $authUrl -Method POST -Body $systemLoginBody -ContentType "application/json" -TimeoutSec 10 -ErrorAction Stop
             
-            if ($adminLogin.data.login.success -and ($adminLogin.data.login.user.roles -contains "admin")) {
-                $adminToken = "Bearer $($adminLogin.data.login.tokens.accessToken)"
-                Write-Host "  ✅ Admin user exists and logged in successfully" -ForegroundColor Green
+            if ($systemLogin.data.login.success -and ($systemLogin.data.login.user.roles -contains "system")) {
+                $systemToken = "Bearer $($systemLogin.data.login.tokens.accessToken)"
+                Write-Host "  ✅ System user exists and logged in successfully" -ForegroundColor Green
             } else {
-                Write-Host "  ⚠️  Admin user exists but login failed or not admin. Creating/updating admin user..." -ForegroundColor Yellow
-                $adminToken = $null
+                Write-Host "  ⚠️  System user exists but login failed or not system. Creating/updating system user..." -ForegroundColor Yellow
+                $systemToken = $null
             }
         } catch {
-            Write-Host "  ⚠️  Admin user not found or login failed. Creating admin user..." -ForegroundColor Yellow
-            $adminToken = $null
+            Write-Host "  ⚠️  System user not found or login failed. Creating system user..." -ForegroundColor Yellow
+            $systemToken = $null
         }
         
         # Step 2: If login failed, try to register or promote existing user
-        if (-not $adminToken) {
+        if (-not $systemToken) {
             $userExists = $false
             $registerSuccess = $false
             
             # Try to register user first
-            $adminRegisterQuery = "mutation Register(`$input: RegisterInput!) { register(input: `$input) { success message user { id email } } }"
-            $adminRegisterVars = @{ input = @{ tenantId = "default-tenant"; email = $adminEmail; password = $adminPassword; autoVerify = $true } }
-            $adminRegisterBody = @{ query = $adminRegisterQuery; variables = $adminRegisterVars } | ConvertTo-Json -Depth 10 -Compress
+            $systemRegisterQuery = "mutation Register(`$input: RegisterInput!) { register(input: `$input) { success message user { id email } } }"
+            $systemRegisterVars = @{ input = @{ tenantId = "default-tenant"; email = $systemEmail; password = $systemPassword; autoVerify = $true } }
+            $systemRegisterBody = @{ query = $systemRegisterQuery; variables = $systemRegisterVars } | ConvertTo-Json -Depth 10 -Compress
             
             try {
-                $adminRegister = Invoke-RestMethod -Uri $authUrl -Method POST -Body $adminRegisterBody -ContentType "application/json" -TimeoutSec 10 -ErrorAction Stop
+                $systemRegister = Invoke-RestMethod -Uri $authUrl -Method POST -Body $systemRegisterBody -ContentType "application/json" -TimeoutSec 10 -ErrorAction Stop
                 
-                if ($adminRegister.data -and $adminRegister.data.register -and $adminRegister.data.register.success) {
-                    Write-Host "  ✅ User registered: $adminEmail" -ForegroundColor Green
+                if ($systemRegister.data -and $systemRegister.data.register -and $systemRegister.data.register.success) {
+                    Write-Host "  ✅ User registered: $systemEmail" -ForegroundColor Green
                     $registerSuccess = $true
-                } elseif ($adminRegister.errors -and $adminRegister.errors.Count -gt 0) {
-                    $errorMsg = $adminRegister.errors[0].message
+                } elseif ($systemRegister.errors -and $systemRegister.errors.Count -gt 0) {
+                    $errorMsg = $systemRegister.errors[0].message
                     if ($errorMsg -match "already exists" -or $errorMsg -match "duplicate") {
-                        Write-Host "  [INFO] User already exists, will promote to admin..." -ForegroundColor Cyan
+                        Write-Host "  [INFO] User already exists, will promote to system..." -ForegroundColor Cyan
                         $userExists = $true
                     } else {
                         Write-Host "  [INFO] Registration failed: $errorMsg. Will try to promote existing user..." -ForegroundColor Yellow
@@ -179,56 +179,56 @@ if ($registerResult) {
                 $userExists = $true
             }
             
-            # Step 3: Promote to admin via MongoDB (works for both new and existing users)
+            # Step 3: Promote to system via MongoDB (works for both new and existing users)
             if ($registerSuccess -or $userExists) {
-                Write-Host "  Promoting user to admin via MongoDB..." -ForegroundColor Yellow
+                Write-Host "  Promoting user to system via MongoDB..." -ForegroundColor Yellow
                 Start-Sleep -Seconds 1
                 $scriptsDir = Split-Path -Parent $PSScriptRoot
                 Push-Location $scriptsDir
-                $promoteResult = node promote-to-admin.js $adminEmail 2>&1 | Out-String
+                $promoteResult = node promote-to-system.js $systemEmail 2>&1 | Out-String
                 Pop-Location
                 
-                if ($promoteResult -match "promoted to admin successfully" -or $promoteResult -match "SUCCESS") {
-                    Write-Host "  ✅ User promoted to admin" -ForegroundColor Green
+                if ($promoteResult -match "promoted to system successfully" -or $promoteResult -match "SUCCESS") {
+                    Write-Host "  ✅ User promoted to system" -ForegroundColor Green
                     Start-Sleep -Seconds 1
                     
-                    # Step 4: Login as admin
+                    # Step 4: Login as system
                     try {
-                        $adminLogin = Invoke-RestMethod -Uri $authUrl -Method POST -Body $adminLoginBody -ContentType "application/json" -TimeoutSec 10 -ErrorAction Stop
+                        $systemLogin = Invoke-RestMethod -Uri $authUrl -Method POST -Body $systemLoginBody -ContentType "application/json" -TimeoutSec 10 -ErrorAction Stop
                         
-                        if ($adminLogin.data -and $adminLogin.data.login -and $adminLogin.data.login.success -and ($adminLogin.data.login.user.roles -contains "admin")) {
-                            $adminToken = "Bearer $($adminLogin.data.login.tokens.accessToken)"
-                            Write-Host "  ✅ Admin user created and logged in successfully" -ForegroundColor Green
+                        if ($systemLogin.data -and $systemLogin.data.login -and $systemLogin.data.login.success -and ($systemLogin.data.login.user.roles -contains "system")) {
+                            $systemToken = "Bearer $($systemLogin.data.login.tokens.accessToken)"
+                            Write-Host "  ✅ System user created and logged in successfully" -ForegroundColor Green
                         } else {
-                            $loginMsg = if ($adminLogin.data -and $adminLogin.data.login) { $adminLogin.data.login.message } else { "Unknown error" }
+                            $loginMsg = if ($systemLogin.data -and $systemLogin.data.login) { $systemLogin.data.login.message } else { "Unknown error" }
                             Write-Host "  ⚠️  Login failed after promotion: $loginMsg" -ForegroundColor Yellow
-                            $adminToken = $null
+                            $systemToken = $null
                         }
                     } catch {
                         Write-Host "  ⚠️  Login failed after promotion: $($_.Exception.Message)" -ForegroundColor Yellow
-                        $adminToken = $null
+                        $systemToken = $null
                     }
                 } else {
-                    Write-Host "  ⚠️  Failed to promote user to admin. Output: $promoteResult" -ForegroundColor Yellow
-                    $adminToken = $null
+                    Write-Host "  ⚠️  Failed to promote user to system. Output: $promoteResult" -ForegroundColor Yellow
+                    $systemToken = $null
                 }
             } else {
                 Write-Host "  ⚠️  Could not register or find user to promote" -ForegroundColor Yellow
-                $adminToken = $null
+                $systemToken = $null
             }
         }
         
-        # Step 5: Use admin token for admin queries
-        if ($adminToken) {
+        # Step 5: Use system token for system queries
+        if ($systemToken) {
             Write-Host ""
-            Write-Host "QUERIES (Admin):" -ForegroundColor Yellow
-            $testResults["auth_users"] = Test-GraphQL -ServiceName "Auth" -Url $authUrl -Query "query { users(first: 10) { nodes { id email } totalCount } }" -Token $adminToken -Description "users"
-            $testResults["auth_getUser"] = Test-GraphQL -ServiceName "Auth" -Url $authUrl -Query "query GetUser(`$id: ID!, `$tenantId: String!) { getUser(id: `$id, tenantId: `$tenantId) { id email } }" -Variables @{ id = $userId; tenantId = "test" } -Token $adminToken -Description "getUser"
+            Write-Host "QUERIES (System):" -ForegroundColor Yellow
+            $testResults["auth_users"] = Test-GraphQL -ServiceName "Auth" -Url $authUrl -Query "query { users(first: 10) { nodes { id email } totalCount } }" -Token $systemToken -Description "users"
+            $testResults["auth_getUser"] = Test-GraphQL -ServiceName "Auth" -Url $authUrl -Query "query GetUser(`$id: ID!, `$tenantId: String!) { getUser(id: `$id, tenantId: `$tenantId) { id email } }" -Variables @{ id = $userId; tenantId = "test" } -Token $systemToken -Description "getUser"
             
-            # Store admin token for other services
-            $global:adminToken = $adminToken
+            # Store system token for other services
+            $global:systemToken = $systemToken
         } else {
-            Write-Host "  ⚠️  Could not setup admin user. Admin operations will be skipped." -ForegroundColor Yellow
+            Write-Host "  ⚠️  Could not setup system user. System operations will be skipped." -ForegroundColor Yellow
             $testResults["auth_users"] = $false
             $testResults["auth_getUser"] = $false
         }
@@ -265,10 +265,10 @@ $testResults["payment_health"] = Test-GraphQL -ServiceName "Payment" -Url $payme
 
 Write-Host ""
 Write-Host "MUTATIONS:" -ForegroundColor Yellow
-if ($global:adminToken) {
-    $testResults["payment_createProviderConfig"] = Test-GraphQL -ServiceName "Payment" -Url $paymentUrl -Query "mutation CreateProviderConfig(`$input: CreateProviderConfigInput!) { createProviderConfig(input: `$input) { success providerConfig { id provider name } } }" -Variables @{ input = @{ provider = "stripe"; name = "Stripe Test"; tenantId = "test"; supportedMethods = @("card"); supportedCurrencies = @("USD"); feePercentage = 2.5 } } -Token $global:adminToken -Description "createProviderConfig (admin)"
+if ($global:systemToken) {
+    $testResults["payment_createProviderConfig"] = Test-GraphQL -ServiceName "Payment" -Url $paymentUrl -Query "mutation CreateProviderConfig(`$input: CreateProviderConfigInput!) { createProviderConfig(input: `$input) { success providerConfig { id provider name } } }" -Variables @{ input = @{ provider = "stripe"; name = "Stripe Test"; tenantId = "test"; supportedMethods = @("card"); supportedCurrencies = @("USD"); feePercentage = 2.5 } } -Token $global:systemToken -Description "createProviderConfig (system)"
 } else {
-    Write-Host "  ⚠️  Skipping admin operations (createProviderConfig) - no admin token" -ForegroundColor Yellow
+    Write-Host "  ⚠️  Skipping system operations (createProviderConfig) - no system token" -ForegroundColor Yellow
     $testResults["payment_createProviderConfig"] = $false
 }
 
@@ -281,8 +281,8 @@ if ($global:userToken) {
     
     Write-Host ""
     Write-Host "QUERIES (After Mutations):" -ForegroundColor Yellow
-    if ($global:adminToken) {
-        $testResults["payment_providerConfigs"] = Test-GraphQL -ServiceName "Payment" -Url $paymentUrl -Query "query { providerConfigs(first: 10) { nodes { id provider name } totalCount } }" -Token $global:adminToken -Description "providerConfigs (admin)"
+    if ($global:systemToken) {
+        $testResults["payment_providerConfigs"] = Test-GraphQL -ServiceName "Payment" -Url $paymentUrl -Query "query { providerConfigs(first: 10) { nodes { id provider name } totalCount } }" -Token $global:systemToken -Description "providerConfigs (system)"
     } else {
         $testResults["payment_providerConfigs"] = $false
     }
@@ -317,10 +317,10 @@ if ($global:userToken) {
     $validFrom = $now.AddDays(-1).ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
     $validUntil = $now.AddDays(30).ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
     
-    if ($global:adminToken) {
-        $testResults["bonus_createBonusTemplate"] = Test-GraphQL -ServiceName "Bonus" -Url $bonusUrl -Query "mutation CreateBonusTemplate(`$input: CreateBonusTemplateInput!) { createBonusTemplate(input: `$input) { success bonusTemplate { id name code type value } } }" -Variables @{ input = @{ name = "Welcome Bonus"; code = "WELCOME100"; type = "welcome"; domain = "casino"; valueType = "fixed"; value = 100.0; currency = "USD"; turnoverMultiplier = 1.0; validFrom = $validFrom; validUntil = $validUntil; priority = 1 } } -Token $global:adminToken -Description "createBonusTemplate (admin)"
+    if ($global:systemToken) {
+        $testResults["bonus_createBonusTemplate"] = Test-GraphQL -ServiceName "Bonus" -Url $bonusUrl -Query "mutation CreateBonusTemplate(`$input: CreateBonusTemplateInput!) { createBonusTemplate(input: `$input) { success bonusTemplate { id name code type value } } }" -Variables @{ input = @{ name = "Welcome Bonus"; code = "WELCOME100"; type = "welcome"; domain = "casino"; valueType = "fixed"; value = 100.0; currency = "USD"; turnoverMultiplier = 1.0; validFrom = $validFrom; validUntil = $validUntil; priority = 1 } } -Token $global:systemToken -Description "createBonusTemplate (system)"
     } else {
-        Write-Host "  ⚠️  Skipping admin operations (createBonusTemplate) - no admin token" -ForegroundColor Yellow
+        Write-Host "  ⚠️  Skipping system operations (createBonusTemplate) - no system token" -ForegroundColor Yellow
         $testResults["bonus_createBonusTemplate"] = $false
     }
     
@@ -328,8 +328,8 @@ if ($global:userToken) {
     
     Write-Host ""
     Write-Host "QUERIES (After Mutations):" -ForegroundColor Yellow
-    if ($global:adminToken) {
-        $testResults["bonus_bonusTemplates"] = Test-GraphQL -ServiceName "Bonus" -Url $bonusUrl -Query "query { bonusTemplates(first: 10) { nodes { id name code type } totalCount } }" -Token $global:adminToken -Description "bonusTemplates (admin)"
+    if ($global:systemToken) {
+        $testResults["bonus_bonusTemplates"] = Test-GraphQL -ServiceName "Bonus" -Url $bonusUrl -Query "query { bonusTemplates(first: 10) { nodes { id name code type } totalCount } }" -Token $global:systemToken -Description "bonusTemplates (system)"
     } else {
         $testResults["bonus_bonusTemplates"] = $false
     }

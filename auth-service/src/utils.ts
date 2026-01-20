@@ -197,3 +197,33 @@ export function generateBackupCodes(count: number = 10): string[] {
   }
   return codes;
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Role Utilities (using access-engine patterns)
+// ═══════════════════════════════════════════════════════════════════
+
+import type { UserRole } from './types/role-types.js';
+
+/**
+ * Convert roles to string array
+ * Handles both legacy format (string[]) and new format (UserRole[])
+ * Uses the same logic as access-engine's normalizeUserRoles
+ */
+export function rolesToArray(roles: UserRole[] | string[] | undefined | null): string[] {
+  if (!roles || !Array.isArray(roles) || roles.length === 0) {
+    return [];
+  }
+  
+  // Check if it's legacy format (string[])
+  if (typeof roles[0] === 'string') {
+    return (roles as string[]).filter(Boolean);
+  }
+  
+  // UserRole[] format - extract role names, filter active and non-expired
+  const now = new Date();
+  return (roles as UserRole[])
+    .filter((r) => r.active !== false)
+    .filter((r) => !r.expiresAt || new Date(r.expiresAt) > now)
+    .map((r) => r.role)
+    .filter(Boolean);
+}

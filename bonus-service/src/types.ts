@@ -268,7 +268,8 @@ export interface UserBonus {
   triggerTransactionId?: string;
   
   // Related
-  depositId?: string;              // Qualifying deposit (legacy, use triggerTransactionId)
+  /** @deprecated Use triggerTransactionId instead */
+  depositId?: string;
   referrerId?: string;             // For referral bonuses
   refereeId?: string;              // For referee bonuses
   

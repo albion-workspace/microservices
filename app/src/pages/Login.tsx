@@ -3,7 +3,7 @@
  */
 
 import React, { useState } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { useAuth } from '../lib/auth-context';
 import { Lock, Mail, AlertCircle, Loader2, Shield, Chrome, Facebook as FacebookIcon, Linkedin, Instagram } from 'lucide-react';
 
@@ -12,6 +12,7 @@ const TENANT_ID = 'default-tenant';
 
 export default function Login() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { login } = useAuth();
 
   const [identifier, setIdentifier] = useState('');
@@ -38,7 +39,13 @@ export default function Login() {
       }
 
       if (result.success && result.user && result.tokens) {
-        navigate('/dashboard');
+        // Navigate to the original route or dashboard
+        const from = (location.state as any)?.from?.pathname;
+        if (from && from !== '/login' && from !== '/register') {
+          navigate(from, { replace: true });
+        } else {
+          navigate('/', { replace: true });
+        }
       } else {
         setError(result.message || 'Login failed');
       }

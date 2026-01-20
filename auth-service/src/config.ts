@@ -6,6 +6,7 @@
  */
 
 import type { AuthConfig as BaseAuthConfig } from './types.js';
+import { logger } from 'core-service';
 
 /**
  * Extended AuthConfig with service-specific settings
@@ -41,8 +42,11 @@ export function loadConfig(): AuthConfig {
     serviceName: process.env.SERVICE_NAME || 'auth-service',
     
     // Database
-    mongoUri: process.env.MONGO_URI || 'mongodb://localhost:27017/auth_service',
-    redisUrl: process.env.REDIS_URL,
+    // Note: When connecting from localhost, directConnection=true prevents replica set member discovery
+    // which would try to resolve Docker hostnames like ms-mongo that don't exist on the host machine
+    mongoUri: process.env.MONGO_URI || 'mongodb://localhost:27017/auth_service?directConnection=true',
+    // Redis password: default is redis123 (from Docker container), can be overridden via REDIS_PASSWORD env var
+    redisUrl: process.env.REDIS_URL || `redis://:${process.env.REDIS_PASSWORD || 'redis123'}@localhost:6379`,
     
     // JWT - Use shared secret for all services
     jwtSecret: process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || 'shared-jwt-secret-change-in-production',
@@ -130,7 +134,7 @@ export function validateConfig(config: AuthConfig): void {
     if (config.nodeEnv === 'production') {
       errors.push('JWT_SECRET or SHARED_JWT_SECRET must be set in production');
     } else {
-      console.warn('⚠ WARNING: Using default JWT_SECRET. Change in production!');
+      logger.warn('⚠ WARNING: Using default JWT_SECRET. Change in production!');
     }
   }
   
@@ -143,32 +147,34 @@ export function validateConfig(config: AuthConfig): void {
  * Print configuration summary (without sensitive data)
  */
 export function printConfigSummary(config: AuthConfig): void {
-  console.log('Configuration:');
-  console.log(`  Environment: ${config.nodeEnv}`);
-  console.log(`  Port: ${config.port}`);
-  console.log(`  MongoDB: ${config.mongoUri}`);
-  console.log(`  Redis: ${config.redisUrl || 'not configured'}`);
-  console.log(`  Frontend URL: ${config.frontendUrl}`);
-  console.log(`  JWT Expiry: ${config.jwtExpiresIn}`);
-  console.log('');
+  logger.info('Configuration:', {
+    environment: config.nodeEnv,
+    port: config.port,
+    mongoUri: config.mongoUri.replace(/:[^:@]+@/, ':***@'), // Hide password
+    redisUrl: config.redisUrl ? 'configured' : 'not configured',
+    frontendUrl: config.frontendUrl,
+    jwtExpiry: config.jwtExpiresIn,
+  });
   
-  console.log('Available OAuth Providers:');
-  if (config.googleClientId) console.log('  ✓ Google');
-  if (config.facebookAppId) console.log('  ✓ Facebook');
-  if (config.linkedinClientId) console.log('  ✓ LinkedIn');
-  if (config.instagramClientId) console.log('  ✓ Instagram');
-  if (!config.googleClientId && !config.facebookAppId && !config.linkedinClientId && !config.instagramClientId) {
-    console.log('  - None configured');
-  }
-  console.log('');
+  const oauthProviders: string[] = [];
+  if (config.googleClientId) oauthProviders.push('Google');
+  if (config.facebookAppId) oauthProviders.push('Facebook');
+  if (config.linkedinClientId) oauthProviders.push('LinkedIn');
+  if (config.instagramClientId) oauthProviders.push('Instagram');
   
-  console.log('Available OTP Channels:');
-  if (config.smtpHost) console.log('  ✓ Email (SMTP)');
-  if (config.twilioAccountSid) console.log('  ✓ SMS (Twilio)');
-  if (config.twilioAccountSid) console.log('  ✓ WhatsApp (Twilio)');
-  if (config.telegramBotToken) console.log('  ✓ Telegram');
-  if (!config.smtpHost && !config.twilioAccountSid && !config.telegramBotToken) {
-    console.log('  - None configured');
+  logger.info('Available OAuth Providers', { 
+    providers: oauthProviders.length > 0 ? oauthProviders : ['None configured'] 
+  });
+  
+  const otpChannels: string[] = [];
+  if (config.smtpHost) otpChannels.push('Email (SMTP)');
+  if (config.twilioAccountSid) {
+    otpChannels.push('SMS (Twilio)');
+    otpChannels.push('WhatsApp (Twilio)');
   }
-  console.log('');
+  if (config.telegramBotToken) otpChannels.push('Telegram');
+  
+  logger.info('Available OTP Channels', { 
+    channels: otpChannels.length > 0 ? otpChannels : ['None configured'] 
+  });
 }

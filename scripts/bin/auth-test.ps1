@@ -398,72 +398,72 @@ if ($userToken -and $userId) {
 # SECTION 8: ADMIN OPERATIONS (if admin token available)
 # ═══════════════════════════════════════════════════════════════
 
-# Setup admin user for admin tests
+# Setup system user for system tests
 Write-Host ""
 Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host "SECTION 8: Admin Operations" -ForegroundColor Cyan
+Write-Host "SECTION 8: System Operations" -ForegroundColor Cyan
 Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host ""
 
-$adminEmail = "admin@demo.com"
-$adminPassword = "Admin123!@#"
-$adminToken = $null
+$systemEmail = "system@demo.com"
+$systemPassword = "System123!@#"
+$systemToken = $null
 
-# Try to login as admin
-$adminLoginQuery = "mutation Login(`$input: LoginInput!) { login(input: `$input) { success tokens { accessToken } user { id roles } } }"
-$adminLoginVars = @{ input = @{ tenantId = $tenantId; identifier = $adminEmail; password = $adminPassword } }
-$adminLoginBody = @{ query = $adminLoginQuery; variables = $adminLoginVars } | ConvertTo-Json -Depth 10 -Compress
+# Try to login as system
+$systemLoginQuery = "mutation Login(`$input: LoginInput!) { login(input: `$input) { success tokens { accessToken } user { id roles } } }"
+$systemLoginVars = @{ input = @{ tenantId = $tenantId; identifier = $systemEmail; password = $systemPassword } }
+$systemLoginBody = @{ query = $systemLoginQuery; variables = $systemLoginVars } | ConvertTo-Json -Depth 10 -Compress
 
 try {
-    $adminLogin = Invoke-RestMethod -Uri $authUrl -Method POST -Body $adminLoginBody -ContentType "application/json" -TimeoutSec 10 -ErrorAction Stop
+    $systemLogin = Invoke-RestMethod -Uri $authUrl -Method POST -Body $systemLoginBody -ContentType "application/json" -TimeoutSec 10 -ErrorAction Stop
     
-    if ($adminLogin.data -and $adminLogin.data.login -and $adminLogin.data.login.success -and ($adminLogin.data.login.user.roles -contains "admin")) {
-        $adminToken = "Bearer $($adminLogin.data.login.tokens.accessToken)"
-        Write-Host "  [OK] Admin user logged in successfully" -ForegroundColor Green
+    if ($systemLogin.data -and $systemLogin.data.login -and $systemLogin.data.login.success -and ($systemLogin.data.login.user.roles -contains "system")) {
+        $systemToken = "Bearer $($systemLogin.data.login.tokens.accessToken)"
+        Write-Host "  [OK] System user logged in successfully" -ForegroundColor Green
     } else {
-        Write-Host "  [WARN] Admin user not available or not admin. Skipping admin tests..." -ForegroundColor Yellow
+        Write-Host "  [WARN] System user not available or not system. Skipping system tests..." -ForegroundColor Yellow
     }
 } catch {
-    Write-Host "  [WARN] Could not login as admin. Skipping admin tests..." -ForegroundColor Yellow
+    Write-Host "  [WARN] Could not login as system. Skipping system tests..." -ForegroundColor Yellow
 }
 
-if ($adminToken) {
+if ($systemToken) {
     # Test 1: List all users
     Write-Host ""
-    Write-Host "Test 1: List all users (admin)" -ForegroundColor Yellow
+    Write-Host "Test 1: List all users (system)" -ForegroundColor Yellow
     $usersQuery = "query Users(`$tenantId: String, `$first: Int, `$skip: Int) { users(tenantId: `$tenantId, first: `$first, skip: `$skip) { nodes { id email username roles status } totalCount } }"
     $usersVars = @{ tenantId = $tenantId; first = 10; skip = 0 }
-    $usersResult = Test-GraphQL -ServiceName "Auth" -Url $authUrl -Query $usersQuery -Variables $usersVars -Token $adminToken -Description "users (admin)"
-    $testResults["users_admin"] = $usersResult.Success
+    $usersResult = Test-GraphQL -ServiceName "Auth" -Url $authUrl -Query $usersQuery -Variables $usersVars -Token $systemToken -Description "users (system)"
+    $testResults["users_system"] = $usersResult.Success
     
     # Get a user ID from the users list for subsequent tests
     $testUserId = $null
     if ($usersResult.Success -and $usersResult.Data.users.nodes.Count -gt 0) {
-        # Try to use the original $userId if it exists in the list, otherwise use the first non-admin user
+        # Try to use the original $userId if it exists in the list, otherwise use the first non-system user
         $userFound = $usersResult.Data.users.nodes | Where-Object { $_.id -eq $userId }
         if ($userFound) {
             $testUserId = $userId
         } else {
-            # Find a non-admin user to test with
-            $nonAdminUser = $usersResult.Data.users.nodes | Where-Object { $_.roles -notcontains "admin" } | Select-Object -First 1
-            if ($nonAdminUser) {
-                $testUserId = $nonAdminUser.id
+            # Find a non-system user to test with
+            $nonSystemUser = $usersResult.Data.users.nodes | Where-Object { $_.roles -notcontains "system" } | Select-Object -First 1
+            if ($nonSystemUser) {
+                $testUserId = $nonSystemUser.id
             } else {
-                # Fallback to first user if all are admins
+                # Fallback to first user if all are system users
                 $testUserId = $usersResult.Data.users.nodes[0].id
             }
         }
-        Write-Host "  [INFO] Using user ID for admin tests: $testUserId" -ForegroundColor Gray
+        Write-Host "  [INFO] Using user ID for system tests: $testUserId" -ForegroundColor Gray
     }
     
     # Test 2: Get user by ID
     Write-Host ""
-    Write-Host "Test 2: Get user by ID (admin)" -ForegroundColor Yellow
+    Write-Host "Test 2: Get user by ID (system)" -ForegroundColor Yellow
     if ($testUserId) {
         $getUserQuery = "query GetUser(`$id: ID!, `$tenantId: String!) { getUser(id: `$id, tenantId: `$tenantId) { id email username roles status } }"
         $getUserVars = @{ id = $testUserId; tenantId = $tenantId }
-        $getUserResult = Test-GraphQL -ServiceName "Auth" -Url $authUrl -Query $getUserQuery -Variables $getUserVars -Token $adminToken -Description "getUser (admin)"
-        $testResults["getUser_admin"] = $getUserResult.Success
+        $getUserResult = Test-GraphQL -ServiceName "Auth" -Url $authUrl -Query $getUserQuery -Variables $getUserVars -Token $systemToken -Description "getUser (system)"
+        $testResults["getUser_system"] = $getUserResult.Success
         # Update testUserId if getUser succeeded
         if ($getUserResult.Success -and $getUserResult.Data.getUser) {
             $testUserId = $getUserResult.Data.getUser.id
@@ -475,18 +475,18 @@ if ($adminToken) {
     
     # Test 3: Update user roles
     Write-Host ""
-    Write-Host "Test 3: Update user roles (admin)" -ForegroundColor Yellow
+    Write-Host "Test 3: Update user roles (system)" -ForegroundColor Yellow
     if ($testUserId) {
         Write-Host "  [INFO] Attempting to update roles for user ID: $testUserId" -ForegroundColor Gray
         $updateRolesQuery = "mutation UpdateUserRoles(`$input: UpdateUserRolesInput!) { updateUserRoles(input: `$input) { id roles } }"
         $updateRolesVars = @{ input = @{ userId = $testUserId; tenantId = $tenantId; roles = @("user", "moderator") } }
-        $updateRolesResult = Test-GraphQL -ServiceName "Auth" -Url $authUrl -Query $updateRolesQuery -Variables $updateRolesVars -Token $adminToken -Description "updateUserRoles (admin)"
+        $updateRolesResult = Test-GraphQL -ServiceName "Auth" -Url $authUrl -Query $updateRolesQuery -Variables $updateRolesVars -Token $systemToken -Description "updateUserRoles (system)"
         $testResults["updateUserRoles"] = $updateRolesResult.Success
         
         # Revert back to user role
         if ($updateRolesResult.Success) {
             $revertRolesVars = @{ input = @{ userId = $testUserId; tenantId = $tenantId; roles = @("user") } }
-            Test-GraphQL -ServiceName "Auth" -Url $authUrl -Query $updateRolesQuery -Variables $revertRolesVars -Token $adminToken -Description "revert roles" | Out-Null
+            Test-GraphQL -ServiceName "Auth" -Url $authUrl -Query $updateRolesQuery -Variables $revertRolesVars -Token $systemToken -Description "revert roles" | Out-Null
         } else {
             Write-Host "  [WARN] updateUserRoles failed. Error: $($updateRolesResult.Error)" -ForegroundColor Yellow
         }
