@@ -241,6 +241,7 @@ const depositSaga = [
           verificationLevel: 'none',
           lifetimeDeposits: 0,
           lifetimeWithdrawals: 0,
+          lifetimeFees: 0,
           dailyWithdrawalUsed: 0,
           monthlyWithdrawalUsed: 0,
           lastWithdrawalReset: new Date(),
@@ -350,6 +351,7 @@ const depositSaga = [
           { 
             $inc: { 
               lifetimeDeposits: input.amount,
+              lifetimeFees: feeAmount, // Track fees for reconciliation
             },
             $set: { 
               lastActivityAt: new Date(),
@@ -652,6 +654,7 @@ const withdrawalSaga = [
           { 
             $inc: { 
               lifetimeWithdrawals: input.amount,
+              lifetimeFees: feeAmount, // Track fees for reconciliation
             },
             $set: { 
               lastActivityAt: new Date(),
@@ -697,6 +700,7 @@ const withdrawalSaga = [
             $inc: { 
               balance: totalAmount,
               lifetimeWithdrawals: -input.amount,
+              lifetimeFees: -(data.feeAmount as number || 0),
             },
             $set: { updatedAt: new Date() }
           }
@@ -884,7 +888,7 @@ export const transactionApprovalResolvers = {
       
       // If it's a deposit, rollback the credited amount
       if (txData.type === 'deposit') {
-        const { userId, currency, netAmount, amount } = txData;
+        const { userId, currency, netAmount, amount, feeAmount } = txData;
         // Note: This update uses userId+currency (not id), so we keep manual query
         await walletsCollection.updateOne(
           { userId, currency },
@@ -892,6 +896,7 @@ export const transactionApprovalResolvers = {
             $inc: {
               balance: -netAmount,
               lifetimeDeposits: -amount,
+              lifetimeFees: -(feeAmount || 0),
             },
             $set: { updatedAt: new Date() },
           }
@@ -908,6 +913,7 @@ export const transactionApprovalResolvers = {
             $inc: {
               balance: totalAmount,
               lifetimeWithdrawals: -amount,
+              lifetimeFees: -(feeAmount || 0),
             },
             $set: { updatedAt: new Date() },
           }

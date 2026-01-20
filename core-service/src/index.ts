@@ -43,6 +43,7 @@ export type {
   TransactionType,
   TransactionStatus,
   BalanceCalculator,
+  TransactionState,
 } from './common/ledger.js';
 
 // Account ID Management (Unified Account ID System)
@@ -153,8 +154,20 @@ export {
 } from './common/cache.js';
 
 // Redis
-export { connectRedis, getRedis, publish, subscribe, closeRedis, checkRedisHealth } from './common/redis.js';
-export type { RedisConfig } from './common/redis.js';
+export { 
+  connectRedis, 
+  getRedis, 
+  publish, 
+  subscribe, 
+  closeRedis, 
+  checkRedisHealth,
+  scanKeys,
+  scanKeysIterator,
+  scanKeysArray,
+  scanKeysWithCallback,
+  batchGetValues,
+} from './common/redis.js';
+export type { RedisConfig, ScanOptions } from './common/redis.js';
 
 // Logger
 export { logger, setLogLevel, setLogFormat, configureLogger, createChildLogger } from './common/logger.js';

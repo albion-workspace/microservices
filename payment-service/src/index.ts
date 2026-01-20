@@ -32,7 +32,7 @@ import {
   findOneById,
   generateMongoId,
 } from 'core-service';
-import { initializeLedger } from './services/ledger-service.js';
+import { initializeLedger, syncWalletBalanceFromLedger } from './services/ledger-service.js';
 
 // Import unified event dispatcher (handles both internal events + webhooks)
 import {
@@ -114,6 +114,7 @@ async function getBonusPoolUserId(): Promise<string> {
   }
 }
 
+
 const config = {
   name: 'payment-service',
   port: parseInt(process.env.PORT || '3002'),
@@ -184,13 +185,14 @@ const config = {
               await Promise.allSettled(syncPromises);
             }
             
-            // Normalize null values to 0 for bonusBalance and lockedBalance
+            // Normalize null values to 0 for bonusBalance, lockedBalance, and lifetimeFees
             if (result && result.nodes && Array.isArray(result.nodes)) {
               result.nodes = result.nodes.map((wallet: any) => ({
                 ...wallet,
                 bonusBalance: wallet.bonusBalance ?? 0,
                 lockedBalance: wallet.lockedBalance ?? 0,
                 balance: wallet.balance ?? 0,
+                lifetimeFees: wallet.lifetimeFees ?? 0,
               }));
             }
             
@@ -213,12 +215,13 @@ const config = {
               const db = getDatabase();
               const syncedWallet = await db.collection('wallets').findOne(
                 { id: wallet.id },
-                { projection: { balance: 1, bonusBalance: 1, lockedBalance: 1 } }
+                { projection: { balance: 1, bonusBalance: 1, lockedBalance: 1, lifetimeFees: 1 } }
               );
               if (syncedWallet) {
                 wallet.balance = syncedWallet.balance ?? wallet.balance;
                 wallet.bonusBalance = syncedWallet.bonusBalance ?? wallet.bonusBalance;
                 wallet.lockedBalance = syncedWallet.lockedBalance ?? wallet.lockedBalance;
+                wallet.lifetimeFees = syncedWallet.lifetimeFees ?? wallet.lifetimeFees ?? 0;
               }
             } catch (syncError) {
               // Don't fail the query if sync fails - log at debug level
@@ -229,12 +232,13 @@ const config = {
               });
             }
             
-            // Normalize null values to 0 for bonusBalance and lockedBalance
+            // Normalize null values to 0 for bonusBalance, lockedBalance, and lifetimeFees
             return {
               ...wallet,
               bonusBalance: wallet.bonusBalance ?? 0,
               lockedBalance: wallet.lockedBalance ?? 0,
               balance: wallet.balance ?? 0,
+              lifetimeFees: wallet.lifetimeFees ?? 0,
             };
           },
         },
@@ -562,24 +566,33 @@ function setupBonusEventHandlers() {
       currency: event.data.currency,
     });
     
+    // Early return if userId is missing
+    if (!event.userId) {
+      logger.warn('No userId in bonus.awarded event, cannot sync wallet', { eventId: event.eventId });
+      return;
+    }
+    
+    // TypeScript type narrowing - userId is guaranteed to be string after the check above
+    const userId = event.userId;
+    
     try {
       const db = getDatabase();
       const walletsCollection = db.collection('wallets');
       
       // Find user's wallet (use provided walletId or find by user/currency)
-      let walletId = event.data.walletId;
+      let walletId: string | undefined = event.data.walletId;
       
       if (!walletId) {
         // Find user's main wallet for this currency
         const wallet = await walletsCollection.findOne({
-          userId: event.userId,
+          userId: userId,
           currency: event.data.currency,
           category: 'main',
         });
         
         if (!wallet) {
           logger.warn('No wallet found for bonus credit', {
-            userId: event.userId,
+            userId: userId,
             currency: event.data.currency,
           });
           return;
@@ -587,17 +600,21 @@ function setupBonusEventHandlers() {
         walletId = (wallet as any).id;
       }
       
-      // Credit bonus balance
-      const result = await walletsCollection.updateOne(
-        { id: walletId },
-        { 
-          $inc: { bonusBalance: event.data.value },
-          $set: { updatedAt: new Date() },
-        }
-      );
+      // Ensure walletId is defined before syncing
+      if (!walletId) {
+        logger.warn('Wallet ID not found for bonus credit', {
+          userId: userId,
+          currency: event.data.currency,
+        });
+        return;
+      }
       
-      if (result.modifiedCount > 0) {
-        logger.info('Bonus balance credited', {
+      // Sync wallet balance from ledger (source of truth)
+      // The bonus-service has already recorded the ledger entry, so sync from ledger
+      try {
+        // Both userId and walletId are guaranteed to be strings after checks above
+        await syncWalletBalanceFromLedger(userId, walletId, event.data.currency);
+        logger.info('Bonus balance synced from ledger', {
           walletId,
           bonusId: event.data.bonusId,
           amount: event.data.value,
@@ -632,6 +649,13 @@ function setupBonusEventHandlers() {
           amount: event.data.value,
           currency: event.data.currency,
         }, { skipInternal: true });
+      } catch (syncError) {
+        logger.error('Failed to sync bonus balance from ledger', { 
+          error: syncError, 
+          eventId: event.eventId,
+          walletId,
+          userId: event.userId,
+        });
       }
     } catch (err) {
       logger.error('Failed to credit bonus to wallet', { error: err, eventId: event.eventId });

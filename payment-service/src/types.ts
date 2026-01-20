@@ -366,6 +366,8 @@ export interface Wallet {
   lifetimeDeposits: number;
   /** Total lifetime withdrawals */
   lifetimeWithdrawals: number;
+  /** Total lifetime fees paid (for reconciliation and reporting) */
+  lifetimeFees: number;
   
   // Timestamps (auto-managed by repository)
   createdAt?: Date;

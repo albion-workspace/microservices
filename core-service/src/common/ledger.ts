@@ -22,6 +22,7 @@ import { randomUUID, createHash } from 'crypto';
 import { logger } from './logger.js';
 import { isDuplicateKeyError, handleDuplicateKeyError } from './mongodb-errors.js';
 import { getUserAccountId as getUserId } from './account-ids.js';
+import { getTransactionStateManager, type TransactionState } from './transaction-state.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -140,21 +141,8 @@ export interface CreateTransactionInput {
   requireMajority?: boolean;
 }
 
-/**
- * Transaction state for crash recovery tracking
- */
-export interface TransactionState {
-  _id: string; // Transaction ID
-  sagaId?: string; // Saga ID if part of saga
-  status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'recovered';
-  startedAt: Date;
-  lastHeartbeat: Date;
-  completedAt?: Date;
-  failedAt?: Date;
-  error?: string;
-  currentStep?: string;
-  steps: string[];
-}
+// Transaction state types exported from transaction-state.ts
+export type { TransactionState } from './transaction-state.js';
 
 export interface LedgerConfig {
   tenantId: string;
@@ -196,7 +184,7 @@ export class Ledger implements BalanceCalculator {
   private accounts: Collection<LedgerAccount>;
   private transactions: Collection<LedgerTransaction>;
   private entries: Collection<LedgerEntry>;
-  private transactionStates: Collection<TransactionState>;
+  private stateManager: ReturnType<typeof getTransactionStateManager>;
   private client: MongoClient;
   private config: Required<LedgerConfig>;
   private heartbeatInterval?: NodeJS.Timeout;
@@ -212,7 +200,8 @@ export class Ledger implements BalanceCalculator {
     this.accounts = config.db.collection('ledger_accounts');
     this.transactions = config.db.collection('ledger_transactions');
     this.entries = config.db.collection('ledger_entries');
-    this.transactionStates = config.db.collection('transaction_states');
+    // Transaction states migrated to Redis (top-level import for performance)
+    this.stateManager = getTransactionStateManager();
   }
   
   // ─────────────────────────────────────────────────────────────────
@@ -287,14 +276,9 @@ export class Ledger implements BalanceCalculator {
       this.entries.createIndex({ accountId: 1, sequence: 1, type: 1 }),
       
       // ─────────────────────────────────────────────────────────────────
-      // TRANSACTION STATES - For crash recovery
+      // TRANSACTION STATES - Migrated to Redis (see transaction-state.ts)
+      // No MongoDB indexes needed - Redis handles state with TTL
       // ─────────────────────────────────────────────────────────────────
-      // Find stuck transactions (no heartbeat in 30 seconds)
-      this.transactionStates.createIndex({ status: 1, lastHeartbeat: 1 }),
-      // Find by transaction ID
-      this.transactionStates.createIndex({ _id: 1 }),
-      // Find by saga ID
-      this.transactionStates.createIndex({ sagaId: 1 }, { sparse: true }),
     ]);
     
     // ✅ CRITICAL: Ensure unique index on externalRef exists (duplicate protection)
@@ -665,9 +649,9 @@ export class Ledger implements BalanceCalculator {
     const txId = randomUUID();
     const session = this.client.startSession();
     
-    // ✅ CRASH RECOVERY: Track transaction state
+    // ✅ CRASH RECOVERY: Track transaction state in Redis (with TTL)
     const stateId = `state-${txId}`;
-    await this.transactionStates.insertOne({
+    await this.stateManager.setState({
       _id: stateId,
       sagaId: (input.metadata as any)?.sagaId,
       status: 'in_progress',
@@ -676,17 +660,9 @@ export class Ledger implements BalanceCalculator {
       steps: [],
     });
     
-    // Set up heartbeat (every 5 seconds)
+    // Set up heartbeat (every 5 seconds) - extends Redis TTL automatically
     const heartbeatInterval = setInterval(async () => {
-      try {
-        await this.transactionStates.updateOne(
-          { _id: stateId },
-          { $set: { lastHeartbeat: new Date() } }
-        );
-      } catch (error) {
-        // Heartbeat failure is non-critical
-        logger.debug('Failed to update transaction heartbeat', { stateId, error });
-      }
+      await this.stateManager.updateHeartbeat(stateId);
     }, 5000);
     
     try {
@@ -704,16 +680,10 @@ export class Ledger implements BalanceCalculator {
         readPreference: 'primary',
       });
       
-      // Mark transaction as completed
-      await this.transactionStates.updateOne(
-        { _id: stateId },
-        { 
-          $set: { 
-            status: 'completed',
-            completedAt: new Date()
-          }
-        }
-      );
+      // Mark transaction as completed (Redis TTL: 5 minutes for monitoring)
+      await this.stateManager.updateStatus(stateId, 'completed', {
+        completedAt: new Date(),
+      });
       
       return result!;
     } catch (error: any) {
@@ -736,18 +706,10 @@ export class Ledger implements BalanceCalculator {
         }
       });
       
-      // Mark transaction as failed
-      await this.transactionStates.updateOne(
-        { _id: stateId },
-        { 
-          $set: { 
-            status: 'failed',
-            error: errorMessage,
-            failedAt: new Date()
-          }
-        }
-      ).catch(() => {
-        // State update failure is non-critical
+      // Mark transaction as failed (Redis TTL: 5 minutes for monitoring)
+      await this.stateManager.updateStatus(stateId, 'failed', {
+        error: errorMessage,
+        failedAt: new Date(),
       });
       
       // ✅ CRITICAL FIX: Handle duplicate key error gracefully (race condition)
@@ -1627,15 +1589,11 @@ export class Ledger implements BalanceCalculator {
   
   /**
    * Recover stuck transactions (no heartbeat in 30 seconds)
+   * Note: Redis TTL automatically expires states, but we can still check for monitoring
    * Call this periodically (e.g., every minute) as a background job
    */
   async recoverStuckTransactions(): Promise<number> {
-    const thirtySecondsAgo = new Date(Date.now() - 30000);
-    
-    const stuck = await this.transactionStates.find({
-      status: 'in_progress',
-      lastHeartbeat: { $lt: thirtySecondsAgo }
-    }).toArray();
+    const stuck = await this.stateManager.findStuckTransactions(30);
     
     if (stuck.length === 0) {
       return 0;
@@ -1647,23 +1605,19 @@ export class Ledger implements BalanceCalculator {
     });
     
     // Mark as recovered (failed) - MongoDB transaction will auto-rollback
-    const result = await this.transactionStates.updateMany(
-      {
-        status: 'in_progress',
-        lastHeartbeat: { $lt: thirtySecondsAgo }
-      },
-      {
-        $set: {
-          status: 'recovered',
-          error: 'Transaction timeout - no heartbeat received',
-          failedAt: new Date(),
-        }
-      }
-    );
+    // Redis TTL will auto-expire these, but we mark them for monitoring
+    let recovered = 0;
+    for (const state of stuck) {
+      await this.stateManager.updateStatus(state._id, 'recovered', {
+        error: 'Transaction timeout - no heartbeat received',
+        failedAt: new Date(),
+      });
+      recovered++;
+    }
     
-    logger.info(`Recovered ${result.modifiedCount} stuck transactions`);
+    logger.info(`Recovered ${recovered} stuck transactions`);
     
-    return result.modifiedCount;
+    return recovered;
   }
   
   /**
@@ -1671,7 +1625,7 @@ export class Ledger implements BalanceCalculator {
    */
   async getTransactionState(txId: string): Promise<TransactionState | null> {
     const stateId = `state-${txId}`;
-    return this.transactionStates.findOne({ _id: stateId });
+    return this.stateManager.getState(stateId);
   }
   
   /**

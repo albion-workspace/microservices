@@ -92,6 +92,7 @@ interface UserWalletsResponse {
     withdrawableBalance: number;
     lifetimeDeposits: number;
     lifetimeWithdrawals: number;
+    lifetimeFees: number;
   };
   wallets: {
     id: string;
@@ -176,6 +177,7 @@ export const userWalletResolvers = {
         withdrawableBalance: acc.withdrawableBalance + w.realBalance, // Only real balance is withdrawable
         lifetimeDeposits: acc.lifetimeDeposits,
         lifetimeWithdrawals: acc.lifetimeWithdrawals,
+        lifetimeFees: acc.lifetimeFees,
       }), {
         realBalance: 0,
         bonusBalance: 0,
@@ -184,6 +186,7 @@ export const userWalletResolvers = {
         withdrawableBalance: 0,
         lifetimeDeposits: walletDocs.reduce((sum: number, w: any) => sum + (w.lifetimeDeposits || 0), 0),
         lifetimeWithdrawals: walletDocs.reduce((sum: number, w: any) => sum + (w.lifetimeWithdrawals || 0), 0),
+        lifetimeFees: walletDocs.reduce((sum: number, w: any) => sum + (w.lifetimeFees || 0), 0),
       });
       
       return {
@@ -330,6 +333,7 @@ const walletSaga = [
         lastActivityAt: now,
         lifetimeDeposits: 0,
         lifetimeWithdrawals: 0,
+        lifetimeFees: 0,
       } as Wallet;
       
       await repo.create(wallet);
@@ -365,6 +369,7 @@ export const walletService = createService<Wallet, CreateWalletInput>({
         verificationLevel: String!
         lifetimeDeposits: Float!
         lifetimeWithdrawals: Float!
+        lifetimeFees: Float!
         lastActivityAt: String!
       }
       type WalletConnection { nodes: [Wallet!]! totalCount: Int! pageInfo: PageInfo! }

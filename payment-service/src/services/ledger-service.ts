@@ -407,7 +407,7 @@ export async function recordDepositLedgerEntry(
     });
   }
   
-  // Net amount (after fees) in destination currency
+  // Net amount (after fees) in destination currency - this is what the user receives
   const netAmount = convertedAmount - convertedFeeAmount;
   
   // IMPORTANT: Ledger requires same currency for both accounts in a transaction
@@ -415,6 +415,10 @@ export async function recordDepositLedgerEntry(
   // When currencies differ:
   // 1. Debit source account (source currency) -> conversion account (source currency)
   // 2. Credit conversion account (destination currency) -> destination account (destination currency)
+  
+  // Fees are handled at transaction level (stored in metadata, like exchange rates)
+  // For deposits: Credit netAmount directly (amount - fee) to user account
+  // Fee is deducted from the source amount before crediting to user
   
   let depositTx;
   
@@ -424,12 +428,12 @@ export async function recordDepositLedgerEntry(
     const sourceConversionAccountId = await getOrCreateUserAccount(`conversion-${currency}-${destinationCurrency}-source`, 'main', currency, true);
     const destConversionAccountId = await getOrCreateUserAccount(`conversion-${currency}-${destinationCurrency}-dest`, 'main', destinationCurrency, true);
     
-    // Step 2: Debit source account in source currency
+    // Step 2: Debit source account in source currency (full amount including fee)
     await ledger.createTransaction({
       type: 'transfer',
       fromAccountId,
       toAccountId: sourceConversionAccountId,
-      amount, // Original amount in source currency
+      amount, // Original amount in source currency (includes fee)
       currency, // Source currency
       description: `Currency conversion debit: ${amount} ${currency}`,
       externalRef: `${externalRef}-conversion-debit`,
@@ -439,19 +443,21 @@ export async function recordDepositLedgerEntry(
         toUserId,
         originalCurrency: currency,
         originalAmount: amount,
+        originalFeeAmount: feeAmount,
         exchangeRate,
         conversionType: 'cross-currency-deposit',
       },
     });
     
     // Step 3: Create main deposit transaction: conversion account (destination currency) -> destination account (destination currency)
+    // Credit netAmount (amount - fee) to user account
     depositTx = await ledger.createTransaction({
       type: 'deposit',
       fromAccountId: destConversionAccountId, // Use conversion account in destination currency
       toAccountId,
-      amount: convertedAmount, // Use converted amount in destination currency
+      amount: netAmount, // Net amount after fees (convertedAmount - convertedFeeAmount)
       currency: destinationCurrency, // Use destination currency for transaction
-      description: description || `Deposit of ${amount} ${currency} (converted to ${convertedAmount} ${destinationCurrency}) (fee: ${feeAmount} ${currency})`,
+      description: description || `Deposit of ${amount} ${currency} (converted to ${convertedAmount} ${destinationCurrency}, fee: ${convertedFeeAmount} ${destinationCurrency}, net: ${netAmount} ${destinationCurrency})`,
       externalRef,
       initiatedBy: toUserId,
       metadata: {
@@ -460,57 +466,28 @@ export async function recordDepositLedgerEntry(
         originalCurrency: currency,
         originalAmount: amount,
         originalFeeAmount: feeAmount,
+        convertedAmount,
+        convertedFeeAmount,
+        feeAmount: convertedFeeAmount, // Store fee in transaction metadata for audit trail
         exchangeRate,
       },
     });
   } else {
     // Same currency: direct deposit
+    // Credit netAmount (amount - fee) to user account
     depositTx = await ledger.createTransaction({
       type: 'deposit',
       fromAccountId,
       toAccountId,
-      amount: convertedAmount, // Same as original amount
+      amount: netAmount, // Net amount after fees (convertedAmount - convertedFeeAmount)
       currency: destinationCurrency, // Same as source currency
-      description: description || `Deposit of ${amount} ${currency} (fee: ${feeAmount} ${currency})`,
+      description: description || `Deposit of ${amount} ${currency} (fee: ${feeAmount} ${currency}, net: ${netAmount} ${currency})`,
       externalRef,
       initiatedBy: toUserId,
       metadata: {
         fromUserId,
         toUserId,
-      },
-    });
-  }
-  
-  // Record fee: To User -> Fee Collection User (in destination currency)
-  if (convertedFeeAmount > 0) {
-    // Fee collection is just another user account (in destination currency)
-    const feeAccountId = await getOrCreateUserAccount('fee-collection', 'main', destinationCurrency, false);
-    
-    // Fee transaction should have externalRef to avoid duplicate key errors
-    const feeExternalRef = `${externalRef}-fee`;
-    
-    await ledger.createTransaction({
-      type: 'fee',
-      fromAccountId: toAccountId,
-      toAccountId: feeAccountId,
-      amount: convertedFeeAmount, // Fee in destination currency
-      currency: destinationCurrency,
-      description: `Deposit fee: ${convertedFeeAmount} ${destinationCurrency}${currency !== destinationCurrency ? ` (${feeAmount} ${currency})` : ''}`,
-      externalRef: feeExternalRef,
-      initiatedBy: toUserId,
-      metadata: {
-        fromUserId,
-        toUserId,
-        // Only save what cannot be calculated:
-        // - originalCurrency: needed if different from transaction currency
-        // - originalFeeAmount: user's requested fee (can't be calculated)
-        // - exchangeRate: needed to reconstruct (can be calculated but saved for audit)
-        // Note: convertedFeeAmount = originalFeeAmount * exchangeRate
-        originalCurrency: currency !== destinationCurrency ? currency : undefined,
-        originalFeeAmount: currency !== destinationCurrency ? feeAmount : undefined,
-        exchangeRate: currency !== destinationCurrency ? exchangeRate : undefined,
-        parentTxId: depositTx._id,
-        relatedDeposit: depositTx._id,
+        feeAmount, // Store fee in transaction metadata for audit trail
       },
     });
   }
@@ -657,7 +634,7 @@ export async function recordWithdrawalLedgerEntry(
       toAccountId,
       amount: convertedTotalAmount, // Use converted total amount in destination currency
       currency: destinationCurrency, // Use destination currency for transaction
-      description: description || `Withdrawal of ${amount} ${currency} (converted to ${convertedAmount} ${destinationCurrency}) (fee: ${feeAmount} ${currency})`,
+      description: description || `Withdrawal of ${amount} ${currency} (converted to ${convertedAmount} ${destinationCurrency}, fee: ${convertedFeeAmount} ${destinationCurrency})`,
       externalRef,
       initiatedBy: fromUserId,
       metadata: {
@@ -666,6 +643,9 @@ export async function recordWithdrawalLedgerEntry(
         originalCurrency: currency,
         originalAmount: amount,
         originalFeeAmount: feeAmount,
+        convertedAmount,
+        convertedFeeAmount,
+        feeAmount: convertedFeeAmount, // Store fee in transaction metadata for audit trail
         exchangeRate,
       },
     });
@@ -683,6 +663,7 @@ export async function recordWithdrawalLedgerEntry(
       metadata: {
         fromUserId,
         toUserId,
+        feeAmount, // Store fee in transaction metadata for audit trail
       },
     });
   }
@@ -889,6 +870,7 @@ export async function recordWalletTransactionLedgerEntry(
  * Sync wallet balance from ledger account
  * Generic: All wallets are user wallets - sync from user ledger account
  * This ensures wallet.balance matches ledger account balance
+ * Also syncs bonusBalance from bonus account
  */
 export async function syncWalletBalanceFromLedger(
   userId: string,
@@ -899,16 +881,32 @@ export async function syncWalletBalanceFromLedger(
   const db = getDatabase();
   
   try {
-    // Generic: All wallets are user wallets - sync from user ledger account
-    const accountId = await getOrCreateUserAccount(userId, 'main', currency);
-    const { balance: ledgerBalance } = await ledger.getBalance(accountId);
+    // Sync main account balance
+    const mainAccountId = await getOrCreateUserAccount(userId, 'main', currency);
+    const { balance: ledgerBalance } = await ledger.getBalance(mainAccountId);
     
-    // Update wallet balance to match ledger
+    // Sync bonus account balance
+    let bonusBalance = 0;
+    try {
+      const bonusAccountId = await getOrCreateUserAccount(userId, 'bonus', currency);
+      const { balance: ledgerBonusBalance } = await ledger.getBalance(bonusAccountId);
+      bonusBalance = ledgerBonusBalance;
+    } catch (bonusError) {
+      // Bonus account might not exist yet - that's okay, bonusBalance stays 0
+      logger.debug('Bonus account not found or error syncing bonus balance', {
+        userId,
+        currency,
+        error: bonusError instanceof Error ? bonusError.message : String(bonusError),
+      });
+    }
+    
+    // Update wallet balances to match ledger
     await db.collection('wallets').updateOne(
       { id: walletId },
       {
         $set: {
           balance: ledgerBalance,
+          bonusBalance: bonusBalance,
           updatedAt: new Date(),
         },
       }
@@ -918,6 +916,7 @@ export async function syncWalletBalanceFromLedger(
       walletId,
       userId,
       balance: ledgerBalance,
+      bonusBalance,
       currency,
     });
   } catch (error) {

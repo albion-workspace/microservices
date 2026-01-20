@@ -537,6 +537,7 @@ export const users = {
   system: SYSTEM_USER,
   gateway: PROVIDER_USERS.paymentGateway,
   provider: PROVIDER_USERS.paymentProvider,
+  bonusPool: PROVIDER_USERS.bonusPool,
   endUsers: END_USERS,
   all: ALL_USERS,
 };
