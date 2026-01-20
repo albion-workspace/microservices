@@ -262,6 +262,18 @@ const config = {
         Mutation: {
           ...transferApprovalResolvers.Mutation,
         },
+        // Field resolvers for Transaction computed fields
+        Transaction: {
+          type: (parent: any) => parent.type || parent.charge,
+          status: (parent: any) => parent.status || 'completed',
+          currency: (parent: any) => parent.currency || parent.meta?.currency,
+          feeAmount: (parent: any) => parent.feeAmount ?? parent.meta?.feeAmount ?? null,
+          netAmount: (parent: any) => parent.netAmount ?? parent.meta?.netAmount ?? null,
+          fromUserId: (parent: any) => parent.fromUserId || parent.meta?.fromUserId || null,
+          toUserId: (parent: any) => parent.toUserId || parent.meta?.toUserId || null,
+          description: (parent: any) => parent.description || parent.meta?.description || null,
+          metadata: (parent: any) => parent.metadata || parent.meta || null,
+        },
       }
     },
     // Webhooks - just plug it in!
@@ -280,6 +292,9 @@ const config = {
       withdrawals: isAuthenticated,
       withdrawal: isAuthenticated,
       transactions: isAuthenticated, // Unified transactions query
+      // Transfers
+      transfers: isAuthenticated, // User-to-user transfers query
+      transfer: isAuthenticated, // Single transfer query
       // Wallets
       wallets: isAuthenticated,
       wallet: isAuthenticated,

@@ -301,57 +301,57 @@ export default function UseCases() {
         // Step 3: Verify balances
         addLog('Step 3: Verifying balances...')
         
-        const gatewayBalance = await gql<{ ledgerAccountBalance: { balance: number } }>(
+        const gatewayBalance = await gql<{ walletBalance: { balance: number } }>(
           'payment',
           `
-            query GetBalance($userId: String!, $subtype: String!, $currency: String!) {
-              ledgerAccountBalance(userId: $userId, subtype: $subtype, currency: $currency) {
+            query GetBalance($userId: String!, $category: String, $currency: String!) {
+              walletBalance(userId: $userId, category: $category, currency: $currency) {
                 balance
               }
             }
           `,
           {
             userId: paymentFlowState.gatewayUserId,
-            subtype: 'main',
+            category: 'main',
             currency: paymentFlowState.currency,
           }
         )
 
-        const providerBalance = await gql<{ ledgerAccountBalance: { balance: number } }>(
+        const providerBalance = await gql<{ walletBalance: { balance: number } }>(
           'payment',
           `
-            query GetBalance($userId: String!, $subtype: String!, $currency: String!) {
-              ledgerAccountBalance(userId: $userId, subtype: $subtype, currency: $currency) {
+            query GetBalance($userId: String!, $category: String, $currency: String!) {
+              walletBalance(userId: $userId, category: $category, currency: $currency) {
                 balance
               }
             }
           `,
           {
             userId: paymentFlowState.providerUserId,
-            subtype: 'main',
+            category: 'main',
             currency: paymentFlowState.currency,
           }
         )
 
-        const userBalance = await gql<{ ledgerAccountBalance: { balance: number } }>(
+        const userBalance = await gql<{ walletBalance: { balance: number } }>(
           'payment',
           `
-            query GetBalance($userId: String!, $subtype: String!, $currency: String!) {
-              ledgerAccountBalance(userId: $userId, subtype: $subtype, currency: $currency) {
+            query GetBalance($userId: String!, $category: String, $currency: String!) {
+              walletBalance(userId: $userId, category: $category, currency: $currency) {
                 balance
               }
             }
           `,
           {
             userId: paymentFlowState.endUserId,
-            subtype: 'main',
+            category: 'main',
             currency: paymentFlowState.currency,
           }
         )
 
-        addLog(`Gateway Balance: €${(gatewayBalance.ledgerAccountBalance.balance / 100).toFixed(2)}`, 'success')
-        addLog(`Provider Balance: €${(providerBalance.ledgerAccountBalance.balance / 100).toFixed(2)}`, 'success')
-        addLog(`User Balance: €${(userBalance.ledgerAccountBalance.balance / 100).toFixed(2)}`, 'success')
+        addLog(`Gateway Balance: €${(gatewayBalance.walletBalance.balance / 100).toFixed(2)}`, 'success')
+        addLog(`Provider Balance: €${(providerBalance.walletBalance.balance / 100).toFixed(2)}`, 'success')
+        addLog(`User Balance: €${(userBalance.walletBalance.balance / 100).toFixed(2)}`, 'success')
         addLog('✅ Payment flow completed successfully!', 'success')
 
         return { success: true }

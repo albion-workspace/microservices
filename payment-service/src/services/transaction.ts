@@ -142,6 +142,13 @@ const depositSaga = [
       const session = (data as any)._session as ClientSession | undefined;
       
       // Create transfer using helper function (passes session if available)
+      // Generate a generic description (only add method detail if it's a specific payment method)
+      const methodDisplay = method || 'system';
+      const isGenericMethod = !methodDisplay || methodDisplay === 'system' || methodDisplay === 'deposit';
+      const description = isGenericMethod 
+        ? 'Deposit'
+        : `Deposit via ${methodDisplay.charAt(0).toUpperCase() + methodDisplay.slice(1)}`;
+      
       const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
         fromUserId: fromUserIdValue,
         toUserId,
@@ -149,9 +156,9 @@ const depositSaga = [
         currency,
         tenantId,
         feeAmount: data.feeAmount as number,
-        method: method || 'card',
+        method: method || 'system',
         externalRef,
-        description: `Deposit from ${fromUserIdValue}`,
+        description,
         // Payment-specific details from rest params
         ...rest,
         externalTransactionId,
@@ -175,7 +182,27 @@ export const depositService = createService<Transaction, CreateDepositInput>({
     name: 'deposit',
     collection: 'transactions',
     graphqlType: `
-      type Transaction { id: ID! userId: String! amount: Float! balance: Float! objectId: String objectModel: String charge: String! meta: JSON createdAt: String! }
+      type Transaction { 
+        id: ID! 
+        userId: String! 
+        amount: Float! 
+        balance: Float! 
+        objectId: String 
+        objectModel: String 
+        charge: String! 
+        meta: JSON 
+        createdAt: String!
+        # Computed fields (mapped from meta and charge)
+        type: String
+        status: String
+        currency: String
+        feeAmount: Float
+        netAmount: Float
+        fromUserId: String
+        toUserId: String
+        description: String
+        metadata: JSON
+      }
       type TransactionConnection { nodes: [Transaction!]! totalCount: Int! pageInfo: PageInfo! }
       # Transfer type will be defined by transferService (referenced here)
       type CreateDepositResult { success: Boolean! deposit: Transaction transfer: Transfer sagaId: ID! errors: [String!] executionTimeMs: Int }
@@ -294,6 +321,13 @@ const withdrawalSaga = [
       const session = (data as any)._session as ClientSession | undefined;
       
       // Create transfer using helper function (passes session if available)
+      // Generate a generic description (only add method detail if it's a specific payment method)
+      const methodDisplay = method || 'system';
+      const isGenericMethod = !methodDisplay || methodDisplay === 'system' || methodDisplay === 'withdrawal';
+      const description = isGenericMethod 
+        ? 'Withdrawal'
+        : `Withdrawal via ${methodDisplay.charAt(0).toUpperCase() + methodDisplay.slice(1)}`;
+      
       const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
         fromUserId,
         toUserId,
@@ -303,7 +337,7 @@ const withdrawalSaga = [
         feeAmount: data.feeAmount as number,
         method,
         externalRef,
-        description: `Withdrawal to ${toUserId}`,
+        description,
         // Payment-specific details from rest params
         ...rest,
         externalTransactionId,
@@ -360,9 +394,15 @@ export const transactionsQueryResolver = async (args: Record<string, unknown>) =
       // Build MongoDB query
       const query: Record<string, unknown> = {};
       
-      // Filter by type if specified
+      // Filter by type/charge if specified (support both charge and type for backward compatibility)
       if (filter.type) {
-        query.type = filter.type;
+        // Support filtering by charge (credit/debit) or objectModel (deposit, withdrawal, etc.)
+        if (filter.type === 'credit' || filter.type === 'debit') {
+          query.charge = filter.type;
+        } else {
+          // For other types like 'deposit', 'withdrawal', filter by objectModel
+          query.objectModel = filter.type;
+        }
       }
       
       // Filter by userId if specified
@@ -370,10 +410,9 @@ export const transactionsQueryResolver = async (args: Record<string, unknown>) =
         query.userId = filter.userId;
       }
       
-      // Filter by status if specified
-      if (filter.status) {
-        query.status = filter.status;
-      }
+      // Filter by status if specified (transactions don't have status, but transfers do)
+      // This filter is kept for backward compatibility but won't match anything
+      // Status filtering should be done on transfers, not transactions
       
       // Filter by date range if specified
       if (filter.dateFrom || filter.dateTo) {
@@ -404,17 +443,21 @@ export const transactionsQueryResolver = async (args: Record<string, unknown>) =
         nodes: nodes.map((tx: any) => ({
           id: tx.id,
           userId: tx.userId,
-          type: tx.type,
-          status: tx.status,
+          type: tx.charge || tx.type, // Use charge (credit/debit) or fallback to type
+          status: tx.status || 'completed', // Transactions are immutable, default to completed
           amount: tx.amount,
-          currency: tx.currency,
-          feeAmount: tx.feeAmount,
-          netAmount: tx.netAmount,
-          fromUserId: tx.fromUserId,
-          toUserId: tx.toUserId,
+          currency: tx.meta?.currency || tx.currency, // Currency is in meta object
+          feeAmount: tx.meta?.feeAmount || tx.feeAmount,
+          netAmount: tx.meta?.netAmount || tx.netAmount,
+          balance: tx.balance, // Wallet balance after transaction
+          charge: tx.charge, // credit or debit
+          fromUserId: tx.meta?.fromUserId || tx.fromUserId, // May be in meta or direct
+          toUserId: tx.meta?.toUserId || tx.toUserId, // May be in meta or direct
           createdAt: tx.createdAt,
-          description: tx.description,
-          metadata: tx.metadata,
+          description: tx.meta?.description || tx.description,
+          metadata: tx.meta || tx.metadata,
+          objectId: tx.objectId,
+          objectModel: tx.objectModel,
         })),
         totalCount,
         pageInfo: {

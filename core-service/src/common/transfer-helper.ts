@@ -421,14 +421,17 @@ export async function createTransferWithTransactions(
       objectModel: transactionObjectModel,  // Custom objectModel ('bonus') or 'transfer'
       externalRef,
       feeAmount,
+      description,  // Include description for debit transaction too
       transferId,  // Include transferId in meta
       status: approvalMode === 'pending' ? 'pending' : undefined,  // Set status for pending mode
     };
     const debitTx = createTransactionDocument(debitTxParams, fromWallet, fromCurrentBalance);
-    // Override meta to include transferId
+    // Override meta to include transferId (preserve existing meta fields like description)
     debitTx.meta = {
       ...debitTx.meta,
       transferId,  // Always include transferId in meta for reference
+      // Preserve description if it was set in debitTxParams (should already be in meta from createTransactionDocument)
+      description: debitTxParams.description || debitTx.meta?.description || descriptionParam,
     };
     
     // Create credit transaction (toUser) using shared helper
@@ -448,10 +451,12 @@ export async function createTransferWithTransactions(
       status: approvalMode === 'pending' ? 'pending' : undefined,  // Set status for pending mode
     };
     const creditTx = createTransactionDocument(creditTxParams, toWallet, toCurrentBalance);
-    // Override meta to include transferId
+    // Override meta to include transferId (preserve existing meta fields like description)
     creditTx.meta = {
       ...creditTx.meta,
       transferId,  // Always include transferId in meta for reference
+      // Preserve description if it was set in creditTxParams (should already be in meta from createTransactionDocument)
+      description: creditTxParams.description || creditTx.meta?.description || descriptionParam,
     };
     
     // Insert all documents atomically (within transaction)
