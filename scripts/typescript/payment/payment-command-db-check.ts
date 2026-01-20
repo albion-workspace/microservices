@@ -15,11 +15,12 @@
  *   npx tsx payment-command-db-check.ts create-index        # Create unique indexes
  *   npx tsx payment-command-db-check.ts fix-index          # Fix/recreate indexes
  *   npx tsx payment-command-db-check.ts remove-duplicates  # Remove duplicate transactions
+ *   npx tsx payment-command-db-check.ts fix-wallet-allownegative  # Fix wallets with incorrect allowNegative
  *   npx tsx payment-command-db-check.ts clean              # Clean payment data (drops all databases)
  */
 
 import { MongoClient } from 'mongodb';
-import { closeAllConnections } from '../config/mongodb.js';
+import { closeAllConnections, getAuthDatabase, getPaymentDatabase } from '../config/mongodb.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Configuration - Single Source of Truth
@@ -759,6 +760,105 @@ async function removeDuplicates() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// Maintenance: Fix Wallet allowNegative Settings
+// ═══════════════════════════════════════════════════════════════════
+
+async function fixWalletAllowNegative() {
+  console.log('╔═══════════════════════════════════════════════════════════════════╗');
+  console.log('║           FIXING WALLET allowNegative SETTINGS                  ║');
+  console.log('╚═══════════════════════════════════════════════════════════════════╝\n');
+
+  const paymentDb = await getPaymentDatabase();
+  const authDb = await getAuthDatabase();
+  
+  const walletsCollection = paymentDb.collection('wallets');
+  const usersCollection = authDb.collection('users');
+  
+  console.log('📊 Checking wallets for incorrect allowNegative settings...\n');
+  
+  // Get all wallets
+  const wallets = await walletsCollection.find({}).toArray();
+  console.log(`Found ${wallets.length} wallets to check\n`);
+  
+  // Get all users with their roles
+  const users = await usersCollection.find({}).toArray();
+  const userRolesMap = new Map<string, string[]>();
+  users.forEach((user: any) => {
+    const userId = user.id || user._id?.toString();
+    const roles = Array.isArray(user.roles) ? user.roles : [];
+    if (userId) {
+      userRolesMap.set(userId, roles);
+    }
+  });
+  
+  console.log(`Loaded ${userRolesMap.size} users from auth database\n`);
+  
+  let fixedCount = 0;
+  let checkedCount = 0;
+  const issues: Array<{ walletId: string; userId: string; current: boolean; shouldBe: boolean; reason: string }> = [];
+  
+  for (const wallet of wallets) {
+    const walletData = wallet as any;
+    const userId = walletData.userId;
+    const currentAllowNegative = walletData.allowNegative ?? false;
+    
+    // Get user roles
+    const userRoles = userRolesMap.get(userId) || [];
+    const isSystemUser = userRoles.includes('system');
+    
+    // Only system users should have allowNegative: true
+    const shouldAllowNegative = isSystemUser;
+    
+    checkedCount++;
+    
+    if (currentAllowNegative !== shouldAllowNegative) {
+      issues.push({
+        walletId: walletData.id || walletData._id?.toString() || 'unknown',
+        userId,
+        current: currentAllowNegative,
+        shouldBe: shouldAllowNegative,
+        reason: isSystemUser 
+          ? 'System user should have allowNegative: true' 
+          : 'Non-system user should have allowNegative: false'
+      });
+      
+      // Fix the wallet
+      await walletsCollection.updateOne(
+        { _id: wallet._id },
+        { 
+          $set: { 
+            allowNegative: shouldAllowNegative,
+            updatedAt: new Date()
+          } 
+        }
+      );
+      
+      fixedCount++;
+      
+      console.log(`🔧 Fixed wallet ${walletData.id || walletData._id?.toString()}:`);
+      console.log(`   User ID: ${userId}`);
+      console.log(`   Roles: ${userRoles.join(', ') || 'none'}`);
+      console.log(`   Changed allowNegative: ${currentAllowNegative} → ${shouldAllowNegative}`);
+      console.log(`   Reason: ${issues[issues.length - 1].reason}\n`);
+    }
+  }
+  
+  console.log(`\n✅ Checked ${checkedCount} wallets`);
+  console.log(`🔧 Fixed ${fixedCount} wallets with incorrect allowNegative settings`);
+  
+  if (issues.length > 0) {
+    console.log(`\n📋 Summary of fixes:`);
+    issues.forEach((issue, idx) => {
+      console.log(`   ${idx + 1}. Wallet ${issue.walletId.substring(0, 12)}... (User: ${issue.userId.substring(0, 12)}...): ${issue.current} → ${issue.shouldBe}`);
+    });
+  } else {
+    console.log(`\n✅ All wallets have correct allowNegative settings!`);
+  }
+  
+  await closeAllConnections();
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // Maintenance: Clean Payment Data
 // ═══════════════════════════════════════════════════════════════════
 
@@ -802,6 +902,7 @@ const COMMAND_REGISTRY: Record<string, () => Promise<void>> = {
   'create-index': createIndexes,
   'fix-index': fixIndexes,
   'remove-duplicates': removeDuplicates,
+  'fix-wallet-allownegative': fixWalletAllowNegative,
   clean: cleanPaymentData,
 };
 

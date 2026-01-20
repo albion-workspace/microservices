@@ -274,9 +274,70 @@ async function transferFunds(
   fromUserId: string, 
   toUserId: string, 
   amount: number, 
-  currency: string
+  currency: string,
+  options?: { fromUserEmail?: string; toUserEmail?: string; description?: string }
 ): Promise<string | null> {
-  console.log(`\n💰 Transferring ${(amount / 100).toFixed(2)} ${currency} from ${fromUserId} to ${toUserId}...`);
+  // Get user emails for description if not provided
+  let fromEmail = options?.fromUserEmail;
+  let toEmail = options?.toUserEmail;
+  
+  if (!fromEmail || !toEmail) {
+    try {
+      const db = await getAuthDatabase();
+      const usersCollection = db.collection('users');
+      
+      if (!fromEmail) {
+        // Try multiple lookup strategies
+        let fromUser = await usersCollection.findOne({ id: fromUserId });
+        if (!fromUser) {
+          // Try _id as string
+          fromUser = await usersCollection.findOne({ _id: fromUserId });
+        }
+        if (!fromUser) {
+          // Try _id as ObjectId (if fromUserId is a valid ObjectId string)
+          try {
+            const { ObjectId } = await import('mongodb');
+            if (ObjectId.isValid(fromUserId)) {
+              fromUser = await usersCollection.findOne({ _id: new ObjectId(fromUserId) });
+            }
+          } catch (e) {
+            // Ignore
+          }
+        }
+        fromEmail = fromUser?.email || fromUserId.substring(0, 8) + '...';
+      }
+      
+      if (!toEmail) {
+        // Try multiple lookup strategies
+        let toUser = await usersCollection.findOne({ id: toUserId });
+        if (!toUser) {
+          // Try _id as string
+          toUser = await usersCollection.findOne({ _id: toUserId });
+        }
+        if (!toUser) {
+          // Try _id as ObjectId (if toUserId is a valid ObjectId string)
+          try {
+            const { ObjectId } = await import('mongodb');
+            if (ObjectId.isValid(toUserId)) {
+              toUser = await usersCollection.findOne({ _id: new ObjectId(toUserId) });
+            }
+          } catch (e) {
+            // Ignore
+          }
+        }
+        toEmail = toUser?.email || toUserId.substring(0, 8) + '...';
+      }
+    } catch (error) {
+      // Fallback to IDs if lookup fails
+      fromEmail = fromEmail || fromUserId.substring(0, 8) + '...';
+      toEmail = toEmail || toUserId.substring(0, 8) + '...';
+    }
+  }
+  
+  const description = options?.description || `Transfer from ${fromEmail} to ${toEmail}`;
+  
+  console.log(`\n💰 Transferring ${(amount / 100).toFixed(2)} ${currency} from ${fromEmail} to ${toEmail}...`);
+  console.log(`   Description: ${description}`);
   
   try {
     // Find or create wallets
@@ -331,7 +392,7 @@ async function transferFunds(
           tenantId: DEFAULT_TENANT_ID,
           method: 'transfer',
           externalRef: `transfer-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-          description: `Transfer from ${fromUserId} to ${toUserId}`,
+          description,
         },
       },
       token
@@ -634,11 +695,11 @@ async function testFlow() {
   try {
     const token = await login();
     
-    // Get user IDs
-    const userIds = await getUserIds(['paymentProvider']);
+    // Get user IDs from users.ts
+    const userIds = await getUserIds(['paymentProvider', 'user4']);
     const providerUserId = userIds.paymentProvider;
     const systemUserId = await getUserId('system');
-    const testUserId = `test-user-${Date.now()}`;
+    const testUserId = userIds.user4; // Use user4 from users.ts instead of hardcoded ID
     const currency = DEFAULT_CURRENCY;
     
     if (!providerUserId) {
@@ -704,15 +765,16 @@ async function testDuplicate() {
   console.log('║           DUPLICATE PROTECTION TEST SUITE                         ║');
   console.log('╚═══════════════════════════════════════════════════════════════════╝\n');
 
-  const testUserId = `duplicate-test-${Date.now()}`;
+  // Use actual users from users.ts instead of hardcoded IDs
+  const testUserId = await getUserId('user5'); // Use user5 from users.ts
   const fromUserId = await getUserId('paymentProvider');
   
   try {
     const token = await login();
     
-    // Initialize test user
+    // Ensure test user exists
     console.log('👤 Initializing test user...');
-    await registerAs('user1');
+    await registerAs('user5'); // Register user5 if not exists
     console.log(`  ✅ Test user ID: ${testUserId}`);
     console.log(`  ✅ Source user ID: ${fromUserId}\n`);
     

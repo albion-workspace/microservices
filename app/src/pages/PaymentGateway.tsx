@@ -2360,6 +2360,45 @@ function LedgerTab() {
   const totalCount = transfersQuery.data?.transfers?.totalCount || 0
   const isLoading = transfersQuery.isLoading
   
+  // Fetch users to map IDs to emails
+  const usersQuery = useQuery({
+    queryKey: ['users-for-transfers'],
+    queryFn: async () => {
+      if (!authToken) return []
+      try {
+        const result = await graphqlQuery(GRAPHQL_SERVICE_URLS.auth, `
+          query GetAllUsers($first: Int) {
+            users(first: $first) {
+              nodes {
+                id
+                email
+              }
+            }
+          }
+        `, { first: 1000 }, authToken)
+        return result.users?.nodes || []
+      } catch (error) {
+        console.error('Failed to fetch users:', error)
+        return []
+      }
+    },
+    enabled: !!authToken,
+  })
+  
+  const userEmailMap = new Map<string, string>()
+  if (usersQuery.data) {
+    usersQuery.data.forEach((user: any) => {
+      if (user.id && user.email) {
+        userEmailMap.set(user.id, user.email)
+      }
+    })
+  }
+  
+  // Helper to get user email or fallback to ID
+  const getUserDisplay = (userId: string) => {
+    return userEmailMap.get(userId) || userId.substring(0, 8) + '...'
+  }
+  
   // Pagination helpers
   const totalPages = Math.ceil(totalCount / pagination.pageSize)
   
@@ -2528,6 +2567,7 @@ function LedgerTab() {
                     <th style={{ textAlign: 'left', padding: '12px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>DATE</th>
                     <th style={{ textAlign: 'left', padding: '12px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>FROM USER</th>
                     <th style={{ textAlign: 'left', padding: '12px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>TO USER</th>
+                    <th style={{ textAlign: 'left', padding: '12px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>DESCRIPTION</th>
                     <th style={{ textAlign: 'right', padding: '12px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>AMOUNT</th>
                     <th style={{ textAlign: 'left', padding: '12px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>CURRENCY</th>
                     <th style={{ textAlign: 'center', padding: '12px 8px', fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>STATUS</th>
@@ -2570,11 +2610,14 @@ function LedgerTab() {
                           }
                         })()}
                       </td>
-                      <td style={{ padding: '10px 8px', fontSize: 11, fontFamily: 'var(--font-mono)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        {transfer.fromUserId}
+                      <td style={{ padding: '10px 8px', fontSize: 12, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {getUserDisplay(transfer.fromUserId)}
                       </td>
-                      <td style={{ padding: '10px 8px', fontSize: 11, fontFamily: 'var(--font-mono)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        {transfer.toUserId}
+                      <td style={{ padding: '10px 8px', fontSize: 12, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {getUserDisplay(transfer.toUserId)}
+                      </td>
+                      <td style={{ padding: '10px 8px', fontSize: 12, color: 'var(--text-secondary)', maxWidth: 250, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {transfer.meta?.description || '-'}
                       </td>
                       <td style={{ padding: '10px 8px', fontSize: 14, textAlign: 'right', fontFamily: 'var(--font-mono)', fontWeight: 500 }}>
                         {formatCurrency(transfer.amount, transfer.meta?.currency || 'EUR')}
