@@ -1382,24 +1382,24 @@ async function testAll() {
   console.log('╚═══════════════════════════════════════════════════════════════════╝\n');
   
   try {
-    // Ensure system user's ledger account allows negative balance (system user can go negative)
+    // Ensure system user's wallets allow negative balance (wallet-level permission)
     const systemUserId = await getUserId('system');
     const paymentDb = await getPaymentDatabase();
-    const ledgerAccounts = paymentDb.collection('ledger_accounts');
+    const walletsCollection = paymentDb.collection('wallets');
     
-    // Update system user's ledger accounts to allow negative balance
-    const updateResult = await ledgerAccounts.updateMany(
-      { ownerId: systemUserId, type: 'user' },
-      { $set: { allowNegative: true } }
+    // Update system user's wallets to allow negative balance
+    const updateResult = await walletsCollection.updateMany(
+      { userId: systemUserId },
+      { $set: { allowNegative: true, updatedAt: new Date() } }
     );
     
     if (updateResult.modifiedCount > 0) {
-      console.log(`✅ Updated ${updateResult.modifiedCount} ledger account(s) for system user to allow negative balance`);
+      console.log(`✅ Updated ${updateResult.modifiedCount} wallet(s) for system user to allow negative balance`);
     } else {
-      console.log(`ℹ️  System user ledger accounts already configured (or not found)`);
+      console.log(`ℹ️  System user wallets already configured (or will be configured on creation)`);
     }
     
-    // Fund bonus pool via payment service (bonus pool is a ledger account, treated as a user)
+    // Fund bonus pool via payment service (bonus pool is a user with a wallet)
     // System user can go negative, so this should work even if system user has 0 balance
     const fundQuery = `
       mutation FundBonusPool($input: CreateDepositInput!) {

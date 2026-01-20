@@ -322,6 +322,50 @@ export class TransactionStateManager {
   }
 
   /**
+   * Recover stuck transactions (mark as recovered)
+   * Finds stuck transactions and marks them as recovered
+   * 
+   * @returns Number of transactions recovered
+   */
+  async recoverStuckTransactions(maxAgeSeconds: number = 30): Promise<number> {
+    const stuckTransactions = await this.findStuckTransactions(maxAgeSeconds);
+    
+    if (stuckTransactions.length === 0) {
+      return 0;
+    }
+
+    let recoveredCount = 0;
+    const now = new Date();
+
+    for (const tx of stuckTransactions) {
+      try {
+        // Mark as recovered
+        const recoveredState: TransactionState = {
+          ...tx,
+          status: 'recovered',
+          failedAt: now,
+          error: 'Transaction timeout - no heartbeat received',
+        };
+
+        await this.setState(recoveredState, this.FAILED_TTL);
+        recoveredCount++;
+
+        logger.info('Recovered stuck transaction', {
+          txId: tx._id,
+          age: Math.round((now.getTime() - tx.lastHeartbeat.getTime()) / 1000),
+        });
+      } catch (error) {
+        logger.error('Failed to recover stuck transaction', {
+          txId: tx._id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    return recoveredCount;
+  }
+
+  /**
    * Get TTL for status
    */
   private getTTLForStatus(status: TransactionState['status']): number {

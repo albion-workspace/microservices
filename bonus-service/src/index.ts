@@ -25,7 +25,6 @@ import {
   type IntegrationEvent,
   type ResolverContext,
 } from 'core-service';
-import { initializeLedger } from './services/ledger-service.js';
 
 // Import unified event dispatcher (handles both internal events + webhooks)
 import {
@@ -703,17 +702,9 @@ async function main() {
     // Continue - webhooks are optional
   }
   
-  // Initialize ledger system AFTER database connection is established
-  const tenantId = 'default'; // Could be multi-tenant in future
-  try {
-    await initializeLedger(tenantId);
-    logger.info('Ledger system initialized for bonus service');
-  } catch (error) {
-    logger.error('Failed to initialize ledger system', { error });
-    // Ledger is critical - but we'll let it fail gracefully and log
-    // The service can still run, but ledger operations will fail
-    throw error; // Re-throw as ledger is critical for bonus service
-  }
+  // Ledger initialization removed - using simplified architecture (wallets + transactions + transfers)
+  // Wallets are created automatically via createTransferWithTransactions
+  logger.info('Bonus service initialized - using wallets + transactions + transfers architecture');
 
   // Note: User status flags are now stored in auth-service user.metadata
   // No need for separate user_status collection - consistent with payment-service architecture

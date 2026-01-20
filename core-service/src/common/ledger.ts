@@ -1,7 +1,16 @@
 /**
  * Double-Entry Ledger System (Financial Grade)
  * 
- * Features:
+ * @deprecated This ledger system is deprecated in favor of the simplified architecture:
+ * - Use `createTransferWithTransactions` from 'core-service' instead
+ * - Architecture: Wallets + Transactions + Transfers (no separate ledger collections)
+ * - Wallets are the source of truth for balances
+ * - Transactions are the ledger (credit/debit records)
+ * - Transfers create 2 transactions atomically
+ * 
+ * This file is kept for backward compatibility but should not be used in new code.
+ * 
+ * Features (legacy):
  * - TRUE ATOMIC transactions using MongoDB sessions
  * - Double-entry bookkeeping (every tx has debit + credit)
  * - Balance Mode: Fast reads from cached balance

@@ -1,8 +1,15 @@
 /**
  * Bonus Service - Saga-based bonus management
+ * 
+ * Architecture: Wallets + Transactions + Transfers
+ * - Wallets = Source of truth for balances
+ * - Transactions = The ledger (each transaction is a ledger entry)
+ * - Transfers = User-to-user operations (creates 2 transactions)
  */
 
-import { createService, type, type Repository, type SagaContext, validateInput } from 'core-service';
+import { createService, type, type Repository, type SagaContext, validateInput, getDatabase, getClient, logger } from 'core-service';
+import { createTransferWithTransactions } from 'core-service';
+import type { CreateTransferParams } from 'core-service';
 import type { BonusTemplate, UserBonus, BonusTransaction, BonusStatus } from '../types.js';
 import { bonusEngine } from './bonus-engine/index.js';
 import { templatePersistence } from './bonus-engine/persistence.js';
@@ -448,3 +455,329 @@ export const bonusTransactionService = createService<BonusTransaction, CreateBon
     maxRetries: 3,
   },
 });
+
+// ═══════════════════════════════════════════════════════════════════
+// Bonus Transfer Helpers (Unified Wallet Operations)
+// Architecture: Wallets + Transactions + Transfers
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Get bonus-pool user ID from auth database
+ * Bonus-pool is a registered user (bonus-pool@system.com), not a string literal
+ */
+async function getBonusPoolUserId(): Promise<string> {
+  try {
+    const client = getClient();
+    const authDb = client.db('auth_service');
+    const usersCollection = authDb.collection('users');
+    
+    // Look up bonus-pool user by email
+    const bonusPoolUser = await usersCollection.findOne({ email: 'bonus-pool@system.com' });
+    
+    if (!bonusPoolUser) {
+      logger.warn('Bonus-pool user not found in auth database, using string literal as fallback');
+      return 'bonus-pool';
+    }
+    
+    const userId = bonusPoolUser._id?.toString() || bonusPoolUser.id;
+    logger.debug('Bonus-pool user ID resolved', { userId, email: bonusPoolUser.email });
+    return userId;
+  } catch (error) {
+    logger.error('Failed to get bonus-pool user ID', { error });
+    return 'bonus-pool';
+  }
+}
+
+/**
+ * Check if bonus pool has sufficient balance
+ * Uses wallet balance directly (wallets are the source of truth)
+ */
+export async function checkBonusPoolBalance(
+  amount: number,
+  currency: string = 'USD'
+): Promise<{ sufficient: boolean; available: number; required: number }> {
+  const db = getDatabase();
+  const bonusPoolUserId = await getBonusPoolUserId();
+  
+  // Get wallet balance directly
+  const wallet = await db.collection('wallets').findOne(
+    { userId: bonusPoolUserId, currency, category: 'main' },
+    { projection: { balance: 1 } }
+  );
+  
+  const available = wallet ? ((wallet as any).balance || 0) : 0;
+  const sufficient = available >= amount;
+  
+  if (!sufficient) {
+    logger.warn('Insufficient bonus pool balance', {
+      available,
+      required: amount,
+      currency,
+      bonusPoolUserId,
+    });
+  }
+  
+  return {
+    sufficient,
+    available,
+    required: amount,
+  };
+}
+
+/**
+ * Record bonus award using transfer helper
+ * Flow: Bonus Pool (real) -> User (bonus)
+ * Creates a transfer with 2 transactions atomically
+ */
+export async function recordBonusAwardTransfer(
+  userId: string,
+  amount: number,
+  currency: string,
+  tenantId: string,
+  bonusId: string,
+  bonusType: string,
+  description?: string
+): Promise<string> {
+  // Check balance first
+  const balanceCheck = await checkBonusPoolBalance(amount, currency);
+  if (!balanceCheck.sufficient) {
+    throw new Error(
+      `Insufficient bonus pool balance. Available: ${balanceCheck.available}, Required: ${balanceCheck.required}`
+    );
+  }
+  
+  // Get bonus-pool user ID
+  const bonusPoolUserId = await getBonusPoolUserId();
+  
+  try {
+    // Create transfer: bonus-pool (real) -> user (bonus)
+    const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
+      fromUserId: bonusPoolUserId,
+      toUserId: userId,
+      amount,
+      currency,
+      tenantId,
+      feeAmount: 0,
+      method: 'bonus_award',
+      externalRef: `bonus-award-${bonusId}-${Date.now()}`,
+      description: description || `Bonus awarded: ${bonusType}`,
+      fromBalanceType: 'real',  // Debit from bonus-pool real balance
+      toBalanceType: 'bonus',   // Credit to user bonus balance
+      objectId: bonusId,         // Transactions reference bonus, not transfer
+      objectModel: 'bonus',
+      bonusId,
+      bonusType,
+    });
+    
+    logger.info('Bonus award recorded via transfer', {
+      transferId: transfer.id,
+      debitTxId: debitTx.id,
+      creditTxId: creditTx.id,
+      userId,
+      bonusId,
+      bonusType,
+      amount,
+      currency,
+    });
+    
+    return transfer.id;
+  } catch (error: any) {
+    logger.error('Failed to create transfer for bonus award', {
+      error: error.message,
+      stack: error.stack,
+      userId,
+      bonusId,
+      bonusType,
+      amount,
+      currency,
+    });
+    throw error;
+  }
+}
+
+/**
+ * Record bonus conversion using transfer helper
+ * Flow: User (bonus) -> User (real) - same user, different balance types
+ * Creates a transfer with 2 transactions atomically
+ */
+export async function recordBonusConversionTransfer(
+  userId: string,
+  amount: number,
+  currency: string,
+  tenantId: string,
+  bonusId: string,
+  description?: string
+): Promise<string> {
+  const db = getDatabase();
+  
+  // Check bonus balance
+  const wallet = await db.collection('wallets').findOne(
+    { userId, currency, category: 'main' },
+    { projection: { bonusBalance: 1 } }
+  );
+  
+  const bonusBalance = wallet ? ((wallet as any).bonusBalance || 0) : 0;
+  if (bonusBalance < amount) {
+    throw new Error(
+      `Insufficient bonus balance. Available: ${bonusBalance}, Required: ${amount}`
+    );
+  }
+  
+  try {
+    // Create transfer: user (bonus) -> user (real) - same user
+    const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
+      fromUserId: userId,
+      toUserId: userId,  // Same user
+      amount,
+      currency,
+      tenantId,
+      feeAmount: 0,
+      method: 'bonus_convert',
+      externalRef: `bonus-convert-${bonusId}-${Date.now()}`,
+      description: description || `Bonus converted to real balance`,
+      fromBalanceType: 'bonus',  // Debit from bonus balance
+      toBalanceType: 'real',     // Credit to real balance
+      objectId: bonusId,         // Transactions reference bonus, not transfer
+      objectModel: 'bonus',
+      bonusId,
+    });
+    
+    logger.info('Bonus conversion recorded via transfer', {
+      transferId: transfer.id,
+      debitTxId: debitTx.id,
+      creditTxId: creditTx.id,
+      userId,
+      bonusId,
+      amount,
+      currency,
+    });
+    
+    return transfer.id;
+  } catch (error: any) {
+    logger.error('Failed to create transfer for bonus conversion', {
+      error: error.message,
+      userId,
+      bonusId,
+      amount,
+      currency,
+    });
+    throw error;
+  }
+}
+
+/**
+ * Record bonus forfeiture using transfer helper
+ * Flow: User (bonus) -> Bonus Pool (real) - return forfeited bonus
+ * Creates a transfer with 2 transactions atomically
+ */
+export async function recordBonusForfeitTransfer(
+  userId: string,
+  amount: number,
+  currency: string,
+  tenantId: string,
+  bonusId: string,
+  reason: string,
+  description?: string
+): Promise<string> {
+  const db = getDatabase();
+  const bonusPoolUserId = await getBonusPoolUserId();
+  
+  // Check bonus balance
+  const wallet = await db.collection('wallets').findOne(
+    { userId, currency, category: 'main' },
+    { projection: { bonusBalance: 1 } }
+  );
+  
+  const bonusBalance = wallet ? ((wallet as any).bonusBalance || 0) : 0;
+  const forfeitAmount = Math.min(amount, bonusBalance);
+  
+  if (forfeitAmount <= 0) {
+    throw new Error('No bonus balance to forfeit');
+  }
+  
+  try {
+    // Create transfer: user (bonus) -> bonus-pool (real)
+    const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
+      fromUserId: userId,
+      toUserId: bonusPoolUserId,
+      amount: forfeitAmount,
+      currency,
+      tenantId,
+      feeAmount: 0,
+      method: 'bonus_forfeit',
+      externalRef: `bonus-forfeit-${bonusId}-${Date.now()}`,
+      description: description || `Bonus forfeited: ${reason}`,
+      fromBalanceType: 'bonus',  // Debit from user bonus balance
+      toBalanceType: 'real',      // Credit to bonus-pool real balance
+      objectId: bonusId,           // Transactions reference bonus, not transfer
+      objectModel: 'bonus',
+      bonusId,
+      reason,
+    });
+    
+    logger.info('Bonus forfeiture recorded via transfer', {
+      transferId: transfer.id,
+      debitTxId: debitTx.id,
+      creditTxId: creditTx.id,
+      userId,
+      bonusId,
+      amount: forfeitAmount,
+      currency,
+      reason,
+    });
+    
+    return transfer.id;
+  } catch (error: any) {
+    logger.error('Failed to create transfer for bonus forfeiture', {
+      error: error.message,
+      userId,
+      bonusId,
+      amount: forfeitAmount,
+      currency,
+      reason,
+    });
+    throw error;
+  }
+}
+
+/**
+ * Get user bonus balance from wallet
+ * Uses wallet balance directly (wallets are the source of truth)
+ */
+export async function getUserBonusBalance(
+  userId: string,
+  currency: string = 'USD'
+): Promise<number> {
+  try {
+    const db = getDatabase();
+    const wallet = await db.collection('wallets').findOne(
+      { userId, currency, category: 'main' },
+      { projection: { bonusBalance: 1 } }
+    );
+    
+    return wallet ? ((wallet as any).bonusBalance || 0) : 0;
+  } catch (error) {
+    logger.debug('Failed to get user bonus balance', { userId, currency, error });
+    return 0;
+  }
+}
+
+/**
+ * Get bonus pool balance from wallet
+ * Uses wallet balance directly (wallets are the source of truth)
+ */
+export async function getBonusPoolBalance(currency: string = 'USD'): Promise<number> {
+  try {
+    const db = getDatabase();
+    const bonusPoolUserId = await getBonusPoolUserId();
+    const wallet = await db.collection('wallets').findOne(
+      { userId: bonusPoolUserId, currency, category: 'main' },
+      { projection: { balance: 1 } }
+    );
+    
+    return wallet ? ((wallet as any).balance || 0) : 0;
+  } catch (error) {
+    logger.debug('Failed to get bonus pool balance', { currency, error });
+    return 0;
+  }
+}

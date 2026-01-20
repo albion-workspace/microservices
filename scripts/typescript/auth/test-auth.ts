@@ -262,13 +262,13 @@ async function testPermission(userKeyOrEmail: string = 'system') {
   console.log(`Permissions in token: ${JSON.stringify(payload.permissions || [])}`);
   
   // Try to call a mutation that requires system role
-  console.log('\n🧪 Testing createWalletTransaction mutation (requires system role)...');
+  console.log('\n🧪 Testing createTransfer mutation (requires system role)...');
   try {
     const result = await graphql(
       PAYMENT_SERVICE_URL,
       `
-        mutation CreateWalletTransaction($input: CreateWalletTransactionInput!) {
-          createWalletTransaction(input: $input) {
+        mutation CreateTransfer($input: CreateTransferInput!) {
+          createTransfer(input: $input) {
             success
             errors
           }
@@ -276,13 +276,12 @@ async function testPermission(userKeyOrEmail: string = 'system') {
       `,
       {
         input: {
-          walletId: 'test-wallet-id',
-          userId: 'test-user-id',
-          type: 'credit',
-          balanceType: 'real',
-          currency: 'EUR',
+          fromUserId: 'test-user-id',
+          toUserId: 'test-user-id',
           amount: 100,
-          description: 'Test transaction',
+          currency: 'EUR',
+          method: 'transfer',
+          description: 'Test transfer',
         },
       },
       token
@@ -295,7 +294,7 @@ async function testPermission(userKeyOrEmail: string = 'system') {
       console.log('   The payment service is correctly rejecting the request.');
       console.log('   This means the JWT token does NOT have admin/system roles.');
       console.log(`   Token has roles: ${JSON.stringify(payload.roles || [])}`);
-      console.log('   Required roles: ["system"]');
+      console.log('   Required roles: ["system"] or authenticated user for transfers');
     }
   }
 }

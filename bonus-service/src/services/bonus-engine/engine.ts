@@ -34,6 +34,10 @@ import {
   transactionPersistence,
 } from './persistence.js';
 import { emitBonusEvent } from '../../event-dispatcher.js';
+import { 
+  recordBonusConversionTransfer,
+  recordBonusForfeitTransfer,
+} from '../bonus.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Bonus Engine Facade
@@ -330,8 +334,7 @@ export class BonusEngine {
 
     // Record conversion in ledger FIRST
     try {
-      const { recordBonusConversionLedgerEntry } = await import('../ledger-service.js');
-      await recordBonusConversionLedgerEntry(
+      await recordBonusConversionTransfer(
         userId,
         bonus.currentValue,
         bonus.currency,
@@ -389,8 +392,7 @@ export class BonusEngine {
 
     // Record forfeiture in ledger FIRST
     try {
-      const { recordBonusForfeitLedgerEntry } = await import('../ledger-service.js');
-      await recordBonusForfeitLedgerEntry(
+      await recordBonusForfeitTransfer(
         userId,
         bonus.currentValue,
         bonus.currency,
@@ -480,8 +482,7 @@ export class BonusEngine {
     for (const bonus of expiredBonuses) {
       // Record expiration in ledger FIRST (same as forfeiture)
       try {
-        const { recordBonusForfeitLedgerEntry } = await import('../ledger-service.js');
-        await recordBonusForfeitLedgerEntry(
+      await recordBonusForfeitTransfer(
           bonus.userId,
           bonus.currentValue,
           bonus.currency,

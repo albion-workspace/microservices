@@ -177,19 +177,22 @@ async function promoteUser() {
       { $set: updateData }
     );
     
-    // Update ledger accounts if allowNegative permission is set
-    // Note: User permissions are stored in auth_service, payment-service queries auth_service directly
+    // Update wallet allowNegative permission (wallet-level is more flexible and performant)
     if (permissions.allowNegative) {
       const paymentDb = await getPaymentDatabase();
-      const ledgerAccounts = paymentDb.collection('ledger_accounts');
+      const walletsCollection = paymentDb.collection('wallets');
       
-      // Update all user accounts to allow negative
-      await ledgerAccounts.updateMany(
-        { ownerId: user.id, type: 'user' },
-        { $set: { allowNegative: true } }
+      // Update all wallets for this user to allow negative balance
+      const updateResult = await walletsCollection.updateMany(
+        { userId: user.id },
+        { $set: { allowNegative: true, updatedAt: new Date() } }
       );
       
-      console.log('✅ Updated ledger accounts to allow negative balance');
+      console.log(`✅ Updated ${updateResult.modifiedCount} wallet(s) to allow negative balance`);
+      
+      // Also set allowNegative for any wallets created in the future via getOrCreateWallet
+      // This is handled by passing options to getOrCreateWallet, but we can also set a default
+      // by updating the user's wallets now (done above).
     }
     
     console.log(`\n✅ User promoted successfully!`);

@@ -28,7 +28,7 @@ async function getUserFromAuthService(
 ): Promise<any> {
   try {
     // Query auth_service database directly (both services share MongoDB instance)
-    // Same pattern as payment-service/src/services/ledger-service.ts
+    // Same pattern as payment-service/src/services/wallet.ts (unified wallet operations)
     const client = getClient();
     const authDb = client.db('auth_service');
     const authUsersCollection = authDb.collection('users');
