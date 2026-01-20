@@ -723,10 +723,15 @@ async function testFlow() {
     
     console.log(`  Payment Provider: €${formatAmount(providerBalance)}\n`);
     
-    // Step 2: Create end user wallet
-    console.log('👤 STEP 2: Creating End User Wallet\n');
-    const walletId = await createWallet(token, testUserId, currency);
-    console.log(`  ✅ Wallet created: ${walletId}\n`);
+    // Step 2: Get or create end user wallet
+    console.log('👤 STEP 2: Getting/Creating End User Wallet\n');
+    let walletId = await findWallet(token, testUserId, currency);
+    if (!walletId) {
+      walletId = await createWallet(token, testUserId, currency);
+      console.log(`  ✅ Wallet created: ${walletId}\n`);
+    } else {
+      console.log(`  ✅ Using existing wallet: ${walletId}\n`);
+    }
     
     // Step 3: End user deposits from payment-provider
     console.log('💳 STEP 3: End User Deposits from Payment Provider (€500)\n');
@@ -778,10 +783,15 @@ async function testDuplicate() {
     console.log(`  ✅ Test user ID: ${testUserId}`);
     console.log(`  ✅ Source user ID: ${fromUserId}\n`);
     
-    // Create wallet
+    // Get or create wallet
     console.log('📦 Setting up test wallet...');
-    const walletId = await createWallet(token, testUserId, DEFAULT_CURRENCY);
-    console.log(`  ✅ Wallet created: ${walletId}\n`);
+    let walletId = await findWallet(token, testUserId, DEFAULT_CURRENCY);
+    if (!walletId) {
+      walletId = await createWallet(token, testUserId, DEFAULT_CURRENCY);
+      console.log(`  ✅ Wallet created: ${walletId}\n`);
+    } else {
+      console.log(`  ✅ Using existing wallet: ${walletId}\n`);
+    }
     
     // Test 1: Concurrent idempotency
     console.log('📋 Test 1: Concurrent Deposits (10 concurrent requests)\n');
@@ -906,11 +916,21 @@ async function testExchangeRate() {
     // Test 1: Create wallets in different currencies
     console.log('📦 Test 1: Creating wallets in different currencies\n');
     
-    const eurWalletId = await createWallet(token, testUserId, 'EUR');
-    console.log(`  ✅ EUR wallet created: ${eurWalletId}`);
+    let eurWalletId = await findWallet(token, testUserId, 'EUR');
+    if (!eurWalletId) {
+      eurWalletId = await createWallet(token, testUserId, 'EUR');
+      console.log(`  ✅ EUR wallet created: ${eurWalletId}`);
+    } else {
+      console.log(`  ✅ Using existing EUR wallet: ${eurWalletId}`);
+    }
     
-    const usdWalletId = await createWallet(token, testUserId, 'USD');
-    console.log(`  ✅ USD wallet created: ${usdWalletId}\n`);
+    let usdWalletId = await findWallet(token, testUserId, 'USD');
+    if (!usdWalletId) {
+      usdWalletId = await createWallet(token, testUserId, 'USD');
+      console.log(`  ✅ USD wallet created: ${usdWalletId}\n`);
+    } else {
+      console.log(`  ✅ Using existing USD wallet: ${usdWalletId}\n`);
+    }
     
     // Test 2: Verify exchange rates are stored and retrievable
     console.log('💰 Test 2: Verifying exchange rate storage and retrieval\n');
@@ -1044,10 +1064,13 @@ async function testCreditLimit() {
     const currentBalance = (wallet1 as any)?.balance || 0;
     console.log(`  🔍 Current balance: €${formatAmount(currentBalance)}`);
     
-    // If wallet has balance, transfer it out first to test negative balance rejection
+    // Get another end user for proper end-user to end-user transfer testing
+    const user4Id = await getUserId('user4');
+    
+    // If wallet has balance, transfer it to another end user first to test negative balance rejection
     if (currentBalance > 0) {
-      console.log(`  ⚠️  Wallet has balance (€${formatAmount(currentBalance)}). Transferring out to reset...`);
-      await transferFunds(token, user1Id, systemUserId, currentBalance, currency);
+      console.log(`  ⚠️  Wallet has balance (€${formatAmount(currentBalance)}). Transferring to another end user to reset...`);
+      await transferFunds(token, user1Id, user4Id, currentBalance, currency);
       // Wait a bit for balance to update
       await sleep(1000);
       const wallet1After = await db.collection('wallets').findOne({ id: wallet1Id });
@@ -1061,10 +1084,10 @@ async function testCreditLimit() {
     const wallet1Balance = (wallet1Check as any)?.balance || 0;
     console.log(`  🔍 Current balance: €${formatAmount(wallet1Balance)}`);
     
-    // If wallet has balance, transfer it out first to test negative balance rejection
+    // If wallet has balance, transfer it to another end user to reset
     if (wallet1Balance > 0) {
-      console.log(`  ⚠️  Wallet has balance (€${formatAmount(wallet1Balance)}). Transferring out to reset...`);
-      await transferFunds(token, user1Id, systemUserId, wallet1Balance, currency);
+      console.log(`  ⚠️  Wallet has balance (€${formatAmount(wallet1Balance)}). Transferring to another end user to reset...`);
+      await transferFunds(token, user1Id, user4Id, wallet1Balance, currency);
       // Wait a bit for balance to update
       await sleep(1000);
       const wallet1After = await dbCheck.collection('wallets').findOne({ id: wallet1Id });
@@ -1072,10 +1095,10 @@ async function testCreditLimit() {
       console.log(`  🔍 Balance after reset: €${formatAmount(balanceAfter)}`);
     }
     
-    // Try to debit more than balance (should fail)
-    console.log('  💳 Attempting to debit €100 from wallet with €0 balance...');
+    // Try to debit more than balance (should fail) - end user to end user transfer
+    console.log('  💳 Attempting to debit €100 from wallet with €0 balance (end user to end user)...');
     try {
-      await transferFunds(token, user1Id, systemUserId, 10000, currency); // €100
+      await transferFunds(token, user1Id, user4Id, 10000, currency); // €100
       throw new Error('Expected error for insufficient balance, but transfer succeeded');
     } catch (error: any) {
       if (error.message.includes('Insufficient balance') || error.message.includes('does not allow negative')) {
@@ -1086,8 +1109,10 @@ async function testCreditLimit() {
     }
     
     // Test 2: Wallet with allowNegative but no creditLimit should allow any negative
+    // NOTE: In production, only SYSTEM users should have allowNegative=true
+    // We're testing with user2 for testing purposes only - this simulates a system user scenario
     console.log('\n📝 Test 2: Wallet with allowNegative=true, no creditLimit...');
-    console.log(`  👤 Using user2 (${user2Id})`);
+    console.log(`  👤 Using user2 (${user2Id}) - NOTE: In production, only system users should have allowNegative=true`);
     let wallet2Id = await findWallet(token, user2Id, currency);
     if (!wallet2Id) {
       wallet2Id = await createWalletWithOptions(token, user2Id, currency, { allowNegative: true });
@@ -1128,7 +1153,9 @@ async function testCreditLimit() {
     await new Promise(resolve => setTimeout(resolve, 200));
     
     // Debit more than balance (should succeed - no credit limit)
-    console.log('  💳 Attempting to debit €50 from wallet with €0 balance (should succeed)...');
+    // Use system user as recipient since user2 has allowNegative=true (for testing purposes)
+    // In production, only system users should have allowNegative=true
+    console.log('  💳 Attempting to debit €50 from wallet with €0 balance (should succeed - user2 has allowNegative=true)...');
     await transferFunds(token, user2Id, systemUserId, 5000, currency); // €50
     console.log('  ✅ Transfer succeeded (wallet allows negative, no limit)');
     
@@ -1171,8 +1198,10 @@ async function testCreditLimit() {
     console.log(`  ✅ Verified negative balance: €${formatAmount(balance2)}`);
     
     // Test 3: Wallet with allowNegative and creditLimit should enforce limit
+    // NOTE: In production, only SYSTEM users should have allowNegative=true
+    // We're testing with user3 for testing purposes only - this simulates a system user scenario
     console.log('\n📝 Test 3: Wallet with allowNegative=true, creditLimit=€1000...');
-    console.log(`  👤 Using user3 (${user3Id})`);
+    console.log(`  👤 Using user3 (${user3Id}) - NOTE: In production, only system users should have allowNegative=true`);
     const creditLimitAmount = 100000; // €1000 in cents
     const wallet3Id = await createWalletWithOptions(token, user3Id, currency, { 
       allowNegative: true, 
@@ -1195,6 +1224,7 @@ async function testCreditLimit() {
     console.log(`  🔍 Current wallet balance: €${formatAmount(initialBalance)}`);
     
     // Step 1: Small debit within credit limit (should succeed)
+    // Use system user as recipient since user3 has allowNegative=true (for testing purposes)
     const smallDebitAmount = 10000; // €100 in cents
     console.log(`  💳 Step 1: Attempting to debit €${formatAmount(smallDebitAmount)} (within credit limit of €${formatAmount(creditLimitAmount)})...`);
     await transferFunds(token, user3Id, systemUserId, smallDebitAmount, currency);

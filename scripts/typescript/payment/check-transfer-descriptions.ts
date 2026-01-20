@@ -32,8 +32,14 @@ async function checkTransfers() {
     console.log(`  From User: ${fromEmail} (${t.fromUserId.substring(0, 12)}...)`);
     console.log(`  To User: ${toEmail} (${t.toUserId.substring(0, 12)}...)`);
     console.log(`  Description: ${description}`);
+    console.log(`  Meta keys: ${t.meta ? Object.keys(t.meta).join(', ') : 'none'}`);
+    if (t.meta) {
+      console.log(`  Meta.method: ${t.meta.method || 'N/A'}`);
+      console.log(`  Meta.externalRef: ${t.meta.externalRef || 'N/A'}`);
+    }
     console.log(`  Amount: €${(t.amount / 100).toFixed(2)}`);
     console.log(`  Status: ${t.status}`);
+    console.log(`  Created: ${t.createdAt}`);
     console.log('');
   });
   

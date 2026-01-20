@@ -2942,6 +2942,45 @@ function TransactionsTab() {
     },
   })
 
+  // Fetch users to map IDs to emails
+  const usersQuery = useQuery({
+    queryKey: ['users-for-transactions'],
+    queryFn: async () => {
+      if (!authToken) return []
+      try {
+        const result = await graphqlQuery(GRAPHQL_SERVICE_URLS.auth, `
+          query GetAllUsers($first: Int) {
+            users(first: $first) {
+              nodes {
+                id
+                email
+              }
+            }
+          }
+        `, { first: 1000 }, authToken)
+        return result.users?.nodes || []
+      } catch (error) {
+        console.error('Failed to fetch users:', error)
+        return []
+      }
+    },
+    enabled: !!authToken,
+  })
+  
+  const userEmailMap = new Map<string, string>()
+  if (usersQuery.data) {
+    usersQuery.data.forEach((user: any) => {
+      if (user.id && user.email) {
+        userEmailMap.set(user.id, user.email)
+      }
+    })
+  }
+  
+  // Helper to get user email or fallback to ID
+  const getUserDisplay = (userId: string) => {
+    return userEmailMap.get(userId) || userId.substring(0, 8) + '...'
+  }
+
   // Extract data from responses - use deposits and withdrawals as primary source
   const deposits = depositsQuery.data?.deposits?.nodes || []
   const withdrawals = withdrawalsQuery.data?.withdrawals?.nodes || []
@@ -3420,7 +3459,7 @@ function TransactionsTab() {
                           {tx._displayType}
                         </span>
                       </td>
-                      <td style={{ padding: '10px 8px', fontSize: 13, fontFamily: 'var(--font-mono)' }}>{tx.userId?.substring(0, 8)}...</td>
+                      <td style={{ padding: '10px 8px', fontSize: 13 }}>{tx.userId ? getUserDisplay(tx.userId) : '-'}</td>
                       <td style={{ padding: '10px 8px', fontSize: 13, color: 'var(--text-secondary)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>
                         {tx._description || tx.description || tx.metadata?.description || (tx.objectModel === 'transfer' ? (tx.charge === 'credit' ? 'Transfer In' : 'Transfer Out') : tx._displayType || '-')}
                       </td>
