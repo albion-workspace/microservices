@@ -44,7 +44,9 @@ function generateExternalRef(
     return externalTransactionId;
   }
   
-  const timeWindow = Math.floor(Date.now() / (5 * 60 * 1000));
+  // Use 1-minute time window instead of 5 minutes to reduce duplicate window
+  // This still allows for retries but prevents duplicates from rapid repeated clicks
+  const timeWindow = Math.floor(Date.now() / (60 * 1000));
   const hashData = method 
     ? `${fromUserId}-${toUserId}-${amount}-${currency}-${method}-${timeWindow}`
     : `${fromUserId}-${toUserId}-${amount}-${currency}-${timeWindow}`;
@@ -55,6 +57,8 @@ function generateExternalRef(
 /**
  * Helper function to check for duplicate transfers
  * Throws error if duplicate is found
+ * 
+ * Checks for duplicates regardless of status to prevent any duplicate transactions
  */
 async function checkDuplicateTransfer(
   externalRef: string,
@@ -62,17 +66,21 @@ async function checkDuplicateTransfer(
 ): Promise<void> {
   const db = getDatabase();
   const transfersCollection = db.collection('transfers');
+  
+  // Check for any existing transfer with this externalRef (regardless of status)
+  // This prevents duplicates even if a previous transfer was completed or failed
   const existing = await transfersCollection.findOne({
     'meta.externalRef': externalRef,
-    status: { $in: ['pending', 'active', 'approved'] },
   });
   
   if (existing) {
+    const existingStatus = (existing as any).status;
     logger.warn(`Duplicate ${type} detected - transfer already exists`, {
       externalRef,
       existingTransferId: existing.id,
+      existingStatus,
     });
-    throw new Error(`Duplicate ${type} detected. A transfer with the same externalRef already exists (${existing.id})`);
+    throw new Error(`Duplicate ${type} detected. A transfer with the same externalRef already exists (${existing.id}, status: ${existingStatus})`);
   }
 }
 
@@ -149,6 +157,9 @@ const depositSaga = [
         ? 'Deposit'
         : `Deposit via ${methodDisplay.charAt(0).toUpperCase() + methodDisplay.slice(1)}`;
       
+      // Ensure description is always set (never null/undefined)
+      const finalDescription = description || 'Deposit';
+      
       const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
         fromUserId: fromUserIdValue,
         toUserId,
@@ -158,7 +169,7 @@ const depositSaga = [
         feeAmount: data.feeAmount as number,
         method: method || 'system',
         externalRef,
-        description,
+        description: finalDescription,
         // Payment-specific details from rest params
         ...rest,
         externalTransactionId,
@@ -328,6 +339,9 @@ const withdrawalSaga = [
         ? 'Withdrawal'
         : `Withdrawal via ${methodDisplay.charAt(0).toUpperCase() + methodDisplay.slice(1)}`;
       
+      // Ensure description is always set (never null/undefined)
+      const finalDescription = description || 'Withdrawal';
+      
       const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
         fromUserId,
         toUserId,
@@ -337,7 +351,7 @@ const withdrawalSaga = [
         feeAmount: data.feeAmount as number,
         method,
         externalRef,
-        description,
+        description: finalDescription,
         // Payment-specific details from rest params
         ...rest,
         externalTransactionId,
@@ -440,25 +454,52 @@ export const transactionsQueryResolver = async (args: Record<string, unknown>) =
       ]);
       
       return {
-        nodes: nodes.map((tx: any) => ({
-          id: tx.id,
-          userId: tx.userId,
-          type: tx.charge || tx.type, // Use charge (credit/debit) or fallback to type
-          status: tx.status || 'completed', // Transactions are immutable, default to completed
-          amount: tx.amount,
-          currency: tx.meta?.currency || tx.currency, // Currency is in meta object
-          feeAmount: tx.meta?.feeAmount || tx.feeAmount,
-          netAmount: tx.meta?.netAmount || tx.netAmount,
-          balance: tx.balance, // Wallet balance after transaction
-          charge: tx.charge, // credit or debit
-          fromUserId: tx.meta?.fromUserId || tx.fromUserId, // May be in meta or direct
-          toUserId: tx.meta?.toUserId || tx.toUserId, // May be in meta or direct
-          createdAt: tx.createdAt,
-          description: tx.meta?.description || tx.description,
-          metadata: tx.meta || tx.metadata,
-          objectId: tx.objectId,
-          objectModel: tx.objectModel,
-        })),
+        nodes: nodes.map((tx: any) => {
+          // Safely extract metadata without circular references
+          const meta = tx.meta || tx.metadata || {};
+          // Create a clean metadata object without circular references
+          const cleanMeta: Record<string, unknown> = {};
+          try {
+            // Only include safe, serializable fields
+            if (meta.currency) cleanMeta.currency = meta.currency;
+            if (meta.feeAmount !== undefined) cleanMeta.feeAmount = meta.feeAmount;
+            if (meta.netAmount !== undefined) cleanMeta.netAmount = meta.netAmount;
+            if (meta.fromUserId) cleanMeta.fromUserId = meta.fromUserId;
+            if (meta.toUserId) cleanMeta.toUserId = meta.toUserId;
+            // Always include description if it exists (even if empty string, but not null/undefined)
+            if (meta.description !== undefined && meta.description !== null) {
+              cleanMeta.description = meta.description;
+            }
+            if (meta.method) cleanMeta.method = meta.method;
+            if (meta.externalRef) cleanMeta.externalRef = meta.externalRef;
+            if (meta.walletId) cleanMeta.walletId = meta.walletId;
+            if (meta.balanceType) cleanMeta.balanceType = meta.balanceType;
+            // Exclude potentially circular references like transferId, objectId references
+          } catch (err) {
+            // If metadata extraction fails, use empty object
+            logger.warn('Failed to extract metadata from transaction', { txId: tx.id, error: err });
+          }
+          
+          return {
+            id: tx.id,
+            userId: tx.userId,
+            type: tx.charge || tx.type, // Use charge (credit/debit) or fallback to type
+            status: tx.status || 'completed', // Transactions are immutable, default to completed
+            amount: tx.amount,
+            currency: meta.currency || tx.currency, // Currency is in meta object
+            feeAmount: meta.feeAmount ?? tx.feeAmount,
+            netAmount: meta.netAmount ?? tx.netAmount,
+            balance: tx.balance, // Wallet balance after transaction
+            charge: tx.charge, // credit or debit
+            fromUserId: meta.fromUserId || tx.fromUserId, // May be in meta or direct
+            toUserId: meta.toUserId || tx.toUserId, // May be in meta or direct
+            createdAt: tx.createdAt,
+            description: cleanMeta.description ?? meta.description ?? (tx.charge === 'credit' ? 'Credit' : tx.charge === 'debit' ? 'Debit' : 'Transaction'), // Always provide a description
+            metadata: cleanMeta, // Use cleaned metadata without circular references
+            objectId: tx.objectId,
+            objectModel: tx.objectModel,
+          };
+        }),
         totalCount,
         pageInfo: {
           hasNextPage: skip + first < totalCount,

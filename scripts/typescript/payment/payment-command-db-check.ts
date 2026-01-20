@@ -357,6 +357,16 @@ async function createIndexes() {
     console.log('🔧 Creating unique index on transactions.meta.externalRef...\n');
     
     try {
+      // Check if collection exists, create it if it doesn't
+      const collections = await db.listCollections({ name: 'transactions' }).toArray();
+      if (collections.length === 0) {
+        console.log('📦 Collection "transactions" does not exist yet. Creating it...');
+        // Create collection by inserting and immediately deleting a dummy document
+        await transactionsCollection.insertOne({ _temp: true });
+        await transactionsCollection.deleteOne({ _temp: true });
+        console.log('✅ Collection "transactions" created');
+      }
+      
       // First, list all indexes and find any externalRef indexes to drop
       const existingIndexes = await transactionsCollection.indexes();
       const externalRefIndexes = existingIndexes.filter(idx => 
@@ -397,6 +407,37 @@ async function createIndexes() {
             console.log(`⚠️  Could not drop index ${indexName}: ${e.message}`);
           }
         }
+      }
+      
+      // Check for duplicates before creating unique index
+      const duplicateCheck = await transactionsCollection.aggregate([
+        {
+          $match: {
+            'meta.externalRef': { $exists: true, $ne: null },
+            charge: { $exists: true }
+          }
+        },
+        {
+          $group: {
+            _id: { externalRef: '$meta.externalRef', charge: '$charge' },
+            count: { $sum: 1 },
+            ids: { $push: '$id' }
+          }
+        },
+        {
+          $match: { count: { $gt: 1 } }
+        }
+      ]).toArray();
+      
+      if (duplicateCheck.length > 0) {
+        console.log(`⚠️  Found ${duplicateCheck.length} duplicate externalRef+charge combinations.`);
+        console.log('   The unique index cannot be created until duplicates are removed.');
+        console.log('   Run "remove-duplicates" command first, or manually clean up duplicates.');
+        console.log('   Example duplicates:');
+        duplicateCheck.slice(0, 3).forEach((dup: any) => {
+          console.log(`     - externalRef: ${dup._id.externalRef}, charge: ${dup._id.charge}, count: ${dup.count}`);
+        });
+        throw new Error(`Cannot create unique index: ${duplicateCheck.length} duplicate(s) found. Run "remove-duplicates" first.`);
       }
       
       // Create unique compound index on meta.externalRef + charge

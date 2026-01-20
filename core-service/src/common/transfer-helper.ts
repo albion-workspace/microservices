@@ -393,6 +393,8 @@ export async function createTransferWithTransactions(
       feeAmount,
       netAmount,
       currency,
+      externalRef,  // Include externalRef in transfer meta for unique index
+      description,  // Include description in transfer meta for reference
       // Handle bankAccount alias
       accountNumber: (rest as any).accountNumber || (rest as any).bankAccount,
     };
@@ -460,7 +462,24 @@ export async function createTransferWithTransactions(
     };
     
     // Insert all documents atomically (within transaction)
-    await transfersCollection.insertOne(transfer, { session: txSession });
+    // Handle duplicate key errors from unique index on meta.externalRef
+    try {
+      await transfersCollection.insertOne(transfer, { session: txSession });
+    } catch (insertError: any) {
+      // Check if this is a duplicate key error (E11000)
+      if (insertError.code === 11000 || insertError.codeName === 'DuplicateKey') {
+        // Check if the duplicate is for externalRef
+        if (insertError.keyPattern && insertError.keyPattern['meta.externalRef']) {
+          logger.warn('Duplicate transfer detected by unique index', {
+            externalRef: externalRef,
+            existingTransferId: insertError.keyValue?.['meta.externalRef'],
+          });
+          throw new Error(`Duplicate transfer detected. A transfer with the same externalRef already exists (${externalRef})`);
+        }
+      }
+      // Re-throw if it's not a duplicate key error
+      throw insertError;
+    }
     await transactionsCollection.insertMany([debitTx, creditTx], { session: txSession });
     
     // Update transfer with transaction IDs (within transaction)

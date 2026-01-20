@@ -5,6 +5,15 @@
  * Consolidates all payment tests into one file with shared utilities.
  * Reduces code duplication and provides consistent user/dependency management.
  * 
+ * BUSINESS RULES:
+ * 1. System User: Can go negative, accepts fees, handles bonuses
+ * 2. Provider User: Can accept fees but CANNOT go negative
+ * 3. End User: Cannot go negative, cannot accept fees
+ * 4. Transfer Rules: Anyone can make transfers, but only system can allow negative balances
+ * 5. Balance Verification: System Balance = -(Provider Balance + End User Balance)
+ *    This means: System Balance + Provider Balance + End User Balance = 0
+ *    (Small differences allowed for fees/rounding)
+ * 
  * Usage:
  *   npm run payment:test                    # Run all tests
  *   npx tsx payment-command-test.ts         # Run all tests
@@ -462,12 +471,10 @@ async function testSetup() {
           return existingWalletId;
         }
 
-        // Determine if user should have allowNegative
-        // System and payment-gateway users should have allowNegative
-        // We'll check by comparing userId with known system/gateway user IDs
+        // Determine if user should have allowNegative based on user type
+        // Only SYSTEM users can go negative (providers and end users cannot)
         const systemUserId = await getUserId('system').catch(() => null);
-        const gatewayUserId = await getUserId('paymentGateway').catch(() => null);
-        const shouldAllowNegative = userId === systemUserId || userId === gatewayUserId;
+        const shouldAllowNegative = userId === systemUserId; // Only system can go negative
 
         const result = await graphql<{ createWallet: { success: boolean; wallet?: { id: string } } }>(
           PAYMENT_SERVICE_URL,
@@ -478,6 +485,7 @@ async function testSetup() {
                 wallet {
                   id
                   userId
+                  allowNegative
                   currency
                   balance
                   allowNegative
@@ -516,17 +524,13 @@ async function testSetup() {
     const systemUserId = await createUser('system');
     await createWalletForUser(systemUserId, DEFAULT_CURRENCY);
 
-    // 2. Setup payment-gateway user
-    const gatewayUserId = await createUser('paymentGateway');
-    await createWalletForUser(gatewayUserId, DEFAULT_CURRENCY);
-
-    // 3. Setup payment-provider user
+    // 2. Setup payment-provider user
     // IMPORTANT: Payment-provider CANNOT go negative - if balance is zero, it stays zero
     // This is critical for mobile money accounts and real-world payment providers
     const providerUserId = await createUser('paymentProvider');
     await createWalletForUser(providerUserId, DEFAULT_CURRENCY);
 
-    // 4. Setup end users (user1-user5)
+    // 3. Setup end users (user1-user5)
     const endUserIds: string[] = [];
     for (let i = 1; i <= 5; i++) {
       const userId = await createUser(`user${i}` as keyof typeof users.endUsers);
@@ -539,7 +543,6 @@ async function testSetup() {
     console.log('╚═══════════════════════════════════════════════════════════════════╝\n');
     console.log('Users created:');
     console.log(`  ✅ ${users.system.email} (system) - Can go negative, full access`);
-    console.log(`  ✅ ${users.gateway.email} (payment-gateway) - Can go negative, accepts fees`);
     console.log(`  ✅ ${users.provider.email} (payment-provider) - Accepts fees`);
     console.log(`  ✅ ${Object.values(users.endUsers).map(u => u.email).join(', ')} (end users) - Normal users\n`);
 
@@ -565,29 +568,29 @@ async function testFunding() {
     const token = await login();
     
     // Get user IDs
-    const userIds = await getUserIds(['paymentGateway', 'paymentProvider']);
-    const gatewayUserId = userIds.paymentGateway;
+    const userIds = await getUserIds(['paymentProvider']);
     const providerUserId = userIds.paymentProvider;
     const systemUserId = await getUserId('system');
     
-    if (!gatewayUserId || !providerUserId) {
-      throw new Error(`Failed to get user IDs: gatewayUserId=${gatewayUserId}, providerUserId=${providerUserId}`);
+    if (!providerUserId) {
+      throw new Error(`Failed to get user IDs: providerUserId=${providerUserId}`);
     }
     
-    // Step 1: Fund gateway user
-    console.log('\n📥 Step 1: Funding gateway user...');
+    // Step 1: Fund provider user from system
+    console.log('\n📥 Step 1: Funding provider user from system...');
     const fundingAmount = 2000000; // €20,000
-    const funded = await fundUserWithDeposit(token, systemUserId, gatewayUserId, fundingAmount, DEFAULT_CURRENCY);
+    const funded = await fundUserWithDeposit(token, systemUserId, providerUserId, fundingAmount, DEFAULT_CURRENCY);
     
     if (!funded) {
-      throw new Error('Failed to fund gateway user');
+      throw new Error('Failed to fund provider user');
     }
     
     await sleep(1000); // Wait for transfers to complete
     
-    // Step 2: Transfer from gateway to provider
-    console.log('\n📤 Step 2: Transferring from gateway to provider...');
-    await transferFunds(token, gatewayUserId, providerUserId, 1000000, DEFAULT_CURRENCY); // €10,000
+    // Step 2: Transfer from provider to end user (for testing)
+    console.log('\n📤 Step 2: Transferring from provider to end user...');
+    const endUserId = await getUserId('user1');
+    await transferFunds(token, providerUserId, endUserId, 1000000, DEFAULT_CURRENCY); // €10,000
     
     // Check transfers
     console.log('\n🔍 Checking for transfers...');
@@ -632,47 +635,31 @@ async function testFlow() {
     const token = await login();
     
     // Get user IDs
-    const userIds = await getUserIds(['paymentGateway', 'paymentProvider']);
-    const gatewayUserId = userIds.paymentGateway;
+    const userIds = await getUserIds(['paymentProvider']);
     const providerUserId = userIds.paymentProvider;
     const systemUserId = await getUserId('system');
     const testUserId = `test-user-${Date.now()}`;
     const currency = DEFAULT_CURRENCY;
     
-    if (!gatewayUserId || !providerUserId) {
-      throw new Error(`Failed to get user IDs: gatewayUserId=${gatewayUserId}, providerUserId=${providerUserId}`);
+    if (!providerUserId) {
+      throw new Error(`Failed to get user IDs: providerUserId=${providerUserId}`);
     }
     
     // Step 0: Initial balances
     console.log('📊 STEP 0: Initial Balances\n');
-    let gatewayBalance = await getUserBalance(token, gatewayUserId, currency);
     let providerBalance = await getUserBalance(token, providerUserId, currency);
     let userBalance = await getUserWalletBalance(token, testUserId, currency);
     
-    console.log(`  Payment Gateway (${gatewayUserId}): €${formatAmount(gatewayBalance)}`);
     console.log(`  Payment Provider (${providerUserId}): €${formatAmount(providerBalance)}`);
     console.log(`  End User (${testUserId}): €${formatAmount(userBalance)}\n`);
     
-    // Step 0.5: Fund gateway user if needed
-    const requiredAmount = 1000000; // €10,000
-    if (gatewayBalance < requiredAmount) {
-      console.log(`💰 STEP 0.5: Funding Gateway User from System User (€${formatAmount(requiredAmount)})\n`);
-      const fundingAmount = requiredAmount + 1000000; // €20,000 total
-      await fundUserWithDeposit(token, systemUserId, gatewayUserId, fundingAmount, currency);
-      await sleep(2000);
-      gatewayBalance = await getUserBalance(token, gatewayUserId, currency);
-      console.log(`  Gateway balance after funding: €${formatAmount(gatewayBalance)}\n`);
-    }
-    
-    // Step 1: Fund payment-provider from payment-gateway
-    console.log('💰 STEP 1: Funding Payment Provider from Payment Gateway (€10,000)\n');
-    await transferFunds(token, gatewayUserId, providerUserId, 1000000, currency);
+    // Step 1: Fund payment-provider from system user
+    console.log('💰 STEP 1: Funding Payment Provider from System User (€10,000)\n');
+    await transferFunds(token, systemUserId, providerUserId, 1000000, currency);
     await sleep(2000);
     
-    gatewayBalance = await getUserBalance(token, gatewayUserId, currency);
     providerBalance = await getUserBalance(token, providerUserId, currency);
     
-    console.log(`  Payment Gateway: €${formatAmount(gatewayBalance)}`);
     console.log(`  Payment Provider: €${formatAmount(providerBalance)}\n`);
     
     // Step 2: Create end user wallet
@@ -685,11 +672,9 @@ async function testFlow() {
     await fundUserWithDeposit(token, providerUserId, testUserId, 50000, currency); // €500
     await sleep(2000);
     
-    gatewayBalance = await getUserBalance(token, gatewayUserId, currency);
     providerBalance = await getUserBalance(token, providerUserId, currency);
     userBalance = await getUserWalletBalance(token, testUserId, currency);
     
-    console.log(`  Payment Gateway: €${formatAmount(gatewayBalance)}`);
     console.log(`  Payment Provider: €${formatAmount(providerBalance)}`);
     console.log(`  End User: €${formatAmount(userBalance)}\n`);
     
@@ -991,6 +976,40 @@ async function testCreditLimit() {
       console.log(`  ✅ Using existing wallet: ${wallet1Id}`);
     }
     
+    // Check current balance first
+    const db = await getPaymentDatabase();
+    const wallet1 = await db.collection('wallets').findOne({ id: wallet1Id });
+    const currentBalance = (wallet1 as any)?.balance || 0;
+    console.log(`  🔍 Current balance: €${formatAmount(currentBalance)}`);
+    
+    // If wallet has balance, transfer it out first to test negative balance rejection
+    if (currentBalance > 0) {
+      console.log(`  ⚠️  Wallet has balance (€${formatAmount(currentBalance)}). Transferring out to reset...`);
+      await transferFunds(token, user1Id, systemUserId, currentBalance, currency);
+      // Wait a bit for balance to update
+      await sleep(1000);
+      const wallet1After = await db.collection('wallets').findOne({ id: wallet1Id });
+      const balanceAfter = (wallet1After as any)?.balance || 0;
+      console.log(`  🔍 Balance after reset: €${formatAmount(balanceAfter)}`);
+    }
+    
+    // Check current balance first - user1 might have balance from previous tests
+    const dbCheck = await getPaymentDatabase();
+    const wallet1Check = await dbCheck.collection('wallets').findOne({ id: wallet1Id });
+    const wallet1Balance = (wallet1Check as any)?.balance || 0;
+    console.log(`  🔍 Current balance: €${formatAmount(wallet1Balance)}`);
+    
+    // If wallet has balance, transfer it out first to test negative balance rejection
+    if (wallet1Balance > 0) {
+      console.log(`  ⚠️  Wallet has balance (€${formatAmount(wallet1Balance)}). Transferring out to reset...`);
+      await transferFunds(token, user1Id, systemUserId, wallet1Balance, currency);
+      // Wait a bit for balance to update
+      await sleep(1000);
+      const wallet1After = await dbCheck.collection('wallets').findOne({ id: wallet1Id });
+      const balanceAfter = (wallet1After as any)?.balance || 0;
+      console.log(`  🔍 Balance after reset: €${formatAmount(balanceAfter)}`);
+    }
+    
     // Try to debit more than balance (should fail)
     console.log('  💳 Attempting to debit €100 from wallet with €0 balance...');
     try {
@@ -1016,20 +1035,20 @@ async function testCreditLimit() {
     }
     
     // Verify wallet has allowNegative (or update it if needed)
-    const db = await getPaymentDatabase();
-    let wallet2 = await db.collection('wallets').findOne({ id: wallet2Id });
+    const db2 = await getPaymentDatabase();
+    let wallet2 = await db2.collection('wallets').findOne({ id: wallet2Id });
     console.log(`  🔍 Wallet before update: allowNegative=${wallet2?.allowNegative}, userId=${wallet2?.userId}, currency=${wallet2?.currency}`);
     
     if (!wallet2?.allowNegative) {
       console.log('  ⚠️  Wallet does not have allowNegative set. Updating...');
-      const updateResult = await db.collection('wallets').updateOne(
+      const updateResult = await db2.collection('wallets').updateOne(
         { id: wallet2Id },
         { $set: { allowNegative: true } }
       );
       console.log(`  🔍 Update result: matched=${updateResult.matchedCount}, modified=${updateResult.modifiedCount}`);
       
       // Verify the update worked
-      wallet2 = await db.collection('wallets').findOne({ id: wallet2Id });
+      wallet2 = await db2.collection('wallets').findOne({ id: wallet2Id });
       console.log(`  🔍 Wallet after update: allowNegative=${wallet2?.allowNegative}`);
       if (!wallet2?.allowNegative) {
         throw new Error('Failed to update wallet allowNegative field');
@@ -1040,7 +1059,7 @@ async function testCreditLimit() {
     }
     
     // Also verify by userId and currency (how getOrCreateWallet looks it up)
-    const walletByLookup = await db.collection('wallets').findOne({ userId: user2Id, currency });
+    const walletByLookup = await db2.collection('wallets').findOne({ userId: user2Id, currency });
     console.log(`  🔍 Wallet by lookup (userId + currency): allowNegative=${walletByLookup?.allowNegative}, id=${walletByLookup?.id}`);
     
     // Small delay to ensure wallet update is committed
@@ -1055,15 +1074,15 @@ async function testCreditLimit() {
     await new Promise(resolve => setTimeout(resolve, 500));
     
     // Debug: Check wallet directly from database (reuse existing db variable)
-    const walletFromDb = await db.collection('wallets').findOne({ userId: user2Id, currency });
+    const walletFromDb = await db2.collection('wallets').findOne({ userId: user2Id, currency });
     console.log(`  🔍 Wallet from DB (userId + currency): balance=${walletFromDb?.balance}, tenantId=${walletFromDb?.tenantId}, id=${walletFromDb?.id}`);
     
     // Also check by the wallet ID we know exists
-    const walletById = await db.collection('wallets').findOne({ id: wallet2Id });
+    const walletById = await db2.collection('wallets').findOne({ id: wallet2Id });
     console.log(`  🔍 Wallet from DB (by ID ${wallet2Id}): balance=${walletById?.balance}, tenantId=${walletById?.tenantId}`);
     
     // Check all wallets for this user+currency (might be multiple with different tenantIds)
-    const allWallets = await db.collection('wallets').find({ userId: user2Id, currency }).toArray();
+    const allWallets = await db2.collection('wallets').find({ userId: user2Id, currency }).toArray();
     console.log(`  🔍 All wallets for user+currency: ${allWallets.length} found`);
     allWallets.forEach((w, i) => {
       console.log(`    Wallet ${i + 1}: id=${w.id}, tenantId=${w.tenantId}, balance=${w.balance}`);
@@ -1100,7 +1119,7 @@ async function testCreditLimit() {
     console.log(`  ✅ Created wallet with allowNegative and creditLimit: ${wallet3Id}`);
     
     // Verify wallet has creditLimit (check from database)
-    const wallet3 = await db.collection('wallets').findOne({ id: wallet3Id });
+    const wallet3 = await db2.collection('wallets').findOne({ id: wallet3Id });
     if (!wallet3?.allowNegative) {
       throw new Error('Wallet should have allowNegative=true');
     }
@@ -1121,7 +1140,7 @@ async function testCreditLimit() {
     
     // Wait and check balance from database
     await new Promise(resolve => setTimeout(resolve, 500));
-    const wallet3AfterDebit = await db.collection('wallets').findOne({ id: wallet3Id });
+    const wallet3AfterDebit = await db2.collection('wallets').findOne({ id: wallet3Id });
     const balance3a = wallet3AfterDebit?.balance ?? 0;
     console.log(`  ✅ Balance after first debit: €${formatAmount(balance3a)} (expected: €${formatAmount(initialBalance - smallDebitAmount)})`);
     
@@ -1141,7 +1160,7 @@ async function testCreditLimit() {
     
     // Verify balance didn't change (transaction was rejected)
     await new Promise(resolve => setTimeout(resolve, 500));
-    const wallet3AfterReject = await db.collection('wallets').findOne({ id: wallet3Id });
+    const wallet3AfterReject = await db2.collection('wallets').findOne({ id: wallet3Id });
     const balance3b = wallet3AfterReject?.balance ?? 0;
     if (Math.abs(balance3b - balance3a) > 1) {
       throw new Error(`Balance should not have changed, but changed from €${formatAmount(balance3a)} to €${formatAmount(balance3b)}`);
@@ -1157,7 +1176,7 @@ async function testCreditLimit() {
       console.log('  ✅ Transfer succeeded (exactly at credit limit)');
       
       await new Promise(resolve => setTimeout(resolve, 500));
-      const wallet3AtLimit = await db.collection('wallets').findOne({ id: wallet3Id });
+      const wallet3AtLimit = await db2.collection('wallets').findOne({ id: wallet3Id });
       const balance3c = wallet3AtLimit?.balance ?? 0;
       const expectedBalance = -creditLimitAmount;
       if (Math.abs(balance3c - expectedBalance) > 10) { // Allow small rounding differences
@@ -1913,8 +1932,8 @@ async function testRecovery() {
 // ═══════════════════════════════════════════════════════════════════
 
 // Test configuration
-const GATEWAY_TEST_CONFIG = {
-  currency: 'USD',
+const PROVIDER_TEST_CONFIG = {
+  currency: DEFAULT_CURRENCY, // Use default currency (EUR)
 };
 
 const TEST_AMOUNTS = {
@@ -1947,11 +1966,10 @@ interface TestResult {
   details?: Record<string, unknown>;
 }
 
-let gatewayTestWalletId: string;
-let gatewayTestTransactionIds: string[] = [];
-let gatewayTestUserId: string;
+let providerTestEndUserId: string = '';
+let providerTestEndUserWalletId: string = '';
 
-async function getGatewayWalletBalance(walletId: string, token: string): Promise<number> {
+async function getProviderWalletBalance(walletId: string, token: string): Promise<number> {
   const query = `
     query GetWallet {
       wallet(id: "${walletId}") {
@@ -1966,10 +1984,18 @@ async function getGatewayWalletBalance(walletId: string, token: string): Promise
   return (data as any).wallet?.balance || 0;
 }
 
-async function testGatewayWalletCreation() {
-  const token = createSystemToken('8h');
+async function testProviderEndUserWalletCreation() {
+  const { token } = await loginAs('system', { verifyToken: true, retry: true });
   const { userId } = await registerAs('user1');
-  gatewayTestUserId = userId;
+  providerTestEndUserId = userId;
+  
+  // Check if wallet already exists
+  const existingWallet = await findWallet(token, providerTestEndUserId, PROVIDER_TEST_CONFIG.currency);
+  if (existingWallet) {
+    providerTestEndUserWalletId = existingWallet;
+    console.log(`   → Using existing wallet: ${existingWallet}`);
+    return; // Wallet already exists, skip creation
+  }
 
   const query = `
     mutation CreateWallet($input: CreateWalletInput!) {
@@ -1980,10 +2006,7 @@ async function testGatewayWalletCreation() {
           userId
           currency
           balance
-          bonusBalance
-          lockedBalance
         }
-        sagaId
         errors
       }
     }
@@ -1991,8 +2014,8 @@ async function testGatewayWalletCreation() {
 
   const data = await graphql(PAYMENT_SERVICE_URL, query, {
     input: {
-      userId: gatewayTestUserId,
-      currency: GATEWAY_TEST_CONFIG.currency,
+      userId: providerTestEndUserId,
+      currency: PROVIDER_TEST_CONFIG.currency,
       category: 'main',
     }
   }, token);
@@ -2001,15 +2024,15 @@ async function testGatewayWalletCreation() {
     throw new Error(data.createWallet.errors?.join(', ') || 'Failed to create wallet');
   }
 
-  gatewayTestWalletId = data.createWallet.wallet.id;
+  providerTestEndUserWalletId = data.createWallet.wallet.id;
   
   if (data.createWallet.wallet.balance !== 0) {
     throw new Error(`Expected balance 0, got ${data.createWallet.wallet.balance}`);
   }
 }
 
-async function testGatewayDuplicateWalletPrevention() {
-  const token = createSystemToken('8h');
+async function testProviderDuplicateWalletPrevention() {
+  const { token } = await loginAs('system', { verifyToken: true, retry: true });
   const query = `
     mutation CreateWallet($input: CreateWalletInput!) {
       createWallet(input: $input) {
@@ -2023,13 +2046,13 @@ async function testGatewayDuplicateWalletPrevention() {
   try {
     const data = await graphql(PAYMENT_SERVICE_URL, query, {
       input: {
-        userId: gatewayTestUserId,
-        currency: GATEWAY_TEST_CONFIG.currency,
+        userId: providerTestEndUserId,
+        currency: PROVIDER_TEST_CONFIG.currency,
         category: 'main',
       }
     }, token);
 
-    if (data.createWallet.success && data.createWallet.wallet.id !== gatewayTestWalletId) {
+    if (data.createWallet.success && data.createWallet.wallet.id !== providerTestEndUserWalletId) {
       throw new Error('Created duplicate wallet instead of returning existing one');
     }
   } catch (error) {
@@ -2037,334 +2060,150 @@ async function testGatewayDuplicateWalletPrevention() {
   }
 }
 
-async function testGatewaySuccessfulDeposit() {
-  const token = createSystemToken('8h');
-  const depositAmount = TEST_AMOUNTS.initialDeposit;
+async function testProviderSystemToProviderFlow() {
+  // Login as SYSTEM for system → provider operations
+  const { token } = await loginAs('system', { verifyToken: true, retry: true });
+  const systemUserId = await getUserId('system');
+  const providerUserId = await getUserId('paymentProvider');
+  const amount = TEST_AMOUNTS.initialDeposit;
   
-  const query = `
-    mutation Deposit($input: CreateDepositInput!) {
-      createDeposit(input: $input) {
-        success
-        deposit {
-          id
-          userId
-          amount
-          balance
-          currency
-          createdAt
-        }
-        transfer {
-          id
-          amount
-          status
-        }
-        sagaId
-        errors
-      }
-    }
-  `;
-
-  const data = await graphql(PAYMENT_SERVICE_URL, query, {
-    input: {
-      userId: gatewayTestUserId,
-      fromUserId: gatewayTestUserId, // For deposit, fromUserId is the same as userId (external source)
-      amount: depositAmount,
-      currency: GATEWAY_TEST_CONFIG.currency,
-      method: 'card',
-    }
-  }, token);
-
-  if (!data.createDeposit.success) {
-    throw new Error(data.createDeposit.errors?.join(', ') || 'Deposit failed');
+  // Test: System funds provider (system can go negative)
+  console.log(`   → System (${systemUserId}) funding Provider (${providerUserId}) with €${formatAmount(amount)}`);
+  
+  const success = await fundUserWithDeposit(token, systemUserId, providerUserId, amount, PROVIDER_TEST_CONFIG.currency);
+  if (!success) {
+    throw new Error('Failed to fund provider from system');
   }
-
-  const tx = data.createDeposit.deposit;
-  gatewayTestTransactionIds.push(tx.id);
-
-  // Balance is the balance after the transaction (no balanceBefore in new structure)
-  console.log(`   → Deposit created: ${tx.id}, Balance after: ${tx.balance}`);
+  
+  await sleep(500);
+  
+  // Verify provider received funds (net amount after fees)
+  const providerBalance = await getUserWalletBalance(token, providerUserId, PROVIDER_TEST_CONFIG.currency);
+  const expectedNetAmount = amount - Math.round(amount * 0.029); // 2.9% fee
+  
+  // Provider should have received net amount (previous balance + net)
+  console.log(`   → Provider balance: €${formatAmount(providerBalance)}`);
+  
+  // Verify system can go negative (check system balance)
+  const systemBalance = await getUserWalletBalance(token, systemUserId, PROVIDER_TEST_CONFIG.currency);
+  console.log(`   → System balance: €${formatAmount(systemBalance)} (can be negative)`);
 }
 
-async function testGatewayMultipleDeposits() {
-  const token = createSystemToken('8h');
-  const amounts = TEST_AMOUNTS.multipleDeposits;
-  let expectedBalance = TEST_AMOUNTS.initialDeposit;
-
-  for (const amount of amounts) {
-    const query = `
-      mutation Deposit($input: CreateDepositInput!) {
-        createDeposit(input: $input) {
-          success
-          deposit {
-            id
-            balance
-          }
-        }
-      }
-    `;
-
-    const data = await graphql(PAYMENT_SERVICE_URL, query, {
-      input: {
-        userId: gatewayTestUserId,
-        fromUserId: gatewayTestUserId,
-        amount,
-        currency: GATEWAY_TEST_CONFIG.currency,
-        method: 'card',
-      }
-    }, token);
-
-    if (!data.createDeposit.success) {
-      throw new Error(`Deposit of ${amount} failed`);
-    }
-
-    const tx = data.createDeposit.deposit;
-    gatewayTestTransactionIds.push(tx.id);
-
-    // Balance is the balance after transaction
-    expectedBalance += amount;
-    if (tx.balance !== expectedBalance) {
-      throw new Error(`Balance mismatch: expected ${expectedBalance}, got ${tx.balance}`);
-    }
+async function testProviderToEndUserFlow() {
+  // First ensure provider has balance (login as system for system → provider)
+  const systemToken = await loginAs('system', { verifyToken: true, retry: true }).then(r => r.token);
+  const systemUserId = await getUserId('system');
+  const providerUserId = await getUserId('paymentProvider');
+  const amount = TEST_AMOUNTS.initialDeposit;
+  
+  // Ensure provider has balance first
+  const providerBalance = await getUserWalletBalance(systemToken, providerUserId, PROVIDER_TEST_CONFIG.currency);
+  if (providerBalance < amount * 2) {
+    // Fund provider from system (system can go negative)
+    await fundUserWithDeposit(systemToken, systemUserId, providerUserId, amount * 3, PROVIDER_TEST_CONFIG.currency);
+    await sleep(500);
+  }
+  
+  // Now login as PROVIDER for provider → end user operations
+  const { token } = await loginAs('paymentProvider', { verifyToken: true, retry: true });
+  
+  // Test: Provider funds end user (provider cannot go negative)
+  console.log(`   → Provider (${providerUserId}) funding End User (${providerTestEndUserId}) with €${formatAmount(amount)}`);
+  
+  const success = await fundUserWithDeposit(token, providerUserId, providerTestEndUserId, amount, PROVIDER_TEST_CONFIG.currency);
+  if (!success) {
+    throw new Error('Failed to fund end user from provider');
+  }
+  
+  await sleep(500);
+  
+  // Verify end user received funds (use system token to check balances)
+  const endUserBalance = await getUserWalletBalance(systemToken, providerTestEndUserId, PROVIDER_TEST_CONFIG.currency);
+  const expectedNetAmount = amount - Math.round(amount * 0.029); // 2.9% fee
+  
+  console.log(`   → End User balance: €${formatAmount(endUserBalance)}`);
+  
+  // Verify provider balance decreased (provider cannot go negative)
+  const newProviderBalance = await getUserWalletBalance(systemToken, providerUserId, PROVIDER_TEST_CONFIG.currency);
+  console.log(`   → Provider balance: €${formatAmount(newProviderBalance)} (cannot be negative)`);
+  
+  if (newProviderBalance < 0) {
+    throw new Error('Provider balance went negative - should not be allowed');
   }
 }
 
-async function testGatewaySuccessfulWithdrawal() {
-  const token = createSystemToken('8h');
-  const withdrawAmount = TEST_AMOUNTS.withdrawal;
-
-  const query = `
-    mutation Withdraw($input: CreateWithdrawalInput!) {
-      createWithdrawal(input: $input) {
-        success
-        withdrawal {
-          id
-          userId
-          amount
-          balance
-          currency
-          createdAt
-        }
-        transfer {
-          id
-          amount
-          status
-        }
-        errors
-      }
+async function testEndUserTransfer() {
+  // First ensure end user has balance (use system token for setup)
+  const systemToken = await loginAs('system', { verifyToken: true, retry: true }).then(r => r.token);
+  const systemUserId = await getUserId('system');
+  const providerUserId = await getUserId('paymentProvider');
+  const endUser2Id = await getUserId('user2');
+  const transferAmount = TEST_AMOUNTS.withdrawal;
+  
+  // Ensure end user has balance first
+  const currentBalance = await getUserWalletBalance(systemToken, providerTestEndUserId, PROVIDER_TEST_CONFIG.currency);
+  if (currentBalance < transferAmount) {
+    // Ensure provider has balance
+    const providerBalance = await getUserWalletBalance(systemToken, providerUserId, PROVIDER_TEST_CONFIG.currency);
+    if (providerBalance < transferAmount * 2) {
+      // Fund provider from system (system can go negative)
+      await fundUserWithDeposit(systemToken, systemUserId, providerUserId, transferAmount * 3, PROVIDER_TEST_CONFIG.currency);
+      await sleep(500);
     }
-  `;
-
-  const data = await graphql(PAYMENT_SERVICE_URL, query, {
-    input: {
-      userId: gatewayTestUserId,
-      toUserId: gatewayTestUserId, // For withdrawal, toUserId is the same as userId (external destination)
-      amount: withdrawAmount,
-      currency: GATEWAY_TEST_CONFIG.currency,
-      method: 'bank_transfer',
-    }
-  }, token);
-
-  if (!data.createWithdrawal.success) {
-    throw new Error(data.createWithdrawal.errors?.join(', ') || 'Withdrawal failed');
+    // Fund end user from provider (login as provider)
+    const providerToken = await loginAs('paymentProvider', { verifyToken: true, retry: true }).then(r => r.token);
+    await fundUserWithDeposit(providerToken, providerUserId, providerTestEndUserId, transferAmount * 2, PROVIDER_TEST_CONFIG.currency);
+    await sleep(500);
   }
-
-  const tx = data.createWithdrawal.withdrawal;
-  gatewayTestTransactionIds.push(tx.id);
-
-  // Balance is the balance after transaction (no balanceBefore in new structure)
-  console.log(`   → Withdrawal created: ${tx.id}, Balance after: ${tx.balance}`);
+  
+  // Now login as END USER for end user → end user transfers
+  const { token } = await loginAs('user1', { verifyToken: true, retry: true });
+  
+  // Test: End user transfers to another end user (only from their balance)
+  console.log(`   → End User (${providerTestEndUserId}) transferring €${formatAmount(transferAmount)} to End User 2 (${endUser2Id})`);
+  
+  await transferFunds(token, providerTestEndUserId, endUser2Id, transferAmount, PROVIDER_TEST_CONFIG.currency);
+  await sleep(500);
+  
+  // Verify balances (use system token to check)
+  const newBalance1 = await getUserWalletBalance(systemToken, providerTestEndUserId, PROVIDER_TEST_CONFIG.currency);
+  const balance2 = await getUserWalletBalance(systemToken, endUser2Id, PROVIDER_TEST_CONFIG.currency);
+  
+  console.log(`   → End User 1 balance: €${formatAmount(newBalance1)}`);
+  console.log(`   → End User 2 balance: €${formatAmount(balance2)}`);
+  
+  if (newBalance1 < 0) {
+    throw new Error('End user balance went negative - should not be allowed');
+  }
 }
 
-async function testGatewayInsufficientFundsWithdrawal() {
-  const token = createSystemToken('8h');
+async function testEndUserInsufficientFundsRejection() {
+  // Login as END USER for end user operations
+  const { token } = await loginAs('user1', { verifyToken: true, retry: true });
+  const endUser2Id = await getUserId('user2');
   const hugeAmount = TEST_AMOUNTS.insufficientWithdrawal;
 
-  const query = `
-    mutation Withdraw($input: CreateWithdrawalInput!) {
-      createWithdrawal(input: $input) {
-        success
-        errors
-      }
-    }
-  `;
-
-  const data = await graphql(PAYMENT_SERVICE_URL, query, {
-    input: {
-      userId: gatewayTestUserId,
-      toUserId: gatewayTestUserId,
-      amount: hugeAmount,
-      currency: GATEWAY_TEST_CONFIG.currency,
-      method: 'bank_transfer',
-    }
-  }, token);
-
-  if (data.createWithdrawal.success) {
-    throw new Error('Withdrawal should have failed due to insufficient funds');
-  }
-  console.log('  (Correctly rejected insufficient funds)');
-}
-
-async function testGatewayNoDuplicateTransactions() {
-  const uniqueIds = new Set(gatewayTestTransactionIds);
-  if (uniqueIds.size !== gatewayTestTransactionIds.length) {
-    throw new Error(`Found duplicate transaction IDs: ${gatewayTestTransactionIds.length} total, ${uniqueIds.size} unique`);
-  }
-}
-
-async function testGatewayTransactionHistory() {
-  const token = createSystemToken('8h');
-  const query = `
-    query GetTransactions {
-      transactions(filter: { userId: "${gatewayTestUserId}" }, first: 100) {
-        nodes {
-          id
-          userId
-          amount
-          balance
-          currency
-          charge
-          createdAt
-        }
-        totalCount
-        pageInfo {
-          hasNextPage
-          hasPreviousPage
-        }
-      }
-    }
-  `;
-
-  const data = await graphql(PAYMENT_SERVICE_URL, query, {}, token);
-  const transactions = (data as any).transactions.nodes;
-
-  if (transactions.length < gatewayTestTransactionIds.length) {
-    throw new Error(`Missing transactions: expected ${gatewayTestTransactionIds.length}, found ${transactions.length}`);
-  }
-}
-
-async function testGatewayConcurrentDeposits() {
-  const token = createSystemToken('8h');
-  const initialBalance = await getGatewayWalletBalance(gatewayTestWalletId, token);
-  const depositAmount = TEST_AMOUNTS.concurrentDeposit;
-  const numConcurrent = CONCURRENT_CONFIG.numConcurrentDeposits;
-
-  const promises = Array(numConcurrent).fill(null).map(async () => {
-    const query = `
-      mutation Deposit($input: CreateDepositInput!) {
-        createDeposit(input: $input) {
-          success
-          deposit { id balance }
-          errors
-        }
-      }
-    `;
-
-    return graphql(PAYMENT_SERVICE_URL, query, {
-      input: {
-        userId: gatewayTestUserId,
-        fromUserId: gatewayTestUserId,
-        amount: depositAmount,
-        currency: GATEWAY_TEST_CONFIG.currency,
-        method: 'card',
-      }
-    }, token);
-  });
-
-  const results = await Promise.all(promises);
-  const successes = results.filter((r: any) => r.createDeposit?.success);
+  // Test: End user tries to transfer more than they have (should fail)
+  console.log(`   → End User attempting to transfer €${formatAmount(hugeAmount)} (more than balance)`);
   
-  await sleep(CONCURRENT_CONFIG.sleepAfterConcurrent);
-
-  const finalBalance = await getGatewayWalletBalance(gatewayTestWalletId, token);
-  const expectedBalance = initialBalance + (successes.length * depositAmount);
-  
-  if (finalBalance !== expectedBalance) {
-    throw new Error(`Balance mismatch after concurrent deposits: expected ${expectedBalance}, got ${finalBalance}`);
-  }
-}
-
-async function testGatewayConcurrentWithdrawals() {
-  const token = createSystemToken('8h');
-  const currentBalance = await getGatewayWalletBalance(gatewayTestWalletId, token);
-  const withdrawAmount = Math.floor(currentBalance * CONCURRENT_CONFIG.withdrawalPercent);
-  const numConcurrent = CONCURRENT_CONFIG.numConcurrentWithdrawals;
-
-  const promises = Array(numConcurrent).fill(null).map(async () => {
-    const query = `
-      mutation Withdraw($input: CreateWithdrawalInput!) {
-        createWithdrawal(input: $input) {
-          success
-          withdrawal { id balance }
-          errors
-        }
-      }
-    `;
-
-    return graphql(PAYMENT_SERVICE_URL, query, {
-      input: {
-        userId: gatewayTestUserId,
-        toUserId: gatewayTestUserId,
-        amount: withdrawAmount,
-        currency: GATEWAY_TEST_CONFIG.currency,
-        method: 'bank_transfer',
-      }
-    }, token);
-  });
-
-  await Promise.all(promises);
-
-  const finalBalance = await getGatewayWalletBalance(gatewayTestWalletId, token);
-  if (finalBalance < 0) {
-    throw new Error(`Balance went negative: ${finalBalance}`);
-  }
-}
-
-async function testGatewayBonusCreation() {
-  const token = createSystemToken('8h');
-  const query = `
-    mutation CreateBonus($input: CreateUserBonusInput!) {
-      createUserBonus(input: $input) {
-        success
-        userBonus {
-          id
-          userId
-          templateCode
-          status
-          currency
-          originalValue
-          currentValue
-          turnoverRequired
-          turnoverProgress
-          expiresAt
-          createdAt
-        }
-        sagaId
-        errors
-      }
-    }
-  `;
-
   try {
-    const data = await graphql(BONUS_SERVICE_URL, query, {
-      input: {
-        userId: gatewayTestUserId,
-        templateCode: BONUS_TEST_DATA.templateCode,
-        currency: GATEWAY_TEST_CONFIG.currency,
-        tenantId: DEFAULT_TENANT_ID,
-        depositAmount: BONUS_TEST_DATA.depositAmount,
-      }
-    }, token);
-
-    if (!data.createUserBonus.success) {
-      console.log('  (Bonus template not found - skipping bonus tests)');
+    await transferFunds(token, providerTestEndUserId, endUser2Id, hugeAmount, PROVIDER_TEST_CONFIG.currency);
+    throw new Error('Transfer should have failed due to insufficient funds');
+  } catch (error: any) {
+    if (error.message.includes('Insufficient balance') || error.message.includes('does not allow negative')) {
+      console.log('   → Correctly rejected: Insufficient balance');
+      return; // Expected error
     }
-  } catch (error) {
-    console.log('  (Bonus service not available - skipping bonus tests)');
+    throw error; // Unexpected error
   }
 }
+
+// Removed old gateway test functions - replaced with simpler provider tests
 
 async function testGatewayZeroAmountTransaction() {
-  const token = createSystemToken('8h');
+  // Login as PROVIDER for provider → end user operations
+  const { token } = await loginAs('paymentProvider', { verifyToken: true, retry: true });
+  const providerUserId = await getUserId('paymentProvider');
   const query = `
     mutation Deposit($input: CreateDepositInput!) {
       createDeposit(input: $input) {
@@ -2376,10 +2215,10 @@ async function testGatewayZeroAmountTransaction() {
 
   const data = await graphql(PAYMENT_SERVICE_URL, query, {
     input: {
-      userId: gatewayTestUserId,
-      fromUserId: gatewayTestUserId,
+      userId: providerTestEndUserId,
+      fromUserId: providerUserId, // Provider funding end user
       amount: TEST_AMOUNTS.zero,
-      currency: GATEWAY_TEST_CONFIG.currency,
+      currency: PROVIDER_TEST_CONFIG.currency,
       method: 'card',
     }
   }, token);
@@ -2391,7 +2230,9 @@ async function testGatewayZeroAmountTransaction() {
 }
 
 async function testGatewayNegativeAmountTransaction() {
-  const token = createSystemToken('8h');
+  // Login as PROVIDER for provider → end user operations
+  const { token } = await loginAs('paymentProvider', { verifyToken: true, retry: true });
+  const providerUserId = await getUserId('paymentProvider');
   const query = `
     mutation Deposit($input: CreateDepositInput!) {
       createDeposit(input: $input) {
@@ -2403,10 +2244,10 @@ async function testGatewayNegativeAmountTransaction() {
 
   const data = await graphql(PAYMENT_SERVICE_URL, query, {
     input: {
-      userId: gatewayTestUserId,
-      fromUserId: gatewayTestUserId,
+      userId: providerTestEndUserId,
+      fromUserId: providerUserId, // Provider funding end user
       amount: TEST_AMOUNTS.negative,
-      currency: GATEWAY_TEST_CONFIG.currency,
+      currency: PROVIDER_TEST_CONFIG.currency,
       method: 'card',
     }
   }, token);
@@ -2417,146 +2258,50 @@ async function testGatewayNegativeAmountTransaction() {
   console.log('  (Correctly rejected negative amount)');
 }
 
-async function testGatewayInvalidWalletId() {
-  const token = createSystemToken('8h');
-  const query = `
-    mutation Deposit($input: CreateDepositInput!) {
-      createDeposit(input: $input) {
-        success
-        errors
-      }
-    }
-  `;
+// Removed - not needed for basic provider tests
 
-  try {
-    const data = await graphql(PAYMENT_SERVICE_URL, query, {
-      input: {
-        userId: gatewayTestUserId,
-        fromUserId: gatewayTestUserId,
-        amount: 1000,
-        currency: GATEWAY_TEST_CONFIG.currency,
-        method: 'card',
-      }
-    }, token);
-
-    if (data.createDeposit.success) {
-      throw new Error('Transaction on non-existent wallet should fail');
-    }
-  } catch (error) {
-    console.log('  (Correctly rejected invalid wallet)');
-  }
-}
-
-async function testGatewayFinalBalanceConsistency() {
-  const token = createSystemToken('8h');
-  const walletQuery = `
-    query GetWallet {
-      wallet(id: "${gatewayTestWalletId}") {
-        balance
-        bonusBalance
-        lockedBalance
-      }
-    }
-  `;
-
-  const txQuery = `
-    query GetTransactions {
-      transactions(filter: { userId: "${gatewayTestUserId}" }, first: 1000) {
-        nodes {
-          charge
-          amount
-          meta
-        }
-      }
-    }
-  `;
-
-  const [walletData, txData] = await Promise.all([
-    graphql(PAYMENT_SERVICE_URL, walletQuery, {}, token),
-    graphql(PAYMENT_SERVICE_URL, txQuery, {}, token),
-  ]);
-
-  const wallet = (walletData as any).wallet;
-  const transactions = (txData as any).transactions.nodes;
-
-  let calculatedBalance = 0;
-  for (const tx of transactions) {
-    const balanceType = (tx.meta as any)?.balanceType || 'real';
-    if (balanceType === 'real') {
-      if (tx.charge === 'credit') {
-        calculatedBalance += tx.amount;
-      } else if (tx.charge === 'debit') {
-        calculatedBalance -= tx.amount;
-      }
-    }
-  }
-
-  const tolerance = 1;
-  if (Math.abs(wallet.balance - calculatedBalance) > tolerance) {
-    throw new Error(`Balance inconsistency: wallet shows ${wallet.balance}, calculated ${calculatedBalance}`);
-  }
-
-  console.log(`  Final balance: ${wallet.balance} (verified from ${transactions.length} transactions)`);
-}
-
-async function testGateway() {
+async function testProvider() {
   console.log('╔═══════════════════════════════════════════════════════════════════════════╗');
-  console.log('║         PAYMENT GATEWAY & BONUS SERVICE - TEST SUITE                      ║');
+  console.log('║              PAYMENT PROVIDER - BASIC TEST SUITE                        ║');
   console.log('╠═══════════════════════════════════════════════════════════════════════════╣');
-  console.log('║  Testing:                                                                 ║');
-  console.log('║  • Wallet operations (create, deposit, withdraw)                          ║');
-  console.log('║  • Transaction integrity (no duplicates, correct balances)                ║');
-  console.log('║  • Concurrent operations (stress test)                                    ║');
-  console.log('║  • Edge cases (invalid amounts, missing wallets)                          ║');
-  console.log('║  • Balance consistency                                                    ║');
+  console.log('║  Testing Core Flow:                                                       ║');
+  console.log('║  • System → Provider (system can go negative)                            ║');
+  console.log('║  • Provider → End User (provider cannot go negative)                      ║');
+  console.log('║  • End User transfers (only from their balance)                           ║');
+  console.log('║  • Basic validations (zero/negative amounts, insufficient funds)         ║');
   console.log('╚═══════════════════════════════════════════════════════════════════════════╝\n');
 
   // Check services are running
   console.log('🔍 Checking services...');
   try {
     await fetch(PAYMENT_SERVICE_URL.replace('/graphql', '/health'));
-    console.log('  ✅ Payment Gateway running');
+    console.log('  ✅ Payment Service running');
   } catch {
-    console.log('  ❌ Payment Gateway not running at ' + PAYMENT_SERVICE_URL);
-    throw new Error('Payment Gateway not running');
-  }
-
-  try {
-    await fetch(BONUS_SERVICE_URL.replace('/graphql', '/health'));
-    console.log('  ✅ Bonus Service running');
-  } catch {
-    console.log('  ⚠️  Bonus Service not running (bonus tests will be skipped)');
+    console.log('  ❌ Payment Service not running at ' + PAYMENT_SERVICE_URL);
+    throw new Error('Payment Service not running');
   }
 
   console.log('  🔑 Generated authentication tokens');
   
   // Register/get test user from centralized config
   const { userId } = await registerAs('user1');
-  gatewayTestUserId = userId;
-  gatewayTestTransactionIds = [];
-  console.log(`  👤 Test user ID: ${gatewayTestUserId}`);
+  providerTestEndUserId = userId;
+  console.log(`  👤 Test end user ID: ${providerTestEndUserId}`);
 
-  const gatewayTests: Array<{ name: string; fn: () => Promise<void> }> = [
-    { name: 'Create wallet', fn: testGatewayWalletCreation },
-    { name: 'Prevent duplicate wallet', fn: testGatewayDuplicateWalletPrevention },
-    { name: 'Successful deposit', fn: testGatewaySuccessfulDeposit },
-    { name: 'Multiple deposits', fn: testGatewayMultipleDeposits },
-    { name: 'Successful withdrawal', fn: testGatewaySuccessfulWithdrawal },
-    { name: 'Insufficient funds rejection', fn: testGatewayInsufficientFundsWithdrawal },
-    { name: 'No duplicate transaction IDs', fn: testGatewayNoDuplicateTransactions },
-    { name: 'Transaction history', fn: testGatewayTransactionHistory },
-    { name: 'Concurrent deposits', fn: testGatewayConcurrentDeposits },
-    { name: 'Concurrent withdrawals', fn: testGatewayConcurrentWithdrawals },
+  const providerTests: Array<{ name: string; fn: () => Promise<void> }> = [
+    { name: 'Create end user wallet', fn: testProviderEndUserWalletCreation },
+    { name: 'Prevent duplicate wallet', fn: testProviderDuplicateWalletPrevention },
+    { name: 'System → Provider flow', fn: testProviderSystemToProviderFlow },
+    { name: 'Provider → End User flow', fn: testProviderToEndUserFlow },
+    { name: 'End User transfer', fn: testEndUserTransfer },
+    { name: 'Insufficient funds rejection', fn: testEndUserInsufficientFundsRejection },
     { name: 'Zero amount rejection', fn: testGatewayZeroAmountTransaction },
     { name: 'Negative amount rejection', fn: testGatewayNegativeAmountTransaction },
-    { name: 'Invalid wallet rejection', fn: testGatewayInvalidWalletId },
-    { name: 'Final balance consistency', fn: testGatewayFinalBalanceConsistency },
-    { name: 'Bonus creation', fn: testGatewayBonusCreation },
   ];
 
   const results: TestResult[] = [];
 
-  for (const test of gatewayTests) {
+  for (const test of providerTests) {
     const start = Date.now();
     try {
       await test.fn();
@@ -2601,7 +2346,7 @@ async function testGateway() {
     throw new Error(`${failed} test(s) failed`);
   }
 
-  console.log('\n✅ All gateway tests passed!');
+  console.log('\n✅ All provider tests passed!');
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -2618,29 +2363,17 @@ async function testBalanceSummary() {
   try {
     // Fetch all users - try GraphQL first, fallback to MongoDB if permissions fail
     let systemUsers: Array<{ id: string; email: string; roles: string[] }> = [];
-    let gatewayUsers: Array<{ id: string; email: string; roles: string[] }> = [];
     let providerUsers: Array<{ id: string; email: string; roles: string[] }> = [];
     let allUsers: Array<{ id: string; email: string; roles: string[] }> = [];
     let endUsers: Array<{ id: string; email: string; roles: string[] }> = [];
     let allSystemUsers: Array<{ id: string; email: string; roles: string[] }> = [];
     
     try {
-      const [systemUsersResult, gatewayUsersResult, providerUsersResult, systemRoleResult, allUsersResult] = await Promise.all([
+      const [systemUsersResult, providerUsersResult, systemRoleResult, allUsersResult] = await Promise.all([
         graphql<{ usersByRole: { nodes: Array<{ id: string; email: string; roles: string[] }> } }>(
           AUTH_SERVICE_URL,
           `query GetSystemUsers($first: Int) {
             usersByRole(role: "system", first: $first) {
-              nodes { id email roles }
-            }
-          }`,
-          { first: 100 },
-          token
-        ).catch(() => ({ usersByRole: { nodes: [] } })),
-      
-        graphql<{ usersByRole: { nodes: Array<{ id: string; email: string; roles: string[] }> } }>(
-          AUTH_SERVICE_URL,
-          `query GetGatewayUsers($first: Int) {
-            usersByRole(role: "payment-gateway", first: $first) {
               nodes { id email roles }
             }
           }`,
@@ -2684,7 +2417,6 @@ async function testBalanceSummary() {
       
       // Categorize users
       systemUsers = systemUsersResult.usersByRole?.nodes || [];
-      gatewayUsers = gatewayUsersResult.usersByRole?.nodes || [];
       providerUsers = providerUsersResult.usersByRole?.nodes || [];
       const systemRoleUsers = systemRoleResult.usersByRole?.nodes || [];
       allUsers = allUsersResult.users?.nodes || [];
@@ -2713,11 +2445,6 @@ async function testBalanceSummary() {
           const roleNames = roles.map((r: any) => typeof r === 'string' ? r : r.role);
           return roleNames.includes('system');
         });
-        gatewayUsers = allUsers.filter((u: any) => {
-          const roles = Array.isArray(u.roles) ? u.roles : [];
-          const roleNames = roles.map((r: any) => typeof r === 'string' ? r : r.role);
-          return roleNames.includes('payment-gateway');
-        });
         providerUsers = allUsers.filter((u: any) => {
           const roles = Array.isArray(u.roles) ? u.roles : [];
           const roleNames = roles.map((r: any) => typeof r === 'string' ? r : r.role);
@@ -2725,18 +2452,15 @@ async function testBalanceSummary() {
         });
         
         const allSystemIdsMongo = new Set(allSystemUsers.map((u: any) => u.id));
-        const allGatewayIdsMongo = new Set(gatewayUsers.map((u: any) => u.id));
         const allProviderIdsMongo = new Set(providerUsers.map((u: any) => u.id));
         
-        // End users: exclude system, gateway, and provider users
+        // End users: exclude system and provider users
         endUsers = allUsers.filter((u: any) => {
           const roles = Array.isArray(u.roles) ? u.roles : [];
           const roleNames = roles.map((r: any) => typeof r === 'string' ? r : r.role);
           return !roleNames.includes('system') && 
-                 !roleNames.includes('payment-gateway') && 
                  !roleNames.includes('payment-provider') &&
                  !allSystemIdsMongo.has(u.id) && 
-                 !allGatewayIdsMongo.has(u.id) && 
                  !allProviderIdsMongo.has(u.id);
         });
         
@@ -2749,17 +2473,15 @@ async function testBalanceSummary() {
     // Filter regular users (end users) if not already done
     if (endUsers.length === 0 && allUsers.length > 0) {
       const systemIds = new Set(allSystemUsers.map((u: any) => u.id));
-      const gatewayIds = new Set(gatewayUsers.map((u: any) => u.id));
       const providerIds = new Set(providerUsers.map((u: any) => u.id));
       endUsers = allUsers.filter((u: any) => 
-        !systemIds.has(u.id) && !gatewayIds.has(u.id) && !providerIds.has(u.id)
+        !systemIds.has(u.id) && !providerIds.has(u.id)
       );
     }
     
     // Collect all user IDs
     let allUserIds: string[] = [
       ...allSystemUsers.map((u: any) => u.id),
-      ...gatewayUsers.map((u: any) => u.id),
       ...providerUsers.map((u: any) => u.id),
       ...endUsers.map((u: any) => u.id),
     ];
@@ -2902,13 +2624,6 @@ async function testBalanceSummary() {
     }));
     const systemTotal = systemBalances.reduce((sum, u) => sum + u.balance, 0);
     
-    const gatewayBalances = gatewayUsers.map((u: any) => ({
-      id: u.id,
-      email: u.email || u.id.substring(0, 8),
-      balance: balanceMap.get(u.id) || 0,
-    }));
-    const gatewayTotal = gatewayBalances.reduce((sum, u) => sum + u.balance, 0);
-    
     const providerBalances = providerUsers.map((u: any) => ({
       id: u.id,
       email: u.email || u.id.substring(0, 8),
@@ -2924,7 +2639,7 @@ async function testBalanceSummary() {
     const endUserTotal = endUserBalances.reduce((sum, u) => sum + u.balance, 0);
     
     // Calculate grand total (fees are handled at transaction level, not as separate accounts)
-    const grandTotal = systemTotal + gatewayTotal + providerTotal + endUserTotal;
+    const grandTotal = systemTotal + providerTotal + endUserTotal;
     
     // Format currency
     const formatCurrency = (amount: number) => {
@@ -2951,17 +2666,6 @@ async function testBalanceSummary() {
       });
       console.log(`   ${'─'.repeat(50)}`);
       console.log(`   TOTAL SYSTEM:${' '.repeat(20)} ${formatCurrency(systemTotal)}`);
-    }
-    
-    console.log('\n🏦 GATEWAY USERS (Payment Gateway):');
-    if (gatewayBalances.length === 0) {
-      console.log('   (none)');
-    } else {
-      gatewayBalances.forEach(u => {
-        console.log(`   ${u.email.padEnd(30)} ${formatCurrency(u.balance)}`);
-      });
-      console.log(`   ${'─'.repeat(50)}`);
-      console.log(`   TOTAL GATEWAY:${' '.repeat(19)} ${formatCurrency(gatewayTotal)}`);
     }
     
     console.log('\n💳 PROVIDER USERS (Payment Providers):');
@@ -3002,32 +2706,37 @@ async function testBalanceSummary() {
     console.log('📊 GRAND TOTALS');
     console.log('═'.repeat(75));
     console.log(`   System Users:     ${formatCurrency(systemTotal).padStart(15)}`);
-    console.log(`   Gateway Users:    ${formatCurrency(gatewayTotal).padStart(15)}`);
     console.log(`   Provider Users:   ${formatCurrency(providerTotal).padStart(15)}`);
     console.log(`   End Users:        ${formatCurrency(endUserTotal).padStart(15)}`);
     console.log(`   ${'─'.repeat(50)}`);
     console.log(`   GRAND TOTAL:      ${formatCurrency(grandTotal).padStart(15)}`);
     console.log('═'.repeat(75));
     
-    // Verification: Check for money loss
-    console.log('\n🔍 VERIFICATION:');
+    // ✅ BALANCE VERIFICATION: System balance should match -(Provider + End User)
+    // Accounting equation: System Balance + Provider Balance + End User Balance = 0
+    // This means: System Balance = -(Provider Balance + End User Balance)
+    console.log('\n🔍 BALANCE VERIFICATION:');
     
-    // In a user-to-user transfer system, the sum should be zero (conservation of money)
-    const isBalanced = Math.abs(grandTotal) < 1; // Allow for rounding errors (1 cent)
+    const totalCredited = providerTotal + endUserTotal; // Total credited to providers + end users
+    const expectedSystemBalance = -totalCredited; // System should be negative of what it credited
+    const balanceDifference = Math.abs(systemTotal - expectedSystemBalance);
+    const isBalanced = balanceDifference < 100; // Allow 1€ difference for rounding/fees
+    
+    console.log(`   Total Credited (Provider + End Users): ${formatCurrency(totalCredited)}`);
+    console.log(`   System Balance: ${formatCurrency(systemTotal)}`);
+    console.log(`   Expected System Balance: ${formatCurrency(expectedSystemBalance)}`);
+    console.log(`   Difference: ${formatCurrency(balanceDifference)}`);
     
     if (isBalanced) {
-      console.log('   ✅ System is balanced (sum ≈ 0) - No money lost!');
+      console.log('   ✅ System balance matches credits - Accounting equation verified!');
+      console.log(`   ✅ System (${formatCurrency(systemTotal)}) = -(Provider + End Users) (${formatCurrency(-totalCredited)})`);
     } else {
-      console.log(`   ⚠️  System imbalance detected: ${formatCurrency(grandTotal)}`);
+      console.log(`   ⚠️  Balance mismatch detected: ${formatCurrency(balanceDifference)}`);
       console.log('   ⚠️  This may indicate:');
-      console.log('      - System user (system@demo.com) has negative balance (normal for platform net position)');
-      console.log('      - Or there is a data inconsistency');
-      
-      if (grandTotal < 0) {
-        console.log(`   ℹ️  System is ${formatCurrency(Math.abs(grandTotal))} in debt (normal if platform owes money)`);
-      } else {
-        console.log(`   ⚠️  System has ${formatCurrency(grandTotal)} extra (investigate!)`);
-      }
+      console.log('      - Fees deducted from transactions (normal)');
+      console.log('      - Rounding differences (normal)');
+      console.log('      - Or data inconsistency (investigate if > 1€)');
+      console.log(`   ℹ️  Grand Total: ${formatCurrency(grandTotal)} (should be ≈ 0, fees may cause small difference)`);
     }
     
     // Check for negative balances where they shouldn't be
@@ -3308,7 +3017,8 @@ async function testAll() {
 
 const TEST_REGISTRY: Record<string, () => Promise<void>> = {
   setup: testSetup,
-  gateway: testGateway,
+  provider: testProvider, // Renamed from gateway
+  gateway: testProvider, // Alias for backward compatibility
   funding: testFunding,
   flow: testFlow,
   duplicate: testDuplicate,

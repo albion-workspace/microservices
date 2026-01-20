@@ -136,7 +136,7 @@ export function createTransactionDocument(
       netAmount: charge === 'credit' ? netAmount : undefined,
       currency,
       externalRef,
-      description,
+      description: description || (charge === 'credit' ? 'Credit' : 'Debit'), // Always set description, never null/undefined
       walletId: (wallet as any).id,
       balanceType,
     },
