@@ -20,6 +20,9 @@ import {
   DEFAULT_CURRENCY,
   createSystemToken,
   getUserId,
+  getSystemUserIdByRole,
+  getBonusPoolUserIdByRole,
+  getUserIdsByRole,
 } from '../config/users.js';
 import { getBonusDatabase, getAuthDatabase, getPaymentDatabase, closeAllConnections } from '../config/mongodb.js';
 import { 
@@ -489,10 +492,8 @@ async function testSetup() {
     const systemUser = await registerAs('system', { updateRoles: true, updatePermissions: true });
     console.log(`  ✅ System user ${systemUser.created ? 'created' : 'updated'}: ${systemUser.userId}`);
 
-    // Register bonus-pool user (will create if doesn't exist, update if exists)
-    console.log('🔐 Registering bonus-pool user...');
-    const bonusPoolUser = await registerAs('bonusPool', { updateRoles: true, updatePermissions: true });
-    console.log(`  ✅ Bonus-pool user ${bonusPoolUser.created ? 'created' : 'updated'}: ${bonusPoolUser.userId}`);
+    // Note: Bonus pool is now system user's bonusBalance (no separate user needed)
+    console.log('ℹ️  Bonus pool uses system user\'s bonusBalance (no separate user needed)');
 
     // Normalize system user roles in MongoDB to string array format if needed
     const db = await getAuthDatabase();
@@ -514,6 +515,51 @@ async function testSetup() {
     }
     
     await closeAllConnections();
+    
+    // Test role-based user lookup (demonstrates flexibility)
+    console.log('🔍 Testing role-based user lookup...');
+    try {
+      // Find system user by role (same approach as services use)
+      const systemUserIdByRole = await findUserIdByRole({ 
+        role: 'system', 
+        tenantId: DEFAULT_TENANT_ID,
+        throwIfNotFound: false 
+      });
+      
+      if (systemUserIdByRole) {
+        console.log(`  ✅ Found system user by role: ${systemUserIdByRole}`);
+      } else {
+        console.log(`  ⚠️  No system user found with 'system' role`);
+      }
+      
+      // Try to find bonus-pool user by role (if exists)
+      try {
+        const bonusPoolUserId = await findUserIdByRole({ 
+          role: 'bonus-pool', 
+          tenantId: DEFAULT_TENANT_ID,
+          throwIfNotFound: false 
+        });
+        
+        if (bonusPoolUserId) {
+          console.log(`  ✅ Found bonus-pool user by role: ${bonusPoolUserId}`);
+        } else {
+          console.log(`  ℹ️  No bonus-pool user found (using system user's bonusBalance instead)`);
+        }
+      } catch (error: any) {
+        console.log(`  ℹ️  No bonus-pool role found (expected - using system user's bonusBalance)`);
+      }
+      
+      // Find all users with system role (demonstrates multi-user support)
+      const allSystemUsers = await findUserIdsByRole({ 
+        role: 'system', 
+        tenantId: DEFAULT_TENANT_ID 
+      });
+      console.log(`  ℹ️  Total users with 'system' role: ${allSystemUsers.length}`);
+      
+    } catch (error: any) {
+      console.warn(`  ⚠️  Role-based lookup test failed: ${error.message}`);
+    }
+    console.log();
     
     // Now login as system user
     console.log('🔐 Logging in as system user...');
@@ -738,36 +784,29 @@ async function testTimeBasedBonuses() {
   // Helper function to ensure bonus pool has sufficient balance
   async function ensureBonusPoolBalance(minRequired: number) {
     try {
-      const systemUserId = await getUserId('system');
-      const bonusPoolUserId = await getUserId('bonusPool');
-      const fundQuery = `
-        mutation FundBonusPool($input: CreateDepositInput!) {
-          createDeposit(input: $input) {
-            success
-            deposit { id amount netAmount }
-            errors
-          }
-        }
-      `;
+      // Use role-based lookup to find system user (same approach as services)
+      const systemUserId = await getSystemUserIdByRole();
       
-      // Fund bonus pool with additional $5M if needed (safety margin)
+      // Fund bonus pool: Transfer from system (real) -> system (bonus)
+      // This funds the system user's bonusBalance which is the bonus pool
       const fundAmount = 500000000; // $5,000,000 in cents
-      const fundData = await graphql(PAYMENT_SERVICE_URL, fundQuery, {
-        input: {
-          userId: bonusPoolUserId,
-          amount: fundAmount,
-          currency: CONFIG.currency,
-          tenantId: DEFAULT_TENANT_ID,
-          fromUserId: systemUserId,
-          method: `bonus-pool-topup-${Date.now()}`,
-        }
-      }, systemToken);
       
-      if (fundData.createDeposit.success) {
-        const netAmount = fundData.createDeposit.deposit?.netAmount || fundAmount;
-        console.log(`     → ✅ Bonus pool topped up: ${(netAmount / 100).toLocaleString()} ${CONFIG.currency}`);
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
+      await createTransferWithTransactions({
+        fromUserId: systemUserId,
+        toUserId: systemUserId,  // Same user, different balance types
+        amount: fundAmount,
+        currency: CONFIG.currency,
+        tenantId: DEFAULT_TENANT_ID,
+        feeAmount: 0,
+        method: 'bonus_pool_funding',
+        externalRef: `bonus-pool-topup-${Date.now()}`,
+        description: 'Funding bonus pool (system bonusBalance)',
+        fromBalanceType: 'real',   // Debit from system real balance
+        toBalanceType: 'bonus',    // Credit to system bonusBalance (bonus pool)
+      });
+      
+      console.log(`     → ✅ Bonus pool topped up: ${(fundAmount / 100).toLocaleString()} ${CONFIG.currency}`);
+      await new Promise(resolve => setTimeout(resolve, 1000));
     } catch (error: any) {
       console.warn(`     → ⚠️  Could not top up bonus pool: ${error.message}`);
     }
@@ -1275,8 +1314,8 @@ async function testRecovery() {
   const db = getDatabase();
   
   // Get test users
-  const systemUserId = await getUserId('system');
-  const bonusPoolUserId = await getUserId('bonusPool');
+  // Use role-based lookup to find system user (same approach as services)
+  const systemUserId = await getSystemUserIdByRole();
   const testUser = testUserId || await getUserId('user1');
   
   // Register transfer recovery handler
@@ -1289,32 +1328,32 @@ async function testRecovery() {
     // Test 1: Create a bonus award transfer and track its state
     console.log('📝 Test 1: Creating bonus award transfer with state tracking...');
     
-    // Ensure bonus pool has balance
-    const bonusPoolWallet = await db.collection('wallets').findOne({ 
-      userId: bonusPoolUserId, 
+    // Ensure bonus pool has balance (check system user's bonusBalance)
+    const systemWallet = await db.collection('wallets').findOne({ 
+      userId: systemUserId, 
       currency: CONFIG.currency 
     });
     
-    if (!bonusPoolWallet || (bonusPoolWallet as any).balance < 10000) {
-      // Fund bonus pool (system -> bonus pool)
+    if (!systemWallet || (systemWallet as any).bonusBalance < 10000) {
+      // Fund bonus pool: Transfer from system (real) -> system (bonus)
       await createTransferWithTransactions({
         fromUserId: systemUserId,
-        toUserId: bonusPoolUserId,
+        toUserId: systemUserId,  // Same user, different balance types
         amount: 100000,
         currency: CONFIG.currency,
         tenantId: DEFAULT_TENANT_ID,
         feeAmount: 0,
         method: 'test_funding',
         externalRef: `test-bonus-pool-funding-${Date.now()}`,
-        description: 'Test funding for bonus pool',
-        fromBalanceType: 'real',
-        toBalanceType: 'real',
+        description: 'Test funding for bonus pool (system bonusBalance)',
+        fromBalanceType: 'real',   // Debit from system real balance
+        toBalanceType: 'bonus',     // Credit to system bonusBalance (bonus pool)
       });
     }
     
-    // Create a bonus award transfer (bonus pool -> user)
+    // Create a bonus award transfer (system bonus -> user bonus)
     const transferResult = await createTransferWithTransactions({
-      fromUserId: bonusPoolUserId,
+      fromUserId: systemUserId,  // System user's bonusBalance is the bonus pool
       toUserId: testUser,
       amount: 5000,
       currency: CONFIG.currency,
@@ -1323,8 +1362,8 @@ async function testRecovery() {
       method: 'bonus_award',
       externalRef: `test-bonus-recovery-${Date.now()}`,
       description: 'Test bonus award for recovery',
-      fromBalanceType: 'real',
-      toBalanceType: 'bonus',
+      fromBalanceType: 'bonus',  // Debit from system bonusBalance (bonus pool)
+      toBalanceType: 'bonus',    // Credit to user bonus balance
     });
     
     const transferId = transferResult.transfer.id;
@@ -1614,14 +1653,8 @@ async function testAll() {
     systemToken = await login();
     console.log('✅ System user logged in');
     
-    // Register bonus-pool user (required for bonus pool funding)
-    console.log('🔐 Registering bonus-pool user...');
-    try {
-      const bonusPoolUser = await registerAs('bonusPool', { updateRoles: true, updatePermissions: true });
-      console.log(`  ✅ Bonus-pool user ${bonusPoolUser.created ? 'created' : 'updated'}: ${bonusPoolUser.userId}`);
-    } catch (error: any) {
-      console.warn(`  ⚠️  Could not register bonus-pool user: ${error.message}`);
-    }
+    // Note: Bonus pool is now system user's bonusBalance (no separate user needed)
+    console.log('ℹ️  Bonus pool uses system user\'s bonusBalance (no separate user needed)');
     
     // Get test user IDs from existing users (created by payment tests)
     console.log('🔍 Getting test user IDs from existing users...');
@@ -1649,12 +1682,50 @@ async function testAll() {
 
   // Step 2.5: Fund bonus pool (required for bonus awards)
   console.log('\n╔═══════════════════════════════════════════════════════════════════╗');
-  console.log('║           STEP 2.5: FUNDING BONUS POOL                           ║');
+  console.log('║           STEP 2.5: ROLE-BASED USER LOOKUP & FUNDING            ║');
   console.log('╚═══════════════════════════════════════════════════════════════════╝\n');
+  
+  // Test role-based user lookup (demonstrates flexibility - uses users.ts utilities)
+  console.log('🔍 Testing role-based user lookup (same approach as services)...');
+  let systemUserId: string;
+  let bonusPoolUserId: string = '';
+  
+  try {
+    // Find system user by role (same approach as bonus-service and payment-service use)
+    systemUserId = await getSystemUserIdByRole();
+    console.log(`  ✅ Found system user by role: ${systemUserId}`);
+    
+    // Try to find bonus-pool user by role (if exists - demonstrates flexibility)
+    bonusPoolUserId = await getBonusPoolUserIdByRole();
+    
+    if (bonusPoolUserId) {
+      console.log(`  ✅ Found bonus-pool user by role: ${bonusPoolUserId}`);
+      console.log(`  ℹ️  Note: Services use system user's bonusBalance, but bonus-pool user exists`);
+    } else {
+      console.log(`  ℹ️  No bonus-pool user found (using system user's bonusBalance instead)`);
+    }
+    
+    // Find all users with system role (demonstrates multi-user support)
+    const allSystemUsers = await getUserIdsByRole('system');
+    console.log(`  ℹ️  Total users with 'system' role: ${allSystemUsers.length}`);
+    
+    if (allSystemUsers.length > 1) {
+      console.log(`  ℹ️  Multiple system users found - services will use first match`);
+    }
+    
+  } catch (error: any) {
+    console.error(`  ❌ Role-based lookup failed: ${error.message}`);
+    throw error;
+  }
+  console.log();
+  
+  // Connect to database for wallet operations
+  const mongoUri = process.env.MONGO_URI || 'mongodb://localhost:27017?directConnection=true';
+  await connectDatabase(mongoUri);
+  const db = getDatabase();
   
   try {
     // Ensure system user's wallets allow negative balance (wallet-level permission)
-    const systemUserId = await getUserId('system');
     const paymentDb = await getPaymentDatabase();
     const walletsCollection = paymentDb.collection('wallets');
     
@@ -1670,41 +1741,36 @@ async function testAll() {
       console.log(`ℹ️  System user wallets already configured (or will be configured on creation)`);
     }
     
-    // Fund bonus pool via payment service (bonus pool is a user with a wallet)
-    // System user can go negative, so this should work even if system user has 0 balance
-    const fundQuery = `
-      mutation FundBonusPool($input: CreateDepositInput!) {
-        createDeposit(input: $input) {
-          success
-          deposit { id amount netAmount }
-          errors
-        }
-      }
-    `;
+    // Fund bonus pool: Transfer to system user's bonusBalance
+    // Architecture: System user's bonusBalance is the bonus pool
+    // Transfer from system (real) -> system (bonus) to fund the bonus pool
+    const fundAmount = 2000000000; // $20,000,000 in cents
     
-    // Fund bonus pool with $20,000,000 (enough for all tests including large bonuses)
-    const fundAmount = 2000000000; // $20,000,000 in cents (increased to ensure sufficient balance for all bonuses including showcase scenarios)
-    const bonusPoolUserId = await getUserId('bonusPool');
-    const fundData = await graphql(PAYMENT_SERVICE_URL, fundQuery, {
-      input: {
-        userId: bonusPoolUserId,
+    try {
+      // Import createTransferWithTransactions for direct transfer
+      const { createTransferWithTransactions } = await import('../../../core-service/src/common/transfer-helper.js');
+      
+      // Transfer from system (real) to system (bonus) - funds the bonus pool
+      await createTransferWithTransactions({
+        fromUserId: systemUserId,
+        toUserId: systemUserId,  // Same user, different balance types
         amount: fundAmount,
         currency: CONFIG.currency,
         tenantId: DEFAULT_TENANT_ID,
-        fromUserId: systemUserId,
-        method: `bonus-pool-funding-${Date.now()}`,
-      }
-    }, systemToken);
-    
-    if (!fundData.createDeposit.success) {
-      console.warn(`⚠️  Could not fund bonus pool: ${fundData.createDeposit.errors?.join(', ') || 'Unknown error'}`);
+        feeAmount: 0,
+        method: 'bonus_pool_funding',
+        externalRef: `bonus-pool-funding-${Date.now()}`,
+        description: 'Funding bonus pool (system user bonusBalance)',
+        fromBalanceType: 'real',   // Debit from system real balance
+        toBalanceType: 'bonus',    // Credit to system bonusBalance (bonus pool)
+      });
+      
+      console.log(`✅ Bonus pool funded: ${(fundAmount / 100).toLocaleString()} ${CONFIG.currency}`);
+      // Wait for transaction to be fully committed
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    } catch (error: any) {
+      console.warn(`⚠️  Could not fund bonus pool: ${error.message}`);
       console.warn('   Bonus awards may fail due to insufficient pool balance');
-    } else {
-      const netAmount = fundData.createDeposit.deposit?.netAmount || fundAmount;
-      console.log(`✅ Bonus pool funded: ${(netAmount / 100).toLocaleString()} ${CONFIG.currency}`);
-      // Wait longer for ledger transaction to be fully committed (bonus pool balance check needs this)
-      // Increased delay to ensure balance is available for subsequent bonus awards
-      await new Promise(resolve => setTimeout(resolve, 3000));
     }
   } catch (error: any) {
     console.warn(`⚠️  Could not fund bonus pool: ${error.message}`);

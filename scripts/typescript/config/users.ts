@@ -12,6 +12,8 @@
 
 import { getAuthDatabase } from './mongodb.js';
 import { createHmac } from 'crypto';
+import { connectDatabase } from '../../../core-service/src/common/database.js';
+import { findUserIdByRole, findUserIdsByRole } from '../../../core-service/src/common/user-utils.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Configuration
@@ -250,7 +252,7 @@ export async function loginAs(
   const loginVars = {
     input: {
       tenantId: DEFAULT_TENANT_ID,
-      identifier: user.email,
+      identifier: user.email.toLowerCase().trim(), // Normalize email to match Passport
       password: user.password,
     },
   };
@@ -331,43 +333,41 @@ export async function registerAs(
   }
 
   // Check if user already exists in MongoDB (more reliable)
+  // CRITICAL: Check by both email AND tenantId (Passport queries by tenantId)
+  // Also normalize email to match Passport's normalization
   const db = await getAuthDatabase();
   const usersCollection = db.collection('users');
-  const existingUser = await usersCollection.findOne({ email: user.email });
+  const normalizedEmail = user.email.toLowerCase().trim(); // Match Passport's normalizeEmail
+  const existingUser = await usersCollection.findOne({ 
+    email: normalizedEmail,
+    tenantId: DEFAULT_TENANT_ID 
+  });
 
   if (existingUser) {
     const userId = existingUser._id?.toString() || existingUser.id;
     
-    // Update roles and permissions if requested
-    if (updateRoles || updatePermissions) {
-      const update: Record<string, unknown> = {};
-      if (updateRoles) {
-        // Normalize roles to string array format (GraphQL expects strings, not objects)
-        // Handle both string[] and UserRole[] formats
-        const existingRoles = existingUser.roles || [];
-        const normalizedRoles = Array.isArray(existingRoles) && existingRoles.length > 0 && typeof existingRoles[0] === 'object'
-          ? existingRoles.map((r: any) => typeof r === 'string' ? r : r.role)
-          : user.roles;
-        update.roles = normalizedRoles;
-      }
-      if (updatePermissions) {
-        update.permissions = user.permissions;
-      }
-      
-      await usersCollection.updateOne(
-        { email: user.email },
-        { $set: update }
-      );
-    }
-
-    return {
-      userId,
-      email: user.email,
-      created: false,
-    };
+    // CRITICAL: Delete and recreate user to ensure password hash is correct
+    // This is safer than updating password hash (which requires bcrypt in scripts)
+    // Registration service handles password hashing correctly
+    await usersCollection.deleteOne({ 
+      email: normalizedEmail,
+      tenantId: DEFAULT_TENANT_ID 
+    });
+    
+    // Fall through to registration below
   }
 
   // Try to register via GraphQL
+  // NOTE: For testing/system setup, we use autoVerify: true to bypass OTP verification
+  // In production, regular users would use the new verification flow:
+  //   1. register() returns registrationToken (JWT)
+  //   2. OTP is sent to email/phone
+  //   3. verifyRegistration(registrationToken, otpCode) creates user and returns tokens
+  // System users (system, payment-gateway, payment-provider) can use autoVerify: true
+  const isSystemUser = user.roles.includes('system') || 
+                       user.roles.includes('payment-gateway') || 
+                       user.roles.includes('payment-provider');
+  
   const registerQuery = `
     mutation Register($input: RegisterInput!) {
       register(input: $input) {
@@ -376,33 +376,53 @@ export async function registerAs(
         user {
           id
           email
+          status
+        }
+        registrationToken
+        tokens {
+          accessToken
+          refreshToken
         }
       }
     }
   `;
 
+  // Use autoVerify for all users in test setup (bypasses OTP verification)
+  // In production, only system users would use autoVerify
   const registerVars = {
     input: {
       tenantId: DEFAULT_TENANT_ID,
-      email: user.email,
+      email: normalizedEmail, // Use normalized email for consistency
       password: user.password,
-      autoVerify: true,
+      autoVerify: true, // Bypass verification for testing/system setup
+      sendOTP: false, // Don't send OTP when autoVerify is true
       ...(metadata && { metadata }),
     },
   };
 
   try {
-    const data = await graphql<{ register: { success: boolean; message?: string; user?: { id: string; email: string } } }>(
+    const data = await graphql<{ 
+      register: { 
+        success: boolean; 
+        message?: string; 
+        user?: { id: string; email: string; status: string }; 
+        registrationToken?: string;
+        tokens?: { accessToken: string; refreshToken: string };
+      } 
+    }>(
       registerQuery,
       registerVars
     );
 
+    // Handle registration response
     if (data.register.success && data.register.user) {
       const userId = data.register.user.id;
 
       // Update roles and permissions via MongoDB (more reliable)
+      // CRITICAL: Update by both email AND tenantId, use normalized email
+      // Password hash is already correct (created by registration service)
       await usersCollection.updateOne(
-        { email: user.email },
+        { email: normalizedEmail, tenantId: DEFAULT_TENANT_ID },
         {
           $set: {
             roles: user.roles,
@@ -413,7 +433,7 @@ export async function registerAs(
 
       return {
         userId,
-        email: user.email,
+        email: normalizedEmail, // Return normalized email
         created: true,
       };
     }
@@ -421,29 +441,24 @@ export async function registerAs(
     throw new Error(`Registration failed: ${data.register.message || 'Unknown error'}`);
   } catch (error: any) {
     // If registration fails (e.g., user already exists), try to find user
-    const foundUser = await usersCollection.findOne({ email: user.email });
+    // CRITICAL: Check by both email AND tenantId, use normalized email
+    const foundUser = await usersCollection.findOne({ 
+      email: normalizedEmail,
+      tenantId: DEFAULT_TENANT_ID 
+    });
     if (foundUser) {
-      const userId = foundUser._id?.toString() || foundUser.id;
+      // User exists but registration failed - delete and recreate
+      // This ensures password hash is correct (registration service handles hashing)
+      await usersCollection.deleteOne({ 
+        email: normalizedEmail,
+        tenantId: DEFAULT_TENANT_ID 
+      });
       
-      // Update roles and permissions
-      await usersCollection.updateOne(
-        { email: user.email },
-        {
-          $set: {
-            roles: user.roles,
-            permissions: user.permissions,
-          },
-        }
-      );
-
-      return {
-        userId,
-        email: user.email,
-        created: false,
-      };
+      // Retry registration (will create fresh user with correct password hash)
+      return await registerAs(userKeyOrEmail, options);
     }
 
-    throw new Error(`Failed to register ${user.email}: ${error.message}`);
+    throw new Error(`Failed to register ${normalizedEmail}: ${error.message}`);
   }
 }
 
@@ -470,10 +485,14 @@ export async function getUserId(userKeyOrEmail: string): Promise<string> {
 
   const db = await getAuthDatabase();
   const usersCollection = db.collection('users');
-  const userDoc = await usersCollection.findOne({ email: user.email });
+  const normalizedEmail = user.email.toLowerCase().trim(); // Match Passport's normalization
+  const userDoc = await usersCollection.findOne({ 
+    email: normalizedEmail,
+    tenantId: DEFAULT_TENANT_ID 
+  });
 
   if (!userDoc) {
-    throw new Error(`User not found in database: ${user.email}`);
+    throw new Error(`User not found in database: ${normalizedEmail}`);
   }
 
   return userDoc._id?.toString() || userDoc.id;
@@ -715,4 +734,102 @@ export function getMockTokens(tenantId: string = DEFAULT_TENANT_ID) {
     user4: createTokenForUser('user4', '8h', { tenantId }),
     user5: createTokenForUser('user5', '8h', { tenantId }),
   };
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Role-Based User Lookup (uses core-service utilities)
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Find a user ID by role (role-based lookup)
+ * Uses the same approach as bonus-service and payment-service
+ * 
+ * @example
+ * // Find system user
+ * const systemUserId = await getUserIdByRole('system');
+ * 
+ * // Find system user for specific tenant
+ * const systemUserId = await getUserIdByRole('system', 'tenant-123');
+ * 
+ * // Find bonus-pool user (if exists)
+ * const bonusPoolUserId = await getUserIdByRole('bonus-pool', undefined, false);
+ * 
+ * @param role - Role to search for (e.g., 'system', 'payment-provider', 'bonus-pool')
+ * @param tenantId - Optional tenant ID to filter by (defaults to DEFAULT_TENANT_ID)
+ * @param throwIfNotFound - Whether to throw error if no user found (default: true)
+ * @returns User ID (string) or empty string if not found and throwIfNotFound is false
+ */
+export async function getUserIdByRole(
+  role: string,
+  tenantId?: string,
+  throwIfNotFound: boolean = true
+): Promise<string> {
+  // Ensure database is connected (required for role-based lookup)
+  const mongoUri = process.env.MONGO_URI || 'mongodb://localhost:27017?directConnection=true';
+  await connectDatabase(mongoUri);
+  
+  return await findUserIdByRole({
+    role,
+    tenantId: tenantId || DEFAULT_TENANT_ID,
+    throwIfNotFound,
+  });
+}
+
+/**
+ * Find multiple user IDs by role
+ * Returns all users with the specified role (useful when multiple system users exist)
+ * 
+ * @example
+ * // Find all system users
+ * const systemUserIds = await getUserIdsByRole('system');
+ * 
+ * // Find all payment providers for a tenant
+ * const providerIds = await getUserIdsByRole('payment-provider', 'tenant-123');
+ * 
+ * @param role - Role to search for
+ * @param tenantId - Optional tenant ID to filter by (defaults to DEFAULT_TENANT_ID)
+ * @returns Array of user IDs
+ */
+export async function getUserIdsByRole(
+  role: string,
+  tenantId?: string
+): Promise<string[]> {
+  // Ensure database is connected (required for role-based lookup)
+  const mongoUri = process.env.MONGO_URI || 'mongodb://localhost:27017?directConnection=true';
+  await connectDatabase(mongoUri);
+  
+  return await findUserIdsByRole({
+    role,
+    tenantId: tenantId || DEFAULT_TENANT_ID,
+  });
+}
+
+/**
+ * Get system user ID using role-based lookup
+ * Convenience function that uses the same approach as services
+ * 
+ * @example
+ * const systemUserId = await getSystemUserIdByRole();
+ * const systemUserId = await getSystemUserIdByRole('tenant-123');
+ * 
+ * @param tenantId - Optional tenant ID (defaults to DEFAULT_TENANT_ID)
+ * @returns System user ID
+ */
+export async function getSystemUserIdByRole(tenantId?: string): Promise<string> {
+  return await getUserIdByRole('system', tenantId, true);
+}
+
+/**
+ * Get bonus-pool user ID using role-based lookup (if exists)
+ * Note: Services now use system user's bonusBalance, but this function
+ * can find a bonus-pool user if one exists for testing/demonstration
+ * 
+ * @example
+ * const bonusPoolUserId = await getBonusPoolUserIdByRole(); // Returns '' if not found
+ * 
+ * @param tenantId - Optional tenant ID (defaults to DEFAULT_TENANT_ID)
+ * @returns Bonus-pool user ID or empty string if not found
+ */
+export async function getBonusPoolUserIdByRole(tenantId?: string): Promise<string> {
+  return await getUserIdByRole('bonus-pool', tenantId, false);
 }

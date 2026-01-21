@@ -1,150 +1,113 @@
 # Auth Service Scripts
 
-Unified scripts for checking, testing, and debugging the auth service.
+Unified scripts for testing and managing the auth service.
 
-## Unified Scripts
+## Scripts
 
-### `check-auth.ts` - Check Operations
-Performs various checks on auth service data (users, sessions, passwords, etc.)
+### `auth-command-test.ts` - Comprehensive Auth Test Suite
+Unified test suite for all authentication functionality
 
 ```bash
-# Check system user
-npx tsx scripts/typescript/auth/check-auth.ts system
+# Run all auth tests
+npm run auth:test
+npx tsx scripts/typescript/auth/auth-command-test.ts all
 
-# Check system with password verification
-npx tsx scripts/typescript/auth/check-auth.ts system --password
+# Run specific test suites
+npx tsx scripts/typescript/auth/auth-command-test.ts registration  # Test registration flow
+npx tsx scripts/typescript/auth/auth-command-test.ts login         # Test login flow
+npx tsx scripts/typescript/auth/auth-command-test.ts password-reset # Test password reset
+npx tsx scripts/typescript/auth/auth-command-test.ts otp           # Test OTP verification
+npx tsx scripts/typescript/auth/auth-command-test.ts token         # Test token refresh
+npx tsx scripts/typescript/auth/auth-command-test.ts 2fa           # Test 2FA flow
 
-# Check for duplicate system users
-npx tsx scripts/typescript/auth/check-auth.ts system --duplicates
+# Get pending OTPs from database (useful when SMTP/SMS providers are not configured)
+npx tsx scripts/typescript/auth/auth-command-test.ts otps          # Get all pending OTPs
+npx tsx scripts/typescript/auth/auth-command-test.ts otps --recipient user@example.com  # Filter by recipient
+npx tsx scripts/typescript/auth/auth-command-test.ts otps --purpose registration  # Filter by purpose
 
-# Check specific user
-npx tsx scripts/typescript/auth/check-auth.ts user system@demo.com
-
-# List all users grouped by role
-npx tsx scripts/typescript/auth/check-auth.ts users
-
-# Check sessions
-npx tsx scripts/typescript/auth/check-auth.ts sessions
-
-# Check password
-npx tsx scripts/typescript/auth/check-auth.ts password system@demo.com System123!@#
-
-# Check user document structure
-npx tsx scripts/typescript/auth/check-auth.ts document system@demo.com
+# Setup test environment
+npx tsx scripts/typescript/auth/auth-command-test.ts setup
 ```
 
-### `test-auth.ts` - Test Operations
-Tests authentication flow, Passport lookup, token decoding, and permissions
+**Test Coverage:**
+- ✅ Registration (auto-verify and with verification)
+- ✅ Login (multiple user types)
+- ✅ Password reset flow
+- ✅ OTP verification
+- ✅ Token refresh
+- ✅ 2FA setup
+- ✅ OTP retrieval (for testing without SMTP/SMS providers)
+
+### `manage-user.ts` - User Management (Generic)
+Generic user management utility for roles, permissions, status, and verification
 
 ```bash
-# Test login flow
-npx tsx scripts/typescript/auth/test-auth.ts login
+# Show user details
+npx tsx scripts/typescript/auth/manage-user.ts system@demo.com show
 
-# Decode token
-npx tsx scripts/typescript/auth/test-auth.ts token
-
-# Test Passport lookup
-npx tsx scripts/typescript/auth/test-auth.ts passport system@demo.com
-
-# Test permission check
-npx tsx scripts/typescript/auth/test-auth.ts permission
-
-# Trace complete login flow
-npx tsx scripts/typescript/auth/test-auth.ts trace
-```
-
-### `debug-auth.ts` - Debug Operations
-Debugging tools for auth issues (wrong users, duplicates, ID mismatches)
-
-```bash
-# Check for wrong user ID
-npx tsx scripts/typescript/auth/debug-auth.ts wrong-user
-
-# Find duplicate users
-npx tsx scripts/typescript/auth/debug-auth.ts duplicates system@demo.com
-
-# Fix duplicate admins
-npx tsx scripts/typescript/auth/debug-auth.ts fix-duplicates
-
-# Find user by email
-npx tsx scripts/typescript/auth/debug-auth.ts find-user system@demo.com
-
-# Check for ID mismatches
-npx tsx scripts/typescript/auth/debug-auth.ts id-mismatch
-```
-
-### `promote-user.ts` - User Management
-Promote users and manage roles/permissions
-
-```bash
 # Promote to system with all permissions
-npx tsx scripts/typescript/auth/promote-user.ts system@demo.com --all
+npx tsx scripts/typescript/auth/manage-user.ts system@demo.com --all
 
 # Set specific roles
-npx tsx scripts/typescript/auth/promote-user.ts user@test.com --roles system
+npx tsx scripts/typescript/auth/manage-user.ts user@test.com --roles admin,system
+
+# Update user status
+npx tsx scripts/typescript/auth/manage-user.ts user@test.com status --status active
 
 # Set specific permissions
-npx tsx scripts/typescript/auth/promote-user.ts gateway@test.com --allow-negative --accept-fee
+npx tsx scripts/typescript/auth/manage-user.ts gateway@test.com --allow-negative --accept-fee
+
+# Mark email as verified
+npx tsx scripts/typescript/auth/manage-user.ts user@test.com --email-verified
+
+# Update roles only
+npx tsx scripts/typescript/auth/manage-user.ts user@test.com roles --roles provider
+
+# Update permissions only
+npx tsx scripts/typescript/auth/manage-user.ts user@test.com permissions --permissions allowNegative,acceptFee
 ```
 
-## Legacy Scripts (Deprecated)
+**Commands:**
+- `promote` (default) - Promote user with roles/permissions
+- `status` - Update user status (pending, active, suspended, locked)
+- `roles` - Update user roles
+- `permissions` - Update user permissions
+- `show` - Show user details
 
-The following scripts have been consolidated into the unified scripts above:
+## Package.json Scripts
 
-### Check Scripts → `check-auth.ts`
-- `check-admin-user.ts` → `check-auth.ts admin`
-- `check-admin-password.ts` → `check-auth.ts admin --password`
-- `check-admin-duplicates.ts` → `check-auth.ts admin --duplicates`
-- `check-all-admin-users.ts` → `check-auth.ts admin --all`
-- `check-user-document.ts` → `check-auth.ts document <email>`
-- `check-user-now.ts` → `check-auth.ts user <email>`
-- `check-users.ts` → `check-auth.ts users`
-- `check-login-user.ts` → `check-auth.ts user system@demo.com`
-- `check-password-match.ts` → `check-auth.ts password <email> [password]`
-- `check-sessions.ts` → `check-auth.ts sessions [userId]`
-
-### Test Scripts → `test-auth.ts`
-- `test-login-trace.ts` → `test-auth.ts trace`
-- `test-passport-lookup.ts` → `test-auth.ts passport`
-- `test-passport-direct.ts` → `test-auth.ts passport`
-- `test-permission-check.ts` → `test-auth.ts permission`
-- `decode-token.ts` → `test-auth.ts token`
-
-### Debug Scripts → `debug-auth.ts`
-- `check-wrong-user.ts` → `debug-auth.ts wrong-user`
-- `check-wrong-user-id.ts` → `debug-auth.ts wrong-user`
-- `check-wrong-id-exists.ts` → `debug-auth.ts wrong-user`
-- `find-wrong-user.ts` → `debug-auth.ts find-user <email>`
-- `fix-duplicate-admin.ts` → `debug-auth.ts fix-duplicates`
-
-### Utility Scripts (Keep)
-- `promote-user.ts` - User promotion utility (keep as-is)
-- `get-admin-user-id.ts` - Simple utility (can be replaced with `check-auth.ts admin`)
-- `check-2fa.js` - 2FA check utility (keep as-is)
-- `check-mongodb-transactions.js` - MongoDB transaction check (keep as-is)
-
-## Migration Guide
-
-### Before
-```bash
-npx tsx scripts/typescript/auth/check-admin-user.ts
-npx tsx scripts/typescript/auth/check-admin-password.ts
-npx tsx scripts/typescript/auth/test-login-trace.ts
-npx tsx scripts/typescript/auth/decode-token.ts
+```json
+"auth:test": "npx tsx typescript/auth/auth-command-test.ts all"
+"auth:test:registration": "npx tsx typescript/auth/auth-command-test.ts registration"
+"auth:test:login": "npx tsx typescript/auth/auth-command-test.ts login"
+"auth:test:password-reset": "npx tsx typescript/auth/auth-command-test.ts password-reset"
+"auth:test:otp": "npx tsx typescript/auth/auth-command-test.ts otp"
+"auth:test:token": "npx tsx typescript/auth/auth-command-test.ts token"
+"auth:test:2fa": "npx tsx typescript/auth/auth-command-test.ts 2fa"
+"auth:manage": "npx tsx typescript/auth/manage-user.ts"
+"promote-to-admin": "npx tsx typescript/auth/manage-user.ts"
 ```
 
-### After
-```bash
-npx tsx scripts/typescript/auth/check-auth.ts admin
-npx tsx scripts/typescript/auth/check-auth.ts admin --password
-npx tsx scripts/typescript/auth/test-auth.ts trace
-npx tsx scripts/typescript/auth/test-auth.ts token
-```
+## Migration Notes
+
+The following scripts have been consolidated or removed:
+
+### Removed Scripts
+- `check-auth.ts` - Removed (not relevant for testing)
+- `debug-auth.ts` - Removed (not relevant for testing)
+- `check-2fa.js` - Removed (functionality integrated into test suite)
+- `test-auth.ts` - Replaced by `auth-command-test.ts`
+- `test-registration.ts` - Integrated into `auth-command-test.ts`
+- `promote-user.ts` - Replaced by `manage-user.ts` (enhanced)
+
+### Updated References
+- `promote-to-admin` npm script now uses `manage-user.ts`
+- All user management operations use `manage-user.ts`
 
 ## Benefits
 
-✅ **Reduced Duplication**: Single script with shared MongoDB connection logic  
-✅ **Consistent Interface**: All scripts follow same argument pattern  
-✅ **Better Organization**: Related operations grouped together  
-✅ **Easier Maintenance**: Update once, affects all operations  
-✅ **Better Documentation**: Single source of truth for each operation type
+✅ **Focused Testing**: Single comprehensive test suite for all auth functionality  
+✅ **Generic User Management**: One tool for all user operations (roles, permissions, status)  
+✅ **Reduced Duplication**: Shared utilities and consistent patterns  
+✅ **Better Organization**: Clear separation between testing and management  
+✅ **Easier Maintenance**: Update once, affects all operations

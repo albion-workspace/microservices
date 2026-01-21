@@ -442,6 +442,7 @@ function formatAmount(amount: number): string {
 // ═══════════════════════════════════════════════════════════════════
 
 async function waitForService(url: string, maxAttempts: number = 30): Promise<boolean> {
+  // Use unified health endpoint (checks liveness, readiness, and metrics)
   const healthUrl = url.replace('/graphql', '/health');
   
   for (let i = 0; i < maxAttempts; i++) {
@@ -449,7 +450,8 @@ async function waitForService(url: string, maxAttempts: number = 30): Promise<bo
       const response = await fetch(healthUrl, { method: 'GET' });
       if (response.ok) {
         const data = await response.json();
-        if (data.status === 'healthy' || data.healthy === true) {
+        // Check for healthy status (unified endpoint returns 'healthy' or 'degraded')
+        if (data.status === 'healthy' || data.status === 'ready' || data.healthy === true) {
           return true;
         }
       }
@@ -2885,8 +2887,7 @@ async function testAll() {
 
 const TEST_REGISTRY: Record<string, () => Promise<void>> = {
   setup: testSetup,
-  provider: testProvider, // Renamed from gateway
-  gateway: testProvider, // Alias for backward compatibility
+  provider: testProvider,
   funding: testFunding,
   flow: testFlow,
   duplicate: testDuplicate,
