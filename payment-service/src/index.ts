@@ -32,6 +32,8 @@ import {
   findOneById,
   generateMongoId,
   isDuplicateKeyError,
+  createObjectModelQueryResolver,
+  findUserIdByRole,
 } from 'core-service';
 // Ledger service imports removed - wallets are updated atomically via createTransferWithTransactions
 import { createTransferWithTransactions } from 'core-service';
@@ -77,6 +79,8 @@ import {
 import { transferApprovalResolvers } from './services/transfer-approval.js';
 
 import { transferService } from './services/transfer.js';
+import { setupRecovery } from './recovery-setup.js';
+
 
 import {
   walletService,
@@ -97,29 +101,36 @@ import { SYSTEM_ROLE, SYSTEM_CURRENCY } from './constants.js';
 export { SYSTEM_ROLE };
 
 /**
- * Get bonus-pool user ID from auth database
- * Bonus-pool is a registered user (bonus-pool@system.com), not a string literal
+ * Get system user ID from auth database using role-based lookup
+ * Uses a user with 'system' role's bonusBalance as the bonus pool
+ * This is generic and flexible - supports multiple system users if needed
+ * 
+ * @param tenantId - Optional tenant ID to filter by (for multi-tenant scenarios)
+ * @returns System user ID
  */
-async function getBonusPoolUserId(): Promise<string> {
+async function getSystemUserId(tenantId?: string): Promise<string> {
+  
   try {
-    const client = getClient();
-    const authDb = client.db('auth_service');
-    const usersCollection = authDb.collection('users');
+    // Find user with 'system' role (role-based, not hardcoded email)
+    const systemUserId = await findUserIdByRole({
+      role: 'system',
+      tenantId,
+      throwIfNotFound: true,
+    });
     
-    // Look up bonus-pool user by email
-    const bonusPoolUser = await usersCollection.findOne({ email: 'bonus-pool@system.com' });
+    logger.debug('System user ID resolved for bonus pool', { 
+      userId: systemUserId, 
+      tenantId,
+      method: 'role-based' 
+    });
     
-    if (!bonusPoolUser) {
-      // Fallback: if user doesn't exist, log warning and return the string (for backward compatibility)
-      logger.warn('Bonus-pool user not found in auth database, using string literal as fallback');
-      return 'bonus-pool';
-    }
-    
-    return bonusPoolUser._id?.toString() || bonusPoolUser.id;
+    return systemUserId;
   } catch (error) {
-    logger.error('Failed to get bonus-pool user ID', { error });
-    // Fallback to string literal for backward compatibility
-    return 'bonus-pool';
+    logger.error('Error getting system user ID by role', { 
+      error: error instanceof Error ? error.message : String(error),
+      tenantId 
+    });
+    throw error;
   }
 }
 
@@ -137,8 +148,30 @@ const config = {
   services: [
     // Register transfer service FIRST so Transfer type is available for deposit/withdrawal results
     { name: 'transfer', types: transferService.types, resolvers: transferService.resolvers },
-    { name: 'deposit', types: depositService.types, resolvers: depositService.resolvers },
-    { name: 'withdrawal', types: withdrawalService.types, resolvers: withdrawalService.resolvers },
+    { 
+      name: 'deposit', 
+      types: depositService.types, 
+      resolvers: {
+        Query: {
+          deposit: depositService.resolvers.Query.deposit,
+          // Override deposits query to filter by objectModel='deposit' and use cursor pagination
+          deposits: createObjectModelQueryResolver(depositService.repository, 'deposit'),
+        } as Record<string, any>,
+        Mutation: depositService.resolvers.Mutation,
+      },
+    },
+    { 
+      name: 'withdrawal', 
+      types: withdrawalService.types, 
+      resolvers: {
+        Query: {
+          withdrawal: withdrawalService.resolvers.Query.withdrawal,
+          // Override withdrawals query to filter by objectModel='withdrawal' and use cursor pagination
+          withdrawals: createObjectModelQueryResolver(withdrawalService.repository, 'withdrawal'),
+        } as Record<string, any>,
+        Mutation: withdrawalService.resolvers.Mutation,
+      },
+    },
     // Unified wallet service - Includes wallet CRUD + balance queries + transaction history
     // Architecture: Wallets + Transactions + Transfers
     { 
@@ -248,7 +281,7 @@ const config = {
           transfer: Transfer
         }
         extend type Query {
-          transactions(first: Int, skip: Int, filter: JSON): TransactionConnection
+          transactions(first: Int, after: String, last: Int, before: String, filter: JSON): TransactionConnection
         }
         extend type Mutation {
           approveTransfer(transferId: String!): TransferApprovalResult!
@@ -443,13 +476,14 @@ function setupBonusEventHandlers() {
         return;
       }
       
-      // Get bonus-pool user ID
-      const bonusPoolUserId = await getBonusPoolUserId();
+      // Get system user ID (bonus pool is system user's bonusBalance)
+      const systemUserId = await getSystemUserId(event.tenantId);
       
-      // Create transfer: bonus-pool -> user (bonus balance)
+      // Create transfer: system (bonus) -> user (bonus)
+      // Uses system user's bonusBalance as the bonus pool
       try {
         const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
-          fromUserId: bonusPoolUserId,
+          fromUserId: systemUserId,
           toUserId: userId,
           amount: event.data.value,
           currency: event.data.currency,
@@ -462,6 +496,8 @@ function setupBonusEventHandlers() {
           objectModel: 'bonus',
           bonusId: event.data.bonusId,
           bonusType: event.data.type,
+          fromBalanceType: 'bonus',  // Debit from system user's bonusBalance (bonus pool)
+          toBalanceType: 'bonus',    // Credit to user bonus balance
         });
         
         logger.info('Bonus awarded via transfer', {
@@ -598,14 +634,15 @@ function setupBonusEventHandlers() {
         return;
       }
       
-      // Get bonus-pool user ID
-      const bonusPoolUserId = await getBonusPoolUserId();
+      // Get system user ID (bonus pool is system user's bonusBalance)
+      const systemUserId = await getSystemUserId(event.tenantId);
       
-      // Create transfer: user -> bonus-pool (return forfeited bonus)
+      // Create transfer: user (bonus) -> system (bonus)
+      // Returns forfeited bonus to system user's bonusBalance (bonus pool)
       try {
         const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
           fromUserId: event.userId!,
-          toUserId: bonusPoolUserId,
+          toUserId: systemUserId,
           amount: event.data.forfeitedValue,
           currency: event.data.currency || SYSTEM_CURRENCY,
           tenantId: event.tenantId,
@@ -614,7 +651,7 @@ function setupBonusEventHandlers() {
           externalRef: `bonus-forfeit-${event.data.bonusId}`,
           description: `Bonus forfeited: ${event.data.reason || 'Forfeited'}`,
           fromBalanceType: 'bonus',  // Debit from user bonus balance
-          toBalanceType: 'real',      // Credit to bonus-pool real balance
+          toBalanceType: 'bonus',    // Credit to system user's bonusBalance (bonus pool)
           objectId: event.data.bonusId,  // Transactions reference bonus, not transfer
           objectModel: 'bonus',
           bonusId: event.data.bonusId,
@@ -669,13 +706,14 @@ function setupBonusEventHandlers() {
     }
     
     try {
-      // Get bonus-pool user ID
-      const bonusPoolUserId = await getBonusPoolUserId();
+      // Get system user ID (bonus pool is system user's bonusBalance)
+      const systemUserId = await getSystemUserId(event.tenantId);
       
-      // Create transfer: user -> bonus-pool (return expired bonus)
+      // Create transfer: user (bonus) -> system (bonus)
+      // Returns expired bonus to system user's bonusBalance (bonus pool)
       const { transfer } = await createTransferWithTransactions({
         fromUserId: event.userId!,
-        toUserId: bonusPoolUserId,
+        toUserId: systemUserId,
         amount: event.data.forfeitedValue,
         currency: event.data.currency || SYSTEM_CURRENCY,
         tenantId: event.tenantId,
@@ -687,6 +725,8 @@ function setupBonusEventHandlers() {
         objectModel: 'bonus',
         bonusId: event.data.bonusId,
         reason: 'expired',
+        fromBalanceType: 'bonus',  // Debit from user bonus balance
+        toBalanceType: 'bonus',    // Credit to system user's bonusBalance (bonus pool)
       });
       
       logger.info('Expired bonus removed via transfer', {
@@ -857,7 +897,6 @@ async function main() {
   
   // Setup recovery system (transfer recovery + recovery job)
   try {
-    const { setupRecovery } = await import('./recovery-setup.js');
     await setupRecovery();
     logger.info('✅ Recovery system initialized');
   } catch (err) {

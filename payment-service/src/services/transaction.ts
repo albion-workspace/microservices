@@ -22,6 +22,7 @@ import {
   logger,
   findOneById,
   updateOneById,
+  paginateCollection,
 } from 'core-service';
 import type { Transaction, Transfer } from '../types.js';
 import { createTransferWithTransactions, type ClientSession } from 'core-service';
@@ -397,31 +398,34 @@ export const withdrawalService = createService<Transaction, CreateWithdrawalInpu
 // ═══════════════════════════════════════════════════════════════════
 
 // ✅ Unified transactions query - fetches all transactions (deposits + withdrawals) together
+// Uses cursor-based pagination for O(1) performance regardless of page number
 export const transactionsQueryResolver = async (args: Record<string, unknown>) => {
       const db = getDatabase();
       const transactionsCollection = db.collection('transactions');
       
       const first = (args.first as number) || 100;
-      const skip = (args.skip as number) || 0;
+      const after = args.after as string | undefined;
+      const last = args.last as number | undefined;
+      const before = args.before as string | undefined;
       const filter = (args.filter as Record<string, unknown>) || {};
       
-      // Build MongoDB query
-      const query: Record<string, unknown> = {};
+      // Build MongoDB query filter
+      const queryFilter: Record<string, unknown> = {};
       
       // Filter by type/charge if specified (support both charge and type for backward compatibility)
       if (filter.type) {
         // Support filtering by charge (credit/debit) or objectModel (deposit, withdrawal, etc.)
         if (filter.type === 'credit' || filter.type === 'debit') {
-          query.charge = filter.type;
+          queryFilter.charge = filter.type;
         } else {
           // For other types like 'deposit', 'withdrawal', filter by objectModel
-          query.objectModel = filter.type;
+          queryFilter.objectModel = filter.type;
         }
       }
       
       // Filter by userId if specified
       if (filter.userId) {
-        query.userId = filter.userId;
+        queryFilter.userId = filter.userId;
       }
       
       // Filter by status if specified (transactions don't have status, but transfers do)
@@ -439,22 +443,23 @@ export const transactionsQueryResolver = async (args: Record<string, unknown>) =
           toDate.setHours(23, 59, 59, 999); // Include full day
           dateFilter.$lte = toDate;
         }
-        query.createdAt = dateFilter;
+        queryFilter.createdAt = dateFilter;
       }
       
-      // Execute query
-      const [nodes, totalCount] = await Promise.all([
-        transactionsCollection
-          .find(query)
-          .sort({ createdAt: -1 })
-          .skip(skip)
-          .limit(first)
-          .toArray(),
-        transactionsCollection.countDocuments(query),
-      ]);
+      // Use cursor-based pagination (O(1) performance)
+      const result = await paginateCollection(transactionsCollection, {
+        first: first ? Math.min(Math.max(1, first), 100) : undefined, // Max 100 per page
+        after,
+        last: last ? Math.min(Math.max(1, last), 100) : undefined,
+        before,
+        filter: queryFilter,
+        sortField: 'createdAt',
+        sortDirection: 'desc',
+      });
       
       return {
-        nodes: nodes.map((tx: any) => {
+        nodes: result.edges.map((edge: { node: any; cursor: string }) => {
+          const tx = edge.node as any;
           // Safely extract metadata without circular references
           const meta = tx.meta || tx.metadata || {};
           // Create a clean metadata object without circular references
@@ -500,10 +505,7 @@ export const transactionsQueryResolver = async (args: Record<string, unknown>) =
             objectModel: tx.objectModel,
           };
         }),
-        totalCount,
-        pageInfo: {
-          hasNextPage: skip + first < totalCount,
-          hasPreviousPage: skip > 0,
-        },
+        totalCount: result.totalCount,
+        pageInfo: result.pageInfo,
       };
 };

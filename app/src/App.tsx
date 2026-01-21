@@ -29,6 +29,9 @@ import Login from './pages/Login'
 import Register from './pages/Register'
 import Profile from './pages/Profile'
 import AuthCallback from './pages/AuthCallback'
+import ForgotPassword from './pages/ForgotPassword'
+import ResetPassword from './pages/ResetPassword'
+import VerifyOTP from './pages/VerifyOTP'
 import Notifications from './pages/Notifications'
 import UserManagement from './pages/UserManagement'
 import UseCases from './pages/UseCases'
@@ -53,6 +56,9 @@ function AppContent() {
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
+      <Route path="/forgot-password" element={<ForgotPassword />} />
+      <Route path="/reset-password" element={<ResetPassword />} />
+      <Route path="/verify-otp" element={<VerifyOTP />} />
       <Route path="/auth/callback" element={<AuthCallback />} />
       <Route path="*" element={<Navigate to="/login" replace />} />
     </Routes>
@@ -176,6 +182,9 @@ function AppContent() {
           <Route path="/settings" element={<ProtectedRoute><SettingsPage /></ProtectedRoute>} />
           <Route path="/login" element={<Navigate to="/" replace />} />
           <Route path="/register" element={<Navigate to="/" replace />} />
+          <Route path="/forgot-password" element={<Navigate to="/" replace />} />
+          <Route path="/reset-password" element={<Navigate to="/" replace />} />
+          <Route path="/verify-otp" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
     </div>

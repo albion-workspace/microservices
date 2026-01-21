@@ -3,11 +3,11 @@
  * Handles TOTP (Time-based One-Time Password) 2FA setup and verification
  */
 
-import { getDatabase, logger, findOneById, updateOneById } from 'core-service';
+import { getDatabase, logger, findOneById, updateOneById, normalizeDocument, findById } from 'core-service';
 import speakeasy from 'speakeasy';
 import qrcode from 'qrcode';
 import type { Enable2FAInput, Verify2FAInput, User, TwoFactorSetupResponse } from '../types.js';
-import { generateBackupCodes, hashToken } from '../utils.js';
+import { generateBackupCodes, hashToken, verifyPassword } from '../utils.js';
 
 export class TwoFactorService {
   /**
@@ -25,16 +25,22 @@ export class TwoFactorService {
         } as TwoFactorSetupResponse;
       }
       
-      // Get user
-      const user = await db.collection('users').findOne({
-        id: input.userId,
-        tenantId: input.tenantId,
-      }) as unknown as User | null;
+      // Get user using findById helper (handles both _id and id fields)
+      const userDoc = await findById<User>(db.collection('users'), input.userId, { tenantId: input.tenantId });
       
-      if (!user) {
+      if (!userDoc || !userDoc._id) {
         return {
           success: false,
           message: 'User not found',
+        } as TwoFactorSetupResponse;
+      }
+      
+      // Normalize user document to ensure id field exists
+      const user = normalizeDocument(userDoc);
+      if (!user || !user.id) {
+        return {
+          success: false,
+          message: 'Invalid user data',
         } as TwoFactorSetupResponse;
       }
       
@@ -46,18 +52,51 @@ export class TwoFactorService {
         } as TwoFactorSetupResponse;
       }
       
-      // Passport.js handles password verification
-      // For 2FA setup, password should be verified via Passport.js authentication flow
-      // Note: Password verification is handled by Passport.js
+      // Verify password before enabling 2FA
+      if (!input.password) {
+        return {
+          success: false,
+          message: 'Password is required to enable 2FA',
+        } as TwoFactorSetupResponse;
+      }
+      
+      const isPasswordValid = await verifyPassword(input.password, user.passwordHash);
+      if (!isPasswordValid) {
+        return {
+          success: false,
+          message: 'Invalid password',
+        } as TwoFactorSetupResponse;
+      }
       
       // Generate 2FA secret
-      const secret = speakeasy.generateSecret({
-        name: `AuthService (${user.email || user.username || user.phone})`,
-        length: 32,
-      });
+      let secret: speakeasy.GeneratedSecret;
+      let qrCodeDataUrl: string;
       
-      // Generate QR code
-      const qrCodeDataUrl = await qrcode.toDataURL(secret.otpauth_url || '');
+      try {
+        secret = speakeasy.generateSecret({
+          name: `AuthService (${user.email || user.username || user.phone})`,
+          length: 32,
+        });
+        
+        if (!secret.otpauth_url) {
+          return {
+            success: false,
+            message: 'Failed to generate 2FA secret URL',
+          } as TwoFactorSetupResponse;
+        }
+        
+        // Generate QR code
+        qrCodeDataUrl = await qrcode.toDataURL(secret.otpauth_url);
+      } catch (error: any) {
+        logger.error('Failed to generate 2FA secret or QR code', {
+          error: error?.message || error,
+          userId: user.id,
+        });
+        return {
+          success: false,
+          message: `Failed to generate 2FA secret: ${error?.message || 'Unknown error'}`,
+        } as TwoFactorSetupResponse;
+      }
       
       // Generate backup codes
       const backupCodes = generateBackupCodes(10);
@@ -66,8 +105,16 @@ export class TwoFactorService {
       );
       
       // Store secret (but don't enable yet - requires verification)
-      await db.collection('users').updateOne(
-        { id: user.id },
+      // Use _id for update (most reliable)
+      if (!user._id) {
+        return {
+          success: false,
+          message: 'User missing _id field',
+        } as TwoFactorSetupResponse;
+      }
+      
+      const updateResult = await db.collection('users').updateOne(
+        { _id: user._id, tenantId: input.tenantId },
         { 
           $set: { 
             twoFactorSecret: secret.base32,
@@ -81,6 +128,18 @@ export class TwoFactorService {
         }
       );
       
+      if (updateResult.matchedCount === 0) {
+        logger.error('Failed to update user for 2FA setup', {
+          userId: user.id,
+          _id: user._id?.toString(),
+          tenantId: input.tenantId,
+        });
+        return {
+          success: false,
+          message: 'Failed to save 2FA configuration',
+        } as TwoFactorSetupResponse;
+      }
+      
       logger.info('2FA setup initiated', { userId: user.id });
       
       return {
@@ -89,11 +148,17 @@ export class TwoFactorService {
         qrCode: qrCodeDataUrl,
         backupCodes, // Return plain codes to user (only shown once)
       };
-    } catch (error) {
-      logger.error('Enable 2FA error', { error });
+    } catch (error: any) {
+      logger.error('Enable 2FA error', { 
+        error: error?.message || error,
+        stack: error?.stack,
+        userId: input.userId,
+        tenantId: input.tenantId,
+      });
       return {
         success: false,
-      };
+        message: error?.message || 'Failed to enable 2FA',
+      } as TwoFactorSetupResponse;
     }
   }
   

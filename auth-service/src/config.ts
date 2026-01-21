@@ -59,13 +59,10 @@ export function loadConfig(): AuthConfig {
     passwordRequireUppercase: process.env.PASSWORD_REQUIRE_UPPERCASE !== 'false',
     passwordRequireNumbers: process.env.PASSWORD_REQUIRE_NUMBERS !== 'false',
     passwordRequireSymbols: process.env.PASSWORD_REQUIRE_SYMBOLS !== 'false',
-    maxLoginAttempts: parseInt(process.env.MAX_LOGIN_ATTEMPTS || '5'),
-    lockoutDuration: parseInt(process.env.LOCKOUT_DURATION || '15'),
     
     // OTP
     otpLength: parseInt(process.env.OTP_LENGTH || '6'),
     otpExpiryMinutes: parseInt(process.env.OTP_EXPIRY_MINUTES || '10'),
-    otpMaxAttempts: parseInt(process.env.OTP_MAX_ATTEMPTS || '3'),
     
     // Session
     sessionMaxAge: parseInt(process.env.SESSION_MAX_AGE || '30'),

@@ -9,7 +9,7 @@
  * - Two-factor authentication (TOTP + backup codes)
  * - Session management
  * - JWT + refresh tokens
- * - Account security (rate limiting, locking)
+ * - Account security (validation)
  * 
  * Restart trigger: ${Date.now()}
  */
@@ -68,8 +68,8 @@ validateConfig(authConfig);
 
 const otpProviders = new OTPProviderFactory(authConfig);
 
-const registrationService = new RegistrationService(authConfig, otpProviders);
 const authenticationService = new AuthenticationService(authConfig);
+const registrationService = new RegistrationService(authConfig, otpProviders, authenticationService);
 const otpService = new OTPService(authConfig, otpProviders);
 const passwordService = new PasswordService(authConfig, otpProviders);
 const twoFactorService = new TwoFactorService();
@@ -160,6 +160,7 @@ const config = {
     Mutation: {
       // Public mutations (no auth required)
       register: allow,
+      verifyRegistration: allow, // Public - part of registration flow
       login: allow,
       forgotPassword: allow,
       resetPassword: allow,
@@ -470,12 +471,11 @@ async function main() {
 ║  • Password management (forgot/reset/change)                          ║
 ║  • JWT + refresh token management                                     ║
 ║  • Session management & device tracking                               ║
-║  • Account security (rate limiting, locking, validation)              ║
+║  • Account security (validation)                                       ║
 ║  • Dynamic user metadata (flexible fields)                            ║
 ║                                                                       ║
 ║  Security:                                                            ║
 ║  • Password: min ${authConfig.passwordMinLength} chars, uppercase, numbers, symbols       ║
-║  • Max login attempts: ${authConfig.maxLoginAttempts} (locks for ${authConfig.lockoutDuration}min)                   ║
 ║  • OTP: ${authConfig.otpLength} digits, expires in ${authConfig.otpExpiryMinutes} minutes                       ║
 ║  • Session: max ${authConfig.sessionMaxAge} days                                          ║
 ║                                                                       ║
@@ -547,6 +547,18 @@ async function main() {
     }
   }, 24 * 60 * 60 * 1000); // Daily
   
+  // Cleanup expired/invalid sessions daily
+  setInterval(async () => {
+    try {
+      const deleted = await authenticationService.cleanupExpiredSessions();
+      if (deleted > 0) {
+        logger.info(`Cleaned up ${deleted} expired/invalid sessions`);
+      }
+    } catch (err) {
+      logger.error('Session cleanup failed', { error: err });
+    }
+  }, 24 * 60 * 60 * 1000); // Daily
+  
   // Note: OAuth routes would need to be added via a custom Express middleware
   // For now, OAuth is configured in Passport strategies and can be triggered from frontend
   logger.info('OAuth strategies configured and ready');
@@ -576,7 +588,6 @@ export type {
   User,
   Session,
   OTP,
-  RefreshToken,
   AuthProvider,
   AccountStatus,
   OTPChannel,

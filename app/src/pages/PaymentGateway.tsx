@@ -758,7 +758,7 @@ function WalletsTab() {
       }
     },
     onSuccess: async (result) => {
-      queryClient.invalidateQueries({ queryKey: ['deposits'] })
+      queryClient.invalidateQueries({ queryKey: ['transactions'] })
       
       // Auto-approve deposit to complete the flow (like in tests)
       const transferId = result?.createDeposit?.transfer?.id
@@ -846,7 +846,7 @@ function WalletsTab() {
       }
     },
     onSuccess: async (result) => {
-      queryClient.invalidateQueries({ queryKey: ['withdrawals'] })
+      queryClient.invalidateQueries({ queryKey: ['transactions'] })
       
       // Auto-approve withdrawal to complete the flow (like in tests)
       const transferId = result?.createWithdrawal?.transfer?.id
@@ -2247,10 +2247,23 @@ function LedgerTab() {
     dateTo: '',
   })
   
-  // Pagination
-  const [pagination, setPagination] = useState({
-    page: 0,
-    pageSize: 25,
+  // Pagination (cursor-based for better performance)
+  const [pagination, setPagination] = useState<{
+    first: number
+    after?: string
+    last?: number
+    before?: string
+  }>({
+    first: 25,
+  })
+  const [pageInfo, setPageInfo] = useState<{
+    hasNextPage: boolean
+    hasPreviousPage: boolean
+    startCursor?: string | null
+    endCursor?: string | null
+  }>({
+    hasNextPage: false,
+    hasPreviousPage: false,
   })
   
   // Build filter object for API
@@ -2305,15 +2318,15 @@ function LedgerTab() {
     return Object.keys(filter).length > 0 ? filter : undefined
   }
   
-  // Fetch transfers (replaces ledgerTransactions)
+  // Fetch transfers (cursor-based pagination for O(1) performance)
   const transfersQuery = useQuery({
     queryKey: ['transfers', pagination, filters],
     queryFn: async () => {
       try {
         const filter = buildApiFilter()
         const result = await graphqlQuery(GRAPHQL_SERVICE_URLS.payment, `
-          query ListTransfers($first: Int, $skip: Int, $filter: JSON) {
-            transfers(first: $first, skip: $skip, filter: $filter) {
+          query ListTransfers($first: Int, $after: String, $last: Int, $before: String, $filter: JSON) {
+            transfers(first: $first, after: $after, last: $last, before: $before, filter: $filter) {
               nodes {
                 id
                 fromUserId
@@ -2329,14 +2342,24 @@ function LedgerTab() {
               pageInfo {
                 hasNextPage
                 hasPreviousPage
+                startCursor
+                endCursor
               }
             }
           }
         `, { 
-          first: pagination.pageSize,
-          skip: pagination.page * pagination.pageSize,
+          first: pagination.first || 25,
+          after: pagination.after || undefined,
+          last: pagination.last || undefined,
+          before: pagination.before || undefined,
           filter: filter
         }, authToken)
+        
+        // Update page info for pagination controls
+        if (result.transfers?.pageInfo) {
+          setPageInfo(result.transfers.pageInfo)
+        }
+        
         return result
       } catch (error: any) {
         console.error('Transfers query error:', error)
@@ -2347,7 +2370,9 @@ function LedgerTab() {
             totalCount: 0,
             pageInfo: {
               hasNextPage: false,
-              hasPreviousPage: false
+              hasPreviousPage: false,
+              startCursor: null,
+              endCursor: null,
             }
           }
         }
@@ -2399,8 +2424,7 @@ function LedgerTab() {
     return userEmailMap.get(userId) || userId.substring(0, 8) + '...'
   }
   
-  // Pagination helpers
-  const totalPages = Math.ceil(totalCount / pagination.pageSize)
+  // Pagination helpers (cursor-based - no page numbers)
   
   const formatCurrency = (amount: number, currency: string = 'EUR') => {
     return new Intl.NumberFormat('en-US', {
@@ -2421,7 +2445,7 @@ function LedgerTab() {
             <select 
               className="input" 
               value={filters.type}
-              onChange={e => { setFilters({ ...filters, type: e.target.value }); setPagination({ ...pagination, page: 0 }) }}
+              onChange={e => { setFilters({ ...filters, type: e.target.value }); setPagination({ first: pagination.first || 25 }) }}
             >
               <option value="">All Types</option>
               <option value="deposit">Deposit</option>
@@ -2439,7 +2463,7 @@ function LedgerTab() {
               className="input"
               placeholder="User ID (from or to)"
               value={filters.userId}
-              onChange={e => { setFilters({ ...filters, userId: e.target.value }); setPagination({ ...pagination, page: 0 }) }}
+              onChange={e => { setFilters({ ...filters, userId: e.target.value }); setPagination({ first: pagination.first || 25 }) }}
             />
           </div>
           
@@ -2449,7 +2473,7 @@ function LedgerTab() {
             <select 
               className="input" 
               value={filters.currency}
-              onChange={e => { setFilters({ ...filters, currency: e.target.value }); setPagination({ ...pagination, page: 0 }) }}
+              onChange={e => { setFilters({ ...filters, currency: e.target.value }); setPagination({ first: pagination.first || 25 }) }}
             >
               <option value="">All</option>
               <option value="EUR">EUR</option>
@@ -2464,7 +2488,7 @@ function LedgerTab() {
             <select 
               className="input" 
               value={filters.status}
-              onChange={e => { setFilters({ ...filters, status: e.target.value }); setPagination({ ...pagination, page: 0 }) }}
+              onChange={e => { setFilters({ ...filters, status: e.target.value }); setPagination({ first: pagination.first || 25 }) }}
             >
               <option value="">All Status</option>
               <option value="pending">Pending</option>
@@ -2482,7 +2506,7 @@ function LedgerTab() {
               className="input"
               placeholder="Search..."
               value={filters.externalRef}
-              onChange={e => { setFilters({ ...filters, externalRef: e.target.value }); setPagination({ ...pagination, page: 0 }) }}
+              onChange={e => { setFilters({ ...filters, externalRef: e.target.value }); setPagination({ first: pagination.first || 25 }) }}
             />
           </div>
           
@@ -2493,7 +2517,7 @@ function LedgerTab() {
               type="date" 
               className="input"
               value={filters.dateFrom}
-              onChange={e => { setFilters({ ...filters, dateFrom: e.target.value }); setPagination({ ...pagination, page: 0 }) }}
+              onChange={e => { setFilters({ ...filters, dateFrom: e.target.value }); setPagination({ first: pagination.first || 25 }) }}
             />
           </div>
           
@@ -2504,17 +2528,17 @@ function LedgerTab() {
               type="date" 
               className="input"
               value={filters.dateTo}
-              onChange={e => { setFilters({ ...filters, dateTo: e.target.value }); setPagination({ ...pagination, page: 0 }) }}
+              onChange={e => { setFilters({ ...filters, dateTo: e.target.value }); setPagination({ first: pagination.first || 25 }) }}
             />
           </div>
-          
+
           {/* Page Size */}
           <div className="form-group" style={{ marginBottom: 0, minWidth: 100 }}>
             <label className="form-label">Page Size</label>
             <select 
               className="input" 
-              value={pagination.pageSize}
-              onChange={e => setPagination({ page: 0, pageSize: parseInt(e.target.value) })}
+              value={pagination.first || 25}
+              onChange={e => setPagination({ first: parseInt(e.target.value) })}
             >
               <option value="25">25</option>
               <option value="50">50</option>
@@ -2528,7 +2552,7 @@ function LedgerTab() {
               className="btn btn-secondary"
               onClick={() => {
                 setFilters({ type: '', userId: '', currency: '', status: '', externalRef: '', dateFrom: '', dateTo: '' })
-                setPagination({ page: 0, pageSize: 25 })
+                setPagination({ first: 25 })
               }}
             >
               Clear
@@ -2546,7 +2570,7 @@ function LedgerTab() {
         <div className="card-header">
           <h3 className="card-title">Transfers</h3>
           <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-            Page {pagination.page + 1} of {totalPages || 1} • Total: {totalCount}
+            Showing {transfers.length} of {totalCount} transfers
           </div>
         </div>
         
@@ -2654,42 +2678,38 @@ function LedgerTab() {
               </table>
             </div>
             
-            {/* Pagination Controls */}
+            {/* Pagination Controls (Cursor-based) */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 8px', borderTop: '1px solid var(--border)' }}>
               <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-                Showing {pagination.page * pagination.pageSize + 1} - {Math.min((pagination.page + 1) * pagination.pageSize, totalCount)} of {totalCount}
+                Showing {transfers.length} of {totalCount} transfers
               </div>
               <div style={{ display: 'flex', gap: 8 }}>
                 <button 
                   className="btn btn-sm btn-secondary"
-                  disabled={pagination.page === 0}
-                  onClick={() => setPagination({ ...pagination, page: 0 })}
+                  disabled={!pageInfo.hasPreviousPage}
+                  onClick={() => setPagination({ first: pagination.first || 25 })}
                 >
                   First
                 </button>
                 <button 
                   className="btn btn-sm btn-secondary"
-                  disabled={pagination.page === 0}
-                  onClick={() => setPagination({ ...pagination, page: pagination.page - 1 })}
+                  disabled={!pageInfo.hasPreviousPage}
+                  onClick={() => setPagination({ 
+                    last: pagination.first || 25, 
+                    before: pageInfo.startCursor || undefined 
+                  })}
                 >
                   Previous
                 </button>
-                <span style={{ display: 'flex', alignItems: 'center', padding: '0 12px', fontSize: 13 }}>
-                  Page {pagination.page + 1} of {totalPages || 1}
-                </span>
                 <button 
                   className="btn btn-sm btn-secondary"
-                  disabled={pagination.page >= totalPages - 1}
-                  onClick={() => setPagination({ ...pagination, page: pagination.page + 1 })}
+                  disabled={!pageInfo.hasNextPage}
+                  onClick={() => setPagination({ 
+                    first: pagination.first || 25, 
+                    after: pageInfo.endCursor || undefined 
+                  })}
                 >
                   Next
-                </button>
-                <button 
-                  className="btn btn-sm btn-secondary"
-                  disabled={pagination.page >= totalPages - 1}
-                  onClick={() => setPagination({ ...pagination, page: totalPages - 1 })}
-                >
-                  Last
                 </button>
               </div>
             </div>
@@ -2737,8 +2757,27 @@ function TransactionsTab() {
     dateTo: '',
   })
   
-  // Pagination
-  const [pagination, setPagination] = useState<PaginationState>({
+  // Pagination (cursor-based for GraphQL query)
+  const [pagination, setPagination] = useState<{
+    first: number
+    after?: string
+    last?: number
+    before?: string
+  }>({
+    first: 1000, // Fetch more for client-side filtering/pagination
+  })
+  const [pageInfo, setPageInfo] = useState<{
+    hasNextPage: boolean
+    hasPreviousPage: boolean
+    startCursor?: string | null
+    endCursor?: string | null
+  }>({
+    hasNextPage: false,
+    hasPreviousPage: false,
+  })
+  
+  // Client-side pagination for UI (since we do client-side filtering)
+  const [uiPagination, setUiPagination] = useState({
     page: 0,
     pageSize: 25,
   })
@@ -2749,120 +2788,86 @@ function TransactionsTab() {
   const [withdrawalForm, setWithdrawalForm] = useState({ userId: '', amount: '50', currency: 'EUR', method: 'bank_transfer', bankAccount: '' })
 
   // Build filter object for API
+  // Transactions query supports filtering by objectModel (deposit, withdrawal, transfer, etc.)
+  // Backend filters by objectModel when type is provided (see transaction.ts line 421)
   const buildApiFilter = () => {
     const filter: Record<string, any> = {}
     if (filters.userId) filter.userId = filters.userId
-    if (filters.status) filter.status = filters.status
+    // Note: Status filtering doesn't work for transactions (transactions don't have status, transfers do)
+    // Status filtering should be done on transfers query, not transactions
+    
+    // Filter by type (deposit, withdrawal, etc.) using objectModel
+    // Backend maps filter.type to objectModel when type is not 'credit' or 'debit' (see transaction.ts line 421)
+    if (filters.type && filters.type !== 'all') {
+      // Map UI filter types to objectModel values
+      if (filters.type === 'deposit') {
+        filter.type = 'deposit' // Backend will filter by objectModel='deposit'
+      } else if (filters.type === 'withdrawal') {
+        filter.type = 'withdrawal' // Backend will filter by objectModel='withdrawal'
+      } else if (filters.type === 'bet' || filters.type === 'win' || filters.type === 'bonus') {
+        filter.type = filters.type // Backend will filter by objectModel
+      }
+      // For 'credit'/'debit', backend filters by charge field instead
+    }
+    
+    // Add date filters if specified
+    if (filters.dateFrom || filters.dateTo) {
+      if (filters.dateFrom) filter.dateFrom = filters.dateFrom
+      if (filters.dateTo) filter.dateTo = filters.dateTo
+    }
+    
     return Object.keys(filter).length > 0 ? filter : undefined
   }
 
-  // ✅ Fetch all transactions - use separate queries to get complete data
-  // Unified query is available but we use separate queries for better control
-  const depositsQuery = useQuery({
-    queryKey: ['deposits', pagination, filters],
-    queryFn: () => graphqlQuery(GRAPHQL_SERVICE_URLS.payment, `
-      query ListDeposits($first: Int, $skip: Int, $filter: JSON) {
-        deposits(first: $first, skip: $skip, filter: $filter) {
-          nodes {
-            id
-            userId
-            type
-            status
-            amount
-            currency
-            feeAmount
-            netAmount
-            fromUserId
-            createdAt
-            description
-            metadata
-            objectModel
-            charge
-          }
-          totalCount
-          pageInfo {
-            hasNextPage
-            hasPreviousPage
-          }
-        }
-      }
-    `, { 
-      first: 1000, // Fetch all deposits (system should see all)
-      skip: 0,
-      filter: buildApiFilter()
-    }, authToken),
-  })
-
-  const withdrawalsQuery = useQuery({
-    queryKey: ['withdrawals', pagination, filters],
-    queryFn: () => graphqlQuery(GRAPHQL_SERVICE_URLS.payment, `
-      query ListWithdrawals($first: Int, $skip: Int, $filter: JSON) {
-        withdrawals(first: $first, skip: $skip, filter: $filter) {
-          nodes {
-            id
-            userId
-            type
-            status
-            amount
-            currency
-            feeAmount
-            netAmount
-            toUserId
-            createdAt
-            description
-            metadata
-            objectModel
-            charge
-          }
-          totalCount
-          pageInfo {
-            hasNextPage
-            hasPreviousPage
-          }
-        }
-      }
-    `, { 
-      first: 1000, // Fetch all withdrawals (system should see all)
-      skip: 0,
-      filter: buildApiFilter()
-    }, authToken),
-  })
-
-  // Also fetch unified transactions for completeness (but use separate queries as primary)
+  // ✅ Fetch all transactions using unified query with cursor-based pagination (O(1) performance)
+  // Transactions query includes all transaction types (deposits, withdrawals, transfers, etc.)
   const transactionsQuery = useQuery({
     queryKey: ['transactions', pagination, filters],
-    queryFn: () => graphqlQuery(GRAPHQL_SERVICE_URLS.payment, `
-      query ListTransactions($first: Int, $skip: Int, $filter: JSON) {
-        transactions(first: $first, skip: $skip, filter: $filter) {
-          nodes {
-            id
-            userId
-            type
-            charge
-            status
-            amount
-            balance
-            currency
-            feeAmount
-            netAmount
-            createdAt
-            description
-            metadata
-            objectId
-            objectModel
-          }
-          totalCount
-          pageInfo {
-            hasNextPage
-            hasPreviousPage
+    queryFn: async () => {
+      const result = await graphqlQuery(GRAPHQL_SERVICE_URLS.payment, `
+        query ListTransactions($first: Int, $after: String, $last: Int, $before: String, $filter: JSON) {
+          transactions(first: $first, after: $after, last: $last, before: $before, filter: $filter) {
+            nodes {
+              id
+              userId
+              type
+              charge
+              status
+              amount
+              balance
+              currency
+              feeAmount
+              netAmount
+              createdAt
+              description
+              metadata
+              objectId
+              objectModel
+            }
+            totalCount
+            pageInfo {
+              hasNextPage
+              hasPreviousPage
+              startCursor
+              endCursor
+            }
           }
         }
+      `, { 
+        first: pagination.first || 25,
+        after: pagination.after || undefined,
+        last: pagination.last || undefined,
+        before: pagination.before || undefined,
+        filter: buildApiFilter()
+      }, authToken)
+      
+      // Update page info for pagination controls
+      if (result.transactions?.pageInfo) {
+        setPageInfo(result.transactions.pageInfo)
       }
-    `, { 
-      first: 1000, // Fetch all transactions (system should see all)
-      skip: 0,
-      filter: buildApiFilter()
-    }, authToken),
+      
+      return result
+    },
   })
 
   // walletTxQuery removed - using transactions query instead
@@ -2891,8 +2896,7 @@ function TransactionsTab() {
     `, { input: { ...(variables || depositForm), amount: parseFloat((variables || depositForm).amount) * 100, tenantId: 'default-tenant' } }, authToken),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['transactions'] })
-      queryClient.invalidateQueries({ queryKey: ['deposits'] })
-      queryClient.invalidateQueries({ queryKey: ['transactions'] })
+      queryClient.invalidateQueries({ queryKey: ['transfers'] })
       queryClient.invalidateQueries({ queryKey: ['statement'] })
       setShowCreateForm(null)
       setDepositForm({ userId: '', amount: '100', currency: 'EUR', method: 'card' })
@@ -2922,7 +2926,7 @@ function TransactionsTab() {
     `, { input: { ...withdrawalForm, amount: parseFloat(withdrawalForm.amount) * 100, tenantId: 'default-tenant' } }, authToken),
     onSuccess: async (result) => {
       queryClient.invalidateQueries({ queryKey: ['transactions'] })
-      queryClient.invalidateQueries({ queryKey: ['withdrawals'] })
+      queryClient.invalidateQueries({ queryKey: ['transactions'] })
       
       // Auto-approve withdrawal to complete the flow
       const transferId = result?.createWithdrawal?.transfer?.id
@@ -2992,15 +2996,9 @@ function TransactionsTab() {
     return userEmailMap.get(userId) || userId.substring(0, 8) + '...'
   }
 
-  // Extract data from responses - use deposits and withdrawals as primary source
-  const deposits = depositsQuery.data?.deposits?.nodes || []
-  const withdrawals = withdrawalsQuery.data?.withdrawals?.nodes || []
-  // walletTx removed - using transactions query instead
-  const allTransactionsData = transactionsQuery.data?.transactions?.nodes || [] // Fallback
-  
-  const depositsTotalCount = depositsQuery.data?.deposits?.totalCount || 0
-  const withdrawalsTotalCount = withdrawalsQuery.data?.withdrawals?.totalCount || 0
-  const transactionsTotalCount = transactionsQuery.data?.transactions?.totalCount || depositsTotalCount + withdrawalsTotalCount
+  // Extract transactions data - unified query includes all transaction types
+  const allTransactionsData = transactionsQuery.data?.transactions?.nodes || []
+  const transactionsTotalCount = transactionsQuery.data?.transactions?.totalCount || 0
 
   // Helper function to parse date safely
   const parseDate = (dateValue: any): number => {
@@ -3019,104 +3017,11 @@ function TransactionsTab() {
     return 0
   }
 
-  // ✅ DEDUPLICATION: Combine deposits and withdrawals, deduplicate by ID and externalRef
-  // Note: Backend prevents duplicates via unique index on externalRef
-  // Frontend needs to deduplicate by transaction ID AND filter out duplicate transfers (show only credit side for deposits, debit side for withdrawals)
+  // Process transactions - unified query includes all transaction types
+  // Deduplicate by ID and externalRef to prevent showing both debit and credit sides of transfers
   const transactionMap = new Map<string, any>()
   const externalRefMap = new Map<string, string>() // Track externalRefs to prevent showing both debit and credit
   
-  // Process deposits (primary source) - ONLY show actual deposits, NOT transfers
-  deposits.forEach((tx: any) => {
-    const txId = tx.id
-    const externalRef = tx.metadata?.externalRef || tx.meta?.externalRef
-    
-    // Skip ALL transfer transactions - deposits query should only return actual deposits
-    // Transfers create both debit and credit transactions, but we only want to show actual deposits
-    if (tx.objectModel === 'transfer') {
-      return
-    }
-    
-    // Skip if this is a debit transaction (deposits should only be credits)
-    if (tx.charge === 'debit') {
-      return
-    }
-    
-    // Skip if we've already seen this externalRef (prevent showing both debit and credit)
-    if (externalRef && externalRefMap.has(externalRef)) {
-      return
-    }
-    
-    if (!transactionMap.has(txId)) {
-      const txCurrency = tx.currency || tx.metadata?.currency || tx.meta?.currency || 'EUR'
-      const description = tx.description || tx.metadata?.description || (tx.objectModel === 'transfer' ? 'Transfer' : 'Deposit')
-      
-      transactionMap.set(txId, {
-        ...tx,
-        currency: txCurrency, // Ensure currency is always set
-        _source: 'deposit' as const,
-        _isCredit: true,
-        _displayType: tx.objectModel === 'transfer' ? 'Transfer' : 'Deposit',
-        _displayAmount: tx.amount,
-        _displayStatus: tx.status,
-        _sortDate: parseDate(tx.createdAt),
-        _createdAt: tx.createdAt,
-        _description: description,
-      })
-      
-      // Track externalRef to prevent duplicates
-      if (externalRef) {
-        externalRefMap.set(externalRef, txId)
-      }
-    }
-  })
-  
-  // Process withdrawals (primary source) - ONLY show actual withdrawals, NOT transfers
-  withdrawals.filter((tx: any) => tx.type === 'withdrawal' || tx.objectModel === 'withdrawal').forEach((tx: any) => {
-    const txId = tx.id
-    const externalRef = tx.metadata?.externalRef || tx.meta?.externalRef
-    
-    // Skip ALL transfer transactions - withdrawals query should only return actual withdrawals
-    // Transfers create both debit and credit transactions, but we only want to show actual withdrawals
-    if (tx.objectModel === 'transfer') {
-      return
-    }
-    
-    // Skip if this is a credit transaction (withdrawals should only be debits)
-    if (tx.charge === 'credit') {
-      return
-    }
-    
-    // Skip if we've already seen this externalRef
-    if (externalRef && externalRefMap.has(externalRef)) {
-      return
-    }
-    
-    if (!transactionMap.has(txId)) {
-      const txCurrency = tx.currency || tx.metadata?.currency || tx.meta?.currency || 'EUR'
-      const description = tx.description || tx.metadata?.description || (tx.objectModel === 'transfer' ? 'Transfer' : 'Withdrawal')
-      
-      transactionMap.set(txId, {
-        ...tx,
-        currency: txCurrency, // Ensure currency is always set
-        _source: 'withdrawal' as const,
-        _isCredit: false,
-        _displayType: tx.objectModel === 'transfer' ? 'Transfer' : 'Withdrawal',
-        _displayAmount: tx.amount,
-        _displayStatus: tx.status,
-        _sortDate: parseDate(tx.createdAt),
-        _createdAt: tx.createdAt,
-        _description: description,
-      })
-      
-      // Track externalRef to prevent duplicates
-      if (externalRef) {
-        externalRefMap.set(externalRef, txId)
-      }
-    }
-  })
-  
-  // Process unified transactions as fallback (in case deposits/withdrawals queries miss some)
-  // Only add transactions that aren't already in the map and aren't duplicate transfers
   allTransactionsData.forEach((tx: any) => {
     const txId = tx.id
     const externalRef = tx.metadata?.externalRef || tx.meta?.externalRef
@@ -3170,22 +3075,26 @@ function TransactionsTab() {
     }
   })
   
-  // Note: walletTransactions removed - transactions query includes all transaction entries
-  // All transaction entries are now in the transactions collection (created by transfers)
-  
+  // Sort transactions by date (newest first)
   const allTransactions = Array.from(transactionMap.values()).sort((a, b) => b._sortDate - a._sortDate)
 
-  // Apply client-side filters
+  // Apply client-side filters (server-side filtering is done via buildApiFilter)
+  // Client-side filtering is mainly for display purposes since we fetch a large batch
   const filteredTransactions = allTransactions.filter(tx => {
+    // Type filtering is done server-side via objectModel, but we can refine here if needed
     if (filters.type && filters.type !== 'all') {
-      if (filters.type === 'deposit' && tx._source !== 'deposit' && tx.type !== 'deposit') return false
-      if (filters.type === 'withdrawal' && tx._source !== 'withdrawal' && tx.type !== 'withdrawal') return false
-      if (filters.type === 'bet' && tx.type !== 'bet') return false
-      if (filters.type === 'win' && tx.type !== 'win') return false
-      if (filters.type === 'bonus' && tx.type !== 'bonus_credit') return false
+      const objectModel = tx.objectModel || tx._source
+      if (filters.type === 'deposit' && objectModel !== 'deposit') return false
+      if (filters.type === 'withdrawal' && objectModel !== 'withdrawal') return false
+      if (filters.type === 'bet' && objectModel !== 'bet') return false
+      if (filters.type === 'win' && objectModel !== 'win') return false
+      if (filters.type === 'bonus' && objectModel !== 'bonus') return false
     }
+    // User ID filtering is done server-side, but we can refine here
     if (filters.userId && !tx.userId?.toLowerCase().includes(filters.userId.toLowerCase())) return false
+    // Status filtering (transactions don't have status, but we can check _displayStatus)
     if (filters.status && tx._displayStatus !== filters.status) return false
+    // Date filtering is done server-side, but we can refine here
     if (filters.dateFrom) {
       const fromDate = new Date(filters.dateFrom).getTime()
       if (tx._sortDate < fromDate) return false
@@ -3197,29 +3106,31 @@ function TransactionsTab() {
     return true
   })
 
-  // Calculate summary stats
+  // Calculate summary stats from transactions (using already sorted allTransactions)
   const stats = {
-    totalDeposits: deposits.reduce((sum: number, tx: any) => sum + (tx.amount || 0), 0),
-    totalWithdrawals: withdrawals.filter((tx: any) => tx.type === 'withdrawal').reduce((sum: number, tx: any) => sum + (tx.amount || 0), 0),
-    depositsCount: depositsTotalCount,
-    withdrawalsCount: withdrawalsTotalCount,
+    totalDeposits: allTransactions
+      .filter((tx: any) => tx.objectModel === 'deposit' || (tx._source === 'deposit' && tx.charge === 'credit'))
+      .reduce((sum: number, tx: any) => sum + (tx.amount || 0), 0),
+    totalWithdrawals: allTransactions
+      .filter((tx: any) => tx.objectModel === 'withdrawal' || (tx._source === 'withdrawal' && tx.charge === 'debit'))
+      .reduce((sum: number, tx: any) => sum + (tx.amount || 0), 0),
+    depositsCount: allTransactions.filter((tx: any) => tx.objectModel === 'deposit' || (tx._source === 'deposit' && tx.charge === 'credit')).length,
+    withdrawalsCount: allTransactions.filter((tx: any) => tx.objectModel === 'withdrawal' || (tx._source === 'withdrawal' && tx.charge === 'debit')).length,
     transactionsCount: transactionsTotalCount,
   }
 
-  const isLoading = depositsQuery.isLoading || withdrawalsQuery.isLoading || transactionsQuery.isLoading
+  const isLoading = transactionsQuery.isLoading
 
   const refetchAll = () => {
-    depositsQuery.refetch()
-    withdrawalsQuery.refetch()
     transactionsQuery.refetch()
   }
 
-  // Pagination helpers
+  // Pagination helpers (client-side)
   const totalItems = filteredTransactions.length
-  const totalPages = Math.ceil(totalItems / pagination.pageSize)
+  const totalPages = Math.ceil(totalItems / uiPagination.pageSize)
   const paginatedTransactions = filteredTransactions.slice(
-    pagination.page * pagination.pageSize,
-    (pagination.page + 1) * pagination.pageSize
+    uiPagination.page * uiPagination.pageSize,
+    (uiPagination.page + 1) * uiPagination.pageSize
   )
 
   return (
@@ -3285,7 +3196,7 @@ function TransactionsTab() {
             <select 
               className="input" 
               value={filters.type}
-              onChange={e => { setFilters({ ...filters, type: e.target.value }); setPagination({ ...pagination, page: 0 }) }}
+              onChange={e => { setFilters({ ...filters, type: e.target.value }); setUiPagination({ ...uiPagination, page: 0 }) }}
             >
               <option value="">All Types</option>
               <option value="deposit">Deposits</option>
@@ -3304,7 +3215,7 @@ function TransactionsTab() {
               className="input"
               placeholder="Search user..."
               value={filters.userId}
-              onChange={e => { setFilters({ ...filters, userId: e.target.value }); setPagination({ ...pagination, page: 0 }) }}
+              onChange={e => { setFilters({ ...filters, userId: e.target.value }); setUiPagination({ ...uiPagination, page: 0 }) }}
             />
           </div>
 
@@ -3314,7 +3225,7 @@ function TransactionsTab() {
             <select 
               className="input" 
               value={filters.status}
-              onChange={e => { setFilters({ ...filters, status: e.target.value }); setPagination({ ...pagination, page: 0 }) }}
+              onChange={e => { setFilters({ ...filters, status: e.target.value }); setPagination({ first: pagination.first || 25 }) }}
             >
               <option value="">All Status</option>
               <option value="pending">Pending</option>
@@ -3331,7 +3242,7 @@ function TransactionsTab() {
               type="date" 
               className="input"
               value={filters.dateFrom}
-              onChange={e => { setFilters({ ...filters, dateFrom: e.target.value }); setPagination({ ...pagination, page: 0 }) }}
+              onChange={e => { setFilters({ ...filters, dateFrom: e.target.value }); setUiPagination({ ...uiPagination, page: 0 }) }}
             />
           </div>
 
@@ -3342,7 +3253,7 @@ function TransactionsTab() {
               type="date" 
               className="input"
               value={filters.dateTo}
-              onChange={e => { setFilters({ ...filters, dateTo: e.target.value }); setPagination({ ...pagination, page: 0 }) }}
+              onChange={e => { setFilters({ ...filters, dateTo: e.target.value }); setUiPagination({ ...uiPagination, page: 0 }) }}
             />
           </div>
 
@@ -3351,8 +3262,8 @@ function TransactionsTab() {
             <label className="form-label">Page Size</label>
             <select 
               className="input" 
-              value={pagination.pageSize}
-              onChange={e => setPagination({ page: 0, pageSize: parseInt(e.target.value) })}
+              value={uiPagination.pageSize}
+              onChange={e => setUiPagination({ page: 0, pageSize: parseInt(e.target.value) })}
             >
               <option value="10">10</option>
               <option value="25">25</option>
@@ -3367,7 +3278,7 @@ function TransactionsTab() {
               className="btn btn-secondary"
               onClick={() => {
                 setFilters({ type: '', userId: '', status: '', dateFrom: '', dateTo: '' })
-                setPagination({ page: 0, pageSize: 25 })
+                setUiPagination({ page: 0, pageSize: 25 })
               }}
             >
               Clear
@@ -3533,37 +3444,37 @@ function TransactionsTab() {
             {/* Pagination Controls */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 8px', borderTop: '1px solid var(--border)' }}>
               <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-                Showing {pagination.page * pagination.pageSize + 1} - {Math.min((pagination.page + 1) * pagination.pageSize, totalItems)} of {totalItems}
+                Showing {uiPagination.page * uiPagination.pageSize + 1} - {Math.min((uiPagination.page + 1) * uiPagination.pageSize, totalItems)} of {totalItems}
               </div>
               <div style={{ display: 'flex', gap: 8 }}>
                 <button 
                   className="btn btn-sm btn-secondary"
-                  disabled={pagination.page === 0}
-                  onClick={() => setPagination({ ...pagination, page: 0 })}
+                  disabled={uiPagination.page === 0}
+                  onClick={() => setUiPagination({ ...uiPagination, page: 0 })}
                 >
                   First
                 </button>
                 <button 
                   className="btn btn-sm btn-secondary"
-                  disabled={pagination.page === 0}
-                  onClick={() => setPagination({ ...pagination, page: pagination.page - 1 })}
+                  disabled={uiPagination.page === 0}
+                  onClick={() => setUiPagination({ ...uiPagination, page: uiPagination.page - 1 })}
                 >
                   Previous
                 </button>
                 <span style={{ display: 'flex', alignItems: 'center', padding: '0 12px', fontSize: 13 }}>
-                  Page {pagination.page + 1} of {totalPages || 1}
+                  Page {uiPagination.page + 1} of {totalPages || 1}
                 </span>
                 <button 
                   className="btn btn-sm btn-secondary"
-                  disabled={pagination.page >= totalPages - 1}
-                  onClick={() => setPagination({ ...pagination, page: pagination.page + 1 })}
+                  disabled={uiPagination.page >= totalPages - 1}
+                  onClick={() => setUiPagination({ ...uiPagination, page: uiPagination.page + 1 })}
                 >
                   Next
                 </button>
                 <button 
                   className="btn btn-sm btn-secondary"
-                  disabled={pagination.page >= totalPages - 1}
-                  onClick={() => setPagination({ ...pagination, page: totalPages - 1 })}
+                  disabled={uiPagination.page >= totalPages - 1}
+                  onClick={() => setUiPagination({ ...uiPagination, page: totalPages - 1 })}
                 >
                   Last
                 </button>

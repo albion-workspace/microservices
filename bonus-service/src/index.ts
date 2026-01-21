@@ -25,6 +25,7 @@ import {
   type IntegrationEvent,
   type ResolverContext,
 } from 'core-service';
+import { setupRecovery } from './recovery-setup.js';
 
 // Import unified event dispatcher (handles both internal events + webhooks)
 import {
@@ -709,7 +710,6 @@ async function main() {
   // Setup recovery system (transfer recovery + recovery job)
   // Bonus operations use createTransferWithTransactions, so they need transfer recovery
   try {
-    const { setupRecovery } = await import('./recovery-setup.js');
     await setupRecovery();
     logger.info('✅ Recovery system initialized');
   } catch (err) {

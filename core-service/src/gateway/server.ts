@@ -10,7 +10,7 @@
  * - POST /graphql - Queries & Mutations (graphql-http)
  * - GET/POST /graphql/stream - Subscriptions via SSE (graphql-sse)
  * - Socket.IO /socket.io - Bidirectional real-time (auto-fallback to polling)
- * - GET /health - Health check
+ * - GET /health - Unified health check (liveness, readiness, metrics)
  * 
  * Socket.IO Benefits:
  * - ES5 browser support
@@ -50,7 +50,7 @@ import { extractToken, verifyToken, createToken } from '../common/jwt.js';
 import { connectDatabase, checkDatabaseHealth } from '../common/database.js';
 import { connectRedis, checkRedisHealth, getRedis } from '../common/redis.js';
 import { getCacheStats } from '../common/cache.js';
-import { logger, subscribeToLogs, type LogEntry } from '../common/logger.js';
+import { logger, subscribeToLogs, type LogEntry, setCorrelationId, generateCorrelationId, getCorrelationId } from '../common/logger.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -364,6 +364,8 @@ function buildSchema(
     fields: {
       hasNextPage: { type: GraphQLBoolean },
       hasPreviousPage: { type: GraphQLBoolean },
+      startCursor: { type: GraphQLString }, // Cursor for first item in page
+      endCursor: { type: GraphQLString },   // Cursor for last item in page
     },
   });
 
@@ -740,9 +742,15 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
   // ─────────────────────────────────────────────────────────────────
   
   function createContext(req: IncomingMessage, socket?: Socket): GatewayContext {
+    // Extract correlation ID from headers (X-Correlation-ID or X-Request-ID)
+    const correlationId = (req.headers['x-correlation-id'] || 
+                          req.headers['x-request-id'] || 
+                          generateCorrelationId()) as string;
+    setCorrelationId(correlationId);
+    
     const token = extractToken(req.headers.authorization);
     const user = token ? verifyToken(token, jwt) : null;
-    return { user, requestId: randomUUID(), socket };
+    return { user, requestId: correlationId, socket };
   }
 
   function createContextFromToken(token: string | null | undefined, socket?: Socket): GatewayContext {
@@ -861,17 +869,36 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
     if (cors) {
       res.setHeader('Access-Control-Allow-Origin', cors.origins[0] || '*');
       res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Correlation-ID,X-Request-ID');
       res.setHeader('Access-Control-Allow-Credentials', 'true');
       if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
     }
 
-    // Health endpoint
+    // Unified health endpoint - combines liveness, readiness, and metrics
     if (url.pathname === '/health') {
-      const ctx = createContext(req);
-      const health = await resolvers.health({}, ctx);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(health));
+      const dbHealth = await checkDatabaseHealth();
+      const redis = getRedis();
+      const cacheStats = getCacheStats();
+      
+      // Service is healthy if database is healthy
+      const healthy = dbHealth.healthy;
+      const status = healthy ? 'healthy' : 'degraded';
+      
+      // Return 200 if healthy, 503 if degraded (for Kubernetes readiness)
+      res.writeHead(healthy ? 200 : 503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        status,
+        service: name,
+        uptime: (Date.now() - startTime) / 1000,
+        timestamp: new Date().toISOString(),
+        database: {
+          healthy: dbHealth.healthy,
+          latencyMs: dbHealth.latencyMs,
+          connections: dbHealth.connections,
+        },
+        redis: { connected: redis !== null },
+        cache: cacheStats,
+      }));
       return;
     }
 
@@ -905,6 +932,7 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
     cors: cors ? {
       origin: cors.origins,
       methods: ['GET', 'POST'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'X-Correlation-ID', 'X-Request-ID'],
       credentials: true,
     } : undefined,
     // Allow both WebSocket and HTTP long-polling

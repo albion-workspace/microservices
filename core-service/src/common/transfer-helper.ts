@@ -243,14 +243,45 @@ export async function getOrCreateWallet(
     } else {
       const newWallet = createNewWallet(userId, currency, tenantId, options);
       const insertOptions = session ? { session } : {};
-      await walletsCollection.insertOne(newWallet, insertOptions);
-      wallet = newWallet;
-      logger.debug('Created new wallet in getOrCreateWallet', {
-        walletId: (wallet as any).id,
-        userId,
-        currency,
-        tenantId,
-      });
+      try {
+        await walletsCollection.insertOne(newWallet, insertOptions);
+        wallet = newWallet;
+        logger.debug('Created new wallet in getOrCreateWallet', {
+          walletId: (wallet as any).id,
+          userId,
+          currency,
+          tenantId,
+        });
+      } catch (error: any) {
+        // Handle duplicate key error (race condition - wallet was created by another concurrent call)
+        if (error.code === 11000 || error.message?.includes('duplicate key')) {
+          logger.debug('Wallet creation race condition detected, fetching existing wallet', {
+            userId,
+            currency,
+            tenantId,
+            errorCode: error.code,
+          });
+          // Fetch the wallet that was just created by another concurrent call
+          wallet = await walletsCollection.findOne(
+            { userId, currency, tenantId },
+            findOptions
+          );
+          if (!wallet) {
+            // If still not found, try without tenantId filter (fallback)
+            wallet = await walletsCollection.findOne(
+              { userId, currency },
+              findOptions
+            );
+          }
+          if (!wallet) {
+            // Last resort: throw the original error
+            throw new Error(`Failed to create or find wallet after duplicate key error: ${error.message}`);
+          }
+        } else {
+          // Re-throw non-duplicate errors
+          throw error;
+        }
+      }
     }
   } else {
     logger.debug('Found existing wallet in getOrCreateWallet', {
@@ -381,10 +412,43 @@ export async function createTransferWithTransactions(
     const toCurrentBalance = (toWallet as any)?.[toBalanceField] || 0;
     
     // Validate balance before debiting (check allowNegative permission)
+    // Security: Even if wallet has allowNegative=true, verify user has system role
     const fromWalletAllowNegative = (fromWallet as any)?.allowNegative ?? false;
     const fromWalletCreditLimit = (fromWallet as any)?.creditLimit;
     
-    if (!fromWalletAllowNegative && fromCurrentBalance < amount) {
+    // Additional security check: Verify user role if wallet claims to allow negative
+    // This prevents regular users from having negative balances even if wallet flag is incorrectly set
+    let userCanGoNegative = fromWalletAllowNegative;
+    if (fromWalletAllowNegative) {
+      try {
+        // Check if user has system role (only system users should have negative balances)
+        const { findUserIdByRole } = await import('./user-utils.js');
+        const systemUserId = await findUserIdByRole({ 
+          role: 'system', 
+          tenantId, 
+          throwIfNotFound: false 
+        });
+        // Only allow negative if this is the system user
+        userCanGoNegative = systemUserId === fromUserId;
+        
+        if (fromWalletAllowNegative && !userCanGoNegative) {
+          logger.warn('Wallet has allowNegative=true but user is not system user - enforcing restriction', {
+            userId: fromUserId,
+            walletId: fromWalletId,
+            currency,
+          });
+        }
+      } catch (error) {
+        // If role check fails, default to safe behavior (don't allow negative)
+        logger.warn('Failed to verify user role for negative balance check - defaulting to safe behavior', {
+          userId: fromUserId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        userCanGoNegative = false;
+      }
+    }
+    
+    if (!userCanGoNegative && fromCurrentBalance < amount) {
       throw new Error(
         `Insufficient balance. Required: ${amount}, Available: ${fromCurrentBalance}. ` +
         `Wallet does not allow negative balance.`
@@ -392,7 +456,7 @@ export async function createTransferWithTransactions(
     }
     
     // Check credit limit if allowNegative is enabled and creditLimit is set (not null/undefined)
-    if (fromWalletAllowNegative && fromWalletCreditLimit != null && fromWalletCreditLimit !== undefined) {
+    if (userCanGoNegative && fromWalletCreditLimit != null && fromWalletCreditLimit !== undefined) {
       const newBalance = fromCurrentBalance - amount;
       if (newBalance < -fromWalletCreditLimit) {
         throw new Error(

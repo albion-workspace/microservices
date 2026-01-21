@@ -4,16 +4,33 @@ import { Activity, RefreshCw } from 'lucide-react'
 interface HealthLog {
   timestamp: string
   service: string
-  status: 'healthy' | 'unhealthy'
+  status: 'healthy' | 'degraded' | 'dead'
   latency: number
+  details?: HealthResponse
 }
 
 const services = [
-  { name: 'auth-service', url: 'http://localhost:3003/health' },
-  { name: 'payment-service', url: 'http://localhost:3004/health' },
-  { name: 'bonus-service', url: 'http://localhost:3005/health' },
-  { name: 'notification-service', url: 'http://localhost:3006/health' },
+  { name: 'auth-service', baseUrl: 'http://localhost:3003' },
+  { name: 'payment-service', baseUrl: 'http://localhost:3004' },
+  { name: 'bonus-service', baseUrl: 'http://localhost:3005' },
+  { name: 'notification-service', baseUrl: 'http://localhost:3006' },
 ]
+
+interface HealthResponse {
+  status: 'healthy' | 'degraded'
+  service: string
+  uptime: number
+  timestamp: string
+  database: {
+    healthy: boolean
+    latencyMs: number
+    connections?: number
+  }
+  redis: {
+    connected: boolean
+  }
+  cache?: any
+}
 
 export default function HealthMonitor() {
   const [logs, setLogs] = useState<HealthLog[]>([])
@@ -25,19 +42,27 @@ export default function HealthMonitor() {
     for (const service of services) {
       const start = Date.now()
       try {
-        const res = await fetch(service.url)
-        const data = await res.json()
+        // Unified health endpoint - combines liveness, readiness, and metrics
+        const res = await fetch(`${service.baseUrl}/health`)
+        const data: HealthResponse = await res.json()
+        
+        // Determine status: healthy if HTTP 200 and status is 'healthy', degraded if 200 but status is 'degraded', dead if not 200
+        const status = res.ok 
+          ? (data.status === 'healthy' ? 'healthy' : 'degraded')
+          : 'dead'
+        
         newLogs.push({
           timestamp: new Date().toISOString(),
           service: service.name,
-          status: data.status === 'healthy' ? 'healthy' : 'unhealthy',
+          status,
           latency: Date.now() - start,
+          details: data,
         })
-      } catch {
+      } catch (error) {
         newLogs.push({
           timestamp: new Date().toISOString(),
           service: service.name,
-          status: 'unhealthy',
+          status: 'dead',
           latency: Date.now() - start,
         })
       }
@@ -110,6 +135,13 @@ export default function HealthMonitor() {
                 >
                   [{log.service}] {log.status.toUpperCase()} ({log.latency}ms)
                 </span>
+                {log.details && (
+                  <div className="console-line ml-8 text-xs text-text-muted">
+                    Uptime: {Math.floor(log.details.uptime)}s | 
+                    DB: {log.details.database?.healthy ? '✓' : '✗'} ({log.details.database?.latencyMs}ms) | 
+                    Redis: {log.details.redis?.connected ? '✓' : '✗'}
+                  </div>
+                )}
               </div>
             ))
           )}

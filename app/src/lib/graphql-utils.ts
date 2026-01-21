@@ -18,6 +18,11 @@ interface GraphQLLogOptions {
  * @param token - Optional auth token
  * @param options - Optional logging options
  */
+// Generate correlation ID for request tracking
+function generateCorrelationId(): string {
+  return `${Date.now()}-${Math.random().toString(36).substring(2, 15)}`
+}
+
 export async function graphql<T = any>(
   url: string,
   query: string,
@@ -27,23 +32,27 @@ export async function graphql<T = any>(
 ): Promise<T> {
   const { operation = 'query', showResponse = true } = options
   const startTime = Date.now()
+  const correlationId = generateCorrelationId()
   
   // Extract service name from URL for logging
   const serviceMatch = url.match(/\/\/([^:]+):(\d+)/)
   const service = serviceMatch ? `${serviceMatch[1]}:${serviceMatch[2]}` : 'unknown'
   
   // Log request
-  console.group(`${LOG_PREFIX} ${operation.toUpperCase()} → ${service}`)
+  console.group(`${LOG_PREFIX} ${operation.toUpperCase()} → ${service} [${correlationId}]`)
   console.log('URL:', url)
   console.log('Query:', query.trim().substring(0, 200) + (query.length > 200 ? '...' : ''))
   if (variables && Object.keys(variables).length > 0) {
     console.log('Variables:', variables)
   }
   console.log('Token:', token ? `${token.substring(0, 20)}...` : 'none')
+  console.log('Correlation ID:', correlationId)
   
   try {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
+      'X-Correlation-ID': correlationId,
+      'X-Request-ID': correlationId, // Also set X-Request-ID for compatibility
     }
     
     if (token) {

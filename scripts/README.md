@@ -66,12 +66,19 @@ See `typescript/README.md` for detailed script organization and usage.
 .\scripts\bin\clean-all.ps1
 ```
 
-### Promote User to Admin
-```powershell
-cd scripts/bin
-node promote-to-system.js system@demo.com
-# Or from project root:
-npm run promote-to-system -- system@demo.com
+### Manage User (Roles, Permissions, Status)
+```bash
+# Show user details
+npm run auth:manage -- system@demo.com show
+
+# Promote to system with all permissions
+npm run auth:manage -- system@demo.com --all
+
+# Set specific roles
+npm run auth:manage -- user@test.com --roles admin,system
+
+# Update user status
+npm run auth:manage -- user@test.com status --status active
 ```
 
 ## Notes

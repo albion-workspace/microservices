@@ -95,7 +95,22 @@ export {
   decodeToken,
   isTokenExpired,
   getTokenExpiration,
+  signGenericJWT,
+  verifyGenericJWT,
 } from './common/jwt.js';
+
+// Pending Operations (Generic temporary data storage)
+export {
+  createPendingOperationStore,
+  createRegistrationStore,
+  createCampaignStore,
+  createFormStore,
+} from './common/pending-operation.js';
+export type {
+  PendingOperationBackend,
+  PendingOperationConfig,
+  PendingOperationOptions,
+} from './common/pending-operation.js';
 export { allow, deny, isAuthenticated, hasRole, hasAnyRole, can, and, or, isOwner, sameTenant, hasPermission, isSystem } from './common/permissions.js';
 
 // Database (optimized)
@@ -135,6 +150,13 @@ export {
   deleteOneById,
   findOneAndUpdateById,
 } from './common/mongodb-utils.js';
+
+// User Utilities
+export {
+  findUserIdByRole,
+  findUserIdsByRole,
+} from './common/user-utils.js';
+export type { FindUserByRoleOptions } from './common/user-utils.js';
 export type {
   Collection,
   Filter,
@@ -198,8 +220,18 @@ export {
 export type { RedisConfig, ScanOptions } from './common/redis.js';
 
 // Logger
-export { logger, setLogLevel, setLogFormat, configureLogger, createChildLogger } from './common/logger.js';
-export type { LogLevel, LogFormat, LoggerConfig } from './common/logger.js';
+export { 
+  logger, 
+  setLogLevel, 
+  setLogFormat, 
+  configureLogger, 
+  createChildLogger,
+  setCorrelationId,
+  getCorrelationId,
+  generateCorrelationId,
+  withCorrelationId,
+} from './common/logger.js';
+export type { LogLevel, LogFormat, LoggerConfig, LogEntry } from './common/logger.js';
 
 // Lifecycle (graceful shutdown)
 export { onShutdown, offShutdown, shutdown, setupGracefulShutdown, isShutdownInProgress } from './common/lifecycle.js';
@@ -247,7 +279,7 @@ export {
 export { getErrorMessage, normalizeError } from './common/errors.js';
 
 // Resolver Utilities
-export { requireAuth, getTenantId, getUserId } from './common/resolvers.js';
+export { requireAuth, getTenantId, getUserId, createObjectModelQueryResolver } from './common/resolvers.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types (from src/types/)

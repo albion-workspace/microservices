@@ -10,9 +10,6 @@
 
 import type { Role } from 'access-engine';
 
-// Alias for backward compatibility
-type RoleDefinition = Role;
-
 /**
  * Default role definitions for common scenarios
  * Uses access-engine's Role type
@@ -282,7 +279,7 @@ export const DEFAULT_ROLES: Role[] = [
 /**
  * Get default roles for a specific use case
  */
-export function getDefaultRolesForUseCase(useCase: 'banking' | 'crypto' | 'forex' | 'betting' | 'all'): RoleDefinition[] {
+export function getDefaultRolesForUseCase(useCase: 'banking' | 'crypto' | 'forex' | 'betting' | 'all'): Role[] {
   if (useCase === 'all') {
     return DEFAULT_ROLES;
   }

@@ -505,15 +505,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             username
             status
             emailVerified
+            phoneVerified
           }
           tokens {
             accessToken
             refreshToken
             expiresIn
+            refreshExpiresIn
           }
           requiresOTP
           otpSentTo
           otpChannel
+          registrationToken
         }
       }
     `;

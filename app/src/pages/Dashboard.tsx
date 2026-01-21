@@ -11,9 +11,36 @@ interface ServiceHealth {
 }
 
 async function fetchHealth(url: string): Promise<ServiceHealth> {
-  const res = await fetch(url)
-  if (!res.ok) throw new Error('Service unavailable')
-  return res.json()
+  try {
+    const res = await fetch(url, { 
+      signal: AbortSignal.timeout(5000) // 5 second timeout
+    })
+    
+    // Unified health endpoint returns 200 for healthy, 503 for degraded
+    // Both are valid responses - parse JSON for both
+    if (res.status === 200 || res.status === 503) {
+      const text = await res.text()
+      if (!text) {
+        throw new Error('Empty response from health endpoint')
+      }
+      try {
+        const data = JSON.parse(text)
+        return data
+      } catch (parseError) {
+        console.error(`[Dashboard] Failed to parse health response for ${url}:`, text)
+        throw new Error('Invalid JSON response')
+      }
+    }
+    
+    // Other status codes are errors
+    throw new Error(`Service returned status ${res.status}`)
+  } catch (error: any) {
+    // Network errors, timeouts, or other fetch failures
+    if (error.name === 'AbortError' || error.name === 'TypeError' || error.message?.includes('Failed to fetch')) {
+      throw new Error('Service unavailable')
+    }
+    throw error
+  }
 }
 
 function ServiceCard({ 
@@ -31,9 +58,15 @@ function ServiceCard({
     queryKey: ['health', url],
     queryFn: () => fetchHealth(url),
     refetchInterval: 5000,
+    retry: 1,
+    retryDelay: 1000,
   })
 
-  const isHealthy = data?.status === 'healthy'
+  // Unified health endpoint: 'healthy' = 200 OK, 'degraded' = 503 Service Unavailable
+  // Handle both the unified format and potential legacy formats
+  const status = data?.status
+  const isHealthy = status === 'healthy' || status === 'alive' || status === 'ready'
+  const isDegraded = status === 'degraded' || status === 'not ready'
   const uptime = data?.uptime ? Math.floor(data.uptime) : 0
   const dbLatency = data?.database?.latencyMs ?? 0
   const dbHealthy = data?.database?.healthy ?? false
@@ -55,10 +88,15 @@ function ServiceCard({
             <span className="status-badge-dot" />
             Offline
           </span>
-        ) : (
-          <span className={`status-badge ${isHealthy ? 'healthy' : 'unhealthy'}`}>
+        ) : !data ? (
+          <span className="status-badge pending">
             <span className="status-badge-dot" />
-            {isHealthy ? 'Healthy' : 'Unhealthy'}
+            No Data
+          </span>
+        ) : (
+          <span className={`status-badge ${isHealthy ? 'healthy' : isDegraded ? 'pending' : 'unhealthy'}`}>
+            <span className="status-badge-dot" />
+            {isHealthy ? 'Healthy' : isDegraded ? 'Degraded' : data.status || 'Unknown'}
           </span>
         )}
       </div>

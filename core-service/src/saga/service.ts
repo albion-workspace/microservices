@@ -74,7 +74,8 @@ export function createService<TEntity extends { id: string }, TInput>(
   
   // Generate Query and Mutation extensions
   // Always include plural query - connection type will be resolved from other services if needed
-  const pluralQuery = `      ${entities}(first: Int, skip: Int, filter: JSON): ${connectionTypeName}`;
+  // Cursor-based pagination only (no skip parameter for backward compatibility)
+  const pluralQuery = `      ${entities}(first: Int, after: String, last: Int, before: String, filter: JSON): ${connectionTypeName}`;
   
   const queryType = `
     extend type Query {
@@ -99,18 +100,35 @@ export function createService<TEntity extends { id: string }, TInput>(
       [config.entity.name]: async (args) => repository.findById(args.id as string),
       
       [entities]: async (args) => {
-        const { first = 20, skip = 0, filter } = args as { first?: number; skip?: number; filter?: Record<string, unknown> };
-        // Sort by createdAt descending by default (newest first)
-        const result = await repository.findMany({ 
-          filter: filter ?? {}, 
-          skip, 
-          take: first,
-          sort: { createdAt: -1 } // Sort by createdAt descending
+        // Cursor-based pagination only (O(1) performance, no backward compatibility)
+        const { 
+          first = 20, 
+          after, 
+          last, 
+          before, 
+          filter 
+        } = args as { 
+          first?: number; 
+          after?: string; 
+          last?: number; 
+          before?: string; 
+          filter?: Record<string, unknown> 
+        };
+        
+        // Cursor-based pagination (O(1) performance)
+        const result = await repository.paginate({
+          first: first ? Math.min(Math.max(1, first), 100) : undefined, // Max 100 per page
+          after,
+          last: last ? Math.min(Math.max(1, last), 100) : undefined,
+          before,
+          filter: filter ?? {},
+          sortField: 'createdAt',
+          sortDirection: 'desc',
         });
         return {
-          nodes: result.items,
-          totalCount: result.total,
-          pageInfo: { hasNextPage: skip + first < result.total, hasPreviousPage: skip > 0 },
+          nodes: result.edges.map(edge => edge.node),
+          totalCount: result.totalCount,
+          pageInfo: result.pageInfo,
         };
       },
     },

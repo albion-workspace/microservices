@@ -2,7 +2,7 @@
  * Notification Service GraphQL Schema & Resolvers
  */
 
-import { logger, requireAuth, getUserId, getErrorMessage } from 'core-service';
+import { logger, requireAuth, getUserId, getErrorMessage, getDatabase } from 'core-service';
 import type { ResolverContext } from 'core-service';
 import type { NotificationService } from './notification-service.js';
 
@@ -111,7 +111,6 @@ export function createNotificationResolvers(notificationService: NotificationSer
       ) => {
         requireAuth(context);
         
-        const { getDatabase } = await import('core-service');
         const db = getDatabase();
         
         const notifications = await db
@@ -130,7 +129,6 @@ export function createNotificationResolvers(notificationService: NotificationSer
           throw new Error('System access required');
         }
         
-        const { getDatabase } = await import('core-service');
         const db = getDatabase();
         
         const total = await db.collection('notifications').countDocuments();

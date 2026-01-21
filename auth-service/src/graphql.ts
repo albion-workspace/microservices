@@ -12,10 +12,11 @@ import {
   normalizeDocument,
   findOneAndUpdateById,
   paginateCollection,
+  getDatabase,
   type CursorPaginationOptions,
   type CursorPaginationResult,
 } from 'core-service';
-import { rolesToArray } from './utils.js';
+import { rolesToArray, normalizeUser, normalizeUsers, permissionsToArray } from './utils.js';
 import type { 
   RegisterInput, 
   LoginInput, 
@@ -68,6 +69,14 @@ export const authGraphQLTypes = `
     requiresOTP: Boolean
     otpSentTo: String
     otpChannel: String
+    registrationToken: String  # JWT token for unverified registration (expires in 24h)
+  }
+  
+  type ForgotPasswordResponse {
+    success: Boolean!
+    message: String!
+    channel: String
+    resetToken: String  # JWT token for password reset (expires in 30m) - for testing/debugging
   }
   
   type OTPResponse {
@@ -76,10 +85,12 @@ export const authGraphQLTypes = `
     otpSentTo: String
     channel: String
     expiresIn: Int
+    otpToken: String  # JWT token with OTP embedded (for verification)
   }
   
   type TwoFactorSetup {
     success: Boolean!
+    message: String
     secret: String
     qrCode: String
     backupCodes: [String!]
@@ -142,9 +153,10 @@ export const authGraphQLTypes = `
   
   input VerifyOTPInput {
     tenantId: String!
-    recipient: String!
+    recipient: String  # Optional: for backward compatibility
     code: String!
-    purpose: String!
+    purpose: String  # Optional: for backward compatibility
+    otpToken: String  # JWT token from sendOTP response (preferred)
   }
   
   input ForgotPasswordInput {
@@ -154,8 +166,9 @@ export const authGraphQLTypes = `
   
   input ResetPasswordInput {
     tenantId: String!
-    token: String!
+    token: String!  # JWT reset token (from forgotPassword)
     newPassword: String!
+    otpCode: String  # Optional: OTP code for SMS/WhatsApp-based reset
   }
   
   input ChangePasswordInput {
@@ -179,6 +192,12 @@ export const authGraphQLTypes = `
   
   input RefreshTokenInput {
     refreshToken: String!
+    tenantId: String!
+  }
+  
+  input VerifyRegistrationInput {
+    registrationToken: String!
+    otpCode: String!
     tenantId: String!
   }
   
@@ -237,6 +256,7 @@ export const authGraphQLTypes = `
   extend type Mutation {
     # Registration
     register(input: RegisterInput!): AuthResponse!
+    verifyRegistration(input: VerifyRegistrationInput!): AuthResponse!
     
     # Authentication
     login(input: LoginInput!): AuthResponse!
@@ -247,10 +267,10 @@ export const authGraphQLTypes = `
     # OTP
     sendOTP(input: SendOTPInput!): OTPResponse!
     verifyOTP(input: VerifyOTPInput!): OTPResponse!
-    resendOTP(recipient: String!, purpose: String!, tenantId: String!): OTPResponse!
+    resendOTP(recipient: String!, purpose: String!, tenantId: String!, otpToken: String): OTPResponse!
     
     # Password Management
-    forgotPassword(input: ForgotPasswordInput!): BasicResponse!
+    forgotPassword(input: ForgotPasswordInput!): ForgotPasswordResponse!
     resetPassword(input: ResetPasswordInput!): BasicResponse!
     changePassword(input: ChangePasswordInput!): BasicResponse!
     
@@ -268,19 +288,6 @@ export const authGraphQLTypes = `
 `;
 
 import type { Resolvers } from 'core-service';
-
-/**
- * Normalize roles: convert UserRole[] objects to string[] array
- * Handles both UserRole[] format ({ role: string, active: boolean, ... }) and string[] format
- */
-function normalizeRoles(roles: any): string[] {
-  if (!roles) {
-    return [];
-  }
-  
-  // Use utility function to convert roles to string array
-  return rolesToArray(roles);
-}
 
 /**
  * Check if user has system role or specific permission
@@ -321,40 +328,6 @@ function checkSystemOrPermission(
 }
 
 /**
- * Normalize user object: map _id to id, normalize permissions and roles
- * Uses core-service helper for document normalization
- */
-function normalizeUser(user: any): any {
-  if (!user) {
-    return null;
-  }
-  
-  // Use core-service helper to ensure id field exists from _id
-  const normalized = normalizeDocument(user);
-  if (!normalized) return null;
-  
-  // Normalize permissions (object → array)
-  if (normalized.permissions && !Array.isArray(normalized.permissions)) {
-    normalized.permissions = Object.keys(normalized.permissions).filter(key => normalized.permissions[key] === true);
-  } else if (!normalized.permissions) {
-    normalized.permissions = [];
-  }
-  
-  // Normalize roles using helper function
-  normalized.roles = normalizeRoles(normalized.roles);
-  
-  return normalized;
-}
-
-/**
- * Normalize multiple user objects
- * Helper function to reduce code duplication
- */
-function normalizeUsers(users: any[]): any[] {
-  return users.map(user => normalizeUser(user)).filter(Boolean);
-}
-
-/**
  * Create resolvers with service instances
  */
 export function createAuthResolvers(
@@ -369,25 +342,11 @@ export function createAuthResolvers(
       /**
        * Normalize roles field: extract role names from UserRole[] format
        */
-      roles: (parent: any) => normalizeRoles(parent.roles),
+      roles: (parent: any) => rolesToArray(parent.roles),
       /**
        * Normalize permissions field: convert object to array if needed
        */
-      permissions: (parent: any) => {
-        if (!parent.permissions) {
-          return [];
-        }
-        // If permissions is an array, return as-is
-        if (Array.isArray(parent.permissions)) {
-          return parent.permissions;
-        }
-        // If permissions is an object, convert to array of keys where value is true
-        if (typeof parent.permissions === 'object') {
-          return Object.keys(parent.permissions).filter(key => parent.permissions[key] === true);
-        }
-        // Fallback: return empty array
-        return [];
-      },
+      permissions: (parent: any) => permissionsToArray(parent.permissions),
     },
     Query: {
       /**
@@ -396,7 +355,6 @@ export function createAuthResolvers(
       me: async (args: Record<string, unknown>, ctx: ResolverContext) => {
         requireAuth(ctx);
         
-        const { getDatabase } = await import('core-service');
         const db = getDatabase();
         const userId = getUserId(ctx);
         const tenantId = getTenantId(ctx);
@@ -431,7 +389,6 @@ export function createAuthResolvers(
           throw new Error('Unauthorized: Insufficient permissions to read user');
         }
         
-        const { getDatabase } = await import('core-service');
         const db = getDatabase();
         const userId = (args as any).id;
         const tenantId = (args as any).tenantId;
@@ -468,7 +425,6 @@ export function createAuthResolvers(
           throw new Error('Unauthorized: Insufficient permissions to list users');
         }
         
-        const { getDatabase } = await import('core-service');
         const db = getDatabase();
         const { tenantId, first, after, last, before } = args as any;
         
@@ -522,7 +478,6 @@ export function createAuthResolvers(
           throw new Error('Unauthorized: Insufficient permissions to list users by role');
         }
         
-        const { getDatabase } = await import('core-service');
         const db = getDatabase();
         const { role, tenantId, first, after, last, before } = args as any;
         
@@ -581,7 +536,6 @@ export function createAuthResolvers(
       mySessions: async (args: Record<string, unknown>, ctx: ResolverContext) => {
         requireAuth(ctx);
         
-        const { getDatabase } = await import('core-service');
         const db = getDatabase();
         const sessions = await db.collection('sessions')
           .find({
@@ -592,7 +546,37 @@ export function createAuthResolvers(
           .sort({ lastAccessedAt: -1 })
           .toArray();
         
-        return sessions;
+        // Normalize sessions and map to GraphQL Session type
+        return sessions
+          .map((session: any) => {
+            // Ensure session has an ID (either from id field or _id)
+            let sessionId: string | null = null;
+            
+            if (session.id) {
+              sessionId = session.id;
+            } else if (session._id) {
+              sessionId = session._id.toString();
+            }
+            
+            // Skip sessions without an ID
+            if (!sessionId) {
+              logger.warn('Session missing ID field', { userId: getUserId(ctx), session });
+              return null;
+            }
+            
+            // Normalize the session document
+            const normalized = normalizeDocument(session);
+            
+            // Map id to sessionId for GraphQL schema
+            // Remove tokenHash and other sensitive fields
+            const { tokenHash, token, _id, id, ...safeSession } = (normalized || session) as any;
+            
+            return {
+              ...safeSession,
+              sessionId, // Use extracted sessionId
+            };
+          })
+          .filter(Boolean); // Remove any null entries
       },
       
       /**
@@ -604,9 +588,36 @@ export function createAuthResolvers(
     Mutation: {
       /**
        * Register new user
+       * 
+       * Flow:
+       * - If autoVerify=true: Creates user immediately in DB, returns user + tokens
+       * - If sendOTP=true, autoVerify=false: Uses pending operation store (JWT), returns registrationToken
+       * 
+       * NOTE: OAuth registration bypasses this - OAuth providers already verify users,
+       * so OAuth users are created directly with status='active' (see handleSocialAuth)
        */
       register: async (args: Record<string, unknown>, ctx: ResolverContext) => {
         return await registrationService.register((args as any).input);
+      },
+      
+      /**
+       * Verify registration and create user in DB
+       * 
+       * Called after OTP verification:
+       * - Verifies registrationToken (JWT from pending operation store)
+       * - Verifies OTP code
+       * - Creates user in DB with status='pending' (activated on first login)
+       * - Returns user + tokens
+       * 
+       * NOTE: OAuth doesn't use this - OAuth users are created directly (see handleSocialAuth)
+       */
+      verifyRegistration: async (args: Record<string, unknown>, ctx: ResolverContext) => {
+        const input = (args as any).input;
+        return await registrationService.verifyRegistration(
+          input.registrationToken,
+          input.otpCode,
+          input.tenantId
+        );
       },
       
       /**
@@ -631,7 +642,7 @@ export function createAuthResolvers(
       logoutAll: async (args: Record<string, unknown>, ctx: ResolverContext) => {
         requireAuth(ctx);
         
-        return await authenticationService.logoutAll(getUserId(ctx));
+        return await authenticationService.logoutAll(getUserId(ctx), getTenantId(ctx));
       },
       
       /**
@@ -646,7 +657,15 @@ export function createAuthResolvers(
        * Send OTP
        */
       sendOTP: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-        return await otpService.sendOTP((args as any).input);
+        const result = await otpService.sendOTP((args as any).input);
+        return {
+          success: result.success,
+          message: result.message,
+          otpSentTo: result.otpSentTo,
+          channel: result.channel,
+          expiresIn: result.expiresIn,
+          otpToken: result.otpToken, // JWT token with OTP embedded
+        };
       },
       
       /**
@@ -660,15 +679,31 @@ export function createAuthResolvers(
        * Resend OTP
        */
       resendOTP: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-        const { recipient, purpose, tenantId } = args as any;
-        return await otpService.resendOTP(recipient, purpose, tenantId);
+        const { recipient, purpose, tenantId, otpToken } = args as any;
+        const result = await otpService.resendOTP(recipient, purpose, tenantId, otpToken);
+        return {
+          success: result.success,
+          message: result.message,
+          otpSentTo: result.otpSentTo,
+          channel: result.channel,
+          expiresIn: result.expiresIn,
+          otpToken: result.otpToken, // Return new otpToken
+        };
       },
       
       /**
        * Forgot password
+       * Returns resetToken (JWT) for testing/debugging
+       * In production, you may want to remove resetToken from response
        */
       forgotPassword: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-        return await passwordService.forgotPassword((args as any).input);
+        const result = await passwordService.forgotPassword((args as any).input);
+        return {
+          success: result.success,
+          message: result.message,
+          channel: result.channel,
+          resetToken: result.resetToken, // JWT token (for testing - remove in production if needed)
+        };
       },
       
       /**
@@ -756,7 +791,6 @@ export function createAuthResolvers(
           throw new Error('Unauthorized: Insufficient permissions to update user roles');
         }
         
-        const { getDatabase } = await import('core-service');
         const db = getDatabase();
         const { userId, tenantId, roles } = (args as any).input;
         
@@ -823,7 +857,6 @@ export function createAuthResolvers(
           throw new Error('Unauthorized: Insufficient permissions to update user permissions');
         }
         
-        const { getDatabase } = await import('core-service');
         const db = getDatabase();
         const { userId, tenantId, permissions } = (args as any).input;
         
@@ -890,7 +923,6 @@ export function createAuthResolvers(
           throw new Error('Unauthorized: Insufficient permissions to update user status');
         }
         
-        const { getDatabase } = await import('core-service');
         const db = getDatabase();
         const { userId, tenantId, status } = (args as any).input;
         

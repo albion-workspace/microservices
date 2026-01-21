@@ -14,19 +14,25 @@ import {
   createTokenPair as coreCreateTokenPair,
   findById,
   normalizeDocument,
-  generateMongoId,
 } from 'core-service';
 import type { UserContext } from 'core-service';
-import type { LoginInput, User, AuthResponse, TokenPair, Session, RefreshToken, DeviceInfo } from '../types.js';
+import type { LoginInput, User, AuthResponse, TokenPair, Session, DeviceInfo } from '../types.js';
 import { 
   parseUserAgent,
   generateDeviceId,
-  generateRefreshToken,
   hashToken,
-  addDays,
-  addSeconds,
-  rolesToArray,
+  createUserContext,
+  ensureUserId,
+  normalizeUser,
 } from '../utils.js';
+import {
+  findExistingSession,
+  createSession,
+  updateSessionForReuse,
+  invalidateSessionByToken,
+  invalidateAllUserSessions,
+  updateSessionLastUsed,
+} from '../utils/session-utils.js';
 import type { AuthConfig } from '../types.js';
 import { authenticateLocal } from '../providers/passport-strategies.js';
 
@@ -49,7 +55,21 @@ export class AuthenticationService {
         twoFactorCode: input.twoFactorCode,
       });
       
-      if (!user || !user._id) {
+      // If Passport returns null/false, authentication failed
+      if (!user) {
+        return {
+          success: false,
+          message: info?.message || 'Authentication failed: invalid credentials',
+        };
+      }
+      
+      // Ensure user has _id (should always be present from MongoDB)
+      if (!user._id) {
+        logger.error('User object missing _id field after Passport authentication', {
+          userId: user.id,
+          email: user.email,
+          identifier: input.identifier,
+        });
         return {
           success: false,
           message: 'Authentication failed: invalid user data',
@@ -145,25 +165,39 @@ export class AuthenticationService {
         }
       }
       
+      // CRITICAL: Activate pending users on first successful login
+      // Users created via registration verification start with status 'pending'
+      // This ensures they cannot perform operations until they log in at least once
+      if (user.status === 'pending') {
+        const db = getDatabase();
+        await db.collection('users').updateOne(
+          { _id: user._id },
+          {
+            $set: {
+              status: 'active',
+              updatedAt: new Date(),
+            },
+          }
+        );
+        user.status = 'active';
+        logger.info('User activated on first login', {
+          userId: user.id,
+          tenantId: user.tenantId,
+        });
+      }
+      
       // Authentication successful! Generate tokens and session
       const deviceInfo = this.extractDeviceInfo(input);
       const tokens = await this.createSessionAndTokens(user, deviceInfo);
       
       logger.info('User logged in via Passport', { 
         userId: user.id, 
-        tenantId: user.tenantId 
+        tenantId: user.tenantId,
+        status: user.status,
       });
       
-      // Normalize permissions (object → array) for GraphQL compatibility
-      const normalizedUser = { ...user };
-      if (normalizedUser.permissions && !Array.isArray(normalizedUser.permissions)) {
-        const permissionsObj = normalizedUser.permissions as Record<string, boolean>;
-        normalizedUser.permissions = Object.keys(permissionsObj).filter(
-          key => permissionsObj[key] === true
-        );
-      } else if (!normalizedUser.permissions) {
-        normalizedUser.permissions = [];
-      }
+      // Normalize user for GraphQL compatibility (roles and permissions)
+      const normalizedUser = normalizeUser(user);
       
       return {
         success: true,
@@ -200,163 +234,59 @@ export class AuthenticationService {
    * Simple flow: Use the user object from Passport directly
    * If roles/permissions need updating, user should refresh token or log out/in
    */
-  private async createSessionAndTokens(user: User, deviceInfo: DeviceInfo): Promise<TokenPair> {
-    const db = getDatabase();
-    const now = new Date();
+  async createSessionAndTokens(user: User, deviceInfo: DeviceInfo): Promise<TokenPair> {
+    // Ensure user has valid ID
+    const userId = ensureUserId(user as User & { _id?: any });
     
-    // Extract roles and permissions from UserRole[] format
-    let roles: string[] = [];
-    let permissions: string[] = [];
-    
-    // Handle roles - extract role names from UserRole[] format
-    if (user.roles !== undefined && user.roles !== null && Array.isArray(user.roles)) {
-      roles = user.roles
-        .filter((r: any) => {
-          // Handle both UserRole objects and string arrays
-          if (typeof r === 'string') return true;
-          return r.active !== false;
-        })
-        .filter((r: any) => {
-          if (typeof r === 'string') return true;
-          return !r.expiresAt || new Date(r.expiresAt) > new Date();
-        })
-        .map((r: any) => {
-          // Handle both UserRole objects and string arrays
-          if (typeof r === 'string') return r;
-          return r.role;
-        })
-        .filter((r: any) => r !== undefined && r !== null); // Remove any undefined/null values
-    }
-    
-    // Handle permissions - check if it exists (empty array is valid)
-    if (user.permissions !== undefined && user.permissions !== null) {
-      if (Array.isArray(user.permissions)) {
-        permissions = user.permissions;
-      } else if (typeof user.permissions === 'object' && !Array.isArray(user.permissions)) {
-        // Convert object format { "permission1": true, "permission2": false } to array
-        const permissionsObj = user.permissions as Record<string, boolean>;
-        permissions = Object.keys(permissionsObj).filter(
-          key => permissionsObj[key] === true
-        );
-      }
-    }
-    
-    // Log for debugging
-    logger.info('Creating JWT token with roles and permissions', {
-      userId: user.id,
-      email: user.email,
-      roles,
-      permissions,
-      rolesCount: roles.length,
-      permissionsCount: permissions.length,
-      rawRoles: user.roles,
-      rawRolesType: Array.isArray(user.roles) ? 'array' : typeof user.roles,
-      rawRolesLength: Array.isArray(user.roles) ? user.roles.length : 0,
-      rawRolesSample: Array.isArray(user.roles) && user.roles.length > 0 ? user.roles[0] : null,
-    });
-    
-    // Generate refresh token
-    const refreshTokenValue = generateRefreshToken();
-    const refreshTokenHash = await hashToken(refreshTokenValue);
-    
-    // Calculate expiry times (parse from config strings like '1h', '7d')
+    // Calculate expiry times
     const accessExpiresIn = this.parseExpiry(this.config.jwtExpiresIn);
     const refreshExpiresIn = this.parseExpiry(this.config.jwtRefreshExpiresIn);
+    const sessionMaxAgeSeconds = this.config.sessionMaxAge * 24 * 60 * 60;
     
-    // Ensure user.id is defined (should be guaranteed by checks above)
-    if (!user.id) {
-      // Try to get id from _id if not set
-      if ((user as any)._id) {
-        user.id = (user as any)._id.toString();
-        logger.warn('User.id was missing, derived from _id', { 
-          userId: user.id,
-          _id: (user as any)._id.toString(),
-        });
-      } else {
-        throw new Error('User ID is required for token creation');
-      }
+    // Ensure deviceId exists
+    if (!deviceInfo.deviceId) {
+      deviceInfo.deviceId = generateDeviceId('', '');
     }
     
-    // Ensure user has id field (normalize if needed)
-    const userId = user.id || (user as any)._id?.toString();
-    if (!userId) {
-      throw new Error('User missing id field - cannot create refresh token');
-    }
+    // Smart token reuse: Check for existing valid session for this device
+    const existingSession = await findExistingSession(userId, user.tenantId, deviceInfo.deviceId);
     
-    logger.info('Creating refresh token', {
-      userId,
-      email: user.email,
-      tenantId: user.tenantId,
-    });
+    let refreshTokenValue: string;
     
-    // Create refresh token record - use MongoDB ObjectId for performant single-insert operation
-    const { objectId: refreshTokenObjectId, idString: refreshTokenId } = generateMongoId();
-    const refreshToken = {
-      _id: refreshTokenObjectId,
-      id: refreshTokenId,
-      userId,
-      tenantId: user.tenantId,
-      token: refreshTokenValue,
-      tokenHash: refreshTokenHash,
-      deviceId: deviceInfo.deviceId,
-      deviceInfo,
-      createdAt: now,
-      expiresAt: addSeconds(now, refreshExpiresIn),
-      isValid: true,
-    };
-    
-    await db.collection('refresh_tokens').insertOne(refreshToken as any);
-    
-    // Create session - use MongoDB ObjectId for performant single-insert operation
-    // Ensure user.id is defined (should be guaranteed by checks above)
-    if (!user.id) {
-      throw new Error('User ID is required for session creation');
-    }
-    const { objectId: sessionObjectId, idString: sessionId } = generateMongoId();
-    const session = {
-      _id: sessionObjectId,
-      sessionId,
-      userId: user.id, // Explicitly use user.id to ensure we're using the correct user ID
-      tenantId: user.tenantId,
-      refreshTokenId,
-      deviceInfo,
-      createdAt: now,
-      expiresAt: addDays(now, this.config.sessionMaxAge),
-      lastAccessedAt: now,
-      isValid: true,
-    };
-    
-    await db.collection('sessions').insertOne(session as any);
-    
-    // Generate JWT access token with roles and permissions from Passport user
-    // CRITICAL: Use user.id (from Passport user object), NOT session.sessionId
-    // Double-check that user.id is valid before creating token
-    if (!user.id || typeof user.id !== 'string') {
-      logger.error('Cannot create token: user.id is missing or invalid in createSessionAndTokens', {
-        userId: user.id,
-        _id: (user as any)._id,
-        email: user.email,
-        userObjectKeys: Object.keys(user),
+    if (existingSession) {
+      // Reuse existing session - rotate refresh token for security
+      logger.info('Reusing existing session for device (rotating refresh token)', {
+        userId,
+        deviceId: deviceInfo.deviceId,
+        sessionId: existingSession.id,
       });
-      throw new Error(`Invalid user ID in createSessionAndTokens: ${user.id}`);
+      
+      refreshTokenValue = await updateSessionForReuse(existingSession, deviceInfo, refreshExpiresIn);
+    } else {
+      // Create new session
+      logger.info('Creating new session', {
+        userId,
+        email: user.email,
+        tenantId: user.tenantId,
+        deviceId: deviceInfo.deviceId,
+      });
+      
+      const sessionResult = await createSession(
+        userId,
+        user.tenantId,
+        deviceInfo.deviceId,
+        deviceInfo,
+        refreshExpiresIn,
+        sessionMaxAgeSeconds
+      );
+      
+      refreshTokenValue = sessionResult.refreshToken;
     }
     
-    logger.info('Creating UserContext for JWT token', {
-      userId: user.id,
-      email: user.email,
-      roles,
-      permissions,
-      rolesCount: roles.length,
-      permissionsCount: permissions.length,
-    });
+    // Create UserContext using reusable utility
+    const userContext = createUserContext(user);
     
-    const userContext: UserContext = {
-      userId: user.id, // Explicitly use user.id to ensure correct user ID in token
-      tenantId: user.tenantId,
-      roles: roles,
-      permissions: permissions,
-    };
-    
+    // Generate JWT access token
     const jwtTokens = coreCreateTokenPair(userContext, {
       secret: this.config.jwtSecret,
       refreshSecret: this.config.jwtRefreshSecret,
@@ -366,7 +296,7 @@ export class AuthenticationService {
     
     return {
       accessToken: jwtTokens.accessToken,
-      refreshToken: refreshTokenValue, // Return our custom refresh token, not JWT
+      refreshToken: refreshTokenValue,
       expiresIn: accessExpiresIn,
       refreshExpiresIn,
     };
@@ -390,16 +320,17 @@ export class AuthenticationService {
     
     try {
       const refreshTokenHash = await hashToken(refreshTokenValue);
+      const now = new Date();
       
-      // Find refresh token
-      const refreshToken = await db.collection('refresh_tokens').findOne({
+      // Find session by token hash (unified collection)
+      const session = await db.collection('sessions').findOne({
         tokenHash: refreshTokenHash,
         tenantId,
         isValid: true,
-      }) as unknown as RefreshToken | null;
+      }) as unknown as Session | null;
       
-      if (!refreshToken) {
-        logger.error('Refresh token not found', {
+      if (!session) {
+        logger.error('Session not found for refresh token', {
           tokenHash: refreshTokenHash.substring(0, 10) + '...',
           tenantId,
         });
@@ -409,21 +340,25 @@ export class AuthenticationService {
         };
       }
       
-      logger.info('Refresh token found', {
-        refreshTokenId: refreshToken.id,
-        refreshTokenUserId: refreshToken.userId,
-        refreshTokenUserIdType: typeof refreshToken.userId,
-        refreshTokenUserIdLength: refreshToken.userId?.length,
+      const normalizedSession = normalizeDocument(session);
+      if (!normalizedSession) {
+        return {
+          success: false,
+          message: 'Invalid session data',
+        };
+      }
+      
+      logger.info('Session found for token refresh', {
+        sessionId: normalizedSession.id,
+        userId: normalizedSession.userId,
         tenantId,
-        expiresAt: refreshToken.expiresAt,
-        isValid: refreshToken.isValid,
       });
       
-      // Check if expired
-      if (refreshToken.expiresAt < new Date()) {
-        await db.collection('refresh_tokens').updateOne(
-          { id: refreshToken.id },
-          { $set: { isValid: false, revokedAt: new Date(), revokedReason: 'expired' } }
+      // Check if refresh token expired
+      if (normalizedSession.refreshTokenExpiresAt < now) {
+        await db.collection('sessions').updateOne(
+          { _id: (session as any)._id },
+          { $set: { isValid: false, revokedAt: now, revokedReason: 'expired' } }
         );
         
         return {
@@ -432,34 +367,29 @@ export class AuthenticationService {
         };
       }
       
-      // Update last used
-      await db.collection('refresh_tokens').updateOne(
-        { id: refreshToken.id },
-        { $set: { lastUsedAt: new Date() } }
-      );
+      // Check if session expired
+      if (normalizedSession.sessionExpiresAt < now) {
+        await db.collection('sessions').updateOne(
+          { _id: (session as any)._id },
+          { $set: { isValid: false, revokedAt: now, revokedReason: 'session_expired' } }
+        );
+        
+        return {
+          success: false,
+          message: 'Session expired',
+        };
+      }
       
-      // Get user using generic helper function with automatic ObjectId handling
-      logger.info('Looking up user for token refresh', {
-        refreshTokenUserId: refreshToken.userId,
-        tenantId,
-      });
+      // Update last used timestamp
+      await updateSessionLastUsed(normalizedSession);
       
-      const user = await findById<User>(db.collection('users'), refreshToken.userId, { tenantId });
+      // Get user
+      const user = await findById<User>(db.collection('users'), normalizedSession.userId, { tenantId });
       
       if (!user) {
-        // Check what users exist to help debug
-        const allUsers = await db.collection('users').find({ tenantId }).limit(5).toArray();
-        const sampleUserIds = allUsers.map((u: any) => ({ 
-          _id: u._id?.toString(), 
-          id: u.id,
-          email: u.email 
-        }));
-        
         logger.error('User not found during token refresh', {
-          refreshTokenUserId: refreshToken.userId,
+          userId: normalizedSession.userId,
           tenantId,
-          sampleUserIds,
-          userCount: await db.collection('users').countDocuments({ tenantId }),
         });
         return {
           success: false,
@@ -467,33 +397,18 @@ export class AuthenticationService {
         };
       }
       
-      // Normalize user document (ensure id field exists)
       const normalizedUser = normalizeDocument(user);
       
-      logger.info('User found during token refresh', {
-        userId: normalizedUser?.id,
-        email: normalizedUser?.email,
-        status: normalizedUser?.status,
-      });
-      
-      if (!normalizedUser) {
+      if (!normalizedUser || normalizedUser.status !== 'active') {
         return {
           success: false,
           message: 'User not found or inactive',
         };
       }
       
-      if (normalizedUser.status !== 'active') {
-        return {
-          success: false,
-          message: 'User not found or inactive',
-        };
-      }
-      
-      // Generate new access token
       if (!normalizedUser.id) {
         logger.error('User missing id field after refresh token lookup', {
-          userId: refreshToken.userId,
+          userId: normalizedSession.userId,
         });
         return {
           success: false,
@@ -501,22 +416,8 @@ export class AuthenticationService {
         };
       }
       
-      // Extract role names using utility function
-      const rolesForContext = rolesToArray(normalizedUser.roles);
-      
-      logger.info('Extracted roles for token refresh', {
-        userId: normalizedUser.id,
-        rolesForContext,
-        rawRoles: normalizedUser.roles,
-        rolesType: Array.isArray(normalizedUser.roles) && normalizedUser.roles.length > 0 ? typeof normalizedUser.roles[0] : 'unknown',
-      });
-      
-      const userContext: UserContext = {
-        userId: normalizedUser.id!,
-        tenantId: normalizedUser.tenantId,
-        roles: rolesForContext,
-        permissions: normalizedUser.permissions || [],
-      };
+      // Create UserContext using reusable utility
+      const userContext = createUserContext(normalizedUser);
       
       const jwtTokens = coreCreateTokenPair(userContext, {
         secret: this.config.jwtSecret,
@@ -530,7 +431,7 @@ export class AuthenticationService {
         message: 'Token refreshed',
         tokens: {
           accessToken: jwtTokens.accessToken,
-          refreshToken: refreshTokenValue, // Keep same refresh token
+          refreshToken: refreshTokenValue, // Return same refresh token
           expiresIn: this.parseExpiry(this.config.jwtExpiresIn),
           refreshExpiresIn: this.parseExpiry(this.config.jwtRefreshExpiresIn),
         },
@@ -539,7 +440,6 @@ export class AuthenticationService {
       logger.error('Token refresh error', { 
         error: error.message,
         stack: error.stack,
-        name: error.name,
       });
       return {
         success: false,
@@ -549,35 +449,18 @@ export class AuthenticationService {
   }
   
   /**
-   * Logout user (invalidate session and refresh token)
+   * Logout user (invalidate session)
    */
   async logout(userId: string, refreshTokenValue: string): Promise<{ success: boolean }> {
-    const db = getDatabase();
-    
     try {
       const refreshTokenHash = await hashToken(refreshTokenValue);
+      const success = await invalidateSessionByToken(refreshTokenHash, userId, 'logout');
       
-      // Invalidate refresh token
-      await db.collection('refresh_tokens').updateOne(
-        { tokenHash: refreshTokenHash, userId },
-        { $set: { isValid: false, revokedAt: new Date(), revokedReason: 'logout' } }
-      );
-      
-      // Invalidate session
-      const refreshToken = await db.collection('refresh_tokens').findOne({
-        tokenHash: refreshTokenHash,
-        userId,
-      }) as unknown as RefreshToken | null;
-      
-      if (refreshToken) {
-        await db.collection('sessions').updateOne(
-          { refreshTokenId: refreshToken.id },
-          { $set: { isValid: false, invalidatedAt: new Date(), invalidatedReason: 'logout' } }
-        );
+      if (!success) {
+        logger.warn('Session not found for logout', { userId, tokenHash: refreshTokenHash.substring(0, 10) + '...' });
       }
       
       logger.info('User logged out', { userId });
-      
       return { success: true };
     } catch (error) {
       logger.error('Logout error', { error, userId });
@@ -588,28 +471,56 @@ export class AuthenticationService {
   /**
    * Logout from all devices
    */
-  async logoutAll(userId: string): Promise<{ success: boolean; count: number }> {
+  async logoutAll(userId: string, tenantId: string): Promise<{ success: boolean; count: number }> {
+    try {
+      const count = await invalidateAllUserSessions(userId, tenantId, 'logout_all');
+      logger.info('User logged out from all devices', { userId, tenantId, count });
+      return { success: true, count };
+    } catch (error) {
+      logger.error('Logout all error', { error, userId, tenantId });
+      return { success: false, count: 0 };
+    }
+  }
+  
+  /**
+   * Cleanup expired and invalid sessions
+   */
+  async cleanupExpiredSessions(): Promise<number> {
     const db = getDatabase();
+    const now = new Date();
     
     try {
-      // Invalidate all refresh tokens
-      const result = await db.collection('refresh_tokens').updateMany(
-        { userId, isValid: true },
-        { $set: { isValid: false, revokedAt: new Date(), revokedReason: 'logout_all' } }
-      );
+      // Delete expired sessions (refresh token or session expired)
+      const expiredResult = await db.collection('sessions').deleteMany({
+        $or: [
+          { refreshTokenExpiresAt: { $lt: now } },
+          { sessionExpiresAt: { $lt: now } },
+        ],
+      });
       
-      // Invalidate all sessions
-      await db.collection('sessions').updateMany(
-        { userId, isValid: true },
-        { $set: { isValid: false, invalidatedAt: new Date(), invalidatedReason: 'logout_all' } }
-      );
+      // Delete invalid sessions older than 30 days
+      const thirtyDaysAgo = new Date();
+      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
       
-      logger.info('User logged out from all devices', { userId, count: result.modifiedCount });
+      const invalidResult = await db.collection('sessions').deleteMany({
+        isValid: false,
+        revokedAt: { $lt: thirtyDaysAgo },
+      });
       
-      return { success: true, count: result.modifiedCount || 0 };
+      const totalDeleted = (expiredResult.deletedCount || 0) + (invalidResult.deletedCount || 0);
+      
+      if (totalDeleted > 0) {
+        logger.info('Cleaned up expired/invalid sessions', {
+          expired: expiredResult.deletedCount || 0,
+          invalid: invalidResult.deletedCount || 0,
+          total: totalDeleted,
+        });
+      }
+      
+      return totalDeleted;
     } catch (error) {
-      logger.error('Logout all error', { error, userId });
-      return { success: false, count: 0 };
+      logger.error('Failed to cleanup sessions', { error });
+      return 0;
     }
   }
 }

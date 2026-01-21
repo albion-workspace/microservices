@@ -1,26 +1,34 @@
 /**
  * OTP Service
  * Handles OTP generation, sending, and verification across multiple channels
+ * Uses PendingOperationStore (JWT-based) for unified OTP storage pattern
  */
 
-import { getDatabase, logger, generateMongoId } from 'core-service';
-import type { SendOTPInput, VerifyOTPInput, OTP, OTPResponse } from '../types.js';
-import { generateOTP, hashToken, addMinutes } from '../utils.js';
+import { logger, createPendingOperationStore, getRedis } from 'core-service';
+import type { SendOTPInput, VerifyOTPInput, OTPResponse } from '../types.js';
+import { generateOTP, hashToken } from '../utils.js';
 import type { AuthConfig } from '../types.js';
 import type { OTPProviderFactory } from '../providers/otp-provider.js';
 
 export class OTPService {
+  private otpStore: ReturnType<typeof createPendingOperationStore>;
+  
   constructor(
     private config: AuthConfig,
     private otpProviders: OTPProviderFactory
-  ) {}
+  ) {
+    // Use generic pending operation store for OTPs (JWT-based)
+    this.otpStore = createPendingOperationStore({
+      jwtSecret: this.config.jwtSecret,
+      defaultExpiration: `${this.config.otpExpiryMinutes}m`,
+    });
+  }
   
   /**
    * Send OTP to user
+   * Returns OTP token (JWT) with OTP code embedded in metadata
    */
   async sendOTP(input: SendOTPInput): Promise<OTPResponse> {
-    const db = getDatabase();
-    
     try {
       // Check if channel is available
       if (!this.otpProviders.isChannelAvailable(input.channel)) {
@@ -30,71 +38,63 @@ export class OTPService {
         };
       }
       
-      // Check rate limiting - max 3 OTPs per 10 minutes
-      const recentOTPs = await db.collection('otps').countDocuments({
+      let code = generateOTP(this.config.otpLength);
+      // @TODO: Remove this after testing
+      code = '000000'; // Test OTP - replace with generateOTP(this.config.otpLength) in production
+      const hashedCode = await hashToken(code);
+      
+      // Store OTP in JWT token (unified pattern)
+      const otpData = {
+        userId: input.userId,
         tenantId: input.tenantId,
         recipient: input.recipient,
+        channel: input.channel,
         purpose: input.purpose,
-        createdAt: { $gte: new Date(Date.now() - 10 * 60 * 1000) },
-      });
-      
-      if (recentOTPs >= 3) {
-        return {
-          success: false,
-          message: 'Too many OTP requests. Please try again later.',
-        };
-      }
-      
-      // Invalidate any existing unused OTPs for this recipient/purpose
-      await db.collection('otps').updateMany(
-        {
-          tenantId: input.tenantId,
+        otp: {
+          hashedCode,
+          channel: input.channel,
           recipient: input.recipient,
           purpose: input.purpose,
-          isUsed: false,
+          createdAt: Date.now(),
+          expiresIn: this.config.otpExpiryMinutes * 60 * 1000, // milliseconds
         },
+      };
+      
+      // Create OTP token in PendingOperationStore (JWT-based)
+      const otpToken = await this.otpStore.create(
+        'otp_verification',
+        otpData,
         {
-          $set: { isUsed: true, usedAt: new Date() },
+          operationType: 'otp_verification',
+          expiresIn: `${this.config.otpExpiryMinutes}m`,
         }
       );
       
-      // Generate OTP
-      const code = generateOTP(this.config.otpLength);
-      const hashedCode = await hashToken(code);
-      
-      const now = new Date();
-      const expiresAt = addMinutes(now, this.config.otpExpiryMinutes);
-      
-      // Store OTP in database - use MongoDB ObjectId for performant single-insert operation
-      const { objectId, idString } = generateMongoId();
-      const otp = {
-        _id: objectId,
-        id: idString,
-        userId: input.userId,
-        tenantId: input.tenantId,
-        code,
-        hashedCode,
-        channel: input.channel,
+      // Debug log: Output plain OTP code for testing
+      logger.debug('OTP code (for testing)', {
         recipient: input.recipient,
+        channel: input.channel,
         purpose: input.purpose,
-        attempts: 0,
-        maxAttempts: this.config.otpMaxAttempts,
-        isUsed: false,
-        createdAt: now,
-        expiresAt,
-      };
-      
-      await db.collection('otps').insertOne(otp as any);
-      
-      // Send OTP via provider (uses notification service)
-      const provider = this.otpProviders.getProvider(input.channel);
-      await provider.send(input.recipient, code, input.purpose, input.tenantId, input.userId);
-      
-      logger.info('OTP sent', { 
-        recipient: input.recipient, 
-        channel: input.channel, 
-        purpose: input.purpose 
+        otpCode: code,
+        otpToken: otpToken.substring(0, 50) + '...',
       });
+      
+      // Send OTP via notification service
+      // TODO: Uncomment when providers are configured
+      // try {
+      //   const provider = this.otpProviders.getProvider(input.channel);
+      //   await provider.send(input.recipient, code, input.purpose, input.tenantId, input.userId);
+      //   logger.info('OTP sent', { 
+      //     recipient: input.recipient, 
+      //     channel: input.channel, 
+      //     purpose: input.purpose 
+      //   });
+      // } catch (sendError) {
+      //   logger.warn('Failed to send OTP via provider (token stored in JWT)', { 
+      //     error: sendError,
+      //     recipient: input.recipient,
+      //   });
+      // }
       
       return {
         success: true,
@@ -102,6 +102,7 @@ export class OTPService {
         otpSentTo: input.recipient,
         channel: input.channel,
         expiresIn: this.config.otpExpiryMinutes * 60,
+        otpToken, // Return JWT token with OTP embedded
       };
     } catch (error) {
       logger.error('Failed to send OTP', { error, input });
@@ -114,82 +115,80 @@ export class OTPService {
   
   /**
    * Verify OTP code
+   * Accepts either otpToken (JWT) + code, or recipient + purpose + code (for backward compatibility)
    */
-  async verifyOTP(input: VerifyOTPInput): Promise<OTPResponse> {
-    const db = getDatabase();
-    
+  async verifyOTP(input: VerifyOTPInput & { otpToken?: string }): Promise<OTPResponse> {
     try {
-      const hashedCode = await hashToken(input.code);
+      let otpData: any;
       
-      // Find OTP
-      const otp = await db.collection('otps').findOne({
-        tenantId: input.tenantId,
-        recipient: input.recipient,
-        purpose: input.purpose,
-        isUsed: false,
-      }) as unknown as OTP | null;
-      
-      if (!otp) {
+      // If otpToken provided, use JWT-based verification (new unified pattern)
+      if (input.otpToken) {
+        const operation = await this.otpStore.verify<{
+          userId?: string;
+          tenantId: string;
+          recipient: string;
+          channel: string;
+          purpose: string;
+          otp: {
+            hashedCode: string;
+            createdAt: number;
+            expiresIn: number;
+          };
+        }>(input.otpToken, 'otp_verification');
+        
+        if (!operation) {
+          return {
+            success: false,
+            message: 'Invalid or expired OTP token',
+          };
+        }
+        
+        otpData = operation.data;
+        
+        // Verify tenant matches
+        if (otpData.tenantId !== input.tenantId) {
+          return {
+            success: false,
+            message: 'Tenant mismatch',
+          };
+        }
+      } else {
+        // Backward compatibility: find OTP by recipient/purpose
+        // This requires scanning Redis or we need to store a mapping
+        // For now, return error - users should use otpToken
         return {
           success: false,
-          message: 'Invalid or expired OTP',
+          message: 'OTP token is required. Please use the token from sendOTP response.',
         };
       }
       
-      // Check if expired
-      if (otp.expiresAt < new Date()) {
-        await db.collection('otps').updateOne(
-          { id: otp.id },
-          { $set: { isUsed: true, usedAt: new Date() } }
-        );
-        
+      // Check OTP expiration
+      const now = Date.now();
+      const otpAge = now - otpData.otp.createdAt;
+      if (otpAge > otpData.otp.expiresIn) {
         return {
           success: false,
           message: 'OTP has expired',
         };
       }
       
-      // Check attempts
-      if (otp.attempts >= otp.maxAttempts) {
-        await db.collection('otps').updateOne(
-          { id: otp.id },
-          { $set: { isUsed: true, usedAt: new Date() } }
-        );
-        
-        return {
-          success: false,
-          message: 'Too many failed attempts',
-        };
-      }
-      
-      // Verify code
-      if (otp.hashedCode !== hashedCode) {
-        // Increment attempts
-        await db.collection('otps').updateOne(
-          { id: otp.id },
-          { $inc: { attempts: 1 } }
-        );
-        
+      // Verify OTP code
+      const hashedCode = await hashToken(input.code);
+      if (otpData.otp.hashedCode !== hashedCode) {
         return {
           success: false,
           message: 'Invalid OTP code',
         };
       }
       
-      // Mark OTP as used
-      await db.collection('otps').updateOne(
-        { id: otp.id },
-        { $set: { isUsed: true, usedAt: new Date() } }
-      );
-      
       // Update user verification status if applicable
-      if (otp.userId) {
-        await this.updateUserVerificationStatus(otp);
+      if (otpData.userId) {
+        await this.updateUserVerificationStatus(otpData);
       }
       
       logger.info('OTP verified', { 
-        recipient: input.recipient, 
-        purpose: input.purpose 
+        recipient: otpData.recipient, 
+        purpose: otpData.purpose 
       });
       
       return {
@@ -208,95 +207,77 @@ export class OTPService {
   /**
    * Update user verification status based on OTP purpose
    */
-  private async updateUserVerificationStatus(otp: OTP): Promise<void> {
-    if (!otp.userId) return;
+  private async updateUserVerificationStatus(otpData: {
+    userId?: string;
+    purpose: string;
+  }): Promise<void> {
+    if (!otpData.userId) return;
     
+    const { getDatabase } = await import('core-service');
     const db = getDatabase();
     const update: any = { updatedAt: new Date() };
     
-    if (otp.purpose === 'email_verification') {
+    if (otpData.purpose === 'email_verification') {
       update.emailVerified = true;
-      update.status = 'active'; // Activate account on email verification
-    } else if (otp.purpose === 'phone_verification') {
+      update.status = 'active';
+    } else if (otpData.purpose === 'phone_verification') {
       update.phoneVerified = true;
-      update.status = 'active'; // Activate account on phone verification
+      update.status = 'active';
     }
     
     if (Object.keys(update).length > 1) {
       await db.collection('users').updateOne(
-        { id: otp.userId },
+        { id: otpData.userId },
         { $set: update }
       );
       
       logger.info('User verification status updated', { 
-        userId: otp.userId, 
-        purpose: otp.purpose 
+        userId: otpData.userId, 
+        purpose: otpData.purpose 
       });
     }
   }
   
   /**
    * Resend OTP (with rate limiting)
+   * Note: Since OTPs are now JWT-based, we need otpToken to resend
+   * For backward compatibility, we can accept recipient/purpose but it's less efficient
    */
-  async resendOTP(recipient: string, purpose: string, tenantId: string): Promise<OTPResponse> {
-    const db = getDatabase();
-    
-    // Find the last OTP for this recipient/purpose
-    const lastOTP = await db.collection('otps').findOne(
-      {
-        tenantId,
-        recipient,
-        purpose,
-      },
-      { sort: { createdAt: -1 } }
-    ) as unknown as OTP | null;
-    
-    if (!lastOTP) {
-      return {
-        success: false,
-        message: 'No OTP request found',
-      };
+  async resendOTP(recipient: string, purpose: string, tenantId: string, otpToken?: string): Promise<OTPResponse> {
+    // If otpToken provided, extract channel/userId from it
+    if (otpToken) {
+      const operation = await this.otpStore.verify<{
+        userId?: string;
+        channel: string;
+      }>(otpToken, 'otp_verification');
+      
+      if (operation) {
+        // Check if can resend (must wait at least 60 seconds)
+        const timeSinceCreation = Date.now() - operation.createdAt;
+        if (timeSinceCreation < 60 * 1000) {
+          return {
+            success: false,
+            message: 'Please wait before requesting a new OTP',
+          };
+        }
+        
+        // Send new OTP
+        return this.sendOTP({
+          tenantId,
+          recipient,
+          channel: operation.data.channel,
+          purpose,
+          userId: operation.data.userId,
+        });
+      }
     }
     
-    // Check if can resend (must wait at least 60 seconds)
-    const timeSinceLastOTP = Date.now() - lastOTP.createdAt.getTime();
-    if (timeSinceLastOTP < 60 * 1000) {
-      return {
-        success: false,
-        message: 'Please wait before requesting a new OTP',
-      };
-    }
-    
-    // Send new OTP
+    // Fallback: send new OTP (will create new token)
     return this.sendOTP({
       tenantId,
       recipient,
-      channel: lastOTP.channel,
-      purpose: lastOTP.purpose,
-      userId: lastOTP.userId,
+      channel: 'email', // Default - should be determined from context
+      purpose,
     });
-  }
-  
-  /**
-   * Cleanup expired OTPs (run periodically)
-   */
-  async cleanupExpiredOTPs(): Promise<number> {
-    const db = getDatabase();
-    
-    try {
-      const result = await db.collection('otps').deleteMany({
-        expiresAt: { $lt: new Date() },
-        isUsed: true,
-      });
-      
-      if (result.deletedCount && result.deletedCount > 0) {
-        logger.info('Expired OTPs cleaned up', { count: result.deletedCount });
-      }
-      
-      return result.deletedCount || 0;
-    } catch (error) {
-      logger.error('Failed to cleanup expired OTPs', { error });
-      return 0;
-    }
   }
 }

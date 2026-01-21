@@ -3,7 +3,7 @@
  * Handles user authentication events and webhook delivery
  */
 
-import { createWebhookManager, getDatabase, logger } from 'core-service';
+import { createWebhookManager, getDatabase, logger, emit } from 'core-service';
 import type { AuthEventType } from './types.js';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -82,7 +82,6 @@ export async function emitAuthEvent<E extends keyof AuthWebhookEvents>(
     // Emit internal event via Redis (for cross-service communication)
     // notification-service listens to 'integration:auth' channel
     if (!options?.skipInternal) {
-      const { emit } = await import('core-service');
       await emit(
         'integration:auth',
         tenantId,

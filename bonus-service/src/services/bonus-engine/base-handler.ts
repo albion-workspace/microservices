@@ -233,7 +233,7 @@ export abstract class BaseBonusHandler implements IBonusHandler {
 
     // Check ledger balance before awarding (prevent infinite money)
     try {
-      const balanceCheck = await checkBonusPoolBalance(calculation.bonusValue, template.currency);
+      const balanceCheck = await checkBonusPoolBalance(calculation.bonusValue, template.currency, context.tenantId);
       if (!balanceCheck.sufficient) {
         logger.warn('Insufficient bonus pool balance', {
           userId: context.userId,
