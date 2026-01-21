@@ -23,6 +23,7 @@ import {
   findOneById,
   updateOneById,
   paginateCollection,
+  extractDocumentId,
 } from 'core-service';
 import type { Transaction, Transfer } from '../types.js';
 import { createTransferWithTransactions, type ClientSession } from 'core-service';
@@ -303,7 +304,7 @@ const withdrawalSaga = [
         throw new Error(`Insufficient balance. Required: ${totalRequired}, Available: ${balance}`);
       }
       
-      data.walletId = (wallet as any).id;
+      data.walletId = extractDocumentId(wallet) || '';
       return { ...ctx, input, data };
     },
   },

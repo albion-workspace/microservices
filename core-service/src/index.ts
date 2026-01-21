@@ -143,6 +143,7 @@ export {
   findById,
   findOneById,
   // Document normalization
+  extractDocumentId,
   normalizeDocument,
   normalizeDocuments,
   // Common operations (performance-optimized)

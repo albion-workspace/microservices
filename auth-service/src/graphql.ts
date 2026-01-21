@@ -9,6 +9,7 @@ import {
   getTenantId, 
   logger,
   findById,
+  extractDocumentId,
   normalizeDocument,
   findOneAndUpdateById,
   paginateCollection,
@@ -549,14 +550,8 @@ export function createAuthResolvers(
         // Normalize sessions and map to GraphQL Session type
         return sessions
           .map((session: any) => {
-            // Ensure session has an ID (either from id field or _id)
-            let sessionId: string | null = null;
-            
-            if (session.id) {
-              sessionId = session.id;
-            } else if (session._id) {
-              sessionId = session._id.toString();
-            }
+            // Extract session ID using helper function
+            const sessionId = extractDocumentId(session);
             
             // Skip sessions without an ID
             if (!sessionId) {

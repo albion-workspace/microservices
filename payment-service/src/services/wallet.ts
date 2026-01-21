@@ -51,7 +51,7 @@
  *    - Consistent across all entities
  */
 
-import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, getDatabase, deleteCache, deleteCachePattern, logger, validateInput, findOneById, findOneAndUpdateById, requireAuth, getUserId, getTenantId, getOrCreateWallet, paginateCollection } from 'core-service';
+import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, getDatabase, deleteCache, deleteCachePattern, logger, validateInput, findOneById, findOneAndUpdateById, requireAuth, getUserId, getTenantId, getOrCreateWallet, paginateCollection, extractDocumentId } from 'core-service';
 import type { Wallet, WalletCategory } from '../types.js';
 import { SYSTEM_CURRENCY } from '../constants.js';
 import { emitPaymentEvent } from '../event-dispatcher.js';
@@ -438,9 +438,10 @@ export const walletResolvers = {
           // Get allowNegative directly from wallet (wallet-level permissions)
           const allowNegative = wallet.allowNegative ?? false;
           
+          const walletId = extractDocumentId(wallet);
           balances.push({
             userId,
-            walletId: wallet.id,
+            walletId: walletId || '',
             balance,
             availableBalance,
             pendingIn: 0,

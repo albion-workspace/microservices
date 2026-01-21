@@ -25,6 +25,7 @@ import {
   startListening,
   getDatabase,
   getClient,
+  extractDocumentId,
   type IntegrationEvent,
   // Webhooks - plug-and-play service
   createWebhookService,
@@ -464,7 +465,7 @@ function setupBonusEventHandlers() {
           });
           return;
         }
-        walletId = (wallet as any).id;
+        walletId = extractDocumentId(wallet) || undefined;
       }
       
       // Ensure walletId is defined before syncing

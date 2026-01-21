@@ -203,6 +203,31 @@ export async function findUserById<T = any>(
 }
 
 /**
+ * Extract document ID from a MongoDB document
+ * Returns id field if present, otherwise converts _id to string
+ * Returns null if neither id nor _id is present
+ * 
+ * @example
+ * const docId = extractDocumentId(document); // Returns string | null
+ * if (docId) {
+ *   // Use docId
+ * }
+ */
+export function extractDocumentId<T extends { _id?: any; id?: string }>(doc: T | null | undefined): string | null {
+  if (!doc) return null;
+  
+  if (doc.id) {
+    return doc.id;
+  }
+  
+  if (doc._id) {
+    return objectIdToString(doc._id) || null;
+  }
+  
+  return null;
+}
+
+/**
  * Normalize a MongoDB document: ensure id field exists from _id
  * Handles both ObjectId and string formats
  */
