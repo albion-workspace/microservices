@@ -3,7 +3,7 @@
  * Reusable functions for session operations
  */
 
-import { getDatabase, normalizeDocument, generateMongoId } from 'core-service';
+import { getDatabase, normalizeDocument, generateMongoId, extractDocumentId, findById } from 'core-service';
 import type { Session, DeviceInfo } from '../types.js';
 import { hashToken, generateRefreshToken, addSeconds } from '../utils.js';
 
@@ -93,8 +93,20 @@ export async function updateSessionForReuse(
   const refreshTokenValue = generateRefreshToken();
   const refreshTokenHash = await hashToken(refreshTokenValue);
   
+  // Use extractDocumentId helper to get session ID, then findById to get document with _id
+  const sessionId = extractDocumentId(session);
+  if (!sessionId) {
+    throw new Error('Session missing ID field');
+  }
+  
+  // Use findById helper to get the document with _id for update
+  const sessionDoc = await findById(db.collection('sessions'), sessionId);
+  if (!sessionDoc || !(sessionDoc as any)._id) {
+    throw new Error('Session document not found');
+  }
+  
   await db.collection('sessions').updateOne(
-    { _id: (session as any)._id },
+    { _id: (sessionDoc as any)._id },
     {
       $set: {
         tokenHash: refreshTokenHash,
@@ -153,8 +165,19 @@ export async function updateSessionLastUsed(session: Session): Promise<void> {
   const db = getDatabase();
   const now = new Date();
   
+  const sessionId = extractDocumentId(session);
+  if (!sessionId) {
+    throw new Error('Session missing ID field');
+  }
+  
+  // Use findById helper to get the document with _id for update
+  const sessionDoc = await findById(db.collection('sessions'), sessionId);
+  if (!sessionDoc || !(sessionDoc as any)._id) {
+    throw new Error('Session document not found');
+  }
+  
   await db.collection('sessions').updateOne(
-    { _id: (session as any)._id },
+    { _id: (sessionDoc as any)._id },
     {
       $set: {
         lastUsedAt: now,
