@@ -25,7 +25,6 @@ import {
   type IntegrationEvent,
   type ResolverContext,
 } from 'core-service';
-import { initializeLedger } from './services/ledger-service.js';
 
 // Import unified event dispatcher (handles both internal events + webhooks)
 import {
@@ -703,16 +702,19 @@ async function main() {
     // Continue - webhooks are optional
   }
   
-  // Initialize ledger system AFTER database connection is established
-  const tenantId = 'default'; // Could be multi-tenant in future
+  // Ledger initialization removed - using simplified architecture (wallets + transactions + transfers)
+  // Wallets are created automatically via createTransferWithTransactions
+  logger.info('Bonus service initialized - using wallets + transactions + transfers architecture');
+  
+  // Setup recovery system (transfer recovery + recovery job)
+  // Bonus operations use createTransferWithTransactions, so they need transfer recovery
   try {
-    await initializeLedger(tenantId);
-    logger.info('Ledger system initialized for bonus service');
-  } catch (error) {
-    logger.error('Failed to initialize ledger system', { error });
-    // Ledger is critical - but we'll let it fail gracefully and log
-    // The service can still run, but ledger operations will fail
-    throw error; // Re-throw as ledger is critical for bonus service
+    const { setupRecovery } = await import('./recovery-setup.js');
+    await setupRecovery();
+    logger.info('✅ Recovery system initialized');
+  } catch (err) {
+    logger.warn('Could not setup recovery system', { error: (err as Error).message });
+    // Don't throw - service can still run without recovery
   }
 
   // Note: User status flags are now stored in auth-service user.metadata

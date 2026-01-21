@@ -36,7 +36,7 @@
  * 
  * 5. **Time-based partitioning** (recommended for millions of tx/day)
  *    - Separate collections per month/year
- *    - Example: wallet_transactions_2024_01, wallet_transactions_2024_02
+ *    - Example: transactions_2024_01, transactions_2024_02 (if partitioning is needed)
  *    - Queries hit smaller datasets
  *    - Easy to archive entire months
  * 
@@ -51,8 +51,8 @@
  *    - Consistent across all entities
  */
 
-import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, getDatabase, deleteCache, deleteCachePattern, logger, validateInput, findOneById, findOneAndUpdateById } from 'core-service';
-import type { Wallet, WalletTransaction, WalletCategory, WalletTransactionType } from '../types.js';
+import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, getDatabase, deleteCache, deleteCachePattern, logger, validateInput, findOneById, findOneAndUpdateById, requireAuth, getUserId, getTenantId, getOrCreateWallet } from 'core-service';
+import type { Wallet, WalletCategory } from '../types.js';
 import { SYSTEM_CURRENCY } from '../constants.js';
 import { emitPaymentEvent } from '../event-dispatcher.js';
 
@@ -107,9 +107,13 @@ interface UserWalletsResponse {
 }
 
 /**
- * Custom resolvers for user wallet operations
+ * Unified wallet resolvers - All wallet balance and transaction queries
+ * Architecture: Wallets + Transactions + Transfers
+ * - Wallets = Source of truth for balances
+ * - Transactions = The ledger (each transaction is a ledger entry)
+ * - Transfers = User-to-user operations (creates 2 transactions)
  */
-export const userWalletResolvers = {
+export const walletResolvers = {
   Query: {
     /**
      * Get all wallets for a user with aggregated totals
@@ -198,64 +202,327 @@ export const userWalletResolvers = {
     },
 
     /**
-     * Get a single wallet balance (simplified)
+     * Get user's wallet balance
+     * Uses wallet directly - wallets are the source of truth
      * 
-     * Query:
-     * ```graphql
-     * query GetWalletBalance($input: JSON) {
-     *   walletBalance(input: $input)
-     * }
-     * ```
-     * 
-     * Variables:
-     * ```json
-     * { "input": { "userId": "player-123", "category": "sports", "currency": "EUR" } }
-     * ```
+     * Supports both formats:
+     * 1. Direct args: walletBalance(userId: String, category: String, currency: String)
+     * 2. JSON input: walletBalance(input: JSON) - for backward compatibility
      */
-    walletBalance: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-      const db = getDatabase();
-      const walletsCollection = db.collection('wallets');
+    walletBalance: async (
+      args: Record<string, unknown>,
+      ctx: ResolverContext
+    ) => {
+      requireAuth(ctx);
       
-      // Handle JSON input (args.input) or direct args
+      // Handle JSON input format (args.input) or direct args
       const input = (args.input as Record<string, unknown>) || args;
       
-      let wallet: any;
+      // Extract parameters from input or direct args
+      const userId = (input.userId as string) || getUserId(ctx);
+      const category = (input.category as string) || (input.subtype as string) || 'main';
+      const currency = (input.currency as string) || SYSTEM_CURRENCY;
+      const walletId = input.walletId as string | undefined;
       
-      if (input.walletId) {
-        // Use optimized findOneById utility (performance-optimized)
-        wallet = await findOneById(walletsCollection, input.walletId as string, {});
-      } else {
-        // Lookup by user + category + currency
-        const userId = (input.userId as string) || ctx.user?.userId;
-        if (!userId) throw new Error('userId or walletId is required');
+      try {
+        const tenantId = getTenantId(ctx) || 'default-tenant';
+        const db = getDatabase();
+        const walletsCollection = db.collection('wallets');
         
-        wallet = await walletsCollection.findOne({
+        let wallet: any;
+        
+        if (walletId) {
+          // Lookup by walletId (if provided)
+          wallet = await walletsCollection.findOne({ id: walletId });
+          if (!wallet) {
+            return null;
+          }
+        } else {
+          // Try to find wallet by userId + currency + category
+          wallet = await walletsCollection.findOne({
+            userId,
+            currency,
+            tenantId,
+            category: category || 'main',
+          });
+          
+          // If not found and category is 'main' (or default), use getOrCreateWallet
+          if (!wallet && (!category || category === 'main')) {
+            wallet = await getOrCreateWallet(userId, currency, tenantId);
+          }
+          
+          // If still not found, return null (non-main categories must be created explicitly)
+          if (!wallet) {
+            return null;
+          }
+        }
+        
+        const balance = (wallet as any).balance || 0;
+        const bonusBalance = (wallet as any).bonusBalance || 0;
+        const lockedBalance = (wallet as any).lockedBalance || 0;
+        const availableBalance = balance - lockedBalance;
+        
+        // Get allowNegative directly from wallet (wallet-level permissions)
+        const allowNegative = (wallet as any).allowNegative ?? false;
+        
+        // Return unified format (supports both GraphQL types)
+        return {
+          walletId: (wallet as any).id,
+          userId: (wallet as any).userId || userId,
+          category: (wallet as any).category || category,
+          currency: (wallet as any).currency || currency,
+          balance,
+          availableBalance,
+          pendingIn: 0, // Not tracked separately - use transactions for pending
+          pendingOut: 0, // Not tracked separately - use transactions for pending
+          allowNegative,
+          // Additional fields for backward compatibility with WalletBalanceResponse type
+          realBalance: balance,
+          bonusBalance,
+          lockedBalance,
+          totalBalance: balance + bonusBalance,
+          withdrawableBalance: balance,
+          status: (wallet as any).status || 'active',
+        };
+      } catch (error) {
+        logger.error('Failed to get wallet balance', { error, userId, category });
+        throw new Error(`Failed to get wallet balance: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    },
+    
+    /**
+     * Get user balances by currency (for multi-currency support)
+     * Uses wallets directly
+     */
+    userBalances: async (
+      args: Record<string, unknown>,
+      ctx: ResolverContext
+    ) => {
+      requireAuth(ctx);
+      const userId = args.userId as string || getUserId(ctx);
+      const currencies = (args.currencies as string[]) || [SYSTEM_CURRENCY];
+      
+      try {
+        const tenantId = getTenantId(ctx) || 'default-tenant';
+        const balances: Array<{
+          currency: string;
+          balance: number;
+          availableBalance: number;
+          allowNegative: boolean;
+        }> = [];
+        
+        for (const currency of currencies) {
+          // Get or create wallet (creates if doesn't exist)
+          const wallet = await getOrCreateWallet(userId, currency, tenantId);
+          
+          const balance = (wallet as any).balance || 0;
+          const lockedBalance = (wallet as any).lockedBalance || 0;
+          const availableBalance = balance - lockedBalance;
+          
+          // Get allowNegative directly from wallet (wallet-level permissions)
+          const allowNegative = (wallet as any).allowNegative ?? false;
+          
+          balances.push({
+            currency,
+            balance,
+            availableBalance,
+            allowNegative,
+          });
+        }
+        
+        return {
           userId,
-          category: (input.category as string) || 'main',
-          currency: (input.currency as string) || SYSTEM_CURRENCY,
-        });
+          balances,
+        };
+      } catch (error) {
+        logger.error('Failed to get user balances', { error, userId });
+        throw new Error(`Failed to get user balances: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    },
+    
+    /**
+     * ✅ PERFORMANT: Get balances for multiple users in one query
+     * Uses wallets directly - optimized for admin dashboard
+     */
+    bulkWalletBalances: async (
+      args: Record<string, unknown>,
+      ctx: ResolverContext
+    ) => {
+      requireAuth(ctx);
+      const userIds = (args.userIds as string[]) || [];
+      const subtype = (args.subtype as string) || 'main';
+      const currency = (args.currency as string) || SYSTEM_CURRENCY;
+      
+      if (!Array.isArray(userIds) || userIds.length === 0) {
+        return {
+          balances: [],
+        };
       }
       
-      if (!wallet) {
-        return null;
+      try {
+        const tenantId = getTenantId(ctx) || 'default-tenant';
+        const db = getDatabase();
+        
+        // Fetch existing wallets in one query
+        const wallets = await db.collection('wallets').find(
+          { userId: { $in: userIds }, currency, category: subtype },
+          { projection: { userId: 1, id: 1, balance: 1, bonusBalance: 1, lockedBalance: 1, allowNegative: 1 } }
+        ).toArray();
+        
+        // Create a map for quick lookup
+        const walletMap = new Map<string, any>();
+        wallets.forEach((wallet: any) => {
+          walletMap.set(wallet.userId, wallet);
+        });
+        
+        // Build results - get or create wallets for users that don't have one
+        const balances: Array<{
+          userId: string;
+          walletId: string;
+          balance: number;
+          availableBalance: number;
+          pendingIn: number;
+          pendingOut: number;
+          allowNegative: boolean;
+        }> = [];
+        
+        for (const userId of userIds) {
+          let wallet = walletMap.get(userId);
+          
+          // Get or create wallet if it doesn't exist
+          if (!wallet) {
+            wallet = await getOrCreateWallet(userId, currency, tenantId);
+          }
+          
+          const balance = wallet.balance || 0;
+          const lockedBalance = wallet.lockedBalance || 0;
+          const availableBalance = balance - lockedBalance;
+          
+          // Get allowNegative directly from wallet (wallet-level permissions)
+          const allowNegative = wallet.allowNegative ?? false;
+          
+          balances.push({
+            userId,
+            walletId: wallet.id,
+            balance,
+            availableBalance,
+            pendingIn: 0,
+            pendingOut: 0,
+            allowNegative,
+          });
+        }
+        
+        return {
+          balances,
+        };
+      } catch (error) {
+        logger.error('Failed to get bulk wallet balances', { error, userIds });
+        throw new Error(`Failed to get bulk wallet balances: ${error instanceof Error ? error.message : String(error)}`);
       }
+    },
+    
+    /**
+     * ✅ Get transactions with filtering and pagination
+     * Uses transactions collection (transactions ARE the ledger)
+     * For audit, reconciliation, and debugging purposes
+     */
+    transactionHistory: async (
+      args: Record<string, unknown>,
+      ctx: ResolverContext
+    ) => {
+      requireAuth(ctx);
+      const db = getDatabase();
+      const transactionsCollection = db.collection('transactions');
+      
+      const first = (args.first as number) || 100;
+      const skip = (args.skip as number) || 0;
+      const filter = (args.filter as Record<string, unknown>) || {};
+      
+      // Build MongoDB query
+      const query: Record<string, unknown> = {};
+      
+      // Filter by charge type if specified
+      if (filter.charge) {
+        query.charge = filter.charge;
+      }
+      
+      // Filter by wallet if specified
+      if (filter.walletId) {
+        query.walletId = filter.walletId;
+      }
+      
+      // Filter by userId if specified
+      if (filter.userId) {
+        query.userId = filter.userId;
+      }
+      
+      // Filter by currency if specified
+      if (filter.currency) {
+        query.currency = filter.currency;
+      }
+      
+      // Filter by status if specified
+      if (filter.status) {
+        query.status = filter.status;
+      }
+      
+      // Filter by externalRef if specified
+      if (filter.externalRef) {
+        query.externalRef = { $regex: filter.externalRef, $options: 'i' };
+      }
+      
+      // Filter by date range if specified
+      if (filter.dateFrom || filter.dateTo) {
+        const dateFilter: Record<string, unknown> = {};
+        if (filter.dateFrom) {
+          dateFilter.$gte = new Date(filter.dateFrom as string);
+        }
+        if (filter.dateTo) {
+          const toDate = new Date(filter.dateTo as string);
+          toDate.setHours(23, 59, 59, 999); // Include full day
+          dateFilter.$lte = toDate;
+        }
+        query.createdAt = dateFilter;
+      }
+      
+      // Execute query
+      const [nodes, totalCount] = await Promise.all([
+        transactionsCollection
+          .find(query)
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(first)
+          .toArray(),
+        transactionsCollection.countDocuments(query),
+      ]);
       
       return {
-        walletId: wallet.id,
-        userId: wallet.userId,
-        category: wallet.category || 'main',
-        currency: wallet.currency,
-        realBalance: wallet.balance || 0,
-        bonusBalance: wallet.bonusBalance || 0,
-        lockedBalance: wallet.lockedBalance || 0,
-        totalBalance: (wallet.balance || 0) + (wallet.bonusBalance || 0),
-        withdrawableBalance: wallet.balance || 0,
-        status: wallet.status,
+        nodes: nodes.map((tx: any) => ({
+          _id: tx._id?.toString() || tx.id,
+          type: tx.charge, // debit or credit
+          fromWalletId: tx.charge === 'debit' ? tx.walletId : null, // For debit, walletId is the source
+          toWalletId: tx.charge === 'credit' ? tx.walletId : null, // For credit, walletId is the destination
+          amount: tx.amount,
+          currency: tx.currency,
+          description: tx.meta?.description,
+          externalRef: tx.externalRef,
+          status: tx.status || 'completed',
+          createdAt: tx.createdAt,
+          metadata: tx.meta,
+        })),
+        totalCount,
+        pageInfo: {
+          hasNextPage: skip + first < totalCount,
+          hasPreviousPage: skip > 0,
+        },
       };
     },
   },
   Mutation: {},
 };
+
+// Export with "userWallet" name for backward compatibility
+export const userWalletResolvers = walletResolvers;
 
 // ═══════════════════════════════════════════════════════════════════
 // Wallet Types & Validation
@@ -266,6 +533,8 @@ interface CreateWalletInput {
   tenantId?: string;
   currency: string;
   category?: string;  // Optional: 'main', 'casino', 'sports', etc.
+  allowNegative?: boolean;  // Optional: allow wallet to go negative
+  creditLimit?: number;  // Optional: credit limit for negative balances
 }
 
 type WalletCtx = SagaContext<Wallet, CreateWalletInput>;
@@ -275,6 +544,8 @@ const walletSchema = type({
   currency: 'string',
   'tenantId?': 'string',
   'category?': 'string',
+  'allowNegative?': 'boolean',
+  'creditLimit?': 'number',
 });
 
 const walletSaga = [
@@ -308,9 +579,11 @@ const walletSaga = [
       
       const wallet: Wallet = {
         id,
-        tenantId: input.tenantId || 'default',
+        tenantId: input.tenantId || 'default-tenant',
         userId: input.userId,
         currency: input.currency as any,
+        allowNegative: input.allowNegative ?? false,
+        creditLimit: input.creditLimit,
         category: (input.category || 'main') as WalletCategory,
         
         // Balances start at 0
@@ -371,11 +644,13 @@ export const walletService = createService<Wallet, CreateWalletInput>({
         lifetimeWithdrawals: Float!
         lifetimeFees: Float!
         lastActivityAt: String!
+        allowNegative: Boolean
+        creditLimit: Float
       }
       type WalletConnection { nodes: [Wallet!]! totalCount: Int! pageInfo: PageInfo! }
       type CreateWalletResult { success: Boolean! wallet: Wallet sagaId: ID! errors: [String!] executionTimeMs: Int }
     `,
-    graphqlInput: `input CreateWalletInput { userId: String! currency: String! category: String tenantId: String }`,
+    graphqlInput: `input CreateWalletInput { userId: String! currency: String! category: String tenantId: String allowNegative: Boolean creditLimit: Float }`,
     validateInput: (input) => {
       const result = walletSchema(input);
       return validateInput(result) as CreateWalletInput | { errors: string[] };
@@ -398,565 +673,151 @@ export const walletService = createService<Wallet, CreateWalletInput>({
   },
 });
 
-// ═══════════════════════════════════════════════════════════════════
-// Wallet Transaction Types & Validation (OPTIMIZED FOR SCALE)
-// ═══════════════════════════════════════════════════════════════════
-
 /**
- * Optimizations applied:
- * 1. Generic reference: refId + refType instead of bonusId/betId/etc
- * 2. Removed balanceBefore: Can be calculated from amount + isCredit
- * 3. Removed updatedAt: Transactions are immutable
- * 4. Compact metadata: Only essential fields
+ * GraphQL type definitions for all wallet queries
+ * Architecture: Wallets + Transactions + Transfers
  */
-interface CreateWalletTxInput {
-  walletId: string;
-  userId: string;
-  type: string;           // WalletTransactionType (deposit, withdrawal, etc)
-  balanceType: string;    // 'real' | 'bonus' | 'locked'
-  currency: string;
-  amount: number;         // Amount in cents (always positive)
-  balance?: number;       // Wallet balance after transaction (calculated by saga if not provided)
-  description?: string;
+export const walletTypes = `
+  type WalletBalance {
+    walletId: String!
+    userId: String!
+    category: String!
+    currency: String!
+    balance: Float!
+    availableBalance: Float!
+    pendingIn: Float!
+    pendingOut: Float!
+    allowNegative: Boolean!
+    # Additional fields for backward compatibility
+    realBalance: Float!
+    bonusBalance: Float!
+    lockedBalance: Float!
+    totalBalance: Float!
+    withdrawableBalance: Float!
+    status: String!
+  }
   
-  // Generic reference pattern (extensible for any entity)
-  refId?: string;         // Reference ID (bonus, bet, game, promotion, etc.)
-  refType?: string;       // Reference type ('bonus', 'bet', 'game', 'promo', etc.)
-}
+  type UserBalance {
+    currency: String!
+    balance: Float!
+    availableBalance: Float!
+    allowNegative: Boolean!
+  }
+  
+  type UserBalances {
+    userId: String!
+    balances: [UserBalance!]!
+  }
+  
+  type BulkWalletBalance {
+    userId: String!
+    walletId: String!
+    balance: Float!
+    availableBalance: Float!
+    pendingIn: Float!
+    pendingOut: Float!
+    allowNegative: Boolean!
+  }
+  
+  type BulkWalletBalancesResponse {
+    balances: [BulkWalletBalance!]!
+  }
+  
+  type TransactionHistory {
+    _id: String!
+    type: String!
+    fromWalletId: String
+    toWalletId: String
+    amount: Float!
+    currency: String!
+    description: String
+    externalRef: String
+    status: String!
+    createdAt: String!
+    metadata: JSON
+  }
+  
+  type TransactionHistoryConnection {
+    nodes: [TransactionHistory!]!
+    totalCount: Int!
+    pageInfo: PageInfo!
+  }
+  
+  extend type Query {
+    """
+    Get all wallets for a user with aggregated totals
+    """
+    userWallets(input: JSON): UserWalletsResponse
+    
+    """
+    Get user's wallet balance
+    Uses wallets collection (source of truth)
+    
+    Supports both formats:
+    - Direct args: walletBalance(userId: String, category: String, currency: String)
+    - JSON input: walletBalance(input: JSON) - for backward compatibility
+    """
+    walletBalance(
+      userId: String
+      category: String
+      currency: String
+      input: JSON
+    ): WalletBalance
+    
+    """
+    Get user balances for multiple currencies
+    """
+    userBalances(
+      userId: String
+      currencies: [String!]
+    ): UserBalances
+    
+    """
+    ✅ PERFORMANT: Get balances for multiple users in one query
+    Optimized for admin dashboard - fetches all balances efficiently
+    """
+    bulkWalletBalances(
+      userIds: [String!]!
+      category: String
+      currency: String
+    ): BulkWalletBalancesResponse!
+    
+    """
+    ✅ Get transactions with filtering and pagination
+    Uses transactions collection (transactions ARE the ledger)
+    For audit, reconciliation, and debugging purposes
+    """
+    transactionHistory(
+      first: Int
+      skip: Int
+      filter: JSON
+    ): TransactionHistoryConnection!
+  }
+`;
 
-type WalletTxCtx = SagaContext<WalletTransaction, CreateWalletTxInput>;
+// Export with "ledger" names for backward compatibility with test scripts
+// These map old GraphQL query names to new implementations
+export const ledgerResolvers = {
+  Query: {
+    ...walletResolvers.Query,
+    // Legacy query aliases (for test scripts that use old names)
+    ledgerAccountBalance: walletResolvers.Query.walletBalance,
+    bulkLedgerBalances: walletResolvers.Query.bulkWalletBalances,
+    ledgerTransactions: walletResolvers.Query.transactionHistory,
+  },
+  Mutation: walletResolvers.Mutation,
+};
 
-const walletTxSchema = type({
-  walletId: 'string',
-  userId: 'string',
-  type: 'string',
-  balanceType: '"real" | "bonus" | "locked"',
-  currency: 'string',
-  amount: 'number > 0',
-  'balance?': 'number >= 0',  // Optional - calculated by saga if not provided
-  'description?': 'string',
-  'refId?': 'string',
-  'refType?': 'string',
-});
+// Export types with both old and new names for backward compatibility
+export const ledgerTypes = walletTypes + `
+  # Legacy type aliases for backward compatibility
+  type LedgerAccountBalance = WalletBalance
+  type BulkLedgerBalance = BulkWalletBalance
+  type BulkLedgerBalancesResponse = BulkWalletBalancesResponse
+  type LedgerTransaction = TransactionHistory
+  type LedgerTransactionConnection = TransactionHistoryConnection
+`;
 
-const walletTxSaga = [
-  {
-    name: 'loadWallet',
-    critical: true,
-    execute: async ({ input, data, ...ctx }: WalletTxCtx): Promise<WalletTxCtx> => {
-      // Determine transaction type
-      const creditTypes = ['deposit', 'win', 'refund', 'bonus_credit', 'transfer_in', 'release'];
-      const isCredit = creditTypes.includes(input.type);
-      data.isCredit = isCredit;
-      
-      // Load wallet from DB to get real balance
-      const db = getDatabase();
-      const walletsCollection = db.collection('wallets');
-      // Use optimized findOneById utility (performance-optimized)
-      const walletDoc = await findOneById(walletsCollection, input.walletId, {});
-      
-      if (!walletDoc) {
-        throw new Error(`Wallet not found: ${input.walletId}`);
-      }
-      data.wallet = walletDoc;
-      
-      const wallet = walletDoc as unknown as Wallet;
-      
-      // Determine which balance to use based on balanceType
-      const balanceField = input.balanceType === 'bonus'
-        ? 'bonusBalance'
-        : input.balanceType === 'locked'
-          ? 'lockedBalance'
-          : 'balance';
-      const currentBalance = (wallet as any)[balanceField] || 0;
-
-      data.balanceField = balanceField;
-      data.currentBalance = currentBalance; // Store for calculating balance
-
-      // For debit operations, check balance with allowNegative permission
-      // Note: The actual balance check with permissions happens in updateWalletBalance step
-      // This is just a preliminary check - we don't throw here if allowNegative might be true
-      // The real check happens later when we call checkUserBalance which reads permissions from auth_service
-      
-      return { ...ctx, input, data };
-    },
-  },
-  {
-    name: 'updateWalletBalance',
-    critical: true,
-    execute: async ({ input, data, ...ctx }: WalletTxCtx): Promise<WalletTxCtx> => {
-      const db = getDatabase();
-      const walletsCollection = db.collection('wallets');
-      const isCredit = data.isCredit as boolean;
-      const balanceField = data.balanceField as string;
-      
-      // For real balance operations, use ledger (source of truth)
-      if (balanceField === 'balance') {
-        try {
-          const { 
-            getLedger, 
-            getOrCreateUserAccount,
-            syncWalletBalanceFromLedger 
-          } = await import('./ledger-service.js');
-          const ledger = getLedger();
-          const wallet = data.wallet as any;
-          
-          // Simplified: Everything is a user wallet - check permissions for negative balance
-          // Check user balance if debit operation
-          let allowNegative = false;
-          if (!isCredit) {
-            const { getOrCreateUserAccount, checkUserBalance } = await import('./ledger-service.js');
-            const balanceCheck = await checkUserBalance(input.userId, input.amount, input.currency, 'main');
-            allowNegative = balanceCheck.allowNegative;
-            if (!balanceCheck.sufficient && !balanceCheck.allowNegative) {
-              throw new Error(
-                `Insufficient balance. Available: ${balanceCheck.available}, Required: ${input.amount}`
-              );
-            }
-          }
-          data.allowNegative = allowNegative;
-          
-          {
-            // User wallet operations - record in ledger FIRST (ledger is source of truth)
-            // For wallet transactions like bet, win, etc., we need to record them in ledger
-            // Skip ledger recording for deposit/withdrawal (handled by their own sagas)
-            const skipLedgerTypes = ['deposit', 'withdrawal'];
-            // For transfer_out/transfer_in, handle as user-to-user transfers
-            // Extract the other user ID from description (format: "Transfer to/from {userId}")
-            const isTransfer = input.type === 'transfer_out' || input.type === 'transfer_in';
-            
-            if (isTransfer && input.description) {
-              try {
-                // Extract user ID from description (e.g., "Transfer to 4fc6cac9-..." or "Transfer from 89166b84-...")
-                const transferMatch = input.description.match(/Transfer (to|from) ([a-f0-9-]+)/i);
-                if (transferMatch) {
-                  const direction = transferMatch[1].toLowerCase(); // "to" or "from"
-                  const otherUserId = transferMatch[2];
-                  
-                  const { recordUserTransferLedgerEntry } = await import('./ledger-service.js');
-                  const wallet = data.wallet as any;
-                  const tenantId = wallet?.tenantId || 'default';
-                  
-                  if (input.type === 'transfer_out') {
-                    // transfer_out: from input.userId to otherUserId
-                    await recordUserTransferLedgerEntry(
-                      input.userId,
-                      otherUserId,
-                      input.amount,
-                      input.currency,
-                      tenantId,
-                      input.description,
-                      input.refId || `transfer-${input.userId}-${otherUserId}-${Date.now()}`
-                    );
-                  } else {
-                    // transfer_in: from otherUserId to input.userId
-                    await recordUserTransferLedgerEntry(
-                      otherUserId,
-                      input.userId,
-                      input.amount,
-                      input.currency,
-                      tenantId,
-                      input.description,
-                      input.refId || `transfer-${otherUserId}-${input.userId}-${Date.now()}`
-                    );
-                  }
-                  
-                  // Mark that we should sync from ledger instead of direct update
-                  (data as any).syncFromLedger = true;
-                  (data as any).skipDirectUpdate = true;
-                  
-                  logger.info('User-to-user transfer recorded in ledger', {
-                    userId: input.userId,
-                    otherUserId,
-                    type: input.type,
-                    amount: input.amount,
-                    currency: input.currency,
-                  });
-                } else {
-                  // Fallback: use recordWalletTransactionLedgerEntry if we can't extract user ID
-                  logger.warn('Could not extract user ID from transfer description, using fallback', {
-                    description: input.description,
-                  });
-                  const { recordWalletTransactionLedgerEntry } = await import('./ledger-service.js');
-                  const wallet = data.wallet as any;
-                  const tenantId = wallet?.tenantId || 'default';
-                  
-                  await recordWalletTransactionLedgerEntry(
-                    input.userId,
-                    input.type,
-                    input.amount,
-                    input.currency,
-                    tenantId,
-                    undefined,
-                    input.description
-                  );
-                  
-                  (data as any).syncFromLedger = true;
-                  (data as any).skipDirectUpdate = true;
-                }
-              } catch (transferError: any) {
-                logger.error('Failed to record user-to-user transfer in ledger', {
-                  error: transferError?.message || String(transferError),
-                  userId: input.userId,
-                  type: input.type,
-                  amount: input.amount,
-                });
-                // Don't fail - allow direct wallet update as fallback
-                (data as any).skipDirectUpdate = false;
-              }
-            } else if (!skipLedgerTypes.includes(input.type)) {
-              try {
-                const { recordWalletTransactionLedgerEntry } = await import('./ledger-service.js');
-                const wallet = data.wallet as any;
-                const tenantId = wallet?.tenantId || 'default';
-                
-                // Record wallet transaction in ledger BEFORE updating wallet
-                // This ensures ledger is always the source of truth
-                await recordWalletTransactionLedgerEntry(
-                  input.userId,
-                  input.type,
-                  input.amount,
-                  input.currency,
-                  tenantId,
-                  undefined, // walletTransactionId will be set after creation
-                  input.description
-                );
-                
-                // Mark that we should sync from ledger instead of direct update
-                (data as any).syncFromLedger = true;
-                (data as any).skipDirectUpdate = true;
-                
-                logger.info('Wallet transaction recorded in ledger', {
-                  userId: input.userId,
-                  type: input.type,
-                  amount: input.amount,
-                  currency: input.currency,
-                });
-              } catch (ledgerError: any) {
-                // If ledger recording fails, log error but allow wallet update as fallback
-                // This ensures backward compatibility
-                logger.error('Failed to record wallet transaction in ledger', {
-                  error: ledgerError?.message || String(ledgerError),
-                  stack: ledgerError?.stack,
-                  userId: input.userId,
-                  type: input.type,
-                  amount: input.amount,
-                });
-                // Don't fail - allow direct wallet update as fallback
-                (data as any).skipDirectUpdate = false;
-              }
-            } else {
-              // For deposit/withdrawal, just check balance (ledger entry created by their sagas)
-              const userAccountId = await getOrCreateUserAccount(input.userId, 'real', input.currency);
-              
-              // Check balance for debits
-              if (!isCredit) {
-                const balance = await ledger.getBalance(userAccountId);
-                if (balance.balance < input.amount) {
-                  throw new Error(
-                    `Insufficient balance in ledger. Available: ${balance.balance}, Required: ${input.amount}`
-                  );
-                }
-              }
-            }
-          }
-        } catch (ledgerError) {
-          // If ledger check fails, fall back to wallet check (for backward compatibility)
-          logger.warn('Ledger check failed, using wallet balance', { error: ledgerError });
-        }
-      }
-      
-      // Check if we should skip direct update (for ledger-recorded transactions)
-      let skipDirectUpdate = (data as any).skipDirectUpdate === true;
-      let balance: number = 0;
-      
-      if (skipDirectUpdate && balanceField === 'balance') {
-        // For ledger-recorded transactions, sync directly from ledger (don't update wallet directly)
-        // Wait for ledger transaction to be committed
-        await new Promise(resolve => setTimeout(resolve, 300));
-        
-        try {
-          const { syncWalletBalanceFromLedger } = await import('./ledger-service.js');
-          await syncWalletBalanceFromLedger(input.userId, input.walletId, input.currency);
-          
-          // Get the updated balance from wallet after sync
-          // Use optimized findOneById utility (performance-optimized)
-          const syncedWallet = await findOneById(walletsCollection, input.walletId, {});
-          balance = (syncedWallet as any)?.[balanceField] || 0;
-          
-          logger.info('Wallet balance synced from ledger (skipped direct update)', {
-            walletId: input.walletId,
-            userId: input.userId,
-            balance,
-          });
-        } catch (syncError) {
-          logger.error('Failed to sync wallet balance from ledger', { 
-            error: syncError,
-            walletId: input.walletId,
-            userId: input.userId,
-          });
-          // Fall back to direct update if sync fails
-          skipDirectUpdate = false;
-        }
-      }
-      
-      if (!skipDirectUpdate) {
-        // Calculate the delta (positive for credit, negative for debit)
-        const delta = isCredit ? input.amount : -input.amount;
-        
-        // Use atomic $inc for concurrency safety
-        const incUpdate: Record<string, number> = { [balanceField]: delta };
-        
-        // Update lifetime stats atomically
-        if (input.type === 'deposit') incUpdate.lifetimeDeposits = input.amount;
-        else if (input.type === 'withdrawal') incUpdate.lifetimeWithdrawals = input.amount;
-        
-        // Build query - for debits, add balance check condition only if allowNegative is false
-        const query: Record<string, unknown> = { id: input.walletId };
-        const allowNegative = (data.allowNegative as boolean) || false;
-        if (!isCredit && !allowNegative) {
-          // Only check balance if user cannot go negative
-          query[balanceField] = { $gte: input.amount };
-        }
-        
-        // Atomic update
-        const result = await walletsCollection.findOneAndUpdate(
-          query,
-          { 
-            $inc: incUpdate,
-            $set: { lastActivityAt: new Date(), updatedAt: new Date() } 
-          },
-          { returnDocument: 'after' }
-        );
-        
-        if (!result) {
-          throw new Error(
-            !isCredit 
-              ? `Insufficient funds for ${input.type}. Required: ${input.amount}`
-              : `Failed to update wallet balance`
-          );
-        }
-        
-        balance = (result as any)[balanceField] || 0;
-        
-        // Sync wallet balance from ledger for real balance (if not already synced)
-        // IMPORTANT: Sync AFTER wallet update to ensure ledger transaction is complete
-        if (balanceField === 'balance') {
-          try {
-            const { syncWalletBalanceFromLedger } = await import('./ledger-service.js');
-            // Small delay to ensure ledger transaction is committed
-            await new Promise(resolve => setTimeout(resolve, 100));
-            await syncWalletBalanceFromLedger(input.userId, input.walletId, input.currency);
-            // Re-read balance after sync to get the correct value
-            // Use optimized findOneById utility (performance-optimized)
-          const syncedWallet = await findOneById(walletsCollection, input.walletId, {});
-            if (syncedWallet) {
-              balance = (syncedWallet as any)[balanceField] || balance;
-            }
-          } catch (syncError) {
-            logger.warn('Could not sync wallet balance from ledger', { error: syncError });
-            // Don't fail the transaction if sync fails - wallet balance was already updated
-          }
-        }
-      } else {
-        // For ledger-recorded transactions, sync wallet from ledger (don't update directly)
-        // Wait for ledger transaction to be committed
-        await new Promise(resolve => setTimeout(resolve, 200));
-        
-        try {
-          const { syncWalletBalanceFromLedger } = await import('./ledger-service.js');
-          await syncWalletBalanceFromLedger(input.userId, input.walletId, input.currency);
-          
-          // Get the updated balance from wallet after sync
-          // Use optimized findOneById utility (performance-optimized)
-          const syncedWallet = await findOneById(walletsCollection, input.walletId, {});
-          balance = (syncedWallet as any)?.[balanceField] || 0;
-          
-          logger.info('Wallet balance synced from ledger (ledger-recorded transaction)', {
-            walletId: input.walletId,
-            userId: input.userId,
-            type: input.type,
-            balance,
-          });
-        } catch (syncError) {
-          logger.error('Failed to sync wallet balance from ledger after ledger transaction', { 
-            error: syncError,
-            walletId: input.walletId,
-            userId: input.userId,
-            type: input.type,
-          });
-          // Fall back to direct update if sync fails
-          const delta = isCredit ? input.amount : -input.amount;
-          // Use optimized findOneAndUpdateById utility (performance-optimized)
-          const result = await findOneAndUpdateById(
-            walletsCollection,
-            input.walletId,
-            { 
-              $inc: { [balanceField]: delta },
-              $set: { lastActivityAt: new Date(), updatedAt: new Date() } 
-            },
-            {},
-            { returnDocument: 'after' }
-          );
-          balance = result ? ((result as any)[balanceField] || 0) : 0;
-        }
-      }
-      
-      // Update input with calculated balance (will be stored in transaction)
-      input.balance = balance;
-      
-      // Invalidate ALL wallet caches (single + lists)
-      await deleteCache(`wallets:id:${input.walletId}`);
-      await deleteCachePattern('wallets:list:*'); // Invalidate all list caches
-      
-      return { ...ctx, input, data };
-    },
-    compensate: async ({ input, data }: WalletTxCtx) => {
-      const db = getDatabase();
-      const walletsCollection = db.collection('wallets');
-      const balanceField = input.balanceType === 'bonus' 
-        ? 'bonusBalance' 
-        : input.balanceType === 'locked' 
-          ? 'lockedBalance' 
-          : 'balance';
-      
-      const isCredit = data.isCredit as boolean;
-      const reverseDelta = isCredit ? -input.amount : input.amount;
-      
-      await walletsCollection.updateOne(
-        { id: input.walletId },
-        { $inc: { [balanceField]: reverseDelta }, $set: { updatedAt: new Date() } }
-      );
-    },
-  },
-  {
-    name: 'createTransaction',
-    critical: true,
-    execute: async ({ input, data, ...ctx }: WalletTxCtx): Promise<WalletTxCtx> => {
-      const repo = data._repository as Repository<WalletTransaction>;
-      const id = (data._generateId as typeof generateId)();
-      
-      const transaction: WalletTransaction = {
-        id,
-        walletId: input.walletId,
-        userId: input.userId,
-        tenantId: 'default',
-        type: input.type as WalletTransactionType,
-        balanceType: input.balanceType as 'real' | 'bonus' | 'locked',
-        currency: input.currency as any,
-        amount: input.amount,
-        balance: input.balance, // Wallet balance after transaction
-        description: input.description,
-        // Generic reference pattern (extensible for any entity)
-        refId: input.refId,
-        refType: input.refType,
-      } as WalletTransaction;
-      
-      await repo.create(transaction);
-      return { ...ctx, input, data, entity: transaction };
-    },
-    compensate: async ({ entity, data }: WalletTxCtx) => {
-      if (entity) {
-        const repo = data._repository as Repository<WalletTransaction>;
-        await repo.delete(entity.id);
-      }
-    },
-  },
-  {
-    name: 'emitEvent',
-    critical: false, // Non-critical - transaction is already saved
-    execute: async ({ input, entity, data }: WalletTxCtx): Promise<WalletTxCtx> => {
-      if (!entity) return { input, entity, data } as WalletTxCtx;
-      
-      // Emit event for cross-service integration + webhooks (unified)
-      const eventType = input.type === 'deposit' 
-        ? 'wallet.deposit.completed'
-        : input.type === 'withdrawal'
-          ? 'wallet.withdrawal.completed'
-          : `wallet.${input.type}.completed`;
-      
-      try {
-        // Use unified emitter - sends to both internal services AND webhooks
-        await emitPaymentEvent(eventType as any, entity.tenantId, entity.userId, {
-          transactionId: entity.id,
-          walletId: entity.walletId,
-          type: entity.type,
-          amount: entity.amount,
-          currency: entity.currency,
-          balance: entity.balance,
-          isFirstDeposit: data.isFirstDeposit, // For bonus service
-        });
-      } catch (err) {
-        // Log but don't fail - event emission is non-critical
-        logger.warn(`Failed to emit ${eventType}`, { error: err });
-      }
-      
-      return { input, entity, data } as WalletTxCtx;
-    },
-  },
-];
-
-export const walletTransactionService = createService<WalletTransaction, CreateWalletTxInput>({
-  name: 'walletTransaction',
-  entity: {
-    name: 'walletTransaction',
-    collection: 'wallet_transactions',
-    graphqlType: `
-      type WalletTransaction {
-        id: ID!
-        walletId: String!
-        userId: String!
-        type: String!
-        balanceType: String!
-        currency: String!
-        amount: Float!
-        balance: Float!
-        refId: String
-        refType: String
-        description: String
-        createdAt: String!
-      }
-      type WalletTransactionConnection { nodes: [WalletTransaction!]! totalCount: Int! pageInfo: PageInfo! }
-      type CreateWalletTransactionResult { success: Boolean! walletTransaction: WalletTransaction sagaId: ID! errors: [String!] executionTimeMs: Int }
-    `,
-    graphqlInput: `input CreateWalletTransactionInput {
-      walletId: String!
-      userId: String!
-      type: String!
-      balanceType: String!
-      currency: String!
-      amount: Float!
-      description: String
-      refId: String
-      refType: String
-    }`,
-    validateInput: (input) => {
-      const result = walletTxSchema(input);
-      return validateInput(result) as CreateWalletTxInput | { errors: string[] };
-    },
-    indexes: [
-      // Core queries (wallet history)
-      { fields: { walletId: 1, createdAt: -1 } },
-      { fields: { userId: 1, currency: 1, createdAt: -1 } },
-      { fields: { userId: 1, type: 1, createdAt: -1 } },
-      
-      // Generic reference lookups (replaces transactionId, bonusId, betId indexes)
-      { fields: { refType: 1, refId: 1 } },
-      
-      // RECOMMENDED: TTL index for auto-archiving old transactions
-      // Automatically delete transactions older than 2 years to manage collection size
-      // Uncomment in production:
-      // { fields: { createdAt: 1 }, options: { expireAfterSeconds: 63072000 } }, // 2 years
-      
-      // RECOMMENDED: Partitioning strategy for very high volume
-      // Create separate collections per month/year: wallet_transactions_2024_01, etc.
-      // Implement in repository layer or use MongoDB sharding
-    ],
-  },
-  saga: walletTxSaga,
-  // Transactions require MongoDB replica set (default in docker-compose)
-  sagaOptions: {
-    useTransaction: process.env.MONGO_TRANSACTIONS !== 'false',
-    maxRetries: 3,
-  },
-});
+// Export walletBalanceResolvers and walletBalanceTypes as aliases for backward compatibility
+export const walletBalanceResolvers = walletResolvers;
+export const walletBalanceTypes = walletTypes;

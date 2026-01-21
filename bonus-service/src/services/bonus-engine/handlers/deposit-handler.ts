@@ -8,7 +8,11 @@ import { getDatabase } from 'core-service';
 import type { BonusTemplate, BonusType } from '../../../types.js';
 import { BaseBonusHandler } from '../base-handler.js';
 import type { BonusContext, EligibilityResult } from '../types.js';
-import { hasMadeFirstDeposit } from '../user-status.js';
+import { 
+  hasMadeFirstDeposit,
+  hasMadeFirstPurchase,
+  hasCompletedFirstAction,
+} from '../user-status.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // First Deposit Handler
@@ -160,7 +164,6 @@ export class FirstPurchaseHandler extends BaseBonusHandler {
     }
 
     // Performance-optimized check: Use user status flag
-    const { hasMadeFirstPurchase } = await import('../user-status.js');
     const hasPurchased = await hasMadeFirstPurchase(context.userId, context.tenantId);
     
     if (hasPurchased) {
@@ -207,7 +210,6 @@ export class FirstActionHandler extends BaseBonusHandler {
     }
 
     // Performance-optimized check: Use user status flag
-    const { hasCompletedFirstAction } = await import('../user-status.js');
     const hasAction = await hasCompletedFirstAction(context.userId, context.tenantId);
     
     if (hasAction) {

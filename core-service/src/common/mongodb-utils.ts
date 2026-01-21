@@ -13,7 +13,7 @@ import { logger } from './logger.js';
 
 // Re-export MongoDB types for convenience
 export { ObjectId } from 'mongodb';
-export type { Collection, Filter, Document } from 'mongodb';
+export type { Collection, Filter, Document, ClientSession } from 'mongodb';
 
 // ═══════════════════════════════════════════════════════════════════
 // ObjectId Utilities

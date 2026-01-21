@@ -295,11 +295,13 @@ function buildSchema(
     logs: LogType,
   };
 
-  // Parse and merge type definitions from all services FIRST
+  // Parse and merge type definitions from all services
+  // Note: JSON scalar is already added to schema.types array (JSONScalar), so we don't declare it in SDL
+  // Declaring it in SDL would cause "Type JSON already exists" error
   let allTypeDefs = '';
   for (const svc of services) {
     if (svc.types) {
-      allTypeDefs += '\n' + svc.types;
+      allTypeDefs += (allTypeDefs ? '\n' : '') + svc.types;
     }
   }
 
@@ -388,12 +390,23 @@ function buildSchema(
     try {
       const typeDoc = parse(allTypeDefs);
       baseSchema = extendSchema(baseSchema, typeDoc);
-      logger.info('Successfully extended schema with service type definitions');
+      logger.info('Successfully extended schema with service type definitions', {
+        typeCount: Object.keys(baseSchema.getTypeMap()).length,
+        hasMutations: baseSchema.getMutationType() ? Object.keys(baseSchema.getMutationType()!.getFields()).length : 0,
+      });
     } catch (error: any) {
       // Even if extendSchema throws, it might have partially extended the schema
       // Check if mutations were added by inspecting the extended schema
       const tempExtendedMutation = baseSchema.getMutationType();
       const hasMutations = tempExtendedMutation && Object.keys(tempExtendedMutation.getFields()).length > 0;
+      
+      logger.error('Schema extension error', { 
+        error: error.message,
+        stack: error.stack,
+        hasMutations,
+        typeDefsLength: allTypeDefs.length,
+        typeDefsPreview: allTypeDefs.substring(0, 500),
+      });
       
       if (hasMutations) {
         logger.warn('Schema extension had warnings but mutations were added', { 
@@ -401,10 +414,11 @@ function buildSchema(
         });
         // Schema was extended despite the error - continue using it
       } else {
-        logger.warn('Schema extension failed and no mutations found', { 
+        logger.error('Schema extension failed and no mutations found', { 
           error: error.message,
         });
         // Schema extension truly failed - will need fallback
+        throw error; // Re-throw to prevent using broken schema
       }
     }
   }

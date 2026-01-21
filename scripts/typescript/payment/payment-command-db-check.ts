@@ -15,11 +15,12 @@
  *   npx tsx payment-command-db-check.ts create-index        # Create unique indexes
  *   npx tsx payment-command-db-check.ts fix-index          # Fix/recreate indexes
  *   npx tsx payment-command-db-check.ts remove-duplicates  # Remove duplicate transactions
+ *   npx tsx payment-command-db-check.ts fix-wallet-allownegative  # Fix wallets with incorrect allowNegative
  *   npx tsx payment-command-db-check.ts clean              # Clean payment data (drops all databases)
  */
 
 import { MongoClient } from 'mongodb';
-import { closeAllConnections } from '../config/mongodb.js';
+import { closeAllConnections, getAuthDatabase, getPaymentDatabase } from '../config/mongodb.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Configuration - Single Source of Truth
@@ -52,17 +53,20 @@ async function checkDuplicates() {
   console.log('╚═══════════════════════════════════════════════════════════════════╝\n');
 
   await withDatabase(async (db) => {
-    // Check transactions collection
+    // Check transactions collection (new schema)
     const transactionsCollection = db.collection('transactions');
     const duplicateCheck = await transactionsCollection.aggregate([
       {
         $match: {
-          'metadata.externalRef': { $exists: true, $ne: null }
+          $or: [
+            { 'meta.externalRef': { $exists: true, $ne: null } },
+            { externalRef: { $exists: true, $ne: null } }
+          ]
         }
       },
       {
         $group: {
-          _id: '$metadata.externalRef',
+          _id: { $ifNull: ['$meta.externalRef', '$externalRef'] },
           count: { $sum: 1 },
           transactionIds: { $push: '$_id' }
         }
@@ -84,19 +88,19 @@ async function checkDuplicates() {
       console.log(`✅ No duplicates found (checked all transactions)`);
     }
     
-    // Check ledger_transactions collection
-    const ledgerTransactionsCollection = db.collection('ledger_transactions');
-    const ledgerDuplicateCheck = await ledgerTransactionsCollection.aggregate([
+    // Check transfers collection (new schema)
+    const transfersCollection = db.collection('transfers');
+    const transferDuplicateCheck = await transfersCollection.aggregate([
       {
         $match: {
-          externalRef: { $exists: true, $ne: null }
+          'meta.externalRef': { $exists: true, $ne: null }
         }
       },
       {
         $group: {
-          _id: '$externalRef',
+          _id: '$meta.externalRef',
           count: { $sum: 1 },
-          transactionIds: { $push: '$_id' },
+          transferIds: { $push: '$_id' },
           statuses: { $push: '$status' }
         }
       },
@@ -107,18 +111,18 @@ async function checkDuplicates() {
       }
     ]).toArray();
     
-    console.log(`\n📊 Checking ledger_transactions collection...`);
-    if (ledgerDuplicateCheck.length > 0) {
-      console.log(`❌ Found ${ledgerDuplicateCheck.length} duplicate externalRefs:`);
-      ledgerDuplicateCheck.slice(0, 10).forEach((dup: any) => {
+    console.log(`\n📊 Checking transfers collection...`);
+    if (transferDuplicateCheck.length > 0) {
+      console.log(`❌ Found ${transferDuplicateCheck.length} duplicate externalRefs:`);
+      transferDuplicateCheck.slice(0, 10).forEach((dup: any) => {
         console.log(`   - externalRef: ${dup._id}`);
         console.log(`     Count: ${dup.count}`);
         console.log(`     Statuses: ${dup.statuses.join(', ')}`);
-        console.log(`     Transaction IDs: ${dup.transactionIds.slice(0, 3).join(', ')}${dup.transactionIds.length > 3 ? '...' : ''}`);
+        console.log(`     Transfer IDs: ${dup.transferIds.slice(0, 3).join(', ')}${dup.transferIds.length > 3 ? '...' : ''}`);
         console.log('');
       });
     } else {
-      console.log(`✅ No duplicates found (checked all ledger transactions)`);
+      console.log(`✅ No duplicates found (checked all transfers)`);
     }
   });
 }
@@ -144,41 +148,53 @@ async function checkIndexes() {
       console.log(`  ${idx.name}: ${keyStr} ${unique} ${sparse}`);
     });
     
-    const uniqueExternalRef = transactionsIndexes.find(idx => 
+    // Check for unique index on meta.externalRef or externalRef
+    const uniqueExternalRefMeta = transactionsIndexes.find(idx => 
       idx.key && 
       typeof idx.key === 'object' && 
-      'metadata.externalRef' in idx.key && 
+      'meta.externalRef' in idx.key && 
+      ('charge' in idx.key || idx.unique === true) &&
       idx.unique === true
     );
     
-    if (uniqueExternalRef) {
-      console.log('\n✅ Unique index on metadata.externalRef EXISTS');
-      console.log(`   Index name: ${uniqueExternalRef.name}`);
+    const uniqueExternalRefTop = transactionsIndexes.find(idx => 
+      idx.key && 
+      typeof idx.key === 'object' && 
+      'externalRef' in idx.key && 
+      idx.unique === true
+    );
+    
+    if (uniqueExternalRefMeta || uniqueExternalRefTop) {
+      const idx = uniqueExternalRefMeta || uniqueExternalRefTop;
+      console.log(`\n✅ Unique index on ${uniqueExternalRefMeta ? 'meta.externalRef' : 'externalRef'} EXISTS`);
+      console.log(`   Index name: ${idx!.name}`);
     } else {
-      console.log('\n❌ Unique index on metadata.externalRef MISSING!');
+      console.log('\n❌ Unique index on meta.externalRef or externalRef MISSING!');
       console.log('   This is why duplicates are being created.');
     }
     
-    // Check ledger_transactions collection indexes
-    console.log('\n📋 Indexes on ledger_transactions collection:\n');
-    const ledgerIndexes = await db.collection('ledger_transactions').indexes();
-    ledgerIndexes.forEach(idx => {
+    // Check transfers collection indexes
+    console.log('\n📋 Indexes on transfers collection:\n');
+    const transfersIndexes = await db.collection('transfers').indexes();
+    transfersIndexes.forEach(idx => {
       const keyStr = JSON.stringify(idx.key);
       const unique = idx.unique ? 'UNIQUE' : '';
       const sparse = idx.sparse ? 'SPARSE' : '';
       console.log(`  ${idx.name}: ${keyStr} ${unique} ${sparse}`);
     });
     
-    const ledgerExternalRefIndex = ledgerIndexes.find(idx => 
-      idx.key && 'externalRef' in idx.key && idx.unique === true
+    const transferExternalRefIndex = transfersIndexes.find(idx => 
+      idx.key && 
+      typeof idx.key === 'object' && 
+      'meta.externalRef' in idx.key && 
+      idx.unique === true
     );
     
-    if (ledgerExternalRefIndex) {
-      console.log('\n✅ Unique index on externalRef EXISTS');
-      console.log(`   Index name: ${ledgerExternalRefIndex.name}`);
+    if (transferExternalRefIndex) {
+      console.log('\n✅ Unique index on transfers.meta.externalRef EXISTS');
+      console.log(`   Index name: ${transferExternalRefIndex.name}`);
     } else {
-      console.log('\n❌ Unique index on externalRef NOT FOUND!');
-      console.log('   This is why duplicates are getting through!');
+      console.log('\n⚠️  Unique index on transfers.meta.externalRef NOT FOUND (optional)');
     }
   });
 }
@@ -264,85 +280,64 @@ async function checkDeposits() {
   console.log('╚═══════════════════════════════════════════════════════════════════╝\n');
 
   await withDatabase(async (db) => {
-    const graphqlTxs = db.collection('transactions');
-    const ledgerTxs = db.collection('ledger_transactions');
+    const transactionsCollection = db.collection('transactions');
+    const transfersCollection = db.collection('transfers');
     
-    // Get recent GraphQL deposits
-    const recentGraphQL = await graphqlTxs.find({ 
-      type: 'deposit',
+    // Get recent deposit transactions (charge='credit' with deposit method)
+    const recentTransactions = await transactionsCollection.find({ 
+      charge: 'credit',
+      'meta.method': { $in: ['card', 'bank_transfer', 'deposit'] },
       userId: { $regex: /^duplicate-test-/ }
     })
     .sort({ createdAt: -1 })
     .limit(30)
     .toArray();
     
-    console.log(`📊 Found ${recentGraphQL.length} recent GraphQL deposits:\n`);
+    console.log(`📊 Found ${recentTransactions.length} recent deposit transactions:\n`);
     
-    // Group by timestamp to find duplicates
-    const byTimestamp = new Map<string, any[]>();
-    recentGraphQL.forEach(tx => {
-      const key = tx.createdAt?.toString() || 'unknown';
-      if (!byTimestamp.has(key)) {
-        byTimestamp.set(key, []);
+    // Group by externalRef to find duplicates
+    const byExternalRef = new Map<string, any[]>();
+    recentTransactions.forEach(tx => {
+      const extRef = tx.meta?.externalRef || tx.externalRef;
+      if (extRef) {
+        if (!byExternalRef.has(extRef)) {
+          byExternalRef.set(extRef, []);
+        }
+        byExternalRef.get(extRef)!.push(tx);
       }
-      byTimestamp.get(key)!.push(tx);
     });
     
-    // Show duplicates
-    const duplicates = Array.from(byTimestamp.entries()).filter(([_, txs]) => txs.length > 1);
-    console.log(`🔍 Found ${duplicates.length} duplicate timestamps:\n`);
-    duplicates.slice(0, 5).forEach(([timestamp, txs]) => {
-      console.log(`  Timestamp: ${timestamp}`);
+    const duplicateRefs = Array.from(byExternalRef.entries()).filter(([_, txs]) => txs.length > 1);
+    console.log(`🔍 Found ${duplicateRefs.length} duplicate externalRefs:\n`);
+    duplicateRefs.slice(0, 5).forEach(([externalRef, txs]) => {
+      console.log(`  externalRef: ${externalRef}`);
       console.log(`    Count: ${txs.length}`);
       console.log(`    Transaction IDs: ${txs.map(t => t.id).join(', ')}`);
-      console.log(`    Statuses: ${txs.map(t => t.status).join(', ')}`);
+      console.log(`    Created: ${txs.map(t => t.createdAt).join(', ')}`);
       console.log('');
     });
     
-    // Get corresponding ledger transactions
-    const ledgerTxsFound = await ledgerTxs.find({
-      'metadata.fromUserId': { $exists: true },
-      'metadata.toUserId': { $exists: true }
+    // Get corresponding transfers
+    const recentTransfers = await transfersCollection.find({
+      'meta.method': { $in: ['card', 'bank_transfer', 'deposit'] }
     })
     .sort({ createdAt: -1 })
     .limit(30)
     .toArray();
     
-    console.log(`\n💰 Found ${ledgerTxsFound.length} recent ledger transactions:\n`);
+    console.log(`\n💰 Found ${recentTransfers.length} recent transfers:\n`);
     
-    // Group by externalRef to find duplicates
-    const byExternalRef = new Map<string, any[]>();
-    ledgerTxsFound.forEach(tx => {
-      if (tx.externalRef) {
-        if (!byExternalRef.has(tx.externalRef)) {
-          byExternalRef.set(tx.externalRef, []);
-        }
-        byExternalRef.get(tx.externalRef)!.push(tx);
-      }
-    });
-    
-    const duplicateRefs = Array.from(byExternalRef.entries()).filter(([_, txs]) => txs.length > 1);
-    console.log(`🔍 Found ${duplicateRefs.length} duplicate externalRefs in ledger:\n`);
-    duplicateRefs.slice(0, 5).forEach(([externalRef, txs]) => {
-      console.log(`  externalRef: ${externalRef}`);
-      console.log(`    Count: ${txs.length}`);
-      console.log(`    Transaction IDs: ${txs.map(t => t._id).join(', ')}`);
-      console.log(`    Statuses: ${txs.map(t => t.status).join(', ')}`);
-      console.log(`    Created: ${txs.map(t => t.createdAt).join(', ')}`);
-      console.log('');
-    });
-    
-    // Show sample ledger transactions
-    console.log(`\n📋 Sample ledger transactions (last 10):\n`);
-    ledgerTxsFound.slice(0, 10).forEach(tx => {
-      console.log(`  ID: ${tx._id}`);
-      console.log(`    externalRef: ${tx.externalRef || '(null)'}`);
-      console.log(`    Type: ${tx.type}`);
-      console.log(`    Status: ${tx.status}`);
-      console.log(`    Amount: ${tx.amount} ${tx.currency}`);
-      console.log(`    From: ${tx.metadata?.fromUserId || 'N/A'}`);
-      console.log(`    To: ${tx.metadata?.toUserId || 'N/A'}`);
-      console.log(`    Created: ${tx.createdAt}`);
+    // Show sample transfers
+    console.log(`\n📋 Sample transfers (last 10):\n`);
+    recentTransfers.slice(0, 10).forEach(tf => {
+      console.log(`  ID: ${tf.id}`);
+      console.log(`    externalRef: ${tf.meta?.externalRef || '(null)'}`);
+      console.log(`    Method: ${tf.meta?.method || 'N/A'}`);
+      console.log(`    Status: ${tf.status}`);
+      console.log(`    Amount: ${tf.amount}`);
+      console.log(`    From: ${tf.fromUserId}`);
+      console.log(`    To: ${tf.toUserId}`);
+      console.log(`    Created: ${tf.createdAt}`);
       console.log('');
     });
   });
@@ -358,44 +353,145 @@ async function createIndexes() {
   console.log('╚═══════════════════════════════════════════════════════════════════╝\n');
 
   await withDatabase(async (db) => {
-    // Create index on transactions.metadata.externalRef
+    // Create index on transactions.meta.externalRef (new schema)
     const transactionsCollection = db.collection('transactions');
-    console.log('🔧 Creating unique index on transactions.metadata.externalRef...\n');
+    console.log('🔧 Creating unique index on transactions.meta.externalRef...\n');
     
     try {
-      // Drop existing non-unique index if it exists
-      try {
-        await transactionsCollection.dropIndex('type_1_metadata.externalRef_1_status_1');
-        console.log('✅ Dropped existing compound index');
-      } catch (e: any) {
-        if (e.codeName !== 'IndexNotFound') {
-          console.log(`⚠️  Could not drop compound index: ${e.message}`);
+      // Check if collection exists, create it if it doesn't
+      const collections = await db.listCollections({ name: 'transactions' }).toArray();
+      if (collections.length === 0) {
+        console.log('📦 Collection "transactions" does not exist yet. Creating it...');
+        // Create collection by inserting and immediately deleting a dummy document
+        await transactionsCollection.insertOne({ _temp: true });
+        await transactionsCollection.deleteOne({ _temp: true });
+        console.log('✅ Collection "transactions" created');
+      }
+      
+      // First, list all indexes and find any externalRef indexes to drop
+      const existingIndexes = await transactionsCollection.indexes();
+      const externalRefIndexes = existingIndexes.filter(idx => 
+        idx.key && typeof idx.key === 'object' && 
+        ('meta.externalRef' in idx.key || 'externalRef' in idx.key || 'metadata.externalRef' in idx.key)
+      );
+      
+      // Drop all externalRef-related indexes
+      for (const idx of externalRefIndexes) {
+        if (idx.name) {
+          try {
+            await transactionsCollection.dropIndex(idx.name);
+            console.log(`✅ Dropped existing index: ${idx.name}`);
+          } catch (e: any) {
+            if (e.codeName !== 'IndexNotFound' && e.code !== 27) {
+              console.log(`⚠️  Could not drop index ${idx.name}: ${e.message}`);
+            }
+          }
         }
       }
       
-      // Create unique index on metadata.externalRef
+      // Also try dropping by common names (in case name is different)
+      const indexesToDrop = [
+        'type_1_metadata.externalRef_1_status_1',
+        'metadata.externalRef_1',
+        'metadata.externalRef_1_unique',
+        'meta.externalRef_1',
+        'meta.externalRef_1_unique', // Old unique index (without charge)
+        'meta.externalRef_1_charge_1_unique' // New compound index (in case we need to recreate)
+      ];
+      
+      for (const indexName of indexesToDrop) {
+        try {
+          await transactionsCollection.dropIndex(indexName);
+          console.log(`✅ Dropped existing index: ${indexName}`);
+        } catch (e: any) {
+          if (e.codeName !== 'IndexNotFound' && e.code !== 27) {
+            console.log(`⚠️  Could not drop index ${indexName}: ${e.message}`);
+          }
+        }
+      }
+      
+      // Check for duplicates before creating unique index
+      const duplicateCheck = await transactionsCollection.aggregate([
+        {
+          $match: {
+            'meta.externalRef': { $exists: true, $ne: null },
+            charge: { $exists: true }
+          }
+        },
+        {
+          $group: {
+            _id: { externalRef: '$meta.externalRef', charge: '$charge' },
+            count: { $sum: 1 },
+            ids: { $push: '$id' }
+          }
+        },
+        {
+          $match: { count: { $gt: 1 } }
+        }
+      ]).toArray();
+      
+      if (duplicateCheck.length > 0) {
+        console.log(`⚠️  Found ${duplicateCheck.length} duplicate externalRef+charge combinations.`);
+        console.log('   The unique index cannot be created until duplicates are removed.');
+        console.log('   Run "remove-duplicates" command first, or manually clean up duplicates.');
+        console.log('   Example duplicates:');
+        duplicateCheck.slice(0, 3).forEach((dup: any) => {
+          console.log(`     - externalRef: ${dup._id.externalRef}, charge: ${dup._id.charge}, count: ${dup.count}`);
+        });
+        throw new Error(`Cannot create unique index: ${duplicateCheck.length} duplicate(s) found. Run "remove-duplicates" first.`);
+      }
+      
+      // Create unique compound index on meta.externalRef + charge
+      // This allows the same externalRef for both debit and credit transactions
       await transactionsCollection.createIndex(
-        { 'metadata.externalRef': 1 },
+        { 'meta.externalRef': 1, charge: 1 },
         { 
           unique: true,
           sparse: true,
-          name: 'metadata.externalRef_1_unique'
+          name: 'meta.externalRef_1_charge_1_unique'
         }
       );
       
-      console.log('✅ Unique index on metadata.externalRef created successfully!');
+      console.log('✅ Unique compound index on meta.externalRef + charge created successfully!');
       
-      // Verify it was created
+      // Create compound unique index on top-level externalRef + charge
+      // This allows the same externalRef for both debit and credit transactions
+      try {
+        // Drop old top-level externalRef unique index if it exists
+        try {
+          await transactionsCollection.dropIndex('externalRef_1_unique');
+          console.log('✅ Dropped old top-level externalRef unique index');
+        } catch (e: any) {
+          // Index might not exist, which is fine
+        }
+        
+        await transactionsCollection.createIndex(
+          { externalRef: 1, charge: 1 },
+          { 
+            unique: true,
+            sparse: true,
+            name: 'externalRef_1_charge_1_unique'
+          }
+        );
+        console.log('✅ Unique compound index on externalRef (top-level) + charge created successfully!');
+      } catch (e: any) {
+        if (e.code !== 85) {
+          console.log(`⚠️  Could not create top-level externalRef compound index: ${e.message}`);
+        }
+      }
+      
+      // Verify indexes were created
       const indexes = await transactionsCollection.indexes();
-      const uniqueIndex = indexes.find(idx => 
+      const uniqueIndexMeta = indexes.find(idx => 
         idx.key && 
-        typeof idx.key === 'object' && 
-        'metadata.externalRef' in idx.key && 
+        typeof idx.key === 'object' &&
+        'meta.externalRef' in idx.key && 
+        'charge' in idx.key &&
         idx.unique === true
       );
       
-      if (uniqueIndex) {
-        console.log(`✅ Verified: Index "${uniqueIndex.name}" exists and is unique`);
+      if (uniqueIndexMeta) {
+        console.log(`✅ Verified: Index "${uniqueIndexMeta.name}" exists and is unique`);
       } else {
         console.log('❌ Index creation may have failed - not found in list');
       }
@@ -406,19 +502,19 @@ async function createIndexes() {
         console.log('   Attempting to drop and recreate...');
         
         try {
-          await transactionsCollection.dropIndex('metadata.externalRef_1');
+          await transactionsCollection.dropIndex('meta.externalRef_1');
         } catch {}
         
         try {
-          await transactionsCollection.dropIndex('metadata.externalRef_1_unique');
+          await transactionsCollection.dropIndex('meta.externalRef_1_unique');
         } catch {}
         
         await transactionsCollection.createIndex(
-          { 'metadata.externalRef': 1 },
+          { 'meta.externalRef': 1 },
           { 
             unique: true,
             sparse: true,
-            name: 'metadata.externalRef_1_unique'
+            name: 'meta.externalRef_1_charge_1_unique'
           }
         );
         
@@ -428,54 +524,62 @@ async function createIndexes() {
       }
     }
     
-    // Create index on ledger_transactions.externalRef
-    const ledgerCollection = db.collection('ledger_transactions');
-    console.log('\n🔧 Creating unique index on ledger_transactions.externalRef...\n');
+    // Create index on transfers.meta.externalRef (optional but recommended)
+    const transfersCollection = db.collection('transfers');
+    console.log('\n🔧 Creating unique index on transfers.meta.externalRef...\n');
     
     try {
-      await ledgerCollection.createIndex(
-        { externalRef: 1 },
+      await transfersCollection.createIndex(
+        { 'meta.externalRef': 1 },
         { 
           sparse: true, 
           unique: true,
-          name: 'externalRef_1_unique'
+          name: 'meta.externalRef_1_charge_1_unique'
         }
       );
-      console.log('✅ Unique index on externalRef created successfully!');
+      console.log('✅ Unique index on transfers.meta.externalRef created successfully!');
     } catch (error: any) {
       if (error.code === 85) {
         console.log('⚠️  Index exists but with different options');
         console.log('   Dropping and recreating...');
         try {
-          await ledgerCollection.dropIndex('externalRef_1');
+          await transfersCollection.dropIndex('meta.externalRef_1');
         } catch (e: any) {
           // Ignore if doesn't exist
         }
-        await ledgerCollection.createIndex(
-          { externalRef: 1 },
+        try {
+          await transfersCollection.dropIndex('meta.externalRef_1_unique');
+        } catch (e: any) {
+          // Ignore if doesn't exist
+        }
+        await transfersCollection.createIndex(
+          { 'meta.externalRef': 1 },
           { 
             sparse: true, 
             unique: true,
-            name: 'externalRef_1_unique'
+            name: 'meta.externalRef_1_charge_1_unique'
           }
         );
         console.log('✅ Index recreated successfully!');
       } else {
-        throw error;
+        console.log(`⚠️  Could not create transfers index: ${error.message}`);
       }
     }
     
-    // Verify the index was created
-    const ledgerIndexes = await ledgerCollection.indexes();
-    const verifyIndex = ledgerIndexes.find(idx => 
-      idx.key && 'externalRef' in idx.key && idx.unique === true
+    // Verify the transfers index was created
+    const transfersIndexes = await transfersCollection.indexes();
+    const verifyTransferIndex = transfersIndexes.find(idx => 
+      idx.key && 
+      typeof idx.key === 'object' && 
+      'meta.externalRef' in idx.key && 
+      idx.unique === true
     );
     
-    if (verifyIndex) {
-      console.log('\n✅ Verification: Unique index on externalRef exists');
-      console.log(`   Options: ${JSON.stringify(verifyIndex)}`);
+    if (verifyTransferIndex) {
+      console.log('\n✅ Verification: Unique index on transfers.meta.externalRef exists');
+      console.log(`   Options: ${JSON.stringify(verifyTransferIndex)}`);
     } else {
-      console.log('\n❌ Verification failed: Index still not found');
+      console.log('\n⚠️  Verification: Transfers index not found (optional)');
     }
   });
 }
@@ -490,22 +594,23 @@ async function fixIndexes() {
   console.log('╚═══════════════════════════════════════════════════════════════════╝\n');
 
   await withDatabase(async (db) => {
-    const transactions = db.collection('ledger_transactions');
+    const transactionsCollection = db.collection('transactions');
     
-    console.log('🔍 Checking existing indexes on ledger_transactions...\n');
+    console.log('🔍 Checking existing indexes on transactions...\n');
     
-    const indexes = await transactions.indexes();
+    const indexes = await transactionsCollection.indexes();
     console.log(`Found ${indexes.length} indexes:\n`);
     
-    // Find all indexes on externalRef
+    // Find all indexes on meta.externalRef or externalRef
     const externalRefIndexes = indexes.filter(idx => 
-      idx.key && typeof idx.key === 'object' && 'externalRef' in idx.key
+      idx.key && typeof idx.key === 'object' && 
+      ('meta.externalRef' in idx.key || 'externalRef' in idx.key)
     );
     
     if (externalRefIndexes.length === 0) {
-      console.log('✅ No indexes found on externalRef field');
+      console.log('⚠️  No indexes found on externalRef fields');
     } else {
-      console.log(`⚠️  Found ${externalRefIndexes.length} index(es) on externalRef:\n`);
+      console.log(`Found ${externalRefIndexes.length} index(es) on externalRef:\n`);
       externalRefIndexes.forEach(idx => {
         console.log(`  Name: ${idx.name}`);
         console.log(`    Key: ${JSON.stringify(idx.key)}`);
@@ -514,50 +619,52 @@ async function fixIndexes() {
         console.log('');
       });
       
-      // Drop all existing externalRef indexes
-      console.log('🗑️  Dropping all existing externalRef indexes...\n');
+      // Drop all existing externalRef indexes that aren't unique
+      console.log('🗑️  Dropping non-unique externalRef indexes...\n');
       for (const idx of externalRefIndexes) {
-        try {
-          await transactions.dropIndex(idx.name);
-          console.log(`  ✅ Dropped index: ${idx.name}`);
-        } catch (error: any) {
-          console.log(`  ⚠️  Failed to drop ${idx.name}: ${error.message}`);
+        if (!idx.unique) {
+          try {
+            await transactionsCollection.dropIndex(idx.name);
+            console.log(`  ✅ Dropped non-unique index: ${idx.name}`);
+          } catch (error: any) {
+            console.log(`  ⚠️  Failed to drop ${idx.name}: ${error.message}`);
+          }
         }
       }
     }
     
-    // Create the correct unique index
-    console.log('\n📝 Creating unique index on externalRef...\n');
+    // Create the correct unique index on meta.externalRef
+    console.log('\n📝 Creating unique index on meta.externalRef...\n');
     try {
-      await transactions.createIndex(
-        { externalRef: 1 },
+      await transactionsCollection.createIndex(
+        { 'meta.externalRef': 1 },
         { 
           sparse: true, 
           unique: true,
-          name: 'externalRef_1_unique'
+          name: 'meta.externalRef_1_charge_1_unique'
         }
       );
-      console.log('✅ Successfully created unique index: externalRef_1_unique\n');
+      console.log('✅ Successfully created unique index: meta.externalRef_1_unique\n');
     } catch (error: any) {
       if (error.code === 85 || error.codeName === 'IndexOptionsConflict') {
         console.log('⚠️  Index conflict detected. Trying to resolve...\n');
         // Try dropping by common names
-        const namesToTry = ['externalRef_1', 'externalRef_1_unique'];
+        const namesToTry = ['meta.externalRef_1', 'meta.externalRef_1_unique', 'meta.externalRef_1_charge_1_unique'];
         for (const name of namesToTry) {
           try {
-            await transactions.dropIndex(name);
+            await transactionsCollection.dropIndex(name);
             console.log(`  ✅ Dropped index: ${name}`);
           } catch (e: any) {
             // Ignore if doesn't exist
           }
         }
         // Try creating again
-        await transactions.createIndex(
-          { externalRef: 1 },
+        await transactionsCollection.createIndex(
+          { 'meta.externalRef': 1, charge: 1 },
           { 
             sparse: true, 
             unique: true,
-            name: 'externalRef_1_unique'
+            name: 'meta.externalRef_1_charge_1_unique'
           }
         );
         console.log('✅ Successfully created unique index after cleanup\n');
@@ -567,13 +674,13 @@ async function fixIndexes() {
     }
     
     // Verify the index was created
-    const finalIndexes = await transactions.indexes();
+    const finalIndexes = await transactionsCollection.indexes();
     const finalExternalRefIndex = finalIndexes.find(idx => 
-      idx.key && typeof idx.key === 'object' && 'externalRef' in idx.key
+      idx.key && typeof idx.key === 'object' && 'meta.externalRef' in idx.key && idx.unique === true
     );
     
-    if (finalExternalRefIndex && finalExternalRefIndex.unique === true) {
-      console.log('✅ Verification: Unique index on externalRef exists and is correct');
+    if (finalExternalRefIndex) {
+      console.log('✅ Verification: Unique index on meta.externalRef exists and is correct');
       console.log(`   Name: ${finalExternalRefIndex.name}`);
       console.log(`   Unique: ${finalExternalRefIndex.unique}`);
       console.log(`   Sparse: ${finalExternalRefIndex.sparse || false}\n`);
@@ -597,21 +704,23 @@ async function removeDuplicates() {
     
     console.log('🧹 Removing duplicate transactions...\n');
     
-    // Find all deposits with externalRef
+    // Find all transactions with externalRef (new schema uses meta.externalRef)
     const transactions = await collection
       .find({ 
-        type: 'deposit',
-        'metadata.externalRef': { $exists: true }
+        $or: [
+          { 'meta.externalRef': { $exists: true } },
+          { externalRef: { $exists: true } }
+        ]
       })
       .sort({ createdAt: 1 }) // Oldest first
       .toArray();
     
-    console.log(`Found ${transactions.length} deposits with externalRef`);
+    console.log(`Found ${transactions.length} transactions with externalRef`);
     
     // Group by externalRef
     const byExternalRef: Record<string, any[]> = {};
     transactions.forEach(tx => {
-      const extRef = tx.metadata?.externalRef;
+      const extRef = tx.meta?.externalRef || tx.externalRef;
       if (extRef) {
         if (!byExternalRef[extRef]) {
           byExternalRef[extRef] = [];
@@ -648,6 +757,105 @@ async function removeDuplicates() {
     console.log(`\n✅ Removed ${totalRemoved} duplicate transactions`);
     console.log(`   Kept ${duplicates.length} original transactions`);
   });
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Maintenance: Fix Wallet allowNegative Settings
+// ═══════════════════════════════════════════════════════════════════
+
+async function fixWalletAllowNegative() {
+  console.log('╔═══════════════════════════════════════════════════════════════════╗');
+  console.log('║           FIXING WALLET allowNegative SETTINGS                  ║');
+  console.log('╚═══════════════════════════════════════════════════════════════════╝\n');
+
+  const paymentDb = await getPaymentDatabase();
+  const authDb = await getAuthDatabase();
+  
+  const walletsCollection = paymentDb.collection('wallets');
+  const usersCollection = authDb.collection('users');
+  
+  console.log('📊 Checking wallets for incorrect allowNegative settings...\n');
+  
+  // Get all wallets
+  const wallets = await walletsCollection.find({}).toArray();
+  console.log(`Found ${wallets.length} wallets to check\n`);
+  
+  // Get all users with their roles
+  const users = await usersCollection.find({}).toArray();
+  const userRolesMap = new Map<string, string[]>();
+  users.forEach((user: any) => {
+    const userId = user.id || user._id?.toString();
+    const roles = Array.isArray(user.roles) ? user.roles : [];
+    if (userId) {
+      userRolesMap.set(userId, roles);
+    }
+  });
+  
+  console.log(`Loaded ${userRolesMap.size} users from auth database\n`);
+  
+  let fixedCount = 0;
+  let checkedCount = 0;
+  const issues: Array<{ walletId: string; userId: string; current: boolean; shouldBe: boolean; reason: string }> = [];
+  
+  for (const wallet of wallets) {
+    const walletData = wallet as any;
+    const userId = walletData.userId;
+    const currentAllowNegative = walletData.allowNegative ?? false;
+    
+    // Get user roles
+    const userRoles = userRolesMap.get(userId) || [];
+    const isSystemUser = userRoles.includes('system');
+    
+    // Only system users should have allowNegative: true
+    const shouldAllowNegative = isSystemUser;
+    
+    checkedCount++;
+    
+    if (currentAllowNegative !== shouldAllowNegative) {
+      issues.push({
+        walletId: walletData.id || walletData._id?.toString() || 'unknown',
+        userId,
+        current: currentAllowNegative,
+        shouldBe: shouldAllowNegative,
+        reason: isSystemUser 
+          ? 'System user should have allowNegative: true' 
+          : 'Non-system user should have allowNegative: false'
+      });
+      
+      // Fix the wallet
+      await walletsCollection.updateOne(
+        { _id: wallet._id },
+        { 
+          $set: { 
+            allowNegative: shouldAllowNegative,
+            updatedAt: new Date()
+          } 
+        }
+      );
+      
+      fixedCount++;
+      
+      console.log(`🔧 Fixed wallet ${walletData.id || walletData._id?.toString()}:`);
+      console.log(`   User ID: ${userId}`);
+      console.log(`   Roles: ${userRoles.join(', ') || 'none'}`);
+      console.log(`   Changed allowNegative: ${currentAllowNegative} → ${shouldAllowNegative}`);
+      console.log(`   Reason: ${issues[issues.length - 1].reason}\n`);
+    }
+  }
+  
+  console.log(`\n✅ Checked ${checkedCount} wallets`);
+  console.log(`🔧 Fixed ${fixedCount} wallets with incorrect allowNegative settings`);
+  
+  if (issues.length > 0) {
+    console.log(`\n📋 Summary of fixes:`);
+    issues.forEach((issue, idx) => {
+      console.log(`   ${idx + 1}. Wallet ${issue.walletId.substring(0, 12)}... (User: ${issue.userId.substring(0, 12)}...): ${issue.current} → ${issue.shouldBe}`);
+    });
+  } else {
+    console.log(`\n✅ All wallets have correct allowNegative settings!`);
+  }
+  
+  await closeAllConnections();
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -694,6 +902,7 @@ const COMMAND_REGISTRY: Record<string, () => Promise<void>> = {
   'create-index': createIndexes,
   'fix-index': fixIndexes,
   'remove-duplicates': removeDuplicates,
+  'fix-wallet-allownegative': fixWalletAllowNegative,
   clean: cleanPaymentData,
 };
 

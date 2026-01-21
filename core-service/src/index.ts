@@ -27,24 +27,50 @@ export type {
   SSEHelpers,
 } from './gateway/server.js';
 
-// Ledger (Double-Entry Bookkeeping)
-export { 
-  Ledger,
-  createLedger,
-} from './common/ledger.js';
+// Ledger system removed - use Wallets + Transactions + Transfers architecture instead
+// Use createTransferWithTransactions from transfer-helper for all financial operations
+
+// Transfer Helper (Simplified Architecture: Wallets + Transactions + Transfers)
+export {
+  createTransferWithTransactions,
+  startSession,
+  endSession,
+  createNewWallet,
+  getOrCreateWallet,
+  approveTransfer,
+  declineTransfer,
+  getBalanceField,
+} from './common/transfer-helper.js';
 export type {
-  LedgerConfig,
-  LedgerAccount,
-  LedgerTransaction,
-  LedgerEntry,
-  CreateTransactionInput,
-  AccountType,
-  AccountSubtype,
-  TransactionType,
-  TransactionStatus,
-  BalanceCalculator,
-  TransactionState,
-} from './common/ledger.js';
+  Transfer,
+  Transaction,
+  CreateTransferParams,
+  CreateTransferResult,
+} from './common/transfer-helper.js';
+
+// Recovery System (Generic - works with transfers, orders, etc.)
+export {
+  recoverOperation,
+  recoverStuckOperations,
+  recoverAllStuckOperations,
+  registerRecoveryHandler,
+  getRecoveryHandler,
+  getOperationStateTracker,
+  getRecoveryJob,
+  OperationStateTracker,
+  RecoveryJob,
+} from './common/recovery.js';
+export type {
+  RecoverableOperation,
+  RecoveryResult,
+  RecoveryHandler,
+  OperationState,
+} from './common/recovery.js';
+
+// Transfer Recovery Handler (Showcase implementation)
+export {
+  createTransferRecoveryHandler,
+} from './common/transfer-recovery.js';
 
 // Account ID Management (Unified Account ID System)
 export {
@@ -89,9 +115,6 @@ export type { MongoConfig } from './common/database.js';
 export {
   // Re-export MongoDB types
   ObjectId,
-  type Collection,
-  type Filter,
-  type Document,
   // ObjectId utilities
   isValidObjectId,
   toObjectId,
@@ -104,7 +127,6 @@ export {
   // Document lookup (performance-optimized)
   findById,
   findOneById,
-  findUserById, // Deprecated: use findById instead
   // Document normalization
   normalizeDocument,
   normalizeDocuments,
@@ -112,6 +134,12 @@ export {
   updateOneById,
   deleteOneById,
   findOneAndUpdateById,
+} from './common/mongodb-utils.js';
+export type {
+  Collection,
+  Filter,
+  Document,
+  ClientSession,
 } from './common/mongodb-utils.js';
 
 // MongoDB Error Handling (sharding-optimized)
@@ -317,25 +345,7 @@ export type {
   UserVerifiedData,
 } from './types/index.js';
 
-// Legacy Event Types (deprecated - use emit<T>() with your own types)
-export type {
-  BaseEvent,
-  IntegrationEvent as LegacyIntegrationEvent,
-  DepositCompletedEvent,
-  WithdrawalCompletedEvent,
-  WithdrawalRequestedEvent,
-  BonusCreditedEvent,
-  BonusConvertedEvent,
-  BonusForfeitedEvent,
-  TurnoverCompletedEvent,
-  TurnoverProgressEvent,
-  UserRegisteredEvent,
-  UserVerifiedEvent,
-  WageringCompletedEvent,
-  WageringProgressEvent,
-} from './types/index.js';
-/** @deprecated Use emit() or buildEvent() instead */
-export { createEvent } from './types/index.js';
+// Legacy event types removed - use emit<T>() with your own types instead
 
 // References (cross-service linking)
 export type {
@@ -365,8 +375,6 @@ export {
   createEmitter,
   createHandler,
   buildEvent,
-  // Deprecated (backward compatibility)
-  publishEvent,
   subscribeToEvents,
   startEventListener,
 } from './common/integration.js';

@@ -21,9 +21,9 @@ import type {
 import { templatePersistence, userBonusPersistence } from './persistence.js';
 import { emitBonusEvent } from '../../event-dispatcher.js';
 import { 
-  recordBonusAwardLedgerEntry,
+  recordBonusAwardTransfer,
   checkBonusPoolBalance,
-} from '../ledger-service.js';
+} from '../bonus.js';
 
 export abstract class BaseBonusHandler implements IBonusHandler {
   abstract readonly type: BonusType;
@@ -266,7 +266,7 @@ export abstract class BaseBonusHandler implements IBonusHandler {
     // Record in ledger AFTER creating bonus record (we need the bonus ID)
     // If ledger fails, the transaction will roll back the bonus creation
     try {
-      await recordBonusAwardLedgerEntry(
+      await recordBonusAwardTransfer(
         context.userId,
         calculation.bonusValue,
         template.currency,

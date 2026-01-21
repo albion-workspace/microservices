@@ -149,73 +149,131 @@ export interface ProviderConfig {
   updatedAt?: Date;
 }
 
+/**
+ * Transaction - Ultra-minimal schema (based on Mongoose pattern)
+ * 
+ * Each transaction represents a single credit or debit for one user.
+ * Transfers create 2 transactions (debit + credit).
+ */
 export interface Transaction {
   id: string;
   tenantId: string;
-  userId: string;
   
-  // Transaction details
-  type: TransactionType;
-  status: TransactionStatus;
-  method: PaymentMethod;
+  // User reference (required)
+  userId: string;                  // Reference to auth.users._id (ObjectId)
   
-  // Amount
-  amount: number;
-  currency: Currency;
-  amountInBaseCurrency?: number;
-  baseCurrency?: Currency;
-  exchangeRate?: number;
+  // Amounts (MINIMAL)
+  amount: number;                   // Transaction amount (cents) - ALWAYS POSITIVE
+  balance: number;                 // Wallet balance AFTER this transaction (cents)
   
-  // Fees
-  feeAmount: number;
-  feeCurrency: Currency;
-  netAmount: number;
+  // Polymorphic reference (replaces refId/refType pattern)
+  objectId?: string;                // Reference to bonus, bet, game, transfer, etc. (ObjectId)
+  objectModel?: string;             // Model type: 'bonus', 'bet', 'game', 'transfer', 'deposit', 'withdrawal', etc.
   
-  // External transaction reference (for third-party integrations)
-  externalTransactionId?: string;
-  externalResponse?: Record<string, unknown>;
+  // Transaction type
+  charge: 'credit' | 'debit';      // Credit (money in) or Debit (money out)
   
-  // User-to-user transfer details
-  fromUserId?: string;  // For deposits: source user (e.g., payment gateway user)
-  toUserId?: string;    // For withdrawals: destination user (e.g., payment gateway user)
-  
-  // Payment details
-  paymentDetails?: {
-    cardLast4?: string;
-    cardBrand?: string;
-    bankName?: string;
-    walletAddress?: string;
-    accountNumber?: string;
+  // Metadata (flexible - GENERIC only, no payment-specific fields)
+  meta?: {
+    // Fee details
+    feeAmount?: number;             // Fee amount (cents)
+    netAmount?: number;             // Net amount after fee (calculate: amount - feeAmount)
+    
+    // Currency (if different from wallet currency)
+    currency?: string;               // Currency code
+    exchangeRate?: number;           // Exchange rate used
+    
+    // Wallet context
+    walletId?: string;              // Wallet ID (for fast lookups)
+    balanceType?: 'real' | 'bonus' | 'locked';  // Which balance affected
+    
+    // External reference (for idempotency)
+    externalRef?: string;            // External reference (for idempotency)
+    
+    // Any other generic data
+    description?: string;
     [key: string]: unknown;
   };
   
-  // References
-  orderId?: string;
-  referenceId?: string;
-  parentTransactionId?: string;  // For refunds
+  // Timestamps (immutable - only createdAt)
+  createdAt: Date;                 // Auto-managed by repository
+  // NO updatedAt - transactions are immutable
+}
+
+/**
+ * Transfer - User-to-user transfer record
+ * 
+ * Creates 2 transactions (debit for fromUser, credit for toUser).
+ */
+export interface Transfer {
+  id: string;
+  tenantId: string;
   
-  // Metadata
-  description?: string;
-  metadata?: Record<string, unknown>;
-  ipAddress?: string;
-  userAgent?: string;
+  // User references (required)
+  fromUserId: string;              // Source user (ObjectId reference)
+  toUserId: string;                 // Destination user (ObjectId reference)
+  
+  // Amount
+  amount: number;                  // Transfer amount (cents) - ALWAYS POSITIVE
+  
+  // Status
+  status: 'pending' | 'active' | 'approved' | 'canceled' | 'used' | 'expired';
+  
+  // Transaction type
+  charge: 'credit' | 'debit';      // Usually 'credit' for transfers
+  
+  // Metadata (flexible - generic for any payment method)
+  meta?: {
+    // External reference (for idempotency)
+    externalRef?: string;           // External reference (for idempotency)
+    externalTransactionId?: string;
+    
+    // Payment method (determines which fields below are used)
+    method?: string;                // Payment method: 'card', 'bank', 'crypto', 'mobile_money', etc.
+    
+    // Payment details (flexible - depends on payment method)
+    // For cards:
+    cardLast4?: string;             // Last 4 digits of card
+    cardBrand?: string;              // Card brand: 'visa', 'mastercard', etc.
+    
+    // For bank transfers:
+    bankName?: string;               // Bank name
+    accountNumber?: string;          // Bank account number
+    bankAccount?: string;           // Alias for accountNumber
+    
+    // For crypto:
+    walletAddress?: string;          // Crypto wallet address
+    blockchain?: string;             // Blockchain: 'bitcoin', 'ethereum', etc.
+    
+    // For mobile money:
+    phoneNumber?: string;           // Mobile money phone number
+    provider?: string;               // Mobile money provider: 'mpesa', 'mtn', etc.
+    
+    // Fee details
+    feeAmount?: number;             // Fee amount (cents)
+    netAmount?: number;             // Net amount after fee
+    
+    // Currency
+    currency?: string;               // Currency code
+    exchangeRate?: number;           // Exchange rate used
+    
+    // Transaction references (created by this transfer)
+    fromTransactionId?: string;     // Debit transaction ID
+    toTransactionId?: string;       // Credit transaction ID
+    
+    // Wallet context
+    fromWalletId?: string;
+    toWalletId?: string;
+    balanceType?: 'real' | 'bonus' | 'locked';
+    
+    // Any other data
+    description?: string;
+    [key: string]: unknown;  // Flexible for any payment method-specific fields
+  };
   
   // Timestamps
-  initiatedAt: Date;
-  processedAt?: Date;
-  completedAt?: Date;
-  failedAt?: Date;
-  
-  // Failure info
-  failureCode?: string;
-  failureMessage?: string;
-  
-  // Audit
-  statusHistory: TransactionStatusEntry[];
-  
-  // Timestamps (auto-managed by repository)
-  createdAt?: Date;
-  updatedAt?: Date;
+  createdAt: Date;                 // Auto-managed
+  updatedAt?: Date;                 // Updated on status changes
 }
 
 /**
@@ -322,6 +380,16 @@ export interface Wallet {
   
   /** Has active bonus that blocks withdrawal */
   hasActiveBonus?: boolean;
+  
+  // ═══════════════════════════════════════════════════════════════════
+  // Wallet Permissions
+  // ═══════════════════════════════════════════════════════════════════
+  
+  /** Allow wallet to go negative balance (wallet-level permission) */
+  allowNegative?: boolean;
+  
+  /** Credit limit for negative balances (in smallest unit: cents, satoshi, wei) */
+  creditLimit?: number;
   
   // ═══════════════════════════════════════════════════════════════════
   // Limits
@@ -442,82 +510,7 @@ export const WALLET_CATEGORIES = {
   STAKING: 'staking',
 } as const;
 
-/**
- * Wallet Transaction (OPTIMIZED FOR SCALE)
- * 
- * Optimizations:
- * 1. Removed balanceBefore: Can calculate from (balance - amount) for credits
- *    or (balance + amount) for debits. Saves 8 bytes per transaction.
- * 2. Generic references (refId/refType): Extensible for any entity type
- *    instead of hardcoded bonusId, betId, gameRoundId, etc.
- * 3. Immutable: No updatedAt field, only createdAt (managed by repository)
- * 4. Use MongoDB TTL indexes to auto-archive old transactions
- */
-export interface WalletTransaction {
-  id: string;
-  walletId: string;
-  userId: string;
-  tenantId: string;
-
-  /** Transaction type */
-  type: WalletTransactionType;
-
-  /** Which balance is affected */
-  balanceType: 'real' | 'bonus' | 'locked';
-
-  amount: number;         // Amount in cents (always positive)
-  currency: Currency;
-
-  /**
-   * Wallet balance after this transaction
-   * 
-   * To calculate balance before transaction:
-   * - For credits (deposit): balanceBefore = balance - amount
-   * - For debits (withdrawal): balanceBefore = balance + amount
-   */
-  balance: number;
-
-  // For bonus transactions, track wagering contribution
-  wageringContribution?: number;
-
-  /**
-   * Generic reference pattern (extensible)
-   * Instead of bonusId, betId, gameRoundId, transactionId, etc.
-   * Examples:
-   * - refType: 'bonus', refId: 'bonus-uuid'
-   * - refType: 'bet', refId: 'bet-uuid'
-   * - refType: 'game', refId: 'game-round-uuid'
-   * - refType: 'transaction', refId: 'payment-tx-uuid'
-   * - refType: 'promo', refId: 'promo-uuid'
-   */
-  refId?: string;
-  refType?: string;       // Entity type: 'bonus', 'bet', 'game', 'transaction', 'promo', etc.
-
-  // Metadata
-  description?: string;
-  category?: string;      // What category of activity
-  metadata?: Record<string, unknown>;
-  
-  // Timestamps (auto-managed by repository)
-  createdAt?: Date;
-  updatedAt?: Date;
-}
-
-export type WalletTransactionType = 
-  | 'deposit'           // Money in from payment
-  | 'withdrawal'        // Money out to payment
-  | 'bet'               // Debit for placing bet
-  | 'win'               // Credit from winning
-  | 'refund'            // Bet cancelled/refunded
-  | 'bonus_credit'      // Bonus added
-  | 'bonus_convert'     // Bonus converted to real (wagering complete)
-  | 'bonus_forfeit'     // Bonus removed/expired
-  | 'transfer_in'       // Transfer from another wallet
-  | 'transfer_out'      // Transfer to another wallet
-  | 'adjustment'        // Manual adjustment
-  | 'fee'               // Fee deduction
-  | 'hold'              // Lock funds
-  | 'release';          // Release locked funds
+// WalletTransaction removed - replaced by Transaction with objectModel pattern
 
 // ═══════════════════════════════════════════════════════════════════
 // Wallet Strategy Configuration (Platform-Level)
@@ -793,6 +786,10 @@ export interface ProcessRefundInput {
 export interface CreateWalletInput {
   currency: Currency;
   category?: WalletCategory;
+  /** Allow wallet to go negative balance (wallet-level permission) */
+  allowNegative?: boolean;
+  /** Credit limit for negative balances (in smallest unit: cents, satoshi, wei) */
+  creditLimit?: number;
 }
 
 export interface TransferBetweenWalletsInput {

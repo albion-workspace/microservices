@@ -21,7 +21,7 @@ import { hasRole, getRoleNames } from '../lib/access'
  * 
  * Demonstrates actual scenarios from payment and bonus tests:
  * 1. Complete Payment Flow: Fund provider → User deposit → Balance verification
- * 2. User-to-User Funding: Gateway → Provider transfer
+ * 2. User-to-User Funding: System → Provider transfer
  * 3. Bonus Eligibility: Check and claim bonuses
  * 4. Bonus Turnover Tracking: Track wagering requirements
  */
@@ -43,9 +43,9 @@ const useCases: UseCase[] = [
     description: 'Fund provider → User deposit → Balance verification (from payment-test-flow.ts)',
     icon: CreditCard,
     steps: [
-      'Fund payment-provider from payment-gateway (€10,000)',
+      'Fund payment-provider from system (€10,000)',
       'End-user deposits from payment-provider (€500)',
-      'Verify balances: Gateway (-€10,000), Provider (€9,500), User (€485.50)',
+      'Verify balances: System (-€10,000), Provider (€9,500), User (€485.50)',
     ],
   },
   {
@@ -54,7 +54,7 @@ const useCases: UseCase[] = [
     description: 'Transfer funds between system users (from payment-test-funding.ts)',
     icon: Users,
     steps: [
-      'Select source user (payment-gateway)',
+      'Select source user (system)',
       'Select destination user (payment-provider)',
       'Enter amount and currency',
       'Execute transfer and verify ledger entries',
@@ -96,7 +96,6 @@ export default function UseCases() {
 
   // Payment Flow State
   const [paymentFlowState, setPaymentFlowState] = useState({
-    gatewayUserId: '',
     providerUserId: '',
     endUserId: '',
     fundingAmount: '10000',
@@ -181,29 +180,35 @@ export default function UseCases() {
           { first: 100 }
         )
 
-        const gatewayWallet = wallets.wallets.nodes.find(
-          w => w.userId === paymentFlowState.gatewayUserId && w.currency === paymentFlowState.currency
+        // Get system user
+        const systemUser = usersQuery.data?.find(u => hasRole(u.roles, 'system'))
+        if (!systemUser) {
+          throw new Error('System user not found')
+        }
+
+        const systemWallet = wallets.wallets.nodes.find(
+          w => w.userId === systemUser.id && w.currency === paymentFlowState.currency
         )
         const providerWallet = wallets.wallets.nodes.find(
           w => w.userId === paymentFlowState.providerUserId && w.currency === paymentFlowState.currency
         )
 
-        if (!gatewayWallet || !providerWallet) {
+        if (!systemWallet || !providerWallet) {
           throw new Error('Wallets not found. Please ensure wallets exist for these users.')
         }
 
-        // Step 2: Fund provider from gateway
+        // Step 2: Fund provider from system
         addLog(`Step 1: Funding provider with €${(parseFloat(paymentFlowState.fundingAmount) / 100).toFixed(2)}`)
         
-        const transferOut = await gql<{ createWalletTransaction: { success: boolean; walletTransaction?: { id: string } } }>(
+        // Use createTransfer mutation
+        const transferResult = await gql<{ createTransfer: { success: boolean; transfer?: { id: string } } }>(
           'payment',
           `
-            mutation TransferOut($input: CreateWalletTransactionInput!) {
-              createWalletTransaction(input: $input) {
+            mutation CreateTransfer($input: CreateTransferInput!) {
+              createTransfer(input: $input) {
                 success
-                walletTransaction {
+                transfer {
                   id
-                  balance
                 }
                 errors
               }
@@ -211,45 +216,16 @@ export default function UseCases() {
           `,
           {
             input: {
-              walletId: gatewayWallet.id,
-              userId: paymentFlowState.gatewayUserId,
-              type: 'transfer_out',
+              fromUserId: systemUser.id,
+              toUserId: paymentFlowState.providerUserId,
               amount: parseFloat(paymentFlowState.fundingAmount),
               currency: paymentFlowState.currency,
-              balanceType: 'real',
               description: `Fund provider: ${paymentFlowState.providerUserId}`,
             },
           }
         )
 
-        const transferIn = await gql<{ createWalletTransaction: { success: boolean; walletTransaction?: { id: string } } }>(
-          'payment',
-          `
-            mutation TransferIn($input: CreateWalletTransactionInput!) {
-              createWalletTransaction(input: $input) {
-                success
-                walletTransaction {
-                  id
-                  balance
-                }
-                errors
-              }
-            }
-          `,
-          {
-            input: {
-              walletId: providerWallet.id,
-              userId: paymentFlowState.providerUserId,
-              type: 'transfer_in',
-              amount: parseFloat(paymentFlowState.fundingAmount),
-              currency: paymentFlowState.currency,
-              balanceType: 'real',
-              description: `Fund from gateway: ${paymentFlowState.gatewayUserId}`,
-            },
-          }
-        )
-
-        const fundResult = transferOut.createWalletTransaction.success && transferIn.createWalletTransaction.success
+        const fundResult = transferResult.createTransfer.success
 
         if (!fundResult) {
           throw new Error('Funding failed')
@@ -301,57 +277,62 @@ export default function UseCases() {
         // Step 3: Verify balances
         addLog('Step 3: Verifying balances...')
         
-        const gatewayBalance = await gql<{ ledgerAccountBalance: { balance: number } }>(
+        // Reuse systemUser from earlier in the function
+        if (!systemUser) {
+          throw new Error('System user not found')
+        }
+
+        const systemBalance = await gql<{ walletBalance: { balance: number } }>(
           'payment',
           `
-            query GetBalance($userId: String!, $subtype: String!, $currency: String!) {
-              ledgerAccountBalance(userId: $userId, subtype: $subtype, currency: $currency) {
+            query GetBalance($userId: String!, $category: String, $currency: String!) {
+              walletBalance(userId: $userId, category: $category, currency: $currency) {
                 balance
               }
             }
           `,
           {
-            userId: paymentFlowState.gatewayUserId,
-            subtype: 'main',
+            userId: systemUser.id,
+            category: 'main',
             currency: paymentFlowState.currency,
           }
         )
 
-        const providerBalance = await gql<{ ledgerAccountBalance: { balance: number } }>(
+        const providerBalance = await gql<{ walletBalance: { balance: number } }>(
           'payment',
           `
-            query GetBalance($userId: String!, $subtype: String!, $currency: String!) {
-              ledgerAccountBalance(userId: $userId, subtype: $subtype, currency: $currency) {
+            query GetBalance($userId: String!, $category: String, $currency: String!) {
+              walletBalance(userId: $userId, category: $category, currency: $currency) {
                 balance
               }
             }
           `,
           {
             userId: paymentFlowState.providerUserId,
-            subtype: 'main',
+            category: 'main',
             currency: paymentFlowState.currency,
           }
         )
 
-        const userBalance = await gql<{ ledgerAccountBalance: { balance: number } }>(
+        const userBalance = await gql<{ walletBalance: { balance: number } }>(
           'payment',
           `
-            query GetBalance($userId: String!, $subtype: String!, $currency: String!) {
-              ledgerAccountBalance(userId: $userId, subtype: $subtype, currency: $currency) {
+            query GetBalance($userId: String!, $category: String, $currency: String!) {
+              walletBalance(userId: $userId, category: $category, currency: $currency) {
                 balance
               }
             }
           `,
           {
             userId: paymentFlowState.endUserId,
-            subtype: 'main',
+            category: 'main',
             currency: paymentFlowState.currency,
           }
         )
 
-        addLog(`Gateway Balance: €${(gatewayBalance.ledgerAccountBalance.balance / 100).toFixed(2)}`, 'success')
-        addLog(`Provider Balance: €${(providerBalance.ledgerAccountBalance.balance / 100).toFixed(2)}`, 'success')
-        addLog(`User Balance: €${(userBalance.ledgerAccountBalance.balance / 100).toFixed(2)}`, 'success')
+        addLog(`System Balance: €${(systemBalance.walletBalance.balance / 100).toFixed(2)}`, 'success')
+        addLog(`Provider Balance: €${(providerBalance.walletBalance.balance / 100).toFixed(2)}`, 'success')
+        addLog(`User Balance: €${(userBalance.walletBalance.balance / 100).toFixed(2)}`, 'success')
         addLog('✅ Payment flow completed successfully!', 'success')
 
         return { success: true }
@@ -577,13 +558,12 @@ export default function UseCases() {
   // Auto-populate user IDs from common test users
   const populateTestUsers = () => {
     const users = usersQuery.data || []
-    const gatewayUser = users.find(u => u.email === 'payment-gateway@system.com')
+    const systemUser = users.find(u => hasRole(u.roles, 'system'))
     const providerUser = users.find(u => u.email === 'payment-provider@system.com')
     const endUser = users.find(u => u.email === 'test-end-user@demo.com') || users.find(u => hasRole(u.roles, 'user'))
 
-    if (gatewayUser) {
-      setPaymentFlowState(prev => ({ ...prev, gatewayUserId: gatewayUser.id }))
-      setFundingState(prev => ({ ...prev, fromUserId: gatewayUser.id }))
+    if (systemUser) {
+      setFundingState(prev => ({ ...prev, fromUserId: systemUser.id }))
     }
     if (providerUser) {
       setPaymentFlowState(prev => ({ ...prev, providerUserId: providerUser.id }))
@@ -668,17 +648,6 @@ export default function UseCases() {
                 >
                   Auto-fill Test Users
                 </button>
-
-                <div className="form-group">
-                  <label className="form-label">Payment Gateway User ID</label>
-                  <input
-                    type="text"
-                    className="input"
-                    value={paymentFlowState.gatewayUserId}
-                    onChange={e => setPaymentFlowState(prev => ({ ...prev, gatewayUserId: e.target.value }))}
-                    placeholder="payment-gateway@system.com user ID"
-                  />
-                </div>
 
                 <div className="form-group">
                   <label className="form-label">Payment Provider User ID</label>
@@ -769,7 +738,7 @@ export default function UseCases() {
                     className="input"
                     value={fundingState.fromUserId}
                     onChange={e => setFundingState(prev => ({ ...prev, fromUserId: e.target.value }))}
-                    placeholder="payment-gateway@system.com user ID"
+                    placeholder="system user ID"
                   />
                 </div>
 
