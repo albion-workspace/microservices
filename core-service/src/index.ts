@@ -39,6 +39,7 @@ export {
   getOrCreateWallet,
   approveTransfer,
   declineTransfer,
+  getBalanceField,
 } from './common/transfer-helper.js';
 export type {
   Transfer,
@@ -46,6 +47,30 @@ export type {
   CreateTransferParams,
   CreateTransferResult,
 } from './common/transfer-helper.js';
+
+// Recovery System (Generic - works with transfers, orders, etc.)
+export {
+  recoverOperation,
+  recoverStuckOperations,
+  recoverAllStuckOperations,
+  registerRecoveryHandler,
+  getRecoveryHandler,
+  getOperationStateTracker,
+  getRecoveryJob,
+  OperationStateTracker,
+  RecoveryJob,
+} from './common/recovery.js';
+export type {
+  RecoverableOperation,
+  RecoveryResult,
+  RecoveryHandler,
+  OperationState,
+} from './common/recovery.js';
+
+// Transfer Recovery Handler (Showcase implementation)
+export {
+  createTransferRecoveryHandler,
+} from './common/transfer-recovery.js';
 
 // Account ID Management (Unified Account ID System)
 export {

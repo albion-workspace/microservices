@@ -26,7 +26,7 @@ export { getTransactionStateManager, TransactionStateManager } from './transacti
 // ═══════════════════════════════════════════════════════════════════
 
 // Import wallet helpers from transfer-helper (for internal use)
-import { getOrCreateWallet as getOrCreateWalletHelper } from './transfer-helper.js';
+import { getOrCreateWallet as getOrCreateWalletHelper, getBalanceField } from './transfer-helper.js';
 
 // Re-export wallet helpers from transfer-helper (for external use)
 export { createNewWallet, getOrCreateWallet, startSession, endSession } from './transfer-helper.js';
@@ -214,7 +214,7 @@ export async function createTransaction(
   const netAmount = amount - feeAmount;
   
   // Get balance field based on balance type
-  const balanceField = balanceType === 'bonus' ? 'bonusBalance' : balanceType === 'locked' ? 'lockedBalance' : 'balance';
+  const balanceField = getBalanceField(balanceType);
   
   // Core transaction logic (reusable with or without external session)
   const executeTransaction = async (txSession: ClientSession): Promise<CreateTransactionResult> => {
@@ -363,7 +363,7 @@ export async function createTransactions(
         const balanceType = balanceTypeParam || 'real';
         const feeAmount = feeAmountParam || 0;
         const netAmount = amount - feeAmount;
-        const balanceField = balanceType === 'bonus' ? 'bonusBalance' : balanceType === 'locked' ? 'lockedBalance' : 'balance';
+        const balanceField = getBalanceField(balanceType);
         
         // Get or create wallet
         const wallet = await getOrCreateWalletHelper(userId, currency, tenantId, txSession);

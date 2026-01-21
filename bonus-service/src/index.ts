@@ -705,6 +705,17 @@ async function main() {
   // Ledger initialization removed - using simplified architecture (wallets + transactions + transfers)
   // Wallets are created automatically via createTransferWithTransactions
   logger.info('Bonus service initialized - using wallets + transactions + transfers architecture');
+  
+  // Setup recovery system (transfer recovery + recovery job)
+  // Bonus operations use createTransferWithTransactions, so they need transfer recovery
+  try {
+    const { setupRecovery } = await import('./recovery-setup.js');
+    await setupRecovery();
+    logger.info('✅ Recovery system initialized');
+  } catch (err) {
+    logger.warn('Could not setup recovery system', { error: (err as Error).message });
+    // Don't throw - service can still run without recovery
+  }
 
   // Note: User status flags are now stored in auth-service user.metadata
   // No need for separate user_status collection - consistent with payment-service architecture

@@ -31,6 +31,20 @@
 import { getDatabase, getClient, generateId, generateMongoId, logger, deleteCachePattern } from '../index.js';
 import type { ClientSession } from 'mongodb';
 import { createTransactionDocument, type CreateTransactionParams, type Transaction } from './transaction-helper.js';
+import { getOperationStateTracker } from './recovery.js';
+
+// ═══════════════════════════════════════════════════════════════════
+// Helper Functions
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Get the MongoDB field name for a balance type
+ * @param balanceType - The balance type ('real', 'bonus', or 'locked')
+ * @returns The MongoDB field name ('balance', 'bonusBalance', or 'lockedBalance')
+ */
+export function getBalanceField(balanceType: 'real' | 'bonus' | 'locked'): string {
+  return balanceType === 'bonus' ? 'bonusBalance' : balanceType === 'locked' ? 'lockedBalance' : 'balance';
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -42,11 +56,12 @@ export interface Transfer {
   fromUserId: string;
   toUserId: string;
   amount: number;
-  status: 'pending' | 'active' | 'approved' | 'canceled' | 'failed';
+  status: 'pending' | 'active' | 'approved' | 'completed' | 'canceled' | 'failed' | 'recovered';
   charge: 'credit' | 'debit';
   meta: Record<string, unknown>;
   createdAt: Date;
   updatedAt?: Date;
+  [key: string]: unknown; // Index signature for RecoverableOperation compatibility
 }
 
 // Re-export Transaction type from transaction-helper for consistency
@@ -358,8 +373,8 @@ export async function createTransferWithTransactions(
     const toWalletId = (toWallet as any).id;
     
     // Get balance fields based on balance types
-    const fromBalanceField = fromBalanceType === 'bonus' ? 'bonusBalance' : fromBalanceType === 'locked' ? 'lockedBalance' : 'balance';
-    const toBalanceField = toBalanceType === 'bonus' ? 'bonusBalance' : toBalanceType === 'locked' ? 'lockedBalance' : 'balance';
+    const fromBalanceField = getBalanceField(fromBalanceType);
+    const toBalanceField = getBalanceField(toBalanceType);
     
     // Calculate balances after transaction
     const fromCurrentBalance = (fromWallet as any)?.[fromBalanceField] || 0;
@@ -632,14 +647,38 @@ export async function createTransferWithTransactions(
   
   // Otherwise, create and manage session internally
   const internalSession = client.startSession();
+  // Track operation state for recovery (if not using external session)
+  const stateTracker = getOperationStateTracker();
+  const operationId = transferId;
+  
   try {
+    // Set initial state
+    await stateTracker.setState(operationId, 'transfer', {
+      status: 'in_progress',
+      startedAt: new Date(),
+      lastHeartbeat: new Date(),
+      steps: ['createTransfer', 'createTransactions', 'updateWallets'],
+      currentStep: 'createTransfer',
+    });
+
     const result = await internalSession.withTransaction(async () => {
-      return await executeTransfer(internalSession);
+      // Update heartbeat during transaction
+      await stateTracker.updateHeartbeat(operationId, 'transfer');
+      
+      const transferResult = await executeTransfer(internalSession);
+      
+      // Update state - transaction completed
+      await stateTracker.updateHeartbeat(operationId, 'transfer');
+      
+      return transferResult;
     }, {
       readConcern: { level: 'snapshot' },
       writeConcern: { w: 'majority' },
       readPreference: 'primary',
     });
+    
+    // Mark as completed
+    await stateTracker.markCompleted(operationId, 'transfer');
     
     // Invalidate wallet cache after successful transaction commit
     // This ensures queries see the updated balances
@@ -654,6 +693,11 @@ export async function createTransferWithTransactions(
     
     return result;
   } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    
+    // Mark as failed
+    await stateTracker.markFailed(operationId, 'transfer', errorMsg);
+    
     logger.error('Failed to create transfer with transactions', {
       error,
       fromUserId,

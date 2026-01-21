@@ -2617,7 +2617,18 @@ function LedgerTab() {
                         {getUserDisplay(transfer.toUserId)}
                       </td>
                       <td style={{ padding: '10px 8px', fontSize: 12, color: 'var(--text-secondary)', maxWidth: 250, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        {transfer.meta?.description || '-'}
+                        {(() => {
+                          const desc = transfer.meta?.description;
+                          // Debug: log if description is missing
+                          if (!desc && transfer.meta) {
+                            console.debug('[Transfer] Missing description:', {
+                              transferId: transfer.id,
+                              metaKeys: Object.keys(transfer.meta || {}),
+                              meta: transfer.meta
+                            });
+                          }
+                          return desc || '-';
+                        })()}
                       </td>
                       <td style={{ padding: '10px 8px', fontSize: 14, textAlign: 'right', fontFamily: 'var(--font-mono)', fontWeight: 500 }}>
                         {formatCurrency(transfer.amount, transfer.meta?.currency || 'EUR')}

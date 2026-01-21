@@ -855,6 +855,16 @@ async function main() {
   // Transaction recovery is handled by saga state manager (Redis-backed)
   logger.info('Payment service initialized - using wallets + transactions architecture');
   
+  // Setup recovery system (transfer recovery + recovery job)
+  try {
+    const { setupRecovery } = await import('./recovery-setup.js');
+    await setupRecovery();
+    logger.info('✅ Recovery system initialized');
+  } catch (err) {
+    logger.warn('Could not setup recovery system', { error: (err as Error).message });
+    // Don't throw - service can still run without recovery
+  }
+  
   // Cleanup old webhook deliveries daily
   setInterval(async () => {
     try {
