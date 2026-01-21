@@ -116,20 +116,12 @@ export async function emitAuthEvent<E extends keyof AuthWebhookEvents>(
 
 /**
  * Cleanup old webhook deliveries (run periodically)
+ * Deliveries are now stored as sub-documents in webhook documents.
  */
 export async function cleanupAuthWebhookDeliveries(olderThanDays: number = 30): Promise<number> {
   try {
-    const db = getDatabase();
-    const cutoffDate = new Date();
-    cutoffDate.setDate(cutoffDate.getDate() - olderThanDays);
-    
-    const result = await db.collection('webhook_deliveries').deleteMany({
-      service: 'auth-service',
-      createdAt: { $lt: cutoffDate },
-      status: { $in: ['success', 'failed'] }, // Keep pending for retry
-    });
-    
-    return result.deletedCount || 0;
+    // Use the webhook manager's cleanup method which handles merged structure
+    return await authWebhooks.cleanupDeliveries(olderThanDays);
   } catch (error) {
     logger.error('Failed to cleanup webhook deliveries', { error });
     return 0;

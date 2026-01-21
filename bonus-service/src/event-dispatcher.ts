@@ -38,7 +38,7 @@ export type BonusWebhookEvents =
 
 /**
  * Webhook manager for bonus service.
- * Uses 'bonus_webhooks' and 'bonus_webhook_deliveries' collections.
+ * Uses 'bonus_webhooks' collection with deliveries as sub-documents.
  */
 export const bonusWebhooks = createWebhookManager<BonusWebhookEvents>({
   serviceName: 'bonus',

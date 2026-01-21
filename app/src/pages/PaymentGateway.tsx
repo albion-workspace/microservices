@@ -1279,6 +1279,9 @@ function WalletsTab() {
   // ✅ Calculate system balance from GraphQL wallets (source of truth from GraphQL)
   const systemUsersBalanceFromWallets = systemWalletsInBaseCurrency.reduce((sum: number, w: any) => sum + (w.balance || 0), 0)
   
+  // ✅ Calculate system bonus balance (bonus pool = system user's bonusBalance)
+  const systemUsersBonusBalance = systemWalletsInBaseCurrency.reduce((sum: number, w: any) => sum + (w.bonusBalance || 0), 0)
+  
   // Calculate system user wallet balances from bulk query (source of truth)
   // System users are users with 'system' role (can go negative, represents platform net position)
   const systemUsersWalletBalance = systemUsers.reduce((sum: number, user: any) => {
@@ -1327,6 +1330,11 @@ function WalletsTab() {
   const finalProviderBalance = providerTotalBalanceFromWallet !== 0
     ? providerTotalBalanceFromWallet
     : providerTotalBalance
+  
+  // ✅ Calculate provider bonus balance from wallets
+  const providerBonusBalance = providerWallets
+    .filter((w: any) => w.currency === baseCurrency)
+    .reduce((sum: number, w: any) => sum + (w.bonusBalance || 0), 0)
   
   // ✅ Calculate end user balances from wallets (source of truth)
   // Note: End users should not go negative (only system can), but we display actual balances
@@ -1377,6 +1385,11 @@ function WalletsTab() {
   const userTotalBalance = userWalletBalances !== 0
     ? userWalletBalances
     : userWalletsBalance
+  
+  // ✅ Calculate end user bonus balance from wallets
+  const userBonusBalance = userWallets
+    .filter((w: any) => w.currency === baseCurrency)
+    .reduce((sum: number, w: any) => sum + (w.bonusBalance || 0), 0)
   
   // Check for negative end user wallets (should never happen - only system can go negative)
   // Use the userCategoryMap for consistent categorization
@@ -1532,6 +1545,17 @@ function WalletsTab() {
               }}>
                 {formatCurrency(systemBalance, baseCurrency)}
               </div>
+              {systemUsersBonusBalance > 0 && (
+                <div style={{ 
+                  fontSize: 11, 
+                  marginTop: 4, 
+                  fontFamily: 'var(--font-mono)', 
+                  color: activeSection === 'system' ? 'rgba(255,255,255,0.7)' : 'var(--accent-orange)',
+                  fontWeight: 600
+                }}>
+                  🎁 {formatCurrency(systemUsersBonusBalance, baseCurrency)} bonus
+                </div>
+              )}
             </div>
 
             {/* Arrow */}
@@ -1560,6 +1584,17 @@ function WalletsTab() {
               <div style={{ fontSize: 16, fontWeight: 700, marginTop: 8, fontFamily: 'var(--font-mono)', color: activeSection === 'provider' ? 'white' : 'var(--accent-purple)' }}>
                 {formatCurrency(finalProviderBalance, baseCurrency)}
               </div>
+              {providerBonusBalance > 0 && (
+                <div style={{ 
+                  fontSize: 11, 
+                  marginTop: 4, 
+                  fontFamily: 'var(--font-mono)', 
+                  color: activeSection === 'provider' ? 'rgba(255,255,255,0.7)' : 'var(--accent-orange)',
+                  fontWeight: 600
+                }}>
+                  🎁 {formatCurrency(providerBonusBalance, baseCurrency)} bonus
+                </div>
+              )}
             </div>
 
             {/* Arrow */}
@@ -1586,6 +1621,17 @@ function WalletsTab() {
               <div style={{ fontSize: 16, fontWeight: 700, marginTop: 8, fontFamily: 'var(--font-mono)', color: activeSection === 'user' ? 'white' : 'var(--accent-green)' }}>
                 {formatCurrency(userTotalBalance, baseCurrency)}
               </div>
+              {userBonusBalance > 0 && (
+                <div style={{ 
+                  fontSize: 11, 
+                  marginTop: 4, 
+                  fontFamily: 'var(--font-mono)', 
+                  color: activeSection === 'user' ? 'rgba(255,255,255,0.7)' : 'var(--accent-orange)',
+                  fontWeight: 600
+                }}>
+                  🎁 {formatCurrency(userBonusBalance, baseCurrency)} bonus
+                </div>
+              )}
             </div>
           </div>
           

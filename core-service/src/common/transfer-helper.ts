@@ -371,17 +371,19 @@ export async function createTransferWithTransactions(
   
   if (method.startsWith('bonus_')) {
     if (method === 'bonus_award') {
-      // bonus_award: bonus-pool (real) -> user (bonus)
-      fromBalanceType = fromBalanceTypeParam || 'real';
+      // bonus_award: system (bonus) -> user (bonus)
+      // System user's bonusBalance is the bonus pool
+      fromBalanceType = fromBalanceTypeParam || 'bonus';
       toBalanceType = toBalanceTypeParam || 'bonus';
     } else if (method === 'bonus_convert') {
       // bonus_convert: user (bonus) -> user (real) - same user
       fromBalanceType = fromBalanceTypeParam || 'bonus';
       toBalanceType = toBalanceTypeParam || 'real';
     } else if (method === 'bonus_forfeit') {
-      // bonus_forfeit: user (bonus) -> bonus-pool (real)
+      // bonus_forfeit: user (bonus) -> system (bonus)
+      // Returns forfeited bonus to system user's bonusBalance (bonus pool)
       fromBalanceType = fromBalanceTypeParam || 'bonus';
-      toBalanceType = toBalanceTypeParam || 'real';
+      toBalanceType = toBalanceTypeParam || 'bonus';
     }
   }
   

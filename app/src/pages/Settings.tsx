@@ -409,7 +409,7 @@ function DatabaseTab() {
 
             <div style={{ fontSize: 14, fontWeight: 600, marginTop: 8 }}>Collections:</div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-              {['wallets', 'wallet_transactions', 'transactions', 'provider_configs', 'payment_webhooks', 'payment_webhook_deliveries'].map(col => (
+              {['wallets', 'wallet_transactions', 'transactions', 'provider_configs', 'payment_webhooks'].map(col => (
                 <span key={col} style={{ fontSize: 12, padding: '4px 8px', background: 'var(--bg-primary)', borderRadius: 4, fontFamily: 'var(--font-mono)' }}>
                   {col}
                 </span>
@@ -435,7 +435,7 @@ function DatabaseTab() {
 
             <div style={{ fontSize: 14, fontWeight: 600, marginTop: 8 }}>Collections:</div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-              {['bonus_templates', 'user_bonuses', 'bonus_webhooks', 'bonus_webhook_deliveries'].map(col => (
+              {['bonus_templates', 'user_bonuses', 'bonus_webhooks'].map(col => (
                 <span key={col} style={{ fontSize: 12, padding: '4px 8px', background: 'var(--bg-primary)', borderRadius: 4, fontFamily: 'var(--font-mono)' }}>
                   {col}
                 </span>

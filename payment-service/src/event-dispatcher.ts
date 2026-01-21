@@ -40,7 +40,7 @@ export type PaymentWebhookEvents =
 
 /**
  * Webhook manager for payment gateway.
- * Uses 'payment_webhooks' and 'payment_webhook_deliveries' collections.
+ * Uses 'payment_webhooks' collection with deliveries as sub-documents.
  */
 export const paymentWebhooks = createWebhookManager<PaymentWebhookEvents>({
   serviceName: 'payment',

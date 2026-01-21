@@ -1776,6 +1776,134 @@ async function testAll() {
     console.warn(`⚠️  Could not fund bonus pool: ${error.message}`);
     console.warn('   Bonus awards may fail due to insufficient pool balance');
   }
+  
+  // Test bonus-pool user behavior (if exists): can receive credits but cannot go negative
+  if (bonusPoolUserId) {
+    console.log('\n╔═══════════════════════════════════════════════════════════════════╗');
+    console.log('║           TESTING BONUS-POOL USER BEHAVIOR                        ║');
+    console.log('╚═══════════════════════════════════════════════════════════════════╝\n');
+    
+    try {
+      const { createTransferWithTransactions } = await import('../../../core-service/src/common/transfer-helper.js');
+      const paymentDb = await getPaymentDatabase();
+      const walletsCollection = paymentDb.collection('wallets');
+      
+      // Get bonus-pool user's wallet
+      const bonusPoolWallet = await walletsCollection.findOne({
+        userId: bonusPoolUserId,
+        currency: CONFIG.currency,
+        category: 'main'
+      });
+      
+      if (bonusPoolWallet) {
+        const initialBalance = (bonusPoolWallet as any).balance || 0;
+        console.log(`📊 Bonus-pool user wallet balance: ${(initialBalance / 100).toLocaleString()} ${CONFIG.currency}`);
+        
+        // Test 1: Bonus-pool user can receive credits from system (like provider user)
+        console.log('\n📥 Test 1: Funding bonus-pool user from system...');
+        const creditAmount = 1000000; // $10,000 in cents
+        
+        await createTransferWithTransactions({
+          fromUserId: systemUserId,
+          toUserId: bonusPoolUserId,
+          amount: creditAmount,
+          currency: CONFIG.currency,
+          tenantId: DEFAULT_TENANT_ID,
+          feeAmount: 0,
+          method: 'test_funding',
+          externalRef: `bonus-pool-test-funding-${Date.now()}`,
+          description: 'Test funding bonus-pool user (provider-like behavior)',
+          fromBalanceType: 'real',
+          toBalanceType: 'real',
+        });
+        
+        // Wait for transaction to commit
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        const walletAfterCredit = await walletsCollection.findOne({
+          userId: bonusPoolUserId,
+          currency: CONFIG.currency,
+          category: 'main'
+        });
+        
+        const balanceAfterCredit = (walletAfterCredit as any).balance || 0;
+        const expectedBalance = initialBalance + creditAmount;
+        
+        if (balanceAfterCredit === expectedBalance) {
+          console.log(`  ✅ Bonus-pool user can receive credits: ${(balanceAfterCredit / 100).toLocaleString()} ${CONFIG.currency}`);
+        } else {
+          console.log(`  ⚠️  Balance mismatch: expected ${(expectedBalance / 100).toLocaleString()}, got ${(balanceAfterCredit / 100).toLocaleString()}`);
+        }
+        
+        // Test 2: Bonus-pool user cannot go negative (unlike system user)
+        console.log('\n📤 Test 2: Attempting to debit more than balance (should fail)...');
+        const debitAmount = balanceAfterCredit + 10000; // Try to debit more than available
+        
+        try {
+          await createTransferWithTransactions({
+            fromUserId: bonusPoolUserId,
+            toUserId: systemUserId,
+            amount: debitAmount,
+            currency: CONFIG.currency,
+            tenantId: DEFAULT_TENANT_ID,
+            feeAmount: 0,
+            method: 'test_debit',
+            externalRef: `bonus-pool-test-debit-${Date.now()}`,
+            description: 'Test debit from bonus-pool user (should fail - cannot go negative)',
+            fromBalanceType: 'real',
+            toBalanceType: 'real',
+          });
+          
+          // If we get here, the transfer succeeded (unexpected)
+          const walletAfterDebit = await walletsCollection.findOne({
+            userId: bonusPoolUserId,
+            currency: CONFIG.currency,
+            category: 'main'
+          });
+          const balanceAfterDebit = (walletAfterDebit as any).balance || 0;
+          
+          if (balanceAfterDebit < 0) {
+            console.log(`  ❌ ERROR: Bonus-pool user went negative: ${(balanceAfterDebit / 100).toLocaleString()} ${CONFIG.currency}`);
+            console.log(`     This should not happen - bonus-pool user should not allow negative balance`);
+          } else {
+            console.log(`  ⚠️  Transfer succeeded but balance is not negative: ${(balanceAfterDebit / 100).toLocaleString()} ${CONFIG.currency}`);
+          }
+        } catch (error: any) {
+          if (error.message?.includes('Insufficient balance') || error.message?.includes('allow negative')) {
+            console.log(`  ✅ Correctly rejected: ${error.message}`);
+            console.log(`     Bonus-pool user cannot go negative (correct behavior)`);
+          } else {
+            console.log(`  ⚠️  Unexpected error: ${error.message}`);
+          }
+        }
+        
+        // Verify wallet allowNegative setting
+        const finalWallet = await walletsCollection.findOne({
+          userId: bonusPoolUserId,
+          currency: CONFIG.currency,
+          category: 'main'
+        });
+        const allowNegative = (finalWallet as any).allowNegative ?? false;
+        
+        console.log(`\n📋 Bonus-pool user wallet settings:`);
+        console.log(`   allowNegative: ${allowNegative} (should be false)`);
+        console.log(`   Final balance: ${((finalWallet as any).balance || 0) / 100} ${CONFIG.currency}`);
+        
+        if (!allowNegative) {
+          console.log(`   ✅ Wallet correctly configured: cannot go negative`);
+        } else {
+          console.log(`   ⚠️  Wallet allows negative (should be false for bonus-pool user)`);
+        }
+        
+      } else {
+        console.log(`  ℹ️  Bonus-pool user wallet not found (will be created on first transaction)`);
+      }
+    } catch (error: any) {
+      console.warn(`  ⚠️  Bonus-pool user test failed: ${error.message}`);
+    }
+    console.log();
+  }
+  
   console.log();
 
   // Step 3: Run bonus tests

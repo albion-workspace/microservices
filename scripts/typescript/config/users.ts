@@ -97,7 +97,7 @@ export const PROVIDER_USERS: Record<string, UserDefinition> = {
       transaction: true,
       wallet: true,
     },
-    description: 'Bonus pool user - holds bonus funds with fixed budget, cannot go negative',
+    description: 'Bonus pool user - kept for testing multi-user scenarios (services use system user\'s bonusBalance)',
   },
 };
 

@@ -16,7 +16,7 @@
  * - Exchange rates are cached for 5 minutes to reduce API calls
  */
 
-import { getDatabase, logger } from 'core-service';
+import { getDatabase, logger, CircuitBreaker } from 'core-service';
 import { SYSTEM_CURRENCY } from '../constants.js';
 
 export interface ExchangeRate {
@@ -39,6 +39,17 @@ export interface ExchangeRateProvider {
  */
 const rateCache = new Map<string, { rate: number; expiresAt: number }>();
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Circuit breaker for exchange rate API calls
+ * Prevents cascading failures when external API is down
+ */
+const exchangeRateCircuitBreaker = new CircuitBreaker({
+  name: 'ExchangeRateAPI',
+  failureThreshold: 5,
+  resetTimeout: 60000, // 1 minute
+  monitoringWindow: 120000, // 2 minutes
+});
 
 /**
  * Get exchange rate between two currencies
@@ -86,7 +97,10 @@ export async function getExchangeRate(
   
   // Try to fetch from external API (placeholder - implement actual API integration)
   try {
-    const rate = await fetchExchangeRateFromAPI(fromCurrency, toCurrency);
+    // Use circuit breaker to protect against API failures
+    const rate = await exchangeRateCircuitBreaker.execute(() =>
+      fetchExchangeRateFromAPI(fromCurrency, toCurrency)
+    );
     
     // Cache the rate
     if (useCache) {
@@ -101,23 +115,32 @@ export async function getExchangeRate(
     
     return rate;
   } catch (error) {
+    const circuitBreakerState = exchangeRateCircuitBreaker.getState();
+    
     logger.warn('Failed to fetch exchange rate from API', {
       fromCurrency,
       toCurrency,
       error: error instanceof Error ? error.message : String(error),
+      circuitBreakerState,
     });
     
     // Fallback: Try reverse rate if available
     const reverseKey = `${toCurrency}:${fromCurrency}`;
     const reverseCached = rateCache.get(reverseKey);
     if (reverseCached && reverseCached.expiresAt > Date.now()) {
+      logger.info('Using reverse cached exchange rate as fallback', {
+        fromCurrency,
+        toCurrency,
+        reverseRate: reverseCached.rate,
+      });
       return 1 / reverseCached.rate;
     }
     
     // Last resort: throw error (don't guess exchange rates!)
     throw new Error(
       `Exchange rate not available for ${fromCurrency} to ${toCurrency}. ` +
-      `Please configure manual rate or ensure exchange rate API is available.`
+      `Please configure manual rate or ensure exchange rate API is available. ` +
+      `Circuit breaker state: ${circuitBreakerState}`
     );
   }
 }

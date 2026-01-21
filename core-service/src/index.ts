@@ -279,6 +279,25 @@ export {
 // Error Utilities
 export { getErrorMessage, normalizeError } from './common/errors.js';
 
+// Circuit Breaker & Retry
+export { 
+  CircuitBreaker, 
+  createCircuitBreaker,
+  CircuitBreakerOpenError,
+} from './common/circuit-breaker.js';
+export type { CircuitBreakerConfig } from './common/circuit-breaker.js';
+
+export { 
+  retry, 
+  createRetryFunction,
+  RetryConfigs,
+} from './common/retry.js';
+export type { 
+  RetryConfig, 
+  RetryResult, 
+  RetryStrategy,
+} from './common/retry.js';
+
 // Resolver Utilities
 export { requireAuth, getTenantId, getUserId, createObjectModelQueryResolver } from './common/resolvers.js';
 
