@@ -130,8 +130,8 @@ export default function UserManagement() {
       setError(null)
       
       const query = `
-        query GetUsers($tenantId: String, $first: Int, $skip: Int) {
-          users(tenantId: $tenantId, first: $first, skip: $skip) {
+        query GetUsers($tenantId: String, $first: Int, $after: String) {
+          users(tenantId: $tenantId, first: $first, after: $after) {
             nodes {
               id
               tenantId
@@ -157,7 +157,6 @@ export default function UserManagement() {
       const data = await authRequest(query, {
         tenantId: currentUser?.tenantId || 'default-tenant',
         first: 100,
-        skip: 0,
       })
       
       setUsers(data.users.nodes)

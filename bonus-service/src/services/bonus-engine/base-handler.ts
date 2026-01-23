@@ -20,10 +20,7 @@ import type {
 } from './types.js';
 import { templatePersistence, userBonusPersistence } from './persistence.js';
 import { emitBonusEvent } from '../../event-dispatcher.js';
-import { 
-  recordBonusAwardTransfer,
-  checkBonusPoolBalance,
-} from '../bonus.js';
+// Event-driven architecture: bonus service emits events, payment service handles wallet operations
 
 export abstract class BaseBonusHandler implements IBonusHandler {
   abstract readonly type: BonusType;
@@ -231,31 +228,6 @@ export abstract class BaseBonusHandler implements IBonusHandler {
       return { success: false, error: 'Bonus value is zero or negative' };
     }
 
-    // Check ledger balance before awarding (prevent infinite money)
-    try {
-      const balanceCheck = await checkBonusPoolBalance(calculation.bonusValue, template.currency, context.tenantId);
-      if (!balanceCheck.sufficient) {
-        logger.warn('Insufficient bonus pool balance', {
-          userId: context.userId,
-          templateId: template.id,
-          required: balanceCheck.required,
-          available: balanceCheck.available,
-        });
-        return { 
-          success: false, 
-          error: `Insufficient bonus pool balance. Available: ${balanceCheck.available}, Required: ${balanceCheck.required}` 
-        };
-      }
-    } catch (ledgerError) {
-      logger.error('Failed to check bonus pool balance', {
-        error: ledgerError,
-        userId: context.userId,
-        templateId: template.id,
-      });
-      // Continue - ledger might not be initialized yet, but log the error
-      // In production, you might want to fail here
-    }
-
     const now = new Date();
     const userBonusData = this.buildUserBonus(template, context, calculation, now);
 
@@ -263,36 +235,11 @@ export abstract class BaseBonusHandler implements IBonusHandler {
     // MongoDB will automatically create _id, which will be normalized to id
     const createdBonus = await userBonusPersistence.create(userBonusData);
 
-    // Record in ledger AFTER creating bonus record (we need the bonus ID)
-    // If ledger fails, the transaction will roll back the bonus creation
-    try {
-      await recordBonusAwardTransfer(
-        context.userId,
-        calculation.bonusValue,
-        template.currency,
-        context.tenantId,
-        createdBonus.id,
-        template.type,
-        `Bonus awarded: ${template.name} (${template.code})`
-      );
-    } catch (ledgerError) {
-      logger.error('Failed to record bonus in ledger', {
-        error: ledgerError,
-        userId: context.userId,
-        bonusId: createdBonus.id,
-      });
-      // If ledger fails, delete the bonus (transaction will handle rollback if in transaction)
-      try {
-        await userBonusPersistence.delete(createdBonus.id);
-      } catch (deleteError) {
-        logger.error('Failed to delete bonus after ledger error', { error: deleteError });
-      }
-      // If ledger fails, we should not award the bonus
-      return { 
-        success: false, 
-        error: 'Failed to record bonus in ledger. Bonus not awarded.' 
-      };
-    }
+    // Emit bonus.awarded event - payment service will handle wallet operations
+    // Payment service will check balance and create transfer when processing the event
+    // If balance is insufficient, payment service will log an error (bonus record still created)
+    // Note: Event emission is non-blocking - payment service handles wallet operations asynchronously
+    await this.emitAwardedEvent(createdBonus, calculation);
 
     // Increment template usage via persistence layer
     await templatePersistence.incrementUsage(template.id);

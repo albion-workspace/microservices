@@ -114,14 +114,14 @@ export default function BonusService() {
       const filter = canManageTemplates ? undefined : { userId: user?.id }
       
       // Build query variables - only include filter if it's defined
-      const variables: Record<string, unknown> = { first: 100, skip: 0 }
+      const variables: Record<string, unknown> = { first: 100 }
       if (filter !== undefined) {
         variables.filter = filter
       }
       
       const query = `
-        query GetUserBonuses($first: Int, $skip: Int, $filter: JSON) {
-          userBonuss(first: $first, skip: $skip, filter: $filter) {
+        query GetUserBonuses($first: Int, $after: String, $filter: JSON) {
+          userBonuss(first: $first, after: $after, filter: $filter) {
             nodes {
               id
               userId
@@ -166,8 +166,8 @@ export default function BonusService() {
       
       try {
       const query = `
-        query GetBonusTemplates($first: Int, $skip: Int) {
-          bonusTemplates(first: $first, skip: $skip) {
+        query GetBonusTemplates($first: Int, $after: String) {
+          bonusTemplates(first: $first, after: $after) {
               nodes {
                 id
                 name
@@ -207,7 +207,7 @@ export default function BonusService() {
         
         const data = await graphqlBonus<{ bonusTemplates: { nodes: BonusTemplate[]; totalCount: number } }>(
           query,
-          { first: 100, skip: 0 },
+          { first: 100 },
           authToken
         )
         
@@ -654,12 +654,28 @@ export default function BonusService() {
                           )}
                         </td>
                         <td style={{ padding: 12, fontSize: 12, color: 'var(--text-muted)' }}>
-                          {new Date(bonus.expiresAt).toLocaleDateString()}
-                          {new Date(bonus.expiresAt) < new Date() && (
-                            <div style={{ fontSize: 10, color: 'var(--color-status-error)', marginTop: 2 }}>
-                              Expired
-                            </div>
-                          )}
+                          {(() => {
+                            try {
+                              const expiresDate = new Date(bonus.expiresAt)
+                              if (isNaN(expiresDate.getTime())) return 'N/A'
+                              return expiresDate.toLocaleDateString()
+                            } catch {
+                              return 'N/A'
+                            }
+                          })()}
+                          {(() => {
+                            try {
+                              const expiresDate = new Date(bonus.expiresAt)
+                              if (isNaN(expiresDate.getTime())) return null
+                              return expiresDate < new Date() ? (
+                                <div style={{ fontSize: 10, color: 'var(--color-status-error)', marginTop: 2 }}>
+                                  Expired
+                                </div>
+                              ) : null
+                            } catch {
+                              return null
+                            }
+                          })()}
                         </td>
                       </tr>
                     ))}
@@ -852,7 +868,18 @@ export default function BonusService() {
                           </div>
                           <div>
                             <span style={{ color: 'var(--color-text-muted)' }}>Valid:</span>{' '}
-                            <strong>{new Date(template.validFrom).toLocaleDateString()} - {new Date(template.validUntil).toLocaleDateString()}</strong>
+                            <strong>
+                              {(() => {
+                                try {
+                                  const fromDate = new Date(template.validFrom)
+                                  const untilDate = new Date(template.validUntil)
+                                  if (isNaN(fromDate.getTime()) || isNaN(untilDate.getTime())) return 'N/A'
+                                  return `${fromDate.toLocaleDateString()} - ${untilDate.toLocaleDateString()}`
+                                } catch {
+                                  return 'N/A'
+                                }
+                              })()}
+                            </strong>
                           </div>
                         </div>
                       </>
@@ -884,6 +911,28 @@ export default function BonusService() {
 // Template Edit Form Component
 // ═══════════════════════════════════════════════════════════════════
 
+// Helper function to safely parse dates
+function safeDateToISOString(dateValue: string | Date | null | undefined, fallback?: Date): string {
+  if (!dateValue) {
+    const defaultDate = fallback || new Date()
+    return defaultDate.toISOString().split('T')[0]
+  }
+  
+  try {
+    const date = dateValue instanceof Date ? dateValue : new Date(dateValue)
+    if (isNaN(date.getTime())) {
+      // Invalid date, use fallback
+      const defaultDate = fallback || new Date()
+      return defaultDate.toISOString().split('T')[0]
+    }
+    return date.toISOString().split('T')[0]
+  } catch (error) {
+    // Error parsing date, use fallback
+    const defaultDate = fallback || new Date()
+    return defaultDate.toISOString().split('T')[0]
+  }
+}
+
 function TemplateEditForm({
   template,
   onSave,
@@ -908,8 +957,8 @@ function TemplateEditForm({
     maxValue: template?.maxValue ? (template.maxValue / 100).toString() : '',
     minDeposit: template?.minDeposit ? (template.minDeposit / 100).toString() : '',
     turnoverMultiplier: template?.turnoverMultiplier?.toString() || '30',
-    validFrom: template?.validFrom ? new Date(template.validFrom).toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
-    validUntil: template?.validUntil ? new Date(template.validUntil).toISOString().split('T')[0] : new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+    validFrom: safeDateToISOString(template?.validFrom, new Date()),
+    validUntil: safeDateToISOString(template?.validUntil, new Date(Date.now() + 90 * 24 * 60 * 60 * 1000)),
     eligibleTiers: template?.eligibleTiers?.join(', ') || '',
     minSelections: template?.minSelections?.toString() || '',
     maxSelections: template?.maxSelections?.toString() || '',
@@ -923,6 +972,21 @@ function TemplateEditForm({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     
+    // Safely parse dates
+    let validFromDate: Date
+    let validUntilDate: Date
+    try {
+      validFromDate = new Date(formData.validFrom)
+      validUntilDate = new Date(formData.validUntil)
+      if (isNaN(validFromDate.getTime()) || isNaN(validUntilDate.getTime())) {
+        alert('Invalid date values. Please check the dates and try again.')
+        return
+      }
+    } catch (error) {
+      alert('Invalid date values. Please check the dates and try again.')
+      return
+    }
+    
     // For updates, only send changed fields (createService handles partial updates)
     const input: any = {
       name: formData.name,
@@ -933,8 +997,8 @@ function TemplateEditForm({
       value: parseFloat(formData.value) * 100, // Convert to cents
       currency: formData.currency,
       turnoverMultiplier: parseFloat(formData.turnoverMultiplier),
-      validFrom: new Date(formData.validFrom).toISOString(),
-      validUntil: new Date(formData.validUntil).toISOString(),
+      validFrom: validFromDate.toISOString(),
+      validUntil: validUntilDate.toISOString(),
       priority: parseInt(formData.priority),
     }
     

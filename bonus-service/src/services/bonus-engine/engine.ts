@@ -34,10 +34,7 @@ import {
   transactionPersistence,
 } from './persistence.js';
 import { emitBonusEvent } from '../../event-dispatcher.js';
-import { 
-  recordBonusConversionTransfer,
-  recordBonusForfeitTransfer,
-} from '../bonus.js';
+// Event-driven architecture: bonus service emits events, payment service handles wallet operations
 
 // ═══════════════════════════════════════════════════════════════════
 // Bonus Engine Facade
@@ -332,21 +329,6 @@ export class BonusEngine {
       return null;
     }
 
-    // Record conversion in ledger FIRST
-    try {
-      await recordBonusConversionTransfer(
-        userId,
-        bonus.currentValue,
-        bonus.currency,
-        bonus.tenantId,
-        bonus.id,
-        `Bonus converted: ${bonus.type}`
-      );
-    } catch (ledgerError) {
-      logger.error('Failed to record bonus conversion in ledger', { error: ledgerError, bonusId });
-      throw new Error('Failed to record bonus conversion in ledger');
-    }
-
     const now = new Date();
     const historyEntry: BonusHistoryEntry = {
       timestamp: now,
@@ -361,7 +343,8 @@ export class BonusEngine {
       convertedAt: now,
     });
 
-    // Emit for payment gateway + webhooks (unified)
+    // Emit bonus.converted event - payment service will handle wallet operations
+    // Payment service will check balance and create transfer when processing the event
     try {
       await emitBonusEvent('bonus.converted', bonus.tenantId, userId, {
         bonusId: bonus.id,
@@ -390,22 +373,6 @@ export class BonusEngine {
 
     if (!bonus) return null;
 
-    // Record forfeiture in ledger FIRST
-    try {
-      await recordBonusForfeitTransfer(
-        userId,
-        bonus.currentValue,
-        bonus.currency,
-        bonus.tenantId,
-        bonus.id,
-        reason,
-        `Bonus forfeited: ${reason}`
-      );
-    } catch (ledgerError) {
-      logger.error('Failed to record bonus forfeiture in ledger', { error: ledgerError, bonusId });
-      throw new Error('Failed to record bonus forfeiture in ledger');
-    }
-
     const now = new Date();
     const historyEntry: BonusHistoryEntry = {
       timestamp: now,
@@ -421,7 +388,8 @@ export class BonusEngine {
       forfeitedAt: now,
     });
 
-    // Emit for payment gateway + webhooks (unified)
+    // Emit bonus.forfeited event - payment service will handle wallet operations
+    // Payment service will check balance and create transfer when processing the event
     try {
       await emitBonusEvent('bonus.forfeited', bonus.tenantId, userId, {
         bonusId: bonus.id,
@@ -480,22 +448,6 @@ export class BonusEngine {
     const expiredBonuses = await userBonusPersistence.findExpiring();
 
     for (const bonus of expiredBonuses) {
-      // Record expiration in ledger FIRST (same as forfeiture)
-      try {
-      await recordBonusForfeitTransfer(
-          bonus.userId,
-          bonus.currentValue,
-          bonus.currency,
-          bonus.tenantId,
-          bonus.id,
-          'Bonus expired',
-          `Bonus expired: ${bonus.type}`
-        );
-      } catch (ledgerError) {
-        logger.error('Failed to record bonus expiration in ledger', { error: ledgerError, bonusId: bonus.id });
-        // Continue - don't block expiration
-      }
-
       const historyEntry: BonusHistoryEntry = {
         timestamp: now,
         action: 'expired',
@@ -509,7 +461,8 @@ export class BonusEngine {
         currentValue: 0,
       });
 
-      // Emit for payment gateway + webhooks (unified)
+      // Emit bonus.expired event - payment service will handle wallet operations
+      // Payment service will check balance and create transfer when processing the event
       try {
         await emitBonusEvent('bonus.expired', bonus.tenantId, bonus.userId, {
           bonusId: bonus.id,

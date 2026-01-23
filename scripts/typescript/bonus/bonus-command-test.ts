@@ -1719,15 +1719,12 @@ async function testAll() {
   }
   console.log();
   
-  // Connect to database for wallet operations
-  const mongoUri = process.env.MONGO_URI || 'mongodb://localhost:27017?directConnection=true';
-  await connectDatabase(mongoUri);
-  const db = getDatabase();
+  // Connect to payment database for wallet operations (wallets are stored in payment_service)
+  const paymentDb = await getPaymentDatabase();
+  const walletsCollection = paymentDb.collection('wallets');
   
   try {
     // Ensure system user's wallets allow negative balance (wallet-level permission)
-    const paymentDb = await getPaymentDatabase();
-    const walletsCollection = paymentDb.collection('wallets');
     
     // Update system user's wallets to allow negative balance
     const updateResult = await walletsCollection.updateMany(
@@ -1741,33 +1738,71 @@ async function testAll() {
       console.log(`ℹ️  System user wallets already configured (or will be configured on creation)`);
     }
     
-    // Fund bonus pool: Transfer to system user's bonusBalance
+    // Fund bonus pool: Directly credit system user's bonusBalance
     // Architecture: System user's bonusBalance is the bonus pool
-    // Transfer from system (real) -> system (bonus) to fund the bonus pool
+    // Since system user's real balance may be 0, we directly credit the bonus balance
     const fundAmount = 2000000000; // $20,000,000 in cents
     
     try {
-      // Import createTransferWithTransactions for direct transfer
-      const { createTransferWithTransactions } = await import('../../../core-service/src/common/transfer-helper.js');
-      
-      // Transfer from system (real) to system (bonus) - funds the bonus pool
-      await createTransferWithTransactions({
-        fromUserId: systemUserId,
-        toUserId: systemUserId,  // Same user, different balance types
-        amount: fundAmount,
+      // Get or create system user's wallet (must have category: 'main' for bonus service to find it)
+      let systemWallet = await walletsCollection.findOne({ 
+        userId: systemUserId, 
         currency: CONFIG.currency,
-        tenantId: DEFAULT_TENANT_ID,
-        feeAmount: 0,
-        method: 'bonus_pool_funding',
-        externalRef: `bonus-pool-funding-${Date.now()}`,
-        description: 'Funding bonus pool (system user bonusBalance)',
-        fromBalanceType: 'real',   // Debit from system real balance
-        toBalanceType: 'bonus',    // Credit to system bonusBalance (bonus pool)
+        category: 'main'  // Bonus service queries with category: 'main'
       });
       
-      console.log(`✅ Bonus pool funded: ${(fundAmount / 100).toLocaleString()} ${CONFIG.currency}`);
-      // Wait for transaction to be fully committed
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      if (!systemWallet) {
+        // Try without category filter (for backward compatibility)
+        systemWallet = await walletsCollection.findOne({ 
+          userId: systemUserId, 
+          currency: CONFIG.currency 
+        });
+        
+        if (systemWallet) {
+          // Update existing wallet to add category
+          await walletsCollection.updateOne(
+            { userId: systemUserId, currency: CONFIG.currency },
+            { $set: { category: 'main', updatedAt: new Date() } }
+          );
+          console.log(`  ✅ Updated system wallet to include category: 'main'`);
+        } else {
+          // Create wallet if it doesn't exist
+          const { generateMongoId } = await import('../../../core-service/src/common/mongodb-utils.js');
+          const { objectId, idString } = generateMongoId();
+          systemWallet = {
+            _id: objectId,
+            id: idString,
+            userId: systemUserId,
+            currency: CONFIG.currency,
+            category: 'main',  // Required for bonus service to find it
+            balance: 0,
+            bonusBalance: 0,
+            lockedBalance: 0,
+            allowNegative: true,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          };
+          await walletsCollection.insertOne(systemWallet);
+          console.log(`  ✅ Created system wallet for ${CONFIG.currency} with category: 'main'`);
+        }
+      }
+      
+      // Directly credit the bonus balance (bonus pool)
+      const updateResult = await walletsCollection.updateOne(
+        { userId: systemUserId, currency: CONFIG.currency, category: 'main' },
+        { 
+          $inc: { bonusBalance: fundAmount },
+          $set: { updatedAt: new Date() }
+        }
+      );
+      
+      if (updateResult.modifiedCount > 0) {
+        console.log(`✅ Bonus pool funded: ${(fundAmount / 100).toLocaleString()} ${CONFIG.currency}`);
+        // Wait for update to be fully committed
+        await new Promise(resolve => setTimeout(resolve, 500));
+      } else {
+        console.warn(`⚠️  Could not update bonus balance (wallet may not exist)`);
+      }
     } catch (error: any) {
       console.warn(`⚠️  Could not fund bonus pool: ${error.message}`);
       console.warn('   Bonus awards may fail due to insufficient pool balance');
