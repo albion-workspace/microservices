@@ -75,7 +75,7 @@ const gatewayConfig = {
       notificationHealth: allow,
       myNotifications: isAuthenticated,
       notificationStats: hasRole('system'),
-      availableChannels: allow, // Allow checking available channels
+      availableChannels: allow,
     },
     Mutation: {
       sendNotification: allow, // Allow service-to-service calls (auth-service, etc.)
@@ -84,12 +84,8 @@ const gatewayConfig = {
   mongoUri: config.mongoUri,
   redisUrl: config.redisUrl,
   defaultPermission: 'deny' as const,
-  
-  // Enable Socket.IO
   enableSocketIO: true,
   socketIOPath: '/notifications/socket.io',
-  
-  // Enable SSE
   enableSSE: true,
   ssePath: '/notifications/events',
 };
@@ -133,6 +129,13 @@ async function main() {
   
   // Create gateway
   const gateway = await createGateway(gatewayConfig);
+  
+  // Set gateway instance for direct Socket.IO and SSE broadcasting
+  notificationService.setGateway({
+    broadcast: gateway.broadcast,
+    sse: gateway.sse,
+    io: gateway.io, // Socket.IO server instance for advanced features
+  });
   
   // Initialize Socket.IO after gateway starts
   notificationService.initializeSocket();

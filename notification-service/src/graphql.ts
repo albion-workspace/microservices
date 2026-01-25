@@ -2,7 +2,7 @@
  * Notification Service GraphQL Schema & Resolvers
  */
 
-import { logger, requireAuth, getUserId, getErrorMessage, getDatabase } from 'core-service';
+import { logger, requireAuth, getUserId, getErrorMessage, getDatabase, generateMongoId, paginateCollection } from 'core-service';
 import type { ResolverContext } from 'core-service';
 import type { NotificationService } from './notification-service.js';
 
@@ -17,7 +17,7 @@ export const notificationGraphQLTypes = `
     tenantId: String!
     channel: NotificationChannel!
     priority: NotificationPriority!
-    to: String!
+    to: String
     subject: String
     body: String!
     status: NotificationStatus!
@@ -57,11 +57,13 @@ export const notificationGraphQLTypes = `
     tenantId: String!
     channel: NotificationChannel!
     priority: NotificationPriority
-    to: String!
+    to: String
     subject: String
     body: String!
     html: String
     metadata: JSON
+    event: String
+    data: JSON
   }
   
   type SendNotificationResponse {
@@ -79,11 +81,22 @@ export const notificationGraphQLTypes = `
     byStatus: JSON!
   }
   
+  type ChannelInfo {
+    channel: NotificationChannel!
+    configured: Boolean!
+  }
+  
+  type NotificationConnection {
+    nodes: [Notification!]!
+    pageInfo: PageInfo!
+    totalCount: Int!
+  }
+  
   extend type Query {
     notificationHealth: String!
-    myNotifications(limit: Int, offset: Int): [Notification!]!
+    myNotifications(first: Int, after: String): NotificationConnection!
     notificationStats: NotificationStats!
-    availableChannels: [NotificationChannel!]!
+    availableChannels: [ChannelInfo!]!
   }
   
   extend type Mutation {
@@ -112,22 +125,36 @@ export function createNotificationResolvers(notificationService: NotificationSer
         requireAuth(context);
         
         const db = getDatabase();
+        const userId = getUserId(context);
+        const { first = 20, after } = args;
         
-        const notifications = await db
-          .collection('notifications')
-          .find({ userId: getUserId(context) })
-          .sort({ createdAt: -1 })
-          .limit(args.limit || 50)
-          .skip(args.offset || 0)
-          .toArray();
+        const result = await paginateCollection(
+          db.collection('notifications'),
+          {
+            first: Math.min(Math.max(1, first || 20), 100),
+            after,
+            filter: { userId },
+            sortField: 'createdAt',
+            sortDirection: 'desc',
+          }
+        );
         
-        // Transform channel, priority, and status to uppercase for GraphQL enum compatibility
-        return notifications.map((notification: any) => ({
-          ...notification,
-          channel: notification.channel?.toUpperCase() || notification.channel,
-          priority: notification.priority?.toUpperCase() || notification.priority,
-          status: notification.status?.toUpperCase() || notification.status,
-        }));
+        const nodes = result.edges.map(edge => {
+          const notification = edge.node as any;
+          return {
+            ...notification,
+            channel: notification.channel?.toUpperCase() || notification.channel,
+            priority: notification.priority?.toUpperCase() || notification.priority,
+            status: notification.status?.toUpperCase() || notification.status,
+            to: notification.to || notification.userId || 'system',
+          };
+        });
+        
+        return {
+          nodes,
+          pageInfo: result.pageInfo,
+          totalCount: result.totalCount || 0,
+        };
       },
       
       notificationStats: async (args: any, context: ResolverContext) => {
@@ -167,7 +194,15 @@ export function createNotificationResolvers(notificationService: NotificationSer
       },
       
       availableChannels: (args: any, context: ResolverContext) => {
-        return notificationService.getAvailableChannels().map(c => c.toUpperCase());
+        const allChannels: string[] = ['EMAIL', 'SMS', 'WHATSAPP', 'PUSH', 'SSE', 'SOCKET'];
+        const configuredChannels = new Set(
+          notificationService.getAvailableChannels().map(c => c.toUpperCase())
+        );
+        
+        return allChannels.map(channel => ({
+          channel: channel as any,
+          configured: configuredChannels.has(channel),
+        }));
       },
     },
     
@@ -177,14 +212,88 @@ export function createNotificationResolvers(notificationService: NotificationSer
         context: ResolverContext
       ) => {
         const input = args.input;
+        const normalizedChannel = input.channel?.toLowerCase();
+        let userId = input.userId;
+        const to = input.to;
+        const currentUserId = context.user ? getUserId(context) : undefined;
+        
+        if ((normalizedChannel === 'sse' || normalizedChannel === 'socket') && !userId && to) {
+          if (to === currentUserId || 
+              (context.user && (
+                to === (context.user as any).email || 
+                to === (context.user as any).username ||
+                to === (context.user as any).phone
+              ))) {
+            userId = currentUserId;
+            logger.info('Resolved recipient to current user', { to, userId });
+          } else if (/^[0-9a-fA-F]{24}$/.test(to)) {
+            userId = to;
+            logger.info('Using to field as userId', { userId });
+          } else {
+            userId = currentUserId;
+            logger.warn('Could not resolve userId from to field, using current user', { to, userId: currentUserId });
+          }
+        } else if (!userId && (normalizedChannel === 'sse' || normalizedChannel === 'socket')) {
+          userId = currentUserId;
+        }
+        
+        if (normalizedChannel === 'sse' || normalizedChannel === 'socket') {
+          if (!userId) {
+            throw new Error(`${normalizedChannel.toUpperCase()} channel requires userId`);
+          }
+        } else {
+          if (!to) {
+            throw new Error(`${normalizedChannel?.toUpperCase() || 'Notification'} channel requires 'to' field`);
+          }
+        }
+        
+        logger.info('Sending notification', {
+          originalChannel: input.channel,
+          normalizedChannel,
+          userId,
+          to,
+          currentUserId,
+        });
         
         try {
-          const result = await notificationService.send({
-            ...input,
-            channel: input.channel.toLowerCase(),
+          const request: any = {
+            tenantId: input.tenantId,
+            channel: normalizedChannel,
             priority: input.priority?.toLowerCase() || 'normal',
-            userId: input.userId || (context.user ? getUserId(context) : undefined), // Use provided userId or context userId
-          });
+            body: input.body,
+            subject: input.subject,
+            metadata: input.metadata,
+          };
+          
+          if (normalizedChannel === 'sse' || normalizedChannel === 'socket') {
+            request.userId = userId;
+            request.to = userId || 'system';
+            request.subject = input.subject;
+            request.body = input.body;
+            request.event = input.event || 'notification';
+            const notificationId = request.id || generateMongoId().idString;
+            
+            request.data = input.data || { 
+              id: notificationId,
+              subject: input.subject,
+              body: input.body,
+              channel: normalizedChannel.toUpperCase(),
+              priority: input.priority?.toUpperCase() || 'NORMAL',
+              userId: userId,
+              tenantId: input.tenantId,
+              ...(input.metadata || {}),
+            };
+          } else {
+            if (!to) {
+              throw new Error(`${normalizedChannel?.toUpperCase() || 'Notification'} channel requires 'to' field`);
+            }
+            request.to = to;
+            if (userId) {
+              request.userId = userId;
+            }
+          }
+          
+          const result = await notificationService.send(request);
           
           return {
             success: result.status === 'sent' || result.status === 'delivered',
@@ -194,7 +303,11 @@ export function createNotificationResolvers(notificationService: NotificationSer
           };
         } catch (e: any) {
           const error = getErrorMessage(e);
-          logger.error('Failed to send notification', { error });
+          logger.error('Failed to send notification', { 
+            error,
+            originalChannel: input.channel,
+            normalizedChannel,
+          });
           
           return {
             success: false,

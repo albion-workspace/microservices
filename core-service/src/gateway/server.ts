@@ -950,22 +950,59 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
     activeSubscriptions.set(socketId, new Map());
     
     // Extract token from auth header or handshake
-    const authHeader = socket.handshake.auth?.token || socket.handshake.headers?.authorization;
-    const token = extractToken(authHeader);
+    // Socket.IO client sends auth object which becomes socket.handshake.auth
+    // The auth.token is the raw token (not "Bearer <token>")
+    // Also check headers for Authorization header (which is "Bearer <token>")
+    const authToken = socket.handshake.auth?.token;
+    const headerAuth = socket.handshake.headers?.authorization;
+    
+    // If authToken exists and is a string, use it directly (it's already the token)
+    // Otherwise, extract from Authorization header (which has "Bearer " prefix)
+    const token = authToken && typeof authToken === 'string' 
+      ? authToken 
+      : extractToken(headerAuth);
+    
     const ctx = createContextFromToken(token, socket);
+    
+    // Debug logging
+    if (!ctx.user) {
+      logger.warn('Socket.IO connection: No user context created', {
+        socketId,
+        hasAuthToken: !!authToken,
+        hasHeaderAuth: !!headerAuth,
+        authTokenType: typeof authToken,
+        handshakeAuth: socket.handshake.auth,
+        handshakeHeaders: Object.keys(socket.handshake.headers || {}),
+      });
+    }
     
     logger.info('Socket.IO connected', { 
       socketId, 
       userId: ctx.user?.userId,
+      tenantId: ctx.user?.tenantId,
+      hasToken: !!token,
+      hasAuthToken: !!authToken,
+      hasHeaderAuth: !!headerAuth,
+      authTokenPresent: !!socket.handshake.auth?.token,
       transport: socket.conn.transport.name, // 'websocket' or 'polling'
     });
 
     // Join user-specific room for targeted messages
     if (ctx.user?.userId) {
-      socket.join(`user:${ctx.user.userId}`);
+      const userRoom = `user:${ctx.user.userId}`;
+      socket.join(userRoom);
+      logger.info('Socket joined user room', { socketId, userId: ctx.user.userId, room: userRoom });
+    } else {
+      logger.warn('Socket connected but no userId found - notifications will not be received', {
+        socketId,
+        hasToken: !!token,
+        hasUser: !!ctx.user,
+      });
     }
     if (ctx.user?.tenantId) {
-      socket.join(`tenant:${ctx.user.tenantId}`);
+      const tenantRoom = `tenant:${ctx.user.tenantId}`;
+      socket.join(tenantRoom);
+      logger.info('Socket joined tenant room', { socketId, tenantId: ctx.user.tenantId, room: tenantRoom });
     }
 
     // ─── GraphQL Query/Mutation via Socket.IO ───
@@ -1070,6 +1107,53 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
         sub.running = false;
         subs?.delete(payload.id);
         socket.emit('subscription:complete', { id: payload.id });
+      }
+    });
+
+    // ─── Room Management ───
+    socket.on('joinRoom', (payload: { room: string }, callback?: (response: any) => void) => {
+      if (payload?.room) {
+        socket.join(payload.room);
+        logger.info('Socket joined room', { socketId, room: payload.room, userId: ctx.user?.userId });
+        if (typeof callback === 'function') {
+          callback({ success: true, room: payload.room });
+        } else {
+          socket.emit('room:joined', { room: payload.room });
+        }
+      } else if (typeof callback === 'function') {
+        callback({ success: false, error: 'Room name required' });
+      }
+    });
+
+    socket.on('leaveRoom', (payload: { room: string }, callback?: (response: any) => void) => {
+      if (payload?.room) {
+        socket.leave(payload.room);
+        logger.info('Socket left room', { socketId, room: payload.room, userId: ctx.user?.userId });
+        if (typeof callback === 'function') {
+          callback({ success: true, room: payload.room });
+        } else {
+          socket.emit('room:left', { room: payload.room });
+        }
+      } else if (typeof callback === 'function') {
+        callback({ success: false, error: 'Room name required' });
+      }
+    });
+
+    socket.on('getRooms', (callback?: (rooms: string[]) => void) => {
+      const rooms = Array.from(socket.rooms);
+      if (typeof callback === 'function') {
+        callback(rooms);
+      } else {
+        socket.emit('rooms', rooms);
+      }
+    });
+
+    socket.on('getConnectionCount', (callback?: (count: number) => void) => {
+      const count = io.sockets.sockets.size;
+      if (typeof callback === 'function') {
+        callback(count);
+      } else {
+        socket.emit('connectionCount', { count });
       }
     });
 

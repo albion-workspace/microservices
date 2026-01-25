@@ -37,6 +37,7 @@ import Notifications from './pages/Notifications'
 import UserManagement from './pages/UserManagement'
 import UseCases from './pages/UseCases'
 import PendingOperations from './pages/PendingOperations'
+import NotificationBell from './components/NotificationBell'
 
 function AppContent() {
   const { isAuthenticated, user, logout, isLoading } = useAuth()
@@ -90,6 +91,7 @@ function AppContent() {
             <div className="user-name">{user?.email || user?.username}</div>
             <div className="user-role">{Array.isArray(user?.roles) && typeof user.roles[0] === 'string' ? user.roles[0] : (user?.roles?.[0] as any)?.role || 'User'}</div>
           </div>
+          <NotificationBell />
           <button onClick={logout} className="user-logout" title="Logout">
             <LogOut className="w-4 h-4" />
           </button>

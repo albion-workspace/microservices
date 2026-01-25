@@ -79,6 +79,26 @@ const STORAGE_KEYS = {
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
 // ═══════════════════════════════════════════════════════════════════
+// JWT Utilities
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Decode JWT token without verification (client-side only, for reading claims)
+ */
+function decodeJWT(token: string): { exp?: number; [key: string]: any } | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const payload = parts[1];
+    const decoded = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
+    return decoded;
+  } catch (error) {
+    console.warn('[Auth] Failed to decode JWT:', error);
+    return null;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // GraphQL Helpers
 // ═══════════════════════════════════════════════════════════════════
 
@@ -292,6 +312,44 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           return;
         }
         
+        // Check if tokens are expired BEFORE making requests
+        // Only check expiration if we can successfully decode the tokens
+        const refreshTokenPayload = decodeJWT(refreshToken);
+        const refreshTokenExpired = refreshTokenPayload?.exp ? (refreshTokenPayload.exp * 1000 < Date.now()) : false;
+        
+        if (refreshTokenExpired) {
+          console.warn('[Auth] ❌ Refresh token is expired, clearing auth and redirecting to login');
+          setState({
+            user: null,
+            tokens: null,
+            isAuthenticated: false,
+            isLoading: false,
+          });
+          localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN);
+          localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN);
+          localStorage.removeItem(STORAGE_KEYS.USER);
+          localStorage.removeItem('auth_token_expires_at');
+          // Redirect will happen automatically because isAuthenticated is false
+          return;
+        }
+        
+        // Check access token expiration - if expired, try refresh before validation
+        const accessTokenPayload = decodeJWT(accessToken);
+        const accessTokenExpired = accessTokenPayload?.exp ? (accessTokenPayload.exp * 1000 < Date.now()) : false;
+        
+        if (accessTokenExpired) {
+          console.log('[Auth] ⚠️ Access token expired, attempting refresh before validation...');
+          const refreshed = await tryRefreshToken(refreshToken);
+          if (refreshed) {
+            console.log('[Auth] ✅ Token refreshed successfully before validation');
+            return; // tryRefreshToken will update state
+          } else {
+            // Refresh failed - but don't clear auth yet, let the normal validation flow handle it
+            // The me query below will fail and trigger the normal error handling
+            console.warn('[Auth] ⚠️ Token refresh failed, will validate with server');
+          }
+        }
+        
         try {
           // Try to fetch current user to validate token
           console.log('[Auth] Validating token with me query...');
@@ -374,7 +432,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               console.log('[Auth] ✅ Token refreshed successfully, staying logged in');
               return; // tryRefreshToken will update state
             } else {
-              console.warn('[Auth] ❌ Token refresh failed');
+              console.warn('[Auth] ❌ Token refresh failed, clearing auth and redirecting to login');
+              // Clear auth and redirect
+              setState({
+                user: null,
+                tokens: null,
+                isAuthenticated: false,
+                isLoading: false,
+              });
+              localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN);
+              localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN);
+              localStorage.removeItem(STORAGE_KEYS.USER);
+              localStorage.removeItem('auth_token_expires_at');
+              return;
             }
           } else if (!isPermissionError && error.message?.includes('Authentication required')) {
             // "Authentication required" without 401 - might be expired token, try refresh
@@ -384,7 +454,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               console.log('[Auth] ✅ Token refreshed successfully, staying logged in');
               return; // tryRefreshToken will update state
             } else {
-              console.warn('[Auth] ❌ Token refresh failed');
+              console.warn('[Auth] ❌ Token refresh failed, clearing auth and redirecting to login');
+              // Clear auth and redirect
+              setState({
+                user: null,
+                tokens: null,
+                isAuthenticated: false,
+                isLoading: false,
+              });
+              localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN);
+              localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN);
+              localStorage.removeItem(STORAGE_KEYS.USER);
+              localStorage.removeItem('auth_token_expires_at');
+              return;
             }
           } else if (!isAuthError) {
             // Permission error, network error, GraphQL error, or other non-auth error
@@ -400,7 +482,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           }
           
           // If we get here, auth failed and refresh failed - clear auth
-          console.warn('[Auth] ❌ Clearing auth due to failed authentication');
+          console.warn('[Auth] ❌ Clearing auth due to failed authentication, redirecting to login');
         }
       } else {
         console.log('[Auth] ⚠️ No tokens found in localStorage');
@@ -704,6 +786,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return null;
     }
     
+    // Check if refresh token is expired before attempting refresh
+    // Only check if we can successfully decode the token
+    const refreshTokenPayload = decodeJWT(refreshToken);
+    const refreshTokenExpired = refreshTokenPayload?.exp ? (refreshTokenPayload.exp * 1000 < Date.now()) : false;
+    if (refreshTokenExpired) {
+      console.warn('[Auth] ❌ Refresh token is expired, clearing auth and redirecting to login');
+      clearAuth();
+      return null;
+    }
+    
     // Create refresh promise and store in lock
     const refreshPromise = (async (): Promise<string | null> => {
       try {
@@ -773,9 +865,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
       
       console.warn('[Auth] ⚠️ Token refresh failed via callback:', result?.message);
+      // If refresh failed, check if refresh token might be expired
+      const errorMessage = result?.message?.toLowerCase() || '';
+      if (errorMessage.includes('expired') || errorMessage.includes('invalid') || errorMessage.includes('refresh')) {
+        console.warn('[Auth] ❌ Refresh token appears to be expired, clearing auth');
+        clearAuth();
+      }
       return null;
     } catch (error: any) {
       console.error('[Auth] ❌ Token refresh error via callback:', error.message);
+      // Check if error indicates refresh token is expired
+      const errorMessage = error.message?.toLowerCase() || '';
+      if (errorMessage.includes('expired') || errorMessage.includes('invalid') || errorMessage.includes('refresh')) {
+        console.warn('[Auth] ❌ Refresh token appears to be expired, clearing auth');
+        clearAuth();
+      }
       return null;
     } finally {
       // Clear lock when done
@@ -786,11 +890,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // Store promise in lock
     refreshLockRef.current = refreshPromise;
     return refreshPromise;
-  }, [state.tokens, state.user]);
+  }, [state.tokens, state.user, clearAuth]);
 
   // Proactive token refresh - refresh before expiration
   // Use ref to track scheduled refresh and prevent loops
-  const scheduledRefreshRef = React.useRef<NodeJS.Timeout | null>(null);
+  const scheduledRefreshRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   
   useEffect(() => {
     if (!state.isAuthenticated || !state.tokens) {
@@ -817,6 +921,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const now = Date.now();
     const timeUntilExpiry = expiresAt - now;
     
+    // Check if refresh token is expired before attempting proactive refresh
+    const currentRefreshToken = state.tokens?.refreshToken || localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN);
+    if (currentRefreshToken) {
+      const refreshTokenPayload = decodeJWT(currentRefreshToken);
+      const refreshTokenExpired = refreshTokenPayload?.exp ? (refreshTokenPayload.exp * 1000 < Date.now()) : false;
+      if (refreshTokenExpired) {
+        console.warn('[Auth] ❌ Refresh token is expired, clearing auth');
+        clearAuth();
+        return;
+      }
+    }
+    
     // Refresh token if it expires in less than 5 minutes (300000ms)
     // or if it's already expired (but not more than 1 minute ago)
     const shouldRefresh = timeUntilExpiry < 5 * 60 * 1000 && timeUntilExpiry > -60 * 1000;
@@ -825,6 +941,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       console.log('[Auth] 🔄 Proactively refreshing token (expires soon)');
       refreshTokenFn().catch((error) => {
         console.warn('[Auth] ⚠️ Proactive token refresh failed:', error.message);
+        // If refresh fails, check if refresh token might be expired
+        const errorMessage = error.message?.toLowerCase() || '';
+        if (errorMessage.includes('expired') || errorMessage.includes('invalid') || errorMessage.includes('refresh')) {
+          console.warn('[Auth] ❌ Refresh token appears to be expired during proactive refresh, clearing auth');
+          clearAuth();
+        }
       });
     } else if (timeUntilExpiry > 5 * 60 * 1000) {
       // Schedule refresh 5 minutes before expiration
@@ -835,6 +957,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         scheduledRefreshRef.current = null;
         refreshTokenFn().catch((error) => {
           console.warn('[Auth] ⚠️ Scheduled token refresh failed:', error.message);
+          // If refresh fails, check if refresh token might be expired
+          const errorMessage = error.message?.toLowerCase() || '';
+          if (errorMessage.includes('expired') || errorMessage.includes('invalid') || errorMessage.includes('refresh')) {
+            console.warn('[Auth] ❌ Refresh token appears to be expired during scheduled refresh, clearing auth');
+            clearAuth();
+          }
         });
       }, refreshDelay);
     }
