@@ -14,6 +14,9 @@ import {
   findOneAndUpdateById,
   paginateCollection,
   getDatabase,
+  getRedis,
+  scanKeysIterator,
+  createPendingOperationStore,
   type CursorPaginationOptions,
   type CursorPaginationResult,
 } from 'core-service';
@@ -114,6 +117,25 @@ export const authGraphQLTypes = `
   type LogoutAllResponse {
     success: Boolean!
     count: Int!
+  }
+  
+  type PendingOperation {
+    token: String!
+    operationType: String!
+    recipient: String
+    channel: String
+    purpose: String
+    createdAt: String!
+    expiresAt: String
+    expiresIn: Int  # seconds until expiration
+    metadata: JSON
+    # Note: Sensitive data (OTP codes, passwords) is NOT exposed
+  }
+  
+  type PendingOperationConnection {
+    nodes: [PendingOperation!]!
+    totalCount: Int!
+    pageInfo: PageInfo!
   }
   
   # Note: BasicResponse and PageInfo are defined in core-service base schema
@@ -242,6 +264,22 @@ export const authGraphQLTypes = `
     
     # Health check
     authHealth: String!
+    
+    # List pending operations (Redis-based only)
+    # Users see only their own operations, admins see all
+    pendingOperations(
+      operationType: String
+      recipient: String
+      first: Int
+      after: String
+    ): PendingOperationConnection!
+    
+    # Get specific pending operation by token
+    # Works for both JWT and Redis-based operations
+    pendingOperation(
+      token: String!
+      operationType: String
+    ): PendingOperation
   }
   
   type UserConnection {
@@ -336,7 +374,8 @@ export function createAuthResolvers(
   authenticationService: any,
   otpService: any,
   passwordService: any,
-  twoFactorService: any
+  twoFactorService: any,
+  authConfig?: { jwtSecret?: string }
 ): Resolvers & Record<string, any> {
   return {
     User: {
@@ -985,6 +1024,287 @@ export function createAuthResolvers(
           throw error instanceof Error ? error : new Error('Failed to update user status');
         }
       },
+      
+      /**
+       * List pending operations (Redis-based only)
+       * Users see only their own operations, admins/system see all
+       */
+      pendingOperations: async (args: Record<string, unknown>, ctx: ResolverContext) => {
+        requireAuth(ctx);
+        
+        const userId = getUserId(ctx);
+        const tenantId = getTenantId(ctx);
+        const user = ctx.user!;
+        
+        // Check if user is admin/system (can see all operations)
+        const isAdmin = checkSystemOrPermission(user, 'user', 'read', '*') || 
+                        user.roles?.includes('system') || 
+                        user.roles?.includes('admin');
+        
+        const redis = getRedis();
+        if (!redis) {
+          logger.debug('Redis not available for pending operations query');
+          return {
+            nodes: [],
+            totalCount: 0,
+            pageInfo: {
+              hasNextPage: false,
+              hasPreviousPage: false,
+              startCursor: null,
+              endCursor: null,
+            },
+          };
+        }
+        
+        const operationType = (args as any).operationType as string | undefined;
+        const recipientFilter = (args as any).recipient as string | undefined;
+        
+        // Fetch user details if not admin (for filtering)
+        let userEmail: string | undefined;
+        let userPhone: string | undefined;
+        if (!isAdmin) {
+          const db = getDatabase();
+          const userDoc = await findById(db.collection('users'), userId, { tenantId });
+          userEmail = userDoc?.email?.toLowerCase();
+          userPhone = userDoc?.phone;
+        }
+        
+        // Build Redis key pattern
+        const pattern = operationType 
+          ? `pending:${operationType}:*`
+          : 'pending:*';
+        
+        const operations: Array<{
+          token: string;
+          operationType: string;
+          recipient?: string;
+          channel?: string;
+          purpose?: string;
+          createdAt: string;
+          expiresAt: string | null;
+          expiresIn: number;
+          metadata: Record<string, unknown>;
+        }> = [];
+        
+        // Scan Redis keys
+        for await (const key of scanKeysIterator({ pattern, maxKeys: 1000 })) {
+          try {
+            const value = await redis.get(key);
+            if (!value || typeof value !== 'string') continue;
+            
+            const payload = JSON.parse(value);
+            const operationData = payload.data || {};
+            
+            // Extract token from key (format: pending:{operationType}:{token})
+            const token = key.split(':').slice(2).join(':') || key.split(':').pop() || '';
+            
+            // Filter by recipient if not admin
+            if (!isAdmin) {
+              const operationRecipient = operationData.recipient?.toLowerCase();
+              
+              // Skip if doesn't match user's email or phone
+              if (operationRecipient !== userEmail?.toLowerCase() && 
+                  operationRecipient !== userPhone) {
+                continue;
+              }
+            }
+            
+            // Apply recipient filter if provided
+            if (recipientFilter) {
+              const operationRecipient = operationData.recipient?.toLowerCase();
+              if (operationRecipient !== recipientFilter.toLowerCase()) {
+                continue;
+              }
+            }
+            
+            // Get TTL (time to live in seconds)
+            const ttl = await redis.ttl(key);
+            
+            // Sanitize metadata (remove sensitive data)
+            const sanitizedMetadata = sanitizePendingOperationMetadata(operationData);
+            
+            operations.push({
+              token,
+              operationType: payload.operationType || 'unknown',
+              recipient: operationData.recipient,
+              channel: operationData.channel || operationData.otp?.channel,
+              purpose: operationData.purpose || operationData.otp?.purpose,
+              createdAt: new Date(payload.createdAt || Date.now()).toISOString(),
+              expiresAt: ttl > 0 ? new Date(Date.now() + ttl * 1000).toISOString() : null,
+              expiresIn: ttl,
+              metadata: sanitizedMetadata,
+            });
+          } catch (error) {
+            logger.warn('Error parsing pending operation', { key, error });
+            continue;
+          }
+        }
+        
+        // Sort by createdAt (newest first)
+        operations.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        
+        // Apply pagination (simple offset-based for now, can be enhanced with cursor-based)
+        const first = (args as any).first as number | undefined;
+        const after = (args as any).after as string | undefined;
+        
+        let paginatedOps = operations;
+        if (first) {
+          const offset = after ? parseInt(Buffer.from(after, 'base64').toString()) || 0 : 0;
+          paginatedOps = operations.slice(offset, offset + first);
+        }
+        
+        return {
+          nodes: paginatedOps,
+          totalCount: operations.length,
+          pageInfo: {
+            hasNextPage: first ? paginatedOps.length === first && operations.length > (after ? parseInt(Buffer.from(after, 'base64').toString()) || 0 : 0) + first : false,
+            hasPreviousPage: after ? parseInt(Buffer.from(after, 'base64').toString()) > 0 : false,
+            startCursor: paginatedOps.length > 0 ? Buffer.from('0').toString('base64') : null,
+            endCursor: paginatedOps.length > 0 ? Buffer.from(String(operations.indexOf(paginatedOps[paginatedOps.length - 1]))).toString('base64') : null,
+          },
+        };
+      },
+      
+      /**
+       * Get specific pending operation by token
+       * Works for both JWT and Redis-based operations
+       */
+      pendingOperation: async (args: Record<string, unknown>, ctx: ResolverContext) => {
+        requireAuth(ctx);
+        
+        const token = (args as any).token as string;
+        const operationType = (args as any).operationType as string | undefined;
+        
+        if (!token) {
+          throw new Error('Token is required');
+        }
+        
+        const jwtSecret = authConfig?.jwtSecret || 
+                         process.env.JWT_SECRET || 
+                         process.env.SHARED_JWT_SECRET || 
+                         'shared-jwt-secret-change-in-production';
+        
+        // Try Redis first
+        const redis = getRedis();
+        if (redis) {
+          // Try to find in Redis
+          const patterns = operationType 
+            ? [`pending:${operationType}:${token}`]
+            : [`pending:*:${token}`];
+          
+          for (const pattern of patterns) {
+            // For exact match, try direct key lookup first
+            const key = pattern.includes('*') 
+              ? (await scanKeysIterator({ pattern, maxKeys: 1 }).next()).value
+              : pattern;
+            
+            if (key && !key.includes('*')) {
+              const value = await redis.get(key);
+              if (value && typeof value === 'string') {
+                try {
+                  const payload = JSON.parse(value);
+                  const operationData = payload.data || {};
+                  const ttl = await redis.ttl(key);
+                  
+                  return {
+                    token,
+                    operationType: payload.operationType || 'unknown',
+                    recipient: operationData.recipient,
+                    channel: operationData.channel || operationData.otp?.channel,
+                    purpose: operationData.purpose || operationData.otp?.purpose,
+                    createdAt: new Date(payload.createdAt || Date.now()).toISOString(),
+                    expiresAt: ttl > 0 ? new Date(Date.now() + ttl * 1000).toISOString() : null,
+                    expiresIn: ttl,
+                    metadata: sanitizePendingOperationMetadata(operationData),
+                  };
+                } catch (error) {
+                  logger.warn('Error parsing Redis pending operation', { key, error });
+                }
+              }
+            }
+          }
+        }
+        
+        // Try JWT-based operation
+        try {
+          const store = createPendingOperationStore({ 
+            backend: 'jwt', // Explicitly use JWT backend for checking JWT-based operations
+            jwtSecret 
+          });
+          const exists = await store.exists(token, operationType || '');
+          
+          if (exists) {
+            // For JWT, decode without consuming (for metadata only)
+            // Note: We can't decode JWT without verification, so we'll use a different approach
+            // Try to verify (but don't consume) - this is tricky with JWT
+            
+            // For now, return basic info - full implementation would require JWT decode utility
+            // that doesn't consume the token
+            return {
+              token,
+              operationType: operationType || 'unknown',
+              recipient: null,
+              channel: null,
+              purpose: null,
+              createdAt: new Date().toISOString(),
+              expiresAt: null,
+              expiresIn: null,
+              metadata: {},
+            };
+          }
+        } catch (error) {
+          logger.debug('Error checking JWT pending operation', { error });
+        }
+        
+        return null;
+      },
     },
   };
+}
+
+/**
+ * Sanitize pending operation metadata to remove sensitive data
+ */
+function sanitizePendingOperationMetadata(data: Record<string, unknown>): Record<string, unknown> {
+  const sanitized: Record<string, unknown> = {};
+  
+  // Copy safe fields
+  const safeFields = ['tenantId', 'userId', 'deviceInfo', 'ipAddress', 'userAgent'];
+  for (const field of safeFields) {
+    if (data[field] !== undefined) {
+      sanitized[field] = data[field];
+    }
+  }
+  
+  // Sanitize OTP data (remove hashed codes)
+  if (data.otp && typeof data.otp === 'object') {
+    const otp = data.otp as Record<string, unknown>;
+    sanitized.otp = {
+      channel: otp.channel,
+      recipient: otp.recipient,
+      purpose: otp.purpose,
+      createdAt: otp.createdAt,
+      expiresIn: otp.expiresIn,
+      // Explicitly exclude: hashedCode, code
+    };
+  }
+  
+  // Explicitly exclude sensitive fields
+  const excludedFields = [
+    'passwordHash',
+    'password',
+    'hashedCode',
+    'code',
+    'otpCode',
+    'resetToken',
+    'secret',
+  ];
+  
+  for (const field of excludedFields) {
+    if (data[field] !== undefined) {
+      // Don't include in sanitized output
+    }
+  }
+  
+  return sanitized;
 }

@@ -5,7 +5,7 @@
  */
 
 import { logger, createPendingOperationStore, getRedis } from 'core-service';
-import type { SendOTPInput, VerifyOTPInput, OTPResponse } from '../types.js';
+import type { SendOTPInput, VerifyOTPInput, OTPResponse, OTPChannel, OTPPurpose } from '../types.js';
 import { generateOTP, hashToken } from '../utils.js';
 import type { AuthConfig } from '../types.js';
 import type { OTPProviderFactory } from '../providers/otp-provider.js';
@@ -19,6 +19,7 @@ export class OTPService {
   ) {
     // Use generic pending operation store for OTPs (JWT-based)
     this.otpStore = createPendingOperationStore({
+      backend: 'jwt', // Explicitly use JWT backend for stateless OTP tokens
       jwtSecret: this.config.jwtSecret,
       defaultExpiration: `${this.config.otpExpiryMinutes}m`,
     });
@@ -265,8 +266,8 @@ export class OTPService {
         return this.sendOTP({
           tenantId,
           recipient,
-          channel: operation.data.channel,
-          purpose,
+          channel: operation.data.channel as OTPChannel,
+          purpose: purpose as OTPPurpose,
           userId: operation.data.userId,
         });
       }
@@ -277,7 +278,7 @@ export class OTPService {
       tenantId,
       recipient,
       channel: 'email', // Default - should be determined from context
-      purpose,
+      purpose: purpose as OTPPurpose,
     });
   }
 }

@@ -34,6 +34,7 @@ export class RegistrationService {
     this.registrationStore = createRegistrationStore(this.config.jwtSecret);
     // Use generic pending operation store for OTPs (unified pattern)
     this.otpStore = createPendingOperationStore({
+      backend: 'jwt', // Explicitly use JWT backend for stateless OTP tokens
       jwtSecret: this.config.jwtSecret,
       defaultExpiration: `${this.config.otpExpiryMinutes}m`,
     });
@@ -296,6 +297,7 @@ export class RegistrationService {
       emailVerified: !!registrationData.email,
       phoneVerified: !!registrationData.phone,
       twoFactorEnabled: false,
+      failedLoginAttempts: 0,
       roles: [{ role: 'user', assignedAt: createdAt, active: true }],
       permissions: [],
       metadata: registrationData.metadata || {},
@@ -440,6 +442,7 @@ export class RegistrationService {
       
       // Security
       twoFactorEnabled: false,
+      failedLoginAttempts: 0,
       
       // Roles & Permissions (UserRole[] format)
       roles: [{ role: 'user', assignedAt: now, active: true }],

@@ -52,7 +52,6 @@ export async function createSession(
   const { objectId: sessionObjectId, idString: sessionId } = generateMongoId();
   
   const session: Session = {
-    _id: sessionObjectId,
     id: sessionId,
     userId,
     tenantId,

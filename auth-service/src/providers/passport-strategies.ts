@@ -491,6 +491,7 @@ async function handleSocialAuth(
       connectedAt: new Date(),
     }],
     twoFactorEnabled: false,
+    failedLoginAttempts: 0,
     metadata: {
       displayName,
       photoUrl,

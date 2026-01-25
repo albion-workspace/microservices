@@ -5,7 +5,7 @@
  * Supports context-based roles and hierarchical role inheritance.
  */
 
-import { getDatabase, logger, findOneById, updateOneById } from 'core-service';
+import { getDatabase, logger, findOneById, updateOneById, extractDocumentId } from 'core-service';
 import { RoleResolver, type Role } from 'access-engine';
 import type {
   UserRole,

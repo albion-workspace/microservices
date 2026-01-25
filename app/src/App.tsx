@@ -13,6 +13,7 @@ import {
   Bell,
   Shield,
   Zap,
+  Clock,
 } from 'lucide-react'
 import { AuthProvider, useAuth } from './lib/auth-context'
 import { hasRole } from './lib/access'
@@ -35,6 +36,7 @@ import VerifyOTP from './pages/VerifyOTP'
 import Notifications from './pages/Notifications'
 import UserManagement from './pages/UserManagement'
 import UseCases from './pages/UseCases'
+import PendingOperations from './pages/PendingOperations'
 
 function AppContent() {
   const { isAuthenticated, user, logout, isLoading } = useAuth()
@@ -137,6 +139,10 @@ function AppContent() {
                 <Shield />
                 <span>User Management</span>
               </NavLink>
+              <NavLink to="/pending-operations" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
+                <Clock />
+                <span>Pending Operations</span>
+              </NavLink>
             </div>
           )}
 
@@ -176,6 +182,7 @@ function AppContent() {
           <Route path="/use-cases" element={<ProtectedRoute><UseCases /></ProtectedRoute>} />
           <Route path="/notifications" element={<ProtectedRoute><Notifications /></ProtectedRoute>} />
           <Route path="/users" element={<ProtectedRoute requireRoles={['system']}><UserManagement /></ProtectedRoute>} />
+          <Route path="/pending-operations" element={<ProtectedRoute><PendingOperations /></ProtectedRoute>} />
           <Route path="/webhooks" element={<ProtectedRoute requireRoles={['system']}><Webhooks /></ProtectedRoute>} />
           <Route path="/realtime" element={<ProtectedRoute><RealtimeTest /></ProtectedRoute>} />
           <Route path="/playground" element={<ProtectedRoute><GraphQLPlayground /></ProtectedRoute>} />

@@ -28,6 +28,7 @@ import {
   startListening,
   getDatabase,
   createWebhookService,
+  setupCleanupTasks,
   type IntegrationEvent,
   type ResolverContext,
 } from 'core-service';
@@ -83,7 +84,8 @@ const authResolvers = createAuthResolvers(
   authenticationService,
   otpService,
   passwordService,
-  twoFactorService
+  twoFactorService,
+  authConfig // Pass config for JWT secret access
 );
 
 // ═══════════════════════════════════════════════════════════════════
@@ -151,6 +153,10 @@ const config = {
       users: or(hasRole('system'), can('user', 'list')), // System or user:list permission
       usersByRole: or(hasRole('system'), can('user', 'list')), // System or user:list permission
       mySessions: isAuthenticated,
+      // Pending Operations - allow all authenticated users (including system)
+      // Same pattern as payment-service: transactions, transfers, etc.
+      pendingOperations: or(hasRole('system'), isAuthenticated),
+      pendingOperation: or(hasRole('system'), isAuthenticated),
       // Webhooks (system only - using URN for consistency)
       webhooks: or(hasRole('system'), can('webhook', 'read')),
       webhook: or(hasRole('system'), can('webhook', 'read')),
@@ -194,6 +200,7 @@ const config = {
   redisUrl: authConfig.redisUrl,
   defaultPermission: 'deny' as const,
 };
+
 
 // ═══════════════════════════════════════════════════════════════════
 // Cross-Service Event Handlers
@@ -511,53 +518,32 @@ async function main() {
     // Continue - webhooks are optional
   }
   
-  // Cleanup old webhook deliveries daily
-  setInterval(async () => {
-    try {
-      const deleted = await cleanupAuthWebhookDeliveries(30);
-      if (deleted > 0) {
-        logger.info(`Cleaned up ${deleted} old webhook deliveries`);
-      }
-    } catch (err) {
-      logger.error('Webhook cleanup failed', { error: err });
-    }
-  }, 24 * 60 * 60 * 1000); // Daily
+  // ═══════════════════════════════════════════════════════════════════
+  // Unified Cleanup System
+  // ═══════════════════════════════════════════════════════════════════
   
-  // Cleanup expired OTPs hourly
-  setInterval(async () => {
-    try {
-      const deleted = await otpService.cleanupExpiredOTPs();
-      if (deleted > 0) {
-        logger.info(`Cleaned up ${deleted} expired OTPs`);
-      }
-    } catch (err) {
-      logger.error('OTP cleanup failed', { error: err });
-    }
-  }, 60 * 60 * 1000); // Hourly
+  // Setup all cleanup tasks using unified system
+  setupCleanupTasks([
+    {
+      name: 'webhook deliveries',
+      execute: async () => cleanupAuthWebhookDeliveries(30),
+      intervalMs: 24 * 60 * 60 * 1000, // Daily
+    },
+    {
+      name: 'password reset tokens (legacy DB entries)',
+      execute: async () => passwordService.cleanupExpiredTokens(),
+      intervalMs: 24 * 60 * 60 * 1000, // Daily
+    },
+    {
+      name: 'expired/invalid sessions',
+      execute: async () => authenticationService.cleanupExpiredSessions(),
+      intervalMs: 24 * 60 * 60 * 1000, // Daily
+    },
+    // Note: Pending operations (Redis) don't need cleanup - Redis TTL auto-expires keys
+    // Note: OTPs use JWT-based pending operations, so they auto-expire (no cleanup needed)
+  ]);
   
-  // Cleanup expired password reset tokens daily
-  setInterval(async () => {
-    try {
-      const deleted = await passwordService.cleanupExpiredTokens();
-      if (deleted > 0) {
-        logger.info(`Cleaned up ${deleted} expired password reset tokens`);
-      }
-    } catch (err) {
-      logger.error('Token cleanup failed', { error: err });
-    }
-  }, 24 * 60 * 60 * 1000); // Daily
-  
-  // Cleanup expired/invalid sessions daily
-  setInterval(async () => {
-    try {
-      const deleted = await authenticationService.cleanupExpiredSessions();
-      if (deleted > 0) {
-        logger.info(`Cleaned up ${deleted} expired/invalid sessions`);
-      }
-    } catch (err) {
-      logger.error('Session cleanup failed', { error: err });
-    }
-  }, 24 * 60 * 60 * 1000); // Daily
+  logger.info('Unified cleanup system initialized');
   
   // Note: OAuth routes would need to be added via a custom Express middleware
   // For now, OAuth is configured in Passport strategies and can be triggered from frontend

@@ -37,6 +37,7 @@ export class PasswordService {
   ) {
     // Use generic pending operation store for password reset (JWT-based)
     this.resetStore = createPendingOperationStore({ 
+      backend: 'jwt', // Explicitly use JWT backend for stateless password reset tokens
       jwtSecret: this.config.jwtSecret,
       defaultExpiration: '30m', // 30 minutes for password reset
     });

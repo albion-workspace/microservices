@@ -19,7 +19,7 @@
  */
 
 import crypto from 'crypto';
-import { getRedis } from './redis.js';
+import { getRedis, scanKeysIterator } from './redis.js';
 import { logger } from './logger.js';
 import { signGenericJWT, verifyGenericJWT } from './jwt.js';
 
@@ -393,12 +393,66 @@ export function createPendingOperationStore(config: PendingOperationConfig = {})
     return exists === 1;
   }
 
+  /**
+   * Cleanup expired operations (Redis only - JWT auto-expires)
+   * Note: Redis TTL handles expiration automatically, but this can clean up any stale entries
+   * Returns number of operations cleaned up
+   */
+  async function cleanupExpired(operationType?: string): Promise<number> {
+    if (actualBackend === 'jwt') {
+      // JWT operations auto-expire, nothing to clean up
+      return 0;
+    }
+
+    const redis = getRedis();
+    if (!redis) {
+      return 0;
+    }
+
+    try {
+      const pattern = operationType 
+        ? `${redisKeyPrefix}${operationType}:*`
+        : `${redisKeyPrefix}*`;
+      
+      let cleaned = 0;
+      
+      // Scan for keys and check TTL
+      for await (const key of scanKeysIterator({ pattern, maxKeys: 10000 })) {
+        const ttl = await redis.ttl(key);
+        // TTL of -2 means key doesn't exist, -1 means no expiration set
+        // 0 or positive means it exists and has expiration
+        // If TTL is 0 or negative (but not -1), the key is expired or doesn't exist
+        if (ttl <= 0 && ttl !== -1) {
+          // Key is expired or doesn't exist, try to delete it
+          const deleted = await redis.del(key);
+          if (deleted > 0) {
+            cleaned++;
+          }
+        }
+      }
+      
+      if (cleaned > 0) {
+        logger.debug('Cleaned up expired pending operations', {
+          operationType: operationType || 'all',
+          cleaned,
+          backend: actualBackend,
+        });
+      }
+      
+      return cleaned;
+    } catch (error) {
+      logger.error('Failed to cleanup expired pending operations', { error });
+      return 0;
+    }
+  }
+
   return {
     create,
     verify,
     update,
     delete: deleteOperation,
     exists,
+    cleanupExpired,
     backend: actualBackend,
   };
 }
