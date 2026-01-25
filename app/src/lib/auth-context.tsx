@@ -239,6 +239,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             
             if (user && result.tokens) {
               console.log('[Auth] ✅ Saving refreshed auth state');
+              // Store expiration time
+              const expiresIn = result.tokens.expiresIn || 3600;
+              const expiresAt = Date.now() + (expiresIn * 1000);
+              localStorage.setItem('auth_token_expires_at', expiresAt.toString());
+              
               // Save auth state
               localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN, result.tokens.accessToken);
               localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, result.tokens.refreshToken);
@@ -298,6 +303,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
           if (data.me) {
             console.log('[Auth] ✅ Token valid, user authenticated:', { id: data.me.id, email: data.me.email });
+            // Store expiration time (default 1 hour if not provided)
+            const expiresAt = Date.now() + (3600 * 1000);
+            localStorage.setItem('auth_token_expires_at', expiresAt.toString());
+            
             setState({
               user: data.me,
               tokens: { accessToken, refreshToken, expiresIn: 3600 },
@@ -415,6 +424,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN, tokens.accessToken);
     localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, tokens.refreshToken);
     localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(user));
+    
+    // Store token expiration time for proactive refresh
+    // Calculate expiration: current time + expiresIn seconds
+    const expiresAt = Date.now() + (tokens.expiresIn * 1000);
+    localStorage.setItem('auth_token_expires_at', expiresAt.toString());
 
     setState({
       user,
@@ -429,6 +443,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN);
     localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN);
     localStorage.removeItem(STORAGE_KEYS.USER);
+    localStorage.removeItem('auth_token_expires_at');
 
     setState({
       user: null,
@@ -669,6 +684,200 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }));
     localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(user));
   }, []);
+
+  // Refresh lock to prevent multiple simultaneous refreshes
+  const refreshLockRef = React.useRef<Promise<string | null> | null>(null);
+
+  // Token refresh callback for graphql-utils (returns new access token or null)
+  // This is called automatically when graphql-utils encounters a 401 error
+  const getRefreshedToken = useCallback(async (): Promise<string | null> => {
+    // If refresh is already in progress, wait for it
+    if (refreshLockRef.current) {
+      console.log('[Auth] ⏳ Token refresh already in progress, waiting...');
+      return refreshLockRef.current;
+    }
+    
+    // Read refresh token from localStorage directly to avoid stale state
+    const refreshToken = localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN);
+    if (!refreshToken) {
+      console.warn('[Auth] No refresh token available for automatic refresh');
+      return null;
+    }
+    
+    // Create refresh promise and store in lock
+    const refreshPromise = (async (): Promise<string | null> => {
+      try {
+        console.log('[Auth] 🔄 Automatic token refresh triggered by graphql-utils...');
+        const data = await graphqlRequest(
+        `mutation RefreshToken($input: RefreshTokenInput!) {
+          refreshToken(input: $input) {
+            success
+            message
+            user {
+              id
+              email
+              username
+              status
+              roles
+              permissions
+              emailVerified
+              phoneVerified
+              twoFactorEnabled
+            }
+            tokens {
+              accessToken
+              refreshToken
+              expiresIn
+              refreshExpiresIn
+            }
+          }
+        }`,
+        {
+          input: {
+            tenantId: TENANT_ID,
+            refreshToken: refreshToken,
+          },
+        }
+      );
+
+      const result = data?.refreshToken;
+      if (result?.success && result?.tokens?.accessToken) {
+        // Update state and localStorage
+        const newTokens = {
+          accessToken: result.tokens.accessToken,
+          refreshToken: result.tokens.refreshToken || refreshToken,
+          expiresIn: result.tokens.expiresIn || 3600,
+        };
+        
+        // Store expiration time
+        const expiresAt = Date.now() + (newTokens.expiresIn * 1000);
+        localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN, newTokens.accessToken);
+        localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, newTokens.refreshToken);
+        localStorage.setItem('auth_token_expires_at', expiresAt.toString());
+        
+        // Update user if provided, otherwise keep existing
+        const user = result.user || state.user;
+        if (user) {
+          localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(user));
+        }
+        
+        // Update state
+        setState(prev => ({
+          ...prev,
+          tokens: newTokens,
+          user: user || prev.user,
+        }));
+        
+        console.log('[Auth] ✅ Token refreshed successfully via automatic callback');
+        return newTokens.accessToken;
+      }
+      
+      console.warn('[Auth] ⚠️ Token refresh failed via callback:', result?.message);
+      return null;
+    } catch (error: any) {
+      console.error('[Auth] ❌ Token refresh error via callback:', error.message);
+      return null;
+    } finally {
+      // Clear lock when done
+      refreshLockRef.current = null;
+    }
+    })();
+    
+    // Store promise in lock
+    refreshLockRef.current = refreshPromise;
+    return refreshPromise;
+  }, [state.tokens, state.user]);
+
+  // Proactive token refresh - refresh before expiration
+  // Use ref to track scheduled refresh and prevent loops
+  const scheduledRefreshRef = React.useRef<NodeJS.Timeout | null>(null);
+  
+  useEffect(() => {
+    if (!state.isAuthenticated || !state.tokens) {
+      // Clear any scheduled refresh if not authenticated
+      if (scheduledRefreshRef.current) {
+        clearTimeout(scheduledRefreshRef.current);
+        scheduledRefreshRef.current = null;
+      }
+      return;
+    }
+
+    const expiresAtStr = localStorage.getItem('auth_token_expires_at');
+    if (!expiresAtStr) {
+      return;
+    }
+
+    // Clear any existing scheduled refresh
+    if (scheduledRefreshRef.current) {
+      clearTimeout(scheduledRefreshRef.current);
+      scheduledRefreshRef.current = null;
+    }
+
+    const expiresAt = parseInt(expiresAtStr, 10);
+    const now = Date.now();
+    const timeUntilExpiry = expiresAt - now;
+    
+    // Refresh token if it expires in less than 5 minutes (300000ms)
+    // or if it's already expired (but not more than 1 minute ago)
+    const shouldRefresh = timeUntilExpiry < 5 * 60 * 1000 && timeUntilExpiry > -60 * 1000;
+    
+    if (shouldRefresh) {
+      console.log('[Auth] 🔄 Proactively refreshing token (expires soon)');
+      refreshTokenFn().catch((error) => {
+        console.warn('[Auth] ⚠️ Proactive token refresh failed:', error.message);
+      });
+    } else if (timeUntilExpiry > 5 * 60 * 1000) {
+      // Schedule refresh 5 minutes before expiration
+      const refreshDelay = timeUntilExpiry - (5 * 60 * 1000);
+      console.log(`[Auth] ⏰ Scheduling token refresh in ${Math.round(refreshDelay / 1000 / 60)} minutes`);
+      scheduledRefreshRef.current = setTimeout(() => {
+        console.log('[Auth] 🔄 Executing scheduled token refresh');
+        scheduledRefreshRef.current = null;
+        refreshTokenFn().catch((error) => {
+          console.warn('[Auth] ⚠️ Scheduled token refresh failed:', error.message);
+        });
+      }, refreshDelay);
+    }
+    
+    // Cleanup function
+    return () => {
+      if (scheduledRefreshRef.current) {
+        clearTimeout(scheduledRefreshRef.current);
+        scheduledRefreshRef.current = null;
+      }
+    };
+  }, [state.isAuthenticated, state.tokens?.accessToken]); // Only depend on accessToken, not the whole tokens object or refreshTokenFn
+  
+  // Separate effect to handle refreshTokenFn calls without causing loops
+  // This effect only runs when tokens actually change (new token received)
+  const lastTokenRef = React.useRef<string | undefined>(state.tokens?.accessToken);
+  React.useEffect(() => {
+    // Only schedule refresh if token actually changed (not just state update)
+    if (state.tokens?.accessToken && state.tokens.accessToken !== lastTokenRef.current) {
+      lastTokenRef.current = state.tokens.accessToken;
+      // Token changed, proactive refresh will be handled by the main effect above
+    }
+  }, [state.tokens?.accessToken]);
+
+  // Register token refresh callback with graphql-utils
+  // Use ref to store callback to avoid re-registration on every state change
+  const refreshCallbackRef = React.useRef(getRefreshedToken);
+  refreshCallbackRef.current = getRefreshedToken;
+  
+  useEffect(() => {
+    // Import dynamically to avoid circular dependency
+    import('./graphql-utils.js').then((module) => {
+      if (module.setTokenRefreshCallback) {
+        // Use wrapper that always calls the latest callback
+        module.setTokenRefreshCallback(async () => {
+          return refreshCallbackRef.current();
+        });
+        console.log('[Auth] ✅ Token refresh callback registered with graphql-utils');
+      }
+    }).catch((error) => {
+      console.warn('[Auth] ⚠️ Failed to register token refresh callback:', error);
+    });
+  }, []); // Only run once on mount
 
   const value: AuthContextValue = {
     ...state,

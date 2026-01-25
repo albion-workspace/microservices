@@ -121,7 +121,13 @@ export function createNotificationResolvers(notificationService: NotificationSer
           .skip(args.offset || 0)
           .toArray();
         
-        return notifications;
+        // Transform channel, priority, and status to uppercase for GraphQL enum compatibility
+        return notifications.map((notification: any) => ({
+          ...notification,
+          channel: notification.channel?.toUpperCase() || notification.channel,
+          priority: notification.priority?.toUpperCase() || notification.priority,
+          status: notification.status?.toUpperCase() || notification.status,
+        }));
       },
       
       notificationStats: async (args: any, context: ResolverContext) => {

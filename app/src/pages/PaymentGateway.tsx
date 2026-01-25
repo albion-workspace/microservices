@@ -2424,6 +2424,7 @@ function LedgerTab() {
         }
       }
     },
+    enabled: !!authToken,
     retry: 1, // Retry once on failure
   })
   
@@ -2914,6 +2915,7 @@ function TransactionsTab() {
       
       return result
     },
+    enabled: !!authToken,
   })
 
   // walletTxQuery removed - using transactions query instead
@@ -3731,6 +3733,7 @@ function ReconciliationTab() {
       txFirst: 500,
       walletFirst: 100
     }, authToken),
+    enabled: !!authToken,
   })
 
   const transactions = txQuery.data?.transactions?.nodes || []
@@ -3919,7 +3922,8 @@ function SettingsTab() {
       query ListProviders($input: JSON) {
         providerConfigs(input: $input)
       }
-    `, { input: { first: 50 } }),
+    `, { input: { first: 50 } }, authToken),
+    enabled: !!authToken,
   })
 
   // Create provider mutation - API uses JSON input/output

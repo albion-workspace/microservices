@@ -1,6 +1,7 @@
 /**
  * Global GraphQL Utility with Logging
  * Single function to execute GraphQL queries/mutations with comprehensive logging
+ * Includes automatic token refresh on 401 errors
  */
 
 const LOG_PREFIX = '[GraphQL]'
@@ -8,6 +9,19 @@ const LOG_PREFIX = '[GraphQL]'
 interface GraphQLLogOptions {
   operation?: string
   showResponse?: boolean
+  retryOn401?: boolean // Whether to retry after token refresh (default: true)
+}
+
+// Token refresh callback - will be set by auth context
+let tokenRefreshCallback: (() => Promise<string | null>) | null = null
+// Track retry count per request to prevent infinite loops
+const retryCountMap = new Map<string, number>()
+
+/**
+ * Set the token refresh callback (called by auth context)
+ */
+export function setTokenRefreshCallback(callback: () => Promise<string | null>) {
+  tokenRefreshCallback = callback
 }
 
 /**
@@ -30,7 +44,7 @@ export async function graphql<T = any>(
   token?: string,
   options: GraphQLLogOptions = {}
 ): Promise<T> {
-  const { operation = 'query', showResponse = true } = options
+  const { operation = 'query', showResponse = true, retryOn401 = true } = options
   const startTime = Date.now()
   const correlationId = generateCorrelationId()
   
@@ -48,15 +62,31 @@ export async function graphql<T = any>(
   console.log('Token:', token ? `${token.substring(0, 20)}...` : 'none')
   console.log('Correlation ID:', correlationId)
   
-  try {
+  const executeRequest = async (currentToken?: string, isRetry = false): Promise<T> => {
+    // Track retry count to prevent infinite loops
+    const retryKey = `${correlationId}-${url}`;
+    if (isRetry) {
+      const retryCount = (retryCountMap.get(retryKey) || 0) + 1;
+      retryCountMap.set(retryKey, retryCount);
+      
+      if (retryCount > 1) {
+        console.error('[GraphQL] ❌ Max retry limit reached, aborting');
+        retryCountMap.delete(retryKey);
+        console.groupEnd();
+        throw new Error('Authentication failed: Max retry limit reached');
+      }
+    } else {
+      retryCountMap.delete(retryKey); // Reset on new request
+    }
+    
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'X-Correlation-ID': correlationId,
       'X-Request-ID': correlationId, // Also set X-Request-ID for compatibility
     }
     
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`
+    if (currentToken) {
+      headers['Authorization'] = `Bearer ${currentToken}`
     }
     
     const response = await fetch(url, {
@@ -71,18 +101,88 @@ export async function graphql<T = any>(
     if (!response.ok) {
       const text = await response.text()
       console.error('HTTP Error:', text.substring(0, 500))
+      
+      // Handle 401 Unauthorized - try to refresh token and retry (only once)
+      if (response.status === 401 && retryOn401 && !isRetry && currentToken && tokenRefreshCallback) {
+        console.log('[GraphQL] 🔄 401 error detected, attempting token refresh...')
+        console.groupEnd()
+        
+        try {
+          const newToken = await tokenRefreshCallback()
+          if (newToken) {
+            console.log('[GraphQL] ✅ Token refreshed, retrying request...')
+            // Retry the request with new token (mark as retry)
+            return executeRequest(newToken, true)
+          } else {
+            console.warn('[GraphQL] ⚠️ Token refresh failed, throwing error')
+            retryCountMap.delete(retryKey);
+            throw new Error('Authentication failed: Token refresh unsuccessful')
+          }
+        } catch (refreshError: any) {
+          console.error('[GraphQL] ❌ Token refresh error:', refreshError.message)
+          retryCountMap.delete(retryKey);
+          throw new Error(`Authentication failed: ${refreshError.message}`)
+        }
+      }
+      
       console.groupEnd()
+      retryCountMap.delete(retryKey);
       throw new Error(`HTTP error! status: ${response.status}`)
     }
     
     const data = await response.json()
     
     if (data.errors) {
-      console.error('GraphQL Errors:', data.errors)
-      console.groupEnd()
+      const errorMessage = data.errors[0]?.message || 'GraphQL error'
+      const errorLower = errorMessage.toLowerCase()
       
-      throw new Error(data.errors[0]?.message || 'GraphQL error')
+      // Distinguish between authentication errors and permission errors
+      // Authentication errors: token invalid/expired/missing - should refresh
+      // Permission errors: user authenticated but lacks permission - should NOT refresh
+      const isAuthError = errorLower.includes('authentication required') ||
+                         errorLower.includes('invalid token') ||
+                         errorLower.includes('token expired') ||
+                         errorLower.includes('token invalid') ||
+                         errorLower.includes('malformed token') ||
+                         (errorLower.includes('expired') && errorLower.includes('token'))
+      
+      // Permission errors - user IS authenticated but lacks permission
+      // "Not authorized" means user is authenticated but lacks permission - DO NOT refresh!
+      const isPermissionError = errorLower.includes('not authorized') ||
+                                (errorLower.includes('unauthorized') && !errorLower.includes('authentication'))
+      
+      console.error('GraphQL Errors:', data.errors)
+      
+      // Only refresh on authentication errors, NOT permission errors, and only once
+      if (isAuthError && !isPermissionError && retryOn401 && !isRetry && currentToken && tokenRefreshCallback) {
+        console.log('[GraphQL] 🔄 Auth error detected in GraphQL response, attempting token refresh...')
+        console.groupEnd()
+        
+        try {
+          const newToken = await tokenRefreshCallback()
+          if (newToken) {
+            console.log('[GraphQL] ✅ Token refreshed, retrying request...')
+            // Retry the request with new token (mark as retry)
+            return executeRequest(newToken, true)
+          } else {
+            console.warn('[GraphQL] ⚠️ Token refresh failed, throwing error')
+            retryCountMap.delete(retryKey);
+            throw new Error(errorMessage)
+          }
+        } catch (refreshError: any) {
+          console.error('[GraphQL] ❌ Token refresh error:', refreshError.message)
+          retryCountMap.delete(retryKey);
+          throw new Error(errorMessage)
+        }
+      }
+      
+      console.groupEnd()
+      retryCountMap.delete(retryKey);
+      throw new Error(errorMessage)
     }
+    
+    // Success - clear retry count
+    retryCountMap.delete(retryKey);
     
     if (showResponse && data.data) {
       const responseStr = JSON.stringify(data.data).substring(0, 500)
@@ -97,6 +197,10 @@ export async function graphql<T = any>(
     }
     
     return data.data
+  }
+  
+  try {
+    return await executeRequest(token)
   } catch (error: any) {
     const duration = Date.now() - startTime
     console.error(`❌ Failed (${duration}ms):`, error.message)
