@@ -46,6 +46,28 @@ export default function PendingOperations() {
   const [operationTypeFilter, setOperationTypeFilter] = useState<string>('')
   const [recipientFilter, setRecipientFilter] = useState<string>('')
 
+  // Fetch all distinct operation types from Redis
+  const { data: operationTypesData } = useQuery<{ pendingOperationTypes: string[] }>({
+    queryKey: ['pendingOperationTypes'],
+    queryFn: async () => {
+      return graphql<{ pendingOperationTypes: string[] }>(
+        SERVICE_URLS.auth,
+        `
+          query GetPendingOperationTypes {
+            pendingOperationTypes
+          }
+        `,
+        {},
+        authToken
+      )
+    },
+    enabled: !!authToken,
+    staleTime: 60000, // Cache for 1 minute
+  })
+
+  const availableOperationTypes = operationTypesData?.pendingOperationTypes || []
+
+  // Main query with filters
   const { data, isLoading, error, refetch } = useQuery<PendingOperationsData>({
     queryKey: ['pendingOperations', operationTypeFilter, recipientFilter],
     queryFn: async () => {
@@ -99,6 +121,7 @@ export default function PendingOperations() {
         authToken
       )
     },
+    enabled: !!authToken,
     refetchInterval: 30000, // Refresh every 30 seconds
   })
 
@@ -181,10 +204,21 @@ export default function PendingOperations() {
                 className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
                 <option value="">All Types</option>
-                <option value="registration">Registration</option>
-                <option value="password_reset">Password Reset</option>
-                <option value="otp_verification">OTP Verification</option>
+                {availableOperationTypes.length > 0 ? (
+                  availableOperationTypes.map((type) => (
+                    <option key={type} value={type}>
+                      {type.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                    </option>
+                  ))
+                ) : (
+                  <option disabled>No operations found</option>
+                )}
               </select>
+              {availableOperationTypes.length === 0 && !isLoading && (
+                <p className="text-xs text-gray-500 mt-1">
+                  Only Redis-based operations are shown (JWT-based cannot be queried)
+                </p>
+              )}
             </div>
 
             <div className="flex-1 min-w-[200px]">
@@ -379,7 +413,8 @@ export default function PendingOperations() {
             <div className="text-sm text-blue-800">
               <p className="font-medium mb-1">About Pending Operations</p>
               <ul className="list-disc list-inside space-y-1 text-blue-700">
-                <li>Only Redis-based operations are displayed (JWT-based operations cannot be listed)</li>
+                <li>Only Redis-based operations are displayed (JWT-based operations like registration, password reset cannot be queried)</li>
+                <li>The operation type filter is dynamically populated from available Redis operations</li>
                 <li>Operations automatically expire based on their TTL</li>
                 <li>Sensitive data (OTP codes, passwords) is not exposed for security</li>
                 <li>Users can only see their own operations; admins can see all</li>

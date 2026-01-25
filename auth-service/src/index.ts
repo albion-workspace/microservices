@@ -157,6 +157,7 @@ const config = {
       // Same pattern as payment-service: transactions, transfers, etc.
       pendingOperations: or(hasRole('system'), isAuthenticated),
       pendingOperation: or(hasRole('system'), isAuthenticated),
+      pendingOperationTypes: or(hasRole('system'), isAuthenticated),
       // Webhooks (system only - using URN for consistency)
       webhooks: or(hasRole('system'), can('webhook', 'read')),
       webhook: or(hasRole('system'), can('webhook', 'read')),

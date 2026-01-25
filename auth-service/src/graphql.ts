@@ -280,6 +280,10 @@ export const authGraphQLTypes = `
       token: String!
       operationType: String
     ): PendingOperation
+    
+    # Get all distinct operation types from Redis
+    # Returns all operation types that exist in Redis (regardless of whether operations exist)
+    pendingOperationTypes: [String!]!
   }
   
   type UserConnection {
@@ -1257,6 +1261,45 @@ export function createAuthResolvers(
         }
         
         return null;
+      },
+      
+      /**
+       * Get all distinct operation types from Redis
+       * Scans Redis keys to find all unique operation types
+       */
+      pendingOperationTypes: async (args: Record<string, unknown>, ctx: ResolverContext) => {
+        requireAuth(ctx);
+        
+        const redis = getRedis();
+        if (!redis) {
+          logger.debug('Redis not available for pending operation types query');
+          return [];
+        }
+        
+        const operationTypes = new Set<string>();
+        
+        // Scan all pending operation keys
+        // Key pattern: pending:{operationType}:{token}
+        const pattern = 'pending:*';
+        
+        try {
+          for await (const key of scanKeysIterator({ pattern, maxKeys: 10000 })) {
+            // Extract operation type from key: pending:{operationType}:{token}
+            const parts = key.split(':');
+            if (parts.length >= 2 && parts[0] === 'pending') {
+              const operationType = parts[1];
+              if (operationType) {
+                operationTypes.add(operationType);
+              }
+            }
+          }
+        } catch (error) {
+          logger.error('Error scanning Redis for operation types', { error });
+          return [];
+        }
+        
+        // Return sorted array of unique operation types
+        return Array.from(operationTypes).sort();
       },
     },
   };
