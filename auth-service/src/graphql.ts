@@ -452,9 +452,16 @@ export function createAuthResolvers(
           // Normalize users from edges
           const normalizedNodes = result.edges.map(edge => normalizeUser(edge.node));
           
+          // Ensure totalCount is always a number (GraphQL requires Int!)
+          // If filters are present, paginateCollection may return undefined, so count manually
+          let totalCount = result.totalCount;
+          if (totalCount === undefined || totalCount === null) {
+            totalCount = await db.collection('users').countDocuments(filter);
+          }
+          
           return {
             nodes: normalizedNodes,
-            totalCount: result.totalCount,
+            totalCount: totalCount || 0, // Ensure it's never null/undefined
             pageInfo: result.pageInfo,
           };
         } catch (error) {
@@ -520,9 +527,16 @@ export function createAuthResolvers(
           // Normalize users from edges
           const normalizedNodes = result.edges.map(edge => normalizeUser(edge.node));
           
+          // Ensure totalCount is always a number (GraphQL requires Int!)
+          // If filters are present, paginateCollection may return undefined, so count manually
+          let totalCount = result.totalCount;
+          if (totalCount === undefined || totalCount === null) {
+            totalCount = await db.collection('users').countDocuments(filter);
+          }
+          
           return {
             nodes: normalizedNodes,
-            totalCount: result.totalCount,
+            totalCount: totalCount || 0, // Ensure it's never null/undefined
             pageInfo: result.pageInfo,
           };
         } catch (error) {
