@@ -307,6 +307,7 @@ function buildSchema(
 
   // Build base schema with minimal Query/Mutation/Subscription types
   // Only include 'health' query - let type definitions extend the rest
+  // Note: Using any for dynamic GraphQL field building - GraphQL types are complex and dynamic
   const queryFields: Record<string, { type: any; args?: any; resolve: any }> = {
     health: {
       type: HealthType,
@@ -328,6 +329,7 @@ function buildSchema(
   });
 
   // Subscription type
+  // Note: Using any for dynamic GraphQL field building - GraphQL types are complex and dynamic
   const subscriptionFields: Record<string, { type: any; subscribe: any; resolve: any }> = {};
   
   for (const [key, subFn] of Object.entries(subscriptionConfig)) {
@@ -396,15 +398,17 @@ function buildSchema(
         typeCount: Object.keys(baseSchema.getTypeMap()).length,
         hasMutations: baseSchema.getMutationType() ? Object.keys(baseSchema.getMutationType()!.getFields()).length : 0,
       });
-    } catch (error: any) {
+    } catch (error: unknown) {
       // Even if extendSchema throws, it might have partially extended the schema
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const errorStack = error instanceof Error ? error.stack : undefined;
       // Check if mutations were added by inspecting the extended schema
       const tempExtendedMutation = baseSchema.getMutationType();
       const hasMutations = tempExtendedMutation && Object.keys(tempExtendedMutation.getFields()).length > 0;
       
       logger.error('Schema extension error', { 
-        error: error.message,
-        stack: error.stack,
+        error: errorMessage,
+        stack: errorStack,
         hasMutations,
         typeDefsLength: allTypeDefs.length,
         typeDefsPreview: allTypeDefs.substring(0, 500),
@@ -412,12 +416,12 @@ function buildSchema(
       
       if (hasMutations) {
         logger.warn('Schema extension had warnings but mutations were added', { 
-          error: error.message,
+          error: errorMessage,
         });
         // Schema was extended despite the error - continue using it
       } else {
         logger.error('Schema extension failed and no mutations found', { 
-          error: error.message,
+          error: errorMessage,
         });
         // Schema extension truly failed - will need fallback
         throw error; // Re-throw to prevent using broken schema
@@ -431,6 +435,7 @@ function buildSchema(
   const extendedSubscriptionType = baseSchema.getSubscriptionType();
   
   // Generic helper to build field resolvers for any root type
+  // Note: Using any for dynamic GraphQL field building - GraphQL's type system is complex and dynamic
   function buildFieldResolver(
     opType: 'Query' | 'Mutation' | 'Subscription',
     fieldName: string,
@@ -472,6 +477,7 @@ function buildSchema(
       }
     } else {
       // Query and Mutation use resolve
+      // Note: args and info use any due to GraphQL's dynamic nature
       fieldConfig.resolve = async (_root: unknown, args: any, ctx: GatewayContext, info: any) => {
         // Use resolver if available
         if (resolvers[fieldName]) {
@@ -556,6 +562,7 @@ function buildSchema(
   }
 
   // Get all types from extended schema except root types to avoid duplicates
+  // Note: Using any for GraphQL type filtering - GraphQL's type system is complex
   const typeMap = baseSchema.getTypeMap();
   const otherTypes = Object.values(typeMap).filter((type: any) => 
     type.name !== 'Query' && 
@@ -764,6 +771,7 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
   
   const httpHandler = createHttpHandler({
     schema,
+    // Note: Using any for context function - graphql-http expects specific context type
     context: ((req: { raw: IncomingMessage }) => createContext(req.raw)) as any,
   });
 
@@ -775,6 +783,7 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
     schema,
     execute,
     subscribe,
+    // Note: Using any for context function - graphql-sse expects specific context type
     context: ((req: { raw: IncomingMessage }) => createContext(req.raw)) as any,
   });
 
@@ -1111,7 +1120,7 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
     });
 
     // ─── Room Management ───
-    socket.on('joinRoom', (payload: { room: string }, callback?: (response: any) => void) => {
+    socket.on('joinRoom', (payload: { room: string }, callback?: (response: { success: boolean; room?: string; error?: string }) => void) => {
       if (payload?.room) {
         socket.join(payload.room);
         logger.info('Socket joined room', { socketId, room: payload.room, userId: ctx.user?.userId });
@@ -1125,7 +1134,7 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
       }
     });
 
-    socket.on('leaveRoom', (payload: { room: string }, callback?: (response: any) => void) => {
+    socket.on('leaveRoom', (payload: { room: string }, callback?: (response: { success: boolean; room?: string; error?: string }) => void) => {
       if (payload?.room) {
         socket.leave(payload.room);
         logger.info('Socket left room', { socketId, room: payload.room, userId: ctx.user?.userId });

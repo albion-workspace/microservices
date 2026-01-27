@@ -5,7 +5,11 @@
  * Provides CRUD operations with tenant isolation.
  */
 
+// External packages
 import type { Collection, Db } from 'mongodb';
+import { RoleResolver, type ResolvedPermissions, type Role as BaseRole } from 'access-engine';
+
+// Internal imports
 import { getDatabase } from '../common/database.js';
 import { generateMongoId } from '../common/mongodb-utils.js';
 import type {
@@ -119,24 +123,44 @@ export class AccessStore {
   
   /**
    * Get all permissions for a role (including inherited)
+   * Uses access-engine's RoleResolver for safe resolution with visited set, maxDepth, and active checks
    */
   async getRolePermissions(roleName: string, tenantId: string): Promise<string[]> {
-    const role = await this.getRoleByName(roleName, tenantId);
-    if (!role) return [];
+    // Load role and all inherited roles from DB
+    const roles = await this.resolveRoleHierarchy([roleName], tenantId);
+    if (roles.length === 0) return [];
     
-    const permissions = new Set<string>(role.permissions);
+    // Convert MongoDB Role[] to BaseRole[] format for RoleResolver
+    const baseRoles: BaseRole[] = roles.map(({ name, description, permissions, inherits, priority, active }) => ({
+      name,
+      description,
+      displayName: name, // Use name as displayName if not provided
+      permissions,
+      inherits,
+      priority,
+      active: active !== false, // Default to true if not set
+      context: undefined, // MongoDB roles don't have context
+      metadata: undefined,
+    }));
     
-    // Add inherited permissions
-    if (role.inherits) {
-      for (const inheritedRoleName of role.inherits) {
-        const inheritedPerms = await this.getRolePermissions(inheritedRoleName, tenantId);
-        for (const perm of inheritedPerms) {
-          permissions.add(perm);
-        }
-      }
-    }
+    // Use RoleResolver for safe resolution (handles visited set, maxDepth, active checks)
+    const roleResolver = new RoleResolver(baseRoles);
     
-    return Array.from(permissions);
+    // Use RoleResolver.resolveUserPermissions with a temporary user to get role permissions
+    // This safely resolves permissions with all safety features (visited set, maxDepth, active checks)
+    const testUser = {
+      userId: 'temp',
+      tenantId,
+      roles: [roleName],
+      permissions: [],
+    };
+    
+    const userResolved = roleResolver.resolveUserPermissions(testUser, {
+      includeInherited: true,
+      includePermissions: true,
+    });
+    
+    return Array.from(userResolved.permissions);
   }
   
   async listRoles(tenantId?: string): Promise<Role[]> {

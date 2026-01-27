@@ -20,6 +20,7 @@ import {
   type CursorPaginationOptions,
   type CursorPaginationResult,
 } from 'core-service';
+import { matchAnyUrn } from 'core-service/access';
 import { 
   rolesToArray, 
   normalizeUser, 
@@ -352,6 +353,7 @@ import type { Resolvers } from 'core-service';
  * Uses access-engine URN format: resource:action:target (e.g., 'user:read:*', 'user:read:own')
  * 
  * NOTE: Only 'system' role has full access. 'admin' and other roles use permissions.
+ * Uses matchAnyUrn from core-service/access (access-engine) for proper URN matching.
  */
 function checkSystemOrPermission(
   user: UserContext | null,
@@ -364,24 +366,12 @@ function checkSystemOrPermission(
   // Check system role (only role with full access)
   if (user.roles?.includes('system')) return true;
   
-  // Check wildcard permission
-  if (user.permissions?.some(p => p === '*:*:*' || p === '*')) return true;
-  
-  // Check specific permission using access-engine URN format: resource:action:target
+  // Check permissions using access-engine's matchAnyUrn (handles wildcards properly)
   const requiredUrn = `${resource}:${action}:${target}`;
-  return user.permissions?.some(p => {
-    // URN matching with wildcard support (access-engine format: resource:action:target)
-    const parts = p.split(':');
-    const reqParts = requiredUrn.split(':');
-    if (parts.length !== 3 || reqParts.length !== 3) return false;
-    
-    // Match: resource, action, target (allowing wildcards)
-    return (
-      (parts[0] === '*' || parts[0] === reqParts[0]) &&
-      (parts[1] === '*' || parts[1] === reqParts[1]) &&
-      (parts[2] === '*' || parts[2] === reqParts[2])
-    );
-  }) ?? false;
+  const permissions = user.permissions || [];
+  
+  // Use matchAnyUrn from access-engine for proper URN matching with wildcard support
+  return matchAnyUrn(permissions, requiredUrn);
 }
 
 /**

@@ -52,8 +52,8 @@ export type {
   RevokeRoleInput,
 } from './types/role-types.js';
 
-// Role type from access-engine
-export type { Role } from 'access-engine';
+// Role type from core-service/access
+export type { Role } from 'core-service/access';
 
 // SocialProfile is exported from user-types.ts
 

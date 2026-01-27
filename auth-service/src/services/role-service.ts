@@ -6,7 +6,7 @@
  */
 
 import { getDatabase, logger, findOneById, updateOneById, extractDocumentId } from 'core-service';
-import { RoleResolver, type Role } from 'access-engine';
+import { RoleResolver, type BaseRole as Role } from 'core-service/access';
 import type {
   UserRole,
   RoleContext,

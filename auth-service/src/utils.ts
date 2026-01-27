@@ -98,7 +98,7 @@ export function keyMatchesToken(key: string, token: string): boolean {
 
 import crypto from 'crypto';
 import bcrypt from 'bcrypt';
-import { RoleResolver, type UserRole, type User as AccessEngineUser } from 'access-engine';
+import { RoleResolver, type UserRole, type User as AccessEngineUser } from 'core-service/access';
 import { normalizeDocument, logger } from 'core-service';
 import type { AuthConfig, IdentifierType, User } from './types.js';
 

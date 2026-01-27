@@ -8,11 +8,11 @@
  * - Betting Platform: admin, agent, player, etc.
  */
 
-import type { Role } from 'access-engine';
+import type { BaseRole as Role } from 'core-service/access';
 
 /**
  * Default role definitions for common scenarios
- * Uses access-engine's Role type
+ * Uses access-engine's base Role type (without MongoDB fields)
  */
 export const DEFAULT_ROLES: Role[] = [
   // ═══════════════════════════════════════════════════════════════

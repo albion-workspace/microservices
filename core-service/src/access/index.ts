@@ -48,11 +48,18 @@ export {
   createAccessEngine,
   createAccessEngineWithDefaults,
   
+  // Role Resolver
+  RoleResolver,
+  
   // Types from access-engine
   type User,
   type Permission,
   type PermissionCondition,
-  type Role as BaseRole,  // Rename to avoid conflict with extended Role
+  type Role as BaseRole,  // Base Role type (without MongoDB fields)
+  type UserRole,
+  type RoleContext,
+  type ResolvedPermissions,
+  type RoleResolutionOptions,
   type AccessResult,
   type ParsedUrn,
   type PermissionRule,
