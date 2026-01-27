@@ -221,6 +221,10 @@ export interface BonusTemplate {
   priority: number;                // For selection ordering
   isActive: boolean;
   
+  // Approval
+  requiresApproval?: boolean;     // Requires admin approval before awarding
+  approvalThreshold?: number;     // Minimum value requiring approval (if requiresApproval is true)
+  
   // Timestamps (auto-managed by repository)
   createdAt?: Date;
   updatedAt?: Date;

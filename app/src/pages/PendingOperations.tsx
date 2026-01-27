@@ -11,6 +11,9 @@ import {
   AlertCircle,
   CheckCircle,
   XCircle,
+  Eye,
+  X,
+  Copy,
 } from 'lucide-react'
 import { useAuth } from '../lib/auth-context'
 import { graphql, SERVICE_URLS } from '../lib/graphql-utils'
@@ -40,11 +43,14 @@ interface PendingOperationsData {
   }
 }
 
+
 export default function PendingOperations() {
   const { tokens } = useAuth()
   const authToken = tokens?.accessToken
   const [operationTypeFilter, setOperationTypeFilter] = useState<string>('')
   const [recipientFilter, setRecipientFilter] = useState<string>('')
+  const [selectedRawData, setSelectedRawData] = useState<any | null>(null)
+  const [loadingRawData, setLoadingRawData] = useState(false)
 
   // Fetch all distinct operation types from Redis
   const { data: operationTypesData } = useQuery<{ pendingOperationTypes: string[] }>({
@@ -178,6 +184,34 @@ export default function PendingOperations() {
     return { icon: CheckCircle, color: 'text-green-500', label: 'Active' }
   }
 
+
+  const handleViewRawData = async (token: string, operationType?: string) => {
+    setLoadingRawData(true)
+    try {
+      const rawData = await graphql<{ pendingOperationRawData: any }>(
+        SERVICE_URLS.auth,
+        `
+          query GetPendingOperationRawData($token: String!, $operationType: String) {
+            pendingOperationRawData(token: $token, operationType: $operationType)
+          }
+        `,
+        { token, operationType: operationType || null },
+        authToken
+      )
+      setSelectedRawData(rawData.pendingOperationRawData)
+    } catch (error) {
+      console.error('Failed to load raw data:', error)
+      alert('Failed to load raw data: ' + (error instanceof Error ? error.message : 'Unknown error'))
+    } finally {
+      setLoadingRawData(false)
+    }
+  }
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text)
+    // Could add toast notification here
+  }
+
   return (
     <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-7xl mx-auto">
@@ -187,9 +221,10 @@ export default function PendingOperations() {
             Pending Operations
           </h1>
           <p className="text-gray-600">
-            View temporary operations stored in Redis (registration, password reset, OTP verification)
+            View temporary operations stored in Redis
           </p>
         </div>
+
 
         {/* Filters */}
         <div className="bg-white rounded-lg shadow-sm p-4 mb-6">
@@ -386,6 +421,14 @@ export default function PendingOperations() {
                               {op.token.substring(0, 20)}...
                             </code>
                             <button
+                              onClick={() => handleViewRawData(op.token, op.operationType)}
+                              disabled={loadingRawData}
+                              className="text-blue-600 hover:text-blue-800 disabled:opacity-50"
+                              title="View raw data"
+                            >
+                              <Eye className="w-4 h-4" />
+                            </button>
+                            <button
                               onClick={() => {
                                 navigator.clipboard.writeText(op.token)
                                 // You could add a toast notification here
@@ -406,6 +449,37 @@ export default function PendingOperations() {
           </div>
         )}
 
+        {/* Raw Data Modal */}
+        {selectedRawData && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] flex flex-col">
+              <div className="flex items-center justify-between p-4 border-b">
+                <h3 className="text-lg font-semibold text-gray-900">Raw Token Data</h3>
+                <button
+                  onClick={() => setSelectedRawData(null)}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="p-4 overflow-auto flex-1">
+                <div className="mb-4 flex gap-2">
+                  <button
+                    onClick={() => copyToClipboard(JSON.stringify(selectedRawData, null, 2))}
+                    className="px-3 py-1 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 flex items-center gap-2"
+                  >
+                    <Copy className="w-4 h-4" />
+                    Copy JSON
+                  </button>
+                </div>
+                <pre className="bg-gray-900 text-green-400 p-4 rounded-lg overflow-x-auto text-xs font-mono">
+                  {JSON.stringify(selectedRawData, null, 2)}
+                </pre>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Info Box */}
         <div className="mt-6 bg-blue-50 border border-blue-200 rounded-lg p-4">
           <div className="flex items-start gap-3">
@@ -416,6 +490,7 @@ export default function PendingOperations() {
                 <li>Only Redis-based operations are displayed (JWT-based operations like registration, password reset cannot be queried)</li>
                 <li>The operation type filter is dynamically populated from available Redis operations</li>
                 <li>Operations automatically expire based on their TTL</li>
+                <li>Click the eye icon to view complete raw token data for any operation type</li>
                 <li>Sensitive data (OTP codes, passwords) is not exposed for security</li>
                 <li>Users can only see their own operations; admins can see all</li>
               </ul>

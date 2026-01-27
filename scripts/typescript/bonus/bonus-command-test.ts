@@ -127,6 +127,9 @@ interface TemplateConfig {
   max?: number;
   minTotal?: number;
   maxTotal?: number;
+  requiresApproval?: boolean;
+  approvalThreshold?: number;
+  description?: string;
 }
 
 const TEMPLATES: Record<string, TemplateConfig[]> = {
@@ -143,7 +146,7 @@ const TEMPLATES: Record<string, TemplateConfig[]> = {
   referral: [
     { code: 'REFERRAL', name: 'Referral Reward', type: 'referral', value: 2500 },
     { code: 'REFEREE', name: 'New User Referral Bonus', type: 'referee', valueType: 'percentage', value: 50, maxValue: 5000 },
-    { code: 'COMMISSION', name: 'Referral Commission', type: 'commission', valueType: 'percentage', value: 5, maxValue: 10000 },
+    { code: 'COMMISSION', name: 'Referral Commission', type: 'commission', valueType: 'percentage', value: 5, maxValue: 10000, requiresApproval: true, approvalThreshold: 2500 },
   ],
   activity: [
     { code: 'ACTIVITY', name: 'Activity Bonus', type: 'activity', valueType: 'percentage', value: 1, maxValue: 5000 },
@@ -162,7 +165,7 @@ const TEMPLATES: Record<string, TemplateConfig[]> = {
   loyalty: [
     { code: 'LOYALTY', name: 'Loyalty Bonus', type: 'loyalty', value: 1000, eligibleTiers: ['silver', 'gold', 'platinum'] },
     { code: 'LOYALTYPTS', name: 'Loyalty Points', type: 'loyalty_points', valueType: 'points', value: 100, turnoverMultiplier: 0 },
-    { code: 'VIP', name: 'VIP Exclusive Bonus', type: 'vip', value: 10000, eligibleTiers: ['vip', 'platinum', 'diamond'] },
+    { code: 'VIP', name: 'VIP Exclusive Bonus', type: 'vip', value: 10000, eligibleTiers: ['vip', 'platinum', 'diamond'], requiresApproval: true, approvalThreshold: 5000 },
     { code: 'TIERUP', name: 'Tier Upgrade Bonus', type: 'tier_upgrade', value: 2500 },
   ],
   timeBased: [
@@ -178,8 +181,8 @@ const TEMPLATES: Record<string, TemplateConfig[]> = {
     { code: 'CHALLENGE', name: 'Challenge Winner', type: 'challenge', value: 5000 },
   ],
   competition: [
-    { code: 'TOURNAMENT', name: 'Tournament Prize', type: 'tournament', value: 100000 },
-    { code: 'LEADERBOARD', name: 'Leaderboard Reward', type: 'leaderboard', value: 50000 },
+    { code: 'TOURNAMENT', name: 'Tournament Prize', type: 'tournament', value: 100000, requiresApproval: true, approvalThreshold: 10000 },
+    { code: 'LEADERBOARD', name: 'Leaderboard Reward', type: 'leaderboard', value: 50000, requiresApproval: true, approvalThreshold: 25000 },
   ],
   selection: [
     { code: 'SELECT', name: 'Pick Your Bonus', type: 'selection', value: 2000 },
@@ -187,9 +190,9 @@ const TEMPLATES: Record<string, TemplateConfig[]> = {
     { code: 'BUNDLE', name: 'Bundle Purchase Bonus', type: 'bundle', valueType: 'percentage', value: 15, maxValue: 5000 },
   ],
   promotional: [
-    { code: 'PROMO50', name: 'Promo Code Bonus', type: 'promo_code', value: 5000 },
-    { code: 'SPECIAL', name: 'Special Event Bonus', type: 'special_event', value: 10000 },
-    { code: 'CUSTOM', name: 'Custom Admin Bonus', type: 'custom', value: 2500 },
+    { code: 'PROMO50', name: 'Promo Code Bonus', type: 'promo_code', value: 5000, requiresApproval: true, approvalThreshold: 5000 },
+    { code: 'SPECIAL', name: 'Special Event Bonus', type: 'special_event', value: 10000, requiresApproval: true, approvalThreshold: 10000 },
+    { code: 'CUSTOM', name: 'Custom Admin Bonus', type: 'custom', value: 2500, requiresApproval: true },
   ],
 };
 
@@ -460,6 +463,8 @@ async function createTemplate(config: TemplateConfig): Promise<string> {
     validFrom: new Date().toISOString(),
     validUntil: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString(),
     eligibleTiers: config.eligibleTiers,
+    requiresApproval: config.requiresApproval ?? false,
+    approvalThreshold: config.approvalThreshold,
     priority: 50,
   };
 
@@ -1615,6 +1620,403 @@ async function testConsistencyServerClient() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// Bonus Approval Tests
+// ═══════════════════════════════════════════════════════════════════
+
+async function verifyTemplateApproval(templateCode: string) {
+  try {
+    const result = await graphql<{ bonusTemplateByCode: { code: string; requiresApproval: boolean; approvalThreshold?: number; value: number } }>(
+      BONUS_URL,
+      `
+        query GetTemplate($code: String!) {
+          bonusTemplateByCode(code: $code) {
+            code
+            requiresApproval
+            approvalThreshold
+            value
+          }
+        }
+      `,
+      { code: templateCode },
+      systemToken
+    );
+    
+    return result.bonusTemplateByCode;
+  } catch (error: any) {
+    console.warn(`  Failed to verify template ${templateCode}: ${error.message}`);
+    return null;
+  }
+}
+
+async function testBonusApproval() {
+  console.log('\n📦 BONUS APPROVAL TESTS\n');
+  
+  // Find templates that require approval from existing templates
+  const approvalTemplates: Array<{ template: TemplateConfig; category: string }> = [];
+  for (const [category, templates] of Object.entries(TEMPLATES)) {
+    for (const template of templates) {
+      if (template.requiresApproval) {
+        approvalTemplates.push({ template, category });
+      }
+    }
+  }
+  
+  if (approvalTemplates.length === 0) {
+    console.log('     ⚠️  No templates with requiresApproval found in TEMPLATES');
+    return;
+  }
+  
+  console.log(`     Found ${approvalTemplates.length} templates requiring approval:`);
+  approvalTemplates.forEach(({ template, category }) => {
+    console.log(`       - ${template.name} (${category}/${template.type})`);
+  });
+  
+  // Test high-value bonus claim (should require approval)
+  await runTest('Test high-value bonus claim (requires approval)', async () => {
+    // Try templates in order: CUSTOM (always requires), PROMO50, VIP, TOURNAMENT
+    const testOrder = ['custom', 'promo_code', 'vip', 'tournament'];
+    let pendingToken: string | null = null;
+    
+    for (const type of testOrder) {
+      const template = approvalTemplates.find(({ template: t }) => t.type === type);
+      if (!template) continue;
+      
+      try {
+        // Use the actual template code (with timestamp) if available
+        const actualCode = templateCodes[type] || template.template.code;
+        console.log(`     Trying ${template.template.name} (${actualCode})...`);
+        
+        const templateData = await verifyTemplateApproval(actualCode);
+        if (templateData) {
+          console.log(`       Template requiresApproval: ${templateData.requiresApproval}, threshold: ${templateData.approvalThreshold || 'none'}, value: ${templateData.value}`);
+        }
+        
+        const result = await graphql<{ createUserBonus: { success: boolean; userBonus: { id: string }; errors: string[]; pendingToken?: string } }>(
+          BONUS_URL,
+          `
+            mutation CreateUserBonus($input: CreateUserBonusInput!) {
+              createUserBonus(input: $input) {
+                success
+                userBonus {
+                  id
+                  status
+                }
+                errors
+                pendingToken
+              }
+            }
+          `,
+          {
+            input: {
+              userId: testUserId,
+              templateCode: actualCode,
+              currency: CONFIG.currency,
+              tenantId: DEFAULT_TENANT_ID,
+            },
+          },
+          systemToken
+        );
+        
+        if (!result.createUserBonus.success) {
+          const error = result.createUserBonus.errors?.[0] || 'Unknown error';
+          const pendingTokenFromResponse = (result.createUserBonus as any).pendingToken;
+          
+          if (pendingTokenFromResponse || error.includes('BONUS_REQUIRES_APPROVAL')) {
+            console.log(`       ✅ ${template.template.name} correctly requires approval`);
+            console.log(`       Error: ${error}`);
+            if (pendingTokenFromResponse) {
+              pendingToken = pendingTokenFromResponse;
+              console.log(`       Pending token: ${pendingToken.substring(0, 30)}...`);
+            }
+            break;
+          } else {
+            console.log(`       ⚠️  ${template.template.name} failed with: ${error}`);
+          }
+        } else {
+          console.log(`       ⚠️  ${template.template.name} was created without approval`);
+        }
+      } catch (error: any) {
+        console.log(`       ⚠️  ${template.template.name} test failed: ${error.message}`);
+      }
+    }
+    
+    if (!pendingToken) {
+      throw new Error('No pending token found - bonus may have been auto-approved or failed for other reasons');
+    }
+    
+    console.log(`     ✅ Found pending bonus requiring approval`);
+  });
+  
+  // List pending bonuses
+  await runTest('List pending bonus approvals', async () => {
+    const result = await graphql<{ pendingBonuses: Array<{ token: string; templateCode: string; calculatedValue: number; userId: string }> }>(
+      BONUS_URL,
+      `
+        query {
+          pendingBonuses {
+            token
+            templateCode
+            calculatedValue
+            currency
+            userId
+            requestedAt
+          }
+        }
+      `,
+      undefined,
+      systemToken
+    );
+    
+    console.log(`     Found ${result.pendingBonuses.length} pending bonuses:`);
+    result.pendingBonuses.forEach((pending, idx) => {
+      console.log(`       ${idx + 1}. ${pending.templateCode} - $${pending.calculatedValue} (User: ${pending.userId.substring(0, 8)}...)`);
+    });
+  });
+  
+  // Test approve bonus (if we have multiple pending bonuses, approve one but leave at least one)
+  await runTest('Test approve pending bonus', async () => {
+    // Get pending bonuses first
+    const pendingResult = await graphql<{ pendingBonuses: Array<{ token: string; templateCode: string; calculatedValue: number }> }>(
+      BONUS_URL,
+      `
+        query {
+          pendingBonuses {
+            token
+            templateCode
+            calculatedValue
+          }
+        }
+      `,
+      undefined,
+      systemToken
+    );
+    
+    if (pendingResult.pendingBonuses.length === 0) {
+      console.log(`     ⚠️  No pending bonuses to approve (this is okay if none were created)`);
+      return;
+    }
+    
+    // Only approve if we have more than one pending bonus (leave at least one for manual testing)
+    if (pendingResult.pendingBonuses.length > 1) {
+      const firstPending = pendingResult.pendingBonuses[0];
+      console.log(`     Approving bonus: ${firstPending.templateCode} ($${firstPending.calculatedValue})`);
+      
+      const result = await graphql<{ approveBonus: { success: boolean; bonusId?: string; error?: string } }>(
+        BONUS_URL,
+        `
+          mutation ApproveBonus($token: String!, $reason: String) {
+            approveBonus(token: $token, reason: $reason) {
+              success
+              bonusId
+              error
+            }
+          }
+        `,
+        {
+          token: firstPending.token,
+          reason: 'Approved by admin - verified eligibility',
+        },
+        systemToken
+      );
+      
+      if (result.approveBonus.success) {
+        console.log(`     ✅ Bonus approved successfully! Bonus ID: ${result.approveBonus.bonusId}`);
+        console.log(`     ℹ️  Left ${pendingResult.pendingBonuses.length - 1} pending bonus(es) for manual testing`);
+      } else {
+        console.log(`     ⚠️  Approval failed: ${result.approveBonus.error}`);
+      }
+    } else {
+      console.log(`     ℹ️  Only ${pendingResult.pendingBonuses.length} pending bonus found - leaving it for manual testing`);
+      console.log(`     Token: ${pendingResult.pendingBonuses[0].token.substring(0, 30)}...`);
+      console.log(`     Template: ${pendingResult.pendingBonuses[0].templateCode}`);
+      console.log(`     Value: $${pendingResult.pendingBonuses[0].calculatedValue}`);
+    }
+  });
+  
+  // Test reject bonus (create a new pending one specifically for rejection test, then reject it)
+  await runTest('Test reject pending bonus', async () => {
+    // First, try to create a bonus that requires approval (use a different template than the one we might approve)
+    const testTemplates = approvalTemplates.filter(({ template }) => 
+      template.type === 'promo_code' || template.type === 'special_event'
+    );
+    
+    if (testTemplates.length === 0) {
+      console.log(`     ⚠️  No approval templates available for rejection test`);
+      return;
+    }
+    
+    const testTemplate = testTemplates[0];
+    const actualCode = templateCodes[testTemplate.template.type] || testTemplate.template.code;
+    
+    // Create a bonus that requires approval (for rejection test only)
+    const createResult = await graphql<{ createUserBonus: { success: boolean; errors: string[]; pendingToken?: string } }>(
+      BONUS_URL,
+      `
+        mutation CreateUserBonus($input: CreateUserBonusInput!) {
+          createUserBonus(input: $input) {
+            success
+            errors
+            pendingToken
+          }
+        }
+      `,
+      {
+        input: {
+          userId: testUserId2, // Use different user
+          templateCode: actualCode,
+          currency: CONFIG.currency,
+          tenantId: DEFAULT_TENANT_ID,
+        },
+      },
+      systemToken
+    );
+    
+    if (!createResult.createUserBonus.success) {
+      const pendingToken = (createResult.createUserBonus as any).pendingToken;
+      if (pendingToken) {
+        console.log(`     Rejecting bonus with token: ${pendingToken.substring(0, 30)}...`);
+        
+        const rejectResult = await graphql<{ rejectBonus: { success: boolean; error?: string } }>(
+          BONUS_URL,
+          `
+            mutation RejectBonus($token: String!, $reason: String!) {
+              rejectBonus(token: $token, reason: $reason) {
+                success
+                error
+              }
+            }
+          `,
+          {
+            token: pendingToken,
+            reason: 'User does not meet eligibility requirements',
+          },
+          systemToken
+        );
+        
+        if (rejectResult.rejectBonus.success) {
+          console.log(`     ✅ Bonus rejected successfully`);
+        } else {
+          console.log(`     ⚠️  Rejection failed: ${rejectResult.rejectBonus.error}`);
+        }
+      } else {
+        console.log(`     ⚠️  No pending token created (bonus may have been auto-approved)`);
+      }
+    } else {
+      console.log(`     ⚠️  Bonus was created without requiring approval`);
+    }
+  });
+  
+  // Create a pending bonus specifically for manual testing (if we don't have one already)
+  await runTest('Ensure pending bonus exists for manual testing', async () => {
+    const pendingResult = await graphql<{ pendingBonuses: Array<{ token: string; templateCode: string; calculatedValue: number }> }>(
+      BONUS_URL,
+      `
+        query {
+          pendingBonuses {
+            token
+            templateCode
+            calculatedValue
+          }
+        }
+      `,
+      undefined,
+      systemToken
+    );
+    
+    if (pendingResult.pendingBonuses.length === 0) {
+      // Create one for manual testing
+      const manualTestTemplate = approvalTemplates.find(({ template }) => template.type === 'custom');
+      if (manualTestTemplate) {
+        const actualCode = templateCodes[manualTestTemplate.template.type] || manualTestTemplate.template.code;
+        console.log(`     Creating pending bonus for manual testing: ${manualTestTemplate.template.name}`);
+        
+        const createResult = await graphql<{ createUserBonus: { success: boolean; errors: string[]; pendingToken?: string } }>(
+          BONUS_URL,
+          `
+            mutation CreateUserBonus($input: CreateUserBonusInput!) {
+              createUserBonus(input: $input) {
+                success
+                errors
+                pendingToken
+              }
+            }
+          `,
+          {
+            input: {
+              userId: testUserId,
+              templateCode: actualCode,
+              currency: CONFIG.currency,
+              tenantId: DEFAULT_TENANT_ID,
+            },
+          },
+          systemToken
+        );
+        
+        if (!createResult.createUserBonus.success) {
+          const pendingToken = (createResult.createUserBonus as any).pendingToken;
+          if (pendingToken) {
+            console.log(`     ✅ Created pending bonus for manual testing`);
+            console.log(`     Token: ${pendingToken.substring(0, 30)}...`);
+            console.log(`     Template: ${actualCode}`);
+          }
+        }
+      }
+    } else {
+      console.log(`     ✅ ${pendingResult.pendingBonuses.length} pending bonus(es) available for manual testing`);
+      pendingResult.pendingBonuses.forEach((pending, idx) => {
+        console.log(`       ${idx + 1}. ${pending.templateCode} - $${pending.calculatedValue} (Token: ${pending.token.substring(0, 30)}...)`);
+      });
+    }
+  });
+}
+
+async function testBonusApprovalFlow() {
+  console.log('\n═══════════════════════════════════════════════════════════════');
+  console.log('BONUS APPROVAL FLOW TESTS');
+  console.log('═══════════════════════════════════════════════════════════════');
+  
+  // Ensure we're logged in
+  if (!systemToken) {
+    systemToken = await login();
+  }
+  
+  // Ensure test users exist
+  if (!testUserId) {
+    try {
+      testUserId = await getUserId('user1');
+    } catch {
+      const testUser1 = await registerAs('user1', { updateRoles: true, updatePermissions: true });
+      testUserId = testUser1.userId;
+    }
+  }
+  
+  if (!testUserId2) {
+    try {
+      testUserId2 = await getUserId('user2');
+    } catch {
+      const testUser2 = await registerAs('user2', { updateRoles: true, updatePermissions: true });
+      testUserId2 = testUser2.userId;
+    }
+  }
+  
+  // Ensure templates are created first (create all templates that require approval)
+  console.log('\n📝 Creating approval-required templates...\n');
+  for (const [category, templates] of Object.entries(TEMPLATES)) {
+    for (const template of templates) {
+      if (template.requiresApproval) {
+        try {
+          await createTemplate(template);
+        } catch (error: any) {
+          console.warn(`     ⚠️  Could not create ${template.name}: ${error.message}`);
+        }
+      }
+    }
+  }
+  
+  await testBonusApproval();
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // Test Runner - All Tests
 // ═══════════════════════════════════════════════════════════════════
 
@@ -1981,6 +2383,9 @@ async function testAll() {
   await testClientSideEligibility();
   await testSelectionValidation();
   await testConsistencyServerClient();
+  
+  // Bonus approval tests
+  await testBonusApprovalFlow();
 
   // Final verification: Confirm templates were created
   console.log('\n╔═══════════════════════════════════════════════════════════════════╗');
@@ -2090,6 +2495,7 @@ const COMMAND_REGISTRY: Record<string, () => Promise<void>> = {
   'selection-validation': testSelectionValidation,
   consistency: testConsistencyServerClient,
   'transfer-recovery': testRecovery,
+  approval: testBonusApprovalFlow,
 };
 
 // ═══════════════════════════════════════════════════════════════════

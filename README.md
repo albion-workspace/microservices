@@ -16,8 +16,11 @@
 7. [Quick Start](#quick-start)
 8. [Testing](#testing)
 9. [Recovery System](#recovery-system)
-10. [GraphQL API](#graphql-api)
-11. [Performance](#performance)
+10. [Pending Operations & Approval Workflows](#-pending-operations--approval-workflows)
+11. [GraphQL API](#graphql-api)
+12. [Performance](#performance)
+13. [Access Control](#access-control)
+14. [Implementation Status](#implementation-status)
 
 ---
 
@@ -403,6 +406,500 @@ Generic recovery system for handling stuck operations:
 - **Recovery Job Interval**: 5 minutes (default)
 - **Max Age**: 60 seconds (default)
 - **State Tracking TTL**: 60 seconds (in-progress), 300 seconds (completed/failed)
+
+---
+
+## ⏳ Pending Operations & Approval Workflows
+
+A generic framework for handling approval/rejection workflows and temporary data storage before committing to the database. Supports both JWT-based (stateless) and Redis-based (stateful) operations.
+
+### Overview
+
+The pending operations pattern provides:
+- **No Incomplete Records**: Operations only created after approval/verification
+- **Audit Trail**: All pending requests stored with metadata
+- **Automatic Expiration**: Pending requests expire after configurable TTL (default 24h)
+- **Queryable**: Redis-based operations can be listed and filtered
+- **Reversible**: Can reject before operation is executed
+- **Performance**: Redis-based, fast queries
+- **Stateless Option**: JWT-based operations for email/SMS links
+
+### Architecture
+
+The pending operation store supports two backends:
+
+#### 1. JWT-based (stateless)
+- Data stored directly in the JWT token
+- No server-side storage required
+- Auto-expires based on token expiration
+- **Use when**: Data doesn't need to be queried/listed, stateless operations (email links, SMS tokens)
+- **Examples**: User registration, password reset, OTP verification
+
+#### 2. Redis-based (stateful)
+- Data stored in Redis with TTL
+- Key pattern: `pending:{operationType}:{token}` or `pending:{operationType}:approval:{token}`
+- Can be queried, updated, and listed
+- Supports multi-step operations
+- **Use when**: Data needs to be queried/updated, multi-step forms, operations that need server-side tracking
+- **Examples**: Bonus approvals, payment approvals, campaign creation
+
+### Backend Selection Guidelines
+
+**Use JWT Backend (`backend: 'jwt'`) when:**
+- ✅ Operation is stateless (token sent via email/SMS link)
+- ✅ Data doesn't need to be queried or listed
+- ✅ Single-use operations (verify once and delete)
+- ✅ No need for updates during the operation lifecycle
+
+**Use Redis Backend (`backend: 'redis'`) when:**
+- ✅ Operation needs to be queried/listed via GraphQL
+- ✅ Multi-step operations that need updates
+- ✅ Operations that need server-side tracking
+- ✅ Data needs to be shared across service instances
+
+### Current Implementation Status
+
+**JWT-Based Operations** (Cannot be listed via GraphQL):
+- **User Registration** (`registration`) - 24 hours expiration
+- **Password Reset** (`password_reset`) - 30 minutes expiration
+- **OTP Verification** (`otp_verification`) - Configurable expiration
+
+**Redis-Based Operations** (Can be listed via GraphQL):
+- **Bonus Approvals** (`bonus:approval`) - 24 hours expiration
+- **Payment Approvals** (future) - Can use same pattern
+- **Withdrawal Approvals** (future) - Can use same pattern
+
+### Generic Pending Operation Approval Service
+
+The `pending-operation-approval.ts` module (`bonus-service/src/services/pending-operation-approval.ts`) provides a reusable service that handles:
+- Creating pending operations
+- Approving pending operations (with custom handlers)
+- Rejecting pending operations
+- Listing pending operations
+- Getting pending operations by token
+- Getting raw operation data (for debugging/admin)
+
+#### Usage Example
+
+```typescript
+import { createPendingOperationApprovalService } from './pending-operation-approval.js';
+
+interface MyOperationData {
+  userId: string;
+  amount: number;
+  currency: string;
+  requestedAt: number;
+}
+
+const approvalService = createPendingOperationApprovalService<MyOperationData>({
+  operationType: 'payment',
+  redisKeyPrefix: 'pending:payment:',
+  defaultExpiration: '24h',
+});
+
+// Register approval handler
+approvalService.registerApprovalHandler(async (data, context) => {
+  // Your custom approval logic here
+  const result = await processPayment({
+    userId: data.userId,
+    amount: data.amount,
+    currency: data.currency,
+  });
+  
+  return { 
+    success: result.success, 
+    resultId: result.paymentId 
+  };
+});
+
+// Create pending operation
+const token = await approvalService.createPendingOperation(data, {
+  operationType: 'high_value_payment',
+  description: 'Large payment request',
+});
+
+// Approve operation
+const result = await approvalService.approvePendingOperation(token, {
+  approvedBy: 'admin@example.com',
+  reason: 'Verified user identity',
+});
+
+// Reject operation
+await approvalService.rejectPendingOperation(token, {
+  rejectedBy: 'admin@example.com',
+  reason: 'Insufficient verification',
+});
+```
+
+### Bonus Approval Workflow
+
+The bonus service uses the generic approval service for high-value bonuses that require admin approval.
+
+#### Architecture
+
+**Components**:
+1. **Pending Bonus Store** (`bonus-service/src/services/bonus-approval.ts`)
+   - Redis-based pending operation store
+   - Stores bonus requests that require approval
+   - 24-hour expiration
+   - Key pattern: `pending:bonus:approval:{token}`
+
+2. **Approval Check** (`bonus-service/src/services/bonus-engine/base-handler.ts`)
+   - Checks `template.requiresApproval` and `template.approvalThreshold`
+   - Creates pending operation if approval required
+   - Bypasses check when approving from pending operation
+
+3. **GraphQL API**
+   - `pendingBonuses` query - List all pending approvals
+   - `pendingBonus(token)` query - Get specific pending bonus
+   - `approveBonus(token, reason)` mutation - Approve and award bonus
+   - `rejectBonus(token, reason)` mutation - Reject pending bonus
+
+#### Bonus Types That Require Approval
+
+1. **High-Value Tournament Prizes** (`tournament`)
+   - Threshold: $10,000+
+   - Example: Tournament Grand Prize ($100,000)
+
+2. **VIP Exclusive Bonuses** (`vip`)
+   - Threshold: $5,000+
+   - Example: VIP Exclusive Welcome ($10,000)
+
+3. **Custom Admin Bonuses** (`custom`)
+   - Always requires approval (no threshold)
+   - Example: Custom Admin Bonus ($5,000)
+
+4. **Large Referral Commissions** (`commission`)
+   - Threshold: $2,500+
+   - Example: High-Value Referral Commission (10% up to $5,000)
+
+5. **Leaderboard Rewards** (`leaderboard`)
+   - Threshold: $25,000+
+   - Example: Leaderboard Top Prize ($50,000)
+
+6. **Special Event Bonuses** (`special_event`)
+   - Threshold: $10,000+
+   - Example: Special Event Mega Bonus ($15,000)
+
+7. **High-Value Promo Codes** (`promo_code`)
+   - Threshold: $5,000+
+   - Example: Promo Code High Value ($7,500)
+
+#### Template Configuration
+
+```typescript
+{
+  name: 'Tournament Grand Prize',
+  code: 'TOURNAMENT_GRAND',
+  type: 'tournament',
+  requiresApproval: true,
+  approvalThreshold: 10000,  // Requires approval if value >= $10,000
+  value: 100000,
+  // ... other fields
+}
+```
+
+#### Approval Flow
+
+```
+User claims bonus
+    ↓
+Bonus engine checks eligibility
+    ↓
+Calculates bonus value
+    ↓
+Checks requiresApproval && value >= approvalThreshold?
+    ↓ YES
+Creates pending operation in Redis
+    ↓
+Returns error: "BONUS_REQUIRES_APPROVAL" + pendingToken
+    ↓
+Admin reviews via pendingBonuses query
+    ↓
+Admin approves/rejects via approveBonus/rejectBonus mutation
+    ↓
+If approved: Bonus awarded (bypasses approval check)
+    ↓
+Pending operation deleted
+```
+
+#### GraphQL Usage
+
+**List Pending Bonuses**:
+```graphql
+query {
+  pendingBonuses {
+    token
+    templateCode
+    calculatedValue
+    currency
+    userId
+    requestedAt
+    expiresAt
+  }
+}
+```
+
+**Get Specific Pending Bonus**:
+```graphql
+query {
+  pendingBonus(token: "abc123...") {
+    token
+    templateCode
+    calculatedValue
+    userId
+    requestedAt
+  }
+}
+```
+
+**Approve Bonus**:
+```graphql
+mutation {
+  approveBonus(token: "abc123...", reason: "Verified eligibility") {
+    success
+    bonusId
+    error
+  }
+}
+```
+
+**Reject Bonus**:
+```graphql
+mutation {
+  rejectBonus(token: "abc123...", reason: "User does not meet requirements") {
+    success
+    error
+  }
+}
+```
+
+#### Generic Pending Operations Query (Auth Service)
+
+The auth service provides generic pending operations queries that work across all services:
+
+**List Pending Operations**:
+```graphql
+query {
+  pendingOperations(operationType: "bonus", first: 100) {
+    nodes {
+      token
+      operationType
+      recipient
+      channel
+      purpose
+      createdAt
+      expiresAt
+      expiresIn
+    }
+    totalCount
+  }
+}
+```
+
+**Get Specific Pending Operation** (works for both JWT and Redis-based):
+```graphql
+query {
+  pendingOperation(token: "abc123...", operationType: "bonus") {
+    token
+    operationType
+    recipient
+    expiresIn
+  }
+}
+```
+
+**Get Raw Pending Operation Data** (admin-only, for debugging):
+```graphql
+query {
+  pendingOperationRawData(token: "abc123...", operationType: "bonus")
+}
+```
+
+### Service Implementation Pattern
+
+All services should follow this pattern:
+
+```typescript
+import { createPendingOperationStore } from 'core-service';
+
+export class MyService {
+  private operationStore: ReturnType<typeof createPendingOperationStore>;
+  
+  constructor(private config: MyConfig) {
+    // ALWAYS specify backend explicitly
+    this.operationStore = createPendingOperationStore({
+      backend: 'redis', // or 'jwt'
+      redisKeyPrefix: 'pending:', // Required for Redis
+      defaultExpiration: 86400, // Seconds for Redis, or '24h' for JWT
+    });
+  }
+  
+  async createOperation(data: MyData): Promise<string> {
+    const token = await this.operationStore.create(
+      'my_operation', // Operation type
+      data, // Operation data
+      {
+        operationType: 'my_operation', // Must match first parameter
+        expiresIn: 86400, // Override default if needed
+        metadata: { /* optional metadata */ },
+      }
+    );
+    return token;
+  }
+  
+  async verifyOperation(token: string): Promise<MyData | null> {
+    const result = await this.operationStore.verify(token, 'my_operation');
+    if (!result) {
+      return null; // Invalid or expired
+    }
+    return result.data;
+  }
+}
+```
+
+### Common Mistakes to Avoid
+
+1. ❌ **Not specifying backend**: Using `backend: 'auto'` can cause inconsistent behavior
+   ```typescript
+   // BAD
+   createPendingOperationStore({ jwtSecret })
+   
+   // GOOD
+   createPendingOperationStore({ backend: 'redis', redisKeyPrefix: 'pending:', defaultExpiration: 86400 })
+   ```
+
+2. ❌ **Mixing expiration formats**: Using wrong format for backend
+   ```typescript
+   // BAD - Using time format for Redis
+   createPendingOperationStore({ backend: 'redis', defaultExpiration: '24h' })
+   
+   // GOOD - Use seconds for Redis
+   createPendingOperationStore({ backend: 'redis', defaultExpiration: 86400 })
+   ```
+
+3. ❌ **Inconsistent operation types**: Using different names for same operation
+   ```typescript
+   // BAD - Inconsistent naming
+   store.create('registration', ...)
+   store.verify(token, 'user_registration') // Mismatch!
+   
+   // GOOD - Consistent naming
+   store.create('registration', ...)
+   store.verify(token, 'registration')
+   ```
+
+### Integration with Other Services
+
+To use the pending operations pattern in other services (e.g., `payment-service`, `withdrawal-service`):
+
+1. Use `createPendingOperationApprovalService` from `bonus-service/src/services/pending-operation-approval.ts` as a template
+2. Create a service-specific wrapper (like `bonus-approval.ts`)
+3. Register your custom approval handler
+4. Expose GraphQL queries/mutations as needed
+5. **Always specify backend explicitly** (`backend: 'redis'` for queryable operations)
+
+### GraphQL Integration
+
+The auth service provides generic pending operations queries that work across all services:
+
+**List Pending Operations** (Redis-based only):
+```graphql
+query {
+  pendingOperations(operationType: "bonus", first: 100) {
+    nodes {
+      token
+      operationType
+      recipient
+      channel
+      purpose
+      createdAt
+      expiresAt
+      expiresIn
+    }
+    totalCount
+  }
+}
+```
+
+**Get Specific Pending Operation** (works for both JWT and Redis-based):
+```graphql
+query {
+  pendingOperation(token: "abc123...", operationType: "bonus") {
+    token
+    operationType
+    recipient
+    expiresIn
+  }
+}
+```
+
+**Get Raw Pending Operation Data** (admin-only, for debugging):
+```graphql
+query {
+  pendingOperationRawData(token: "abc123...", operationType: "bonus")
+}
+```
+
+**Get All Operation Types**:
+```graphql
+query {
+  pendingOperationTypes
+}
+```
+
+### React UI Component
+
+A comprehensive UI component (`app/src/pages/PendingOperations.tsx`) displays pending operations with:
+- **Real-time Updates**: Auto-refreshes every 30 seconds
+- **Filtering**: By operation type and recipient
+- **Statistics**: Shows total, active, and expired operations
+- **Status Indicators**: Visual indicators for operation status
+- **Expiration Display**: Shows time remaining until expiration
+- **Raw Data Viewing**: Admin can view complete raw data for debugging
+
+Accessible at `/pending-operations` route (requires authentication, system users see all operations).
+
+### Testing
+
+Run the bonus approval test scenarios:
+
+```bash
+cd scripts/typescript/bonus
+npx tsx bonus-command-test.ts approval
+```
+
+This will:
+- Create approval-required templates
+- Test high-value bonus claims (require approval)
+- List pending bonus approvals
+- Test approve/reject workflows
+- Leave at least one pending bonus for manual testing
+
+### Security Best Practices
+
+1. **Never expose sensitive data**:
+   - OTP codes (even hashed)
+   - Password hashes
+   - Full user data
+
+2. **Access control**:
+   - Users can only see their own operations
+   - Admins can see all (with proper permissions)
+   - Raw data queries are admin-only
+
+3. **Data sanitization**:
+   - Sensitive fields are automatically removed before returning
+   - `pendingOperationRawData` is admin-only for debugging
+
+### Benefits
+
+1. **Reusable**: One service for all approval workflows
+2. **Type-safe**: Full TypeScript support with generics
+3. **Flexible**: Custom approval handlers for each operation type
+4. **Consistent**: Same API across all services
+5. **Maintainable**: Centralized approval logic
+6. **Dynamic**: Redis key patterns support wildcards for dynamic operation types
 
 ---
 

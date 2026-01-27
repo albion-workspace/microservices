@@ -17,6 +17,7 @@
 import {
   createGateway,
   hasRole,
+  hasAnyRole,
   isAuthenticated,
   allow,
   can,
@@ -158,6 +159,7 @@ const config = {
       pendingOperations: or(hasRole('system'), isAuthenticated),
       pendingOperation: or(hasRole('system'), isAuthenticated),
       pendingOperationTypes: or(hasRole('system'), isAuthenticated),
+      pendingOperationRawData: hasAnyRole('system', 'admin'), // Admin-only for security
       // Webhooks (system only - using URN for consistency)
       webhooks: or(hasRole('system'), can('webhook', 'read')),
       webhook: or(hasRole('system'), can('webhook', 'read')),

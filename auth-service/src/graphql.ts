@@ -20,7 +20,16 @@ import {
   type CursorPaginationOptions,
   type CursorPaginationResult,
 } from 'core-service';
-import { rolesToArray, normalizeUser, normalizeUsers, permissionsToArray } from './utils.js';
+import { 
+  rolesToArray, 
+  normalizeUser, 
+  normalizeUsers, 
+  permissionsToArray,
+  extractToken,
+  extractOperationTypeFromKey,
+  buildPendingOperationPatterns,
+  keyMatchesToken,
+} from './utils.js';
 import type { 
   RegisterInput, 
   LoginInput, 
@@ -284,6 +293,13 @@ export const authGraphQLTypes = `
     # Get all distinct operation types from Redis
     # Returns all operation types that exist in Redis (regardless of whether operations exist)
     pendingOperationTypes: [String!]!
+    
+    # Get raw pending operation data (generic - works for any operation type)
+    # Returns complete raw data including metadata, TTL, and full payload
+    pendingOperationRawData(
+      token: String!
+      operationType: String
+    ): JSON
   }
   
   type UserConnection {
@@ -1100,7 +1116,7 @@ export function createAuthResolvers(
             const operationData = payload.data || {};
             
             // Extract token from key (format: pending:{operationType}:{token})
-            const token = key.split(':').slice(2).join(':') || key.split(':').pop() || '';
+            const token = extractToken(key);
             
             // Filter by recipient if not admin
             if (!isAdmin) {
@@ -1285,10 +1301,9 @@ export function createAuthResolvers(
         try {
           for await (const key of scanKeysIterator({ pattern, maxKeys: 10000 })) {
             // Extract operation type from key: pending:{operationType}:{token}
-            const parts = key.split(':');
-            if (parts.length >= 2 && parts[0] === 'pending') {
-              const operationType = parts[1];
-              if (operationType) {
+            if (key.startsWith('pending:')) {
+              const operationType = extractOperationTypeFromKey(key);
+              if (operationType && operationType !== 'unknown') {
                 operationTypes.add(operationType);
               }
             }
@@ -1301,7 +1316,200 @@ export function createAuthResolvers(
         // Return sorted array of unique operation types
         return Array.from(operationTypes).sort();
       },
+      
+      /**
+       * Get raw pending operation data (generic - works for any operation type)
+       * Returns complete raw data including metadata, TTL, and full payload
+       */
+      pendingOperationRawData: async (args: Record<string, unknown>, ctx: ResolverContext) => {
+        requireAuth(ctx);
+        
+        const user = ctx.user!;
+        const isAdmin = user.roles?.includes('system') || user.roles?.includes('admin');
+        
+        if (!isAdmin) {
+          throw new Error('System or admin access required');
+        }
+        
+        const originalToken = args.token as string;
+        const operationType = args.operationType as string | undefined;
+        const token = extractToken(originalToken);
+        
+        const redis = getRedis();
+        if (!redis) {
+          throw new Error('Redis not available');
+        }
+        
+        // Determine if this is an approval operation
+        const isApprovalOperation = operationType === 'approval' || 
+          (!operationType && originalToken.includes('approval'));
+        
+        const patterns = buildPendingOperationPatterns(
+          token,
+          isApprovalOperation ? 'approval' : operationType
+        );
+        
+        logger.debug('Searching for pending operation raw data', {
+          originalToken,
+          extractedToken: token,
+          operationType,
+          patterns,
+        });
+        
+        // Try direct key lookups first (no wildcards) - most efficient
+        const directResult = await tryDirectKeyLookups(redis, patterns, token, originalToken, operationType);
+        if (directResult) {
+          return directResult;
+        }
+        
+        // If direct lookups failed, try scanning with wildcards
+        const scanResult = await tryWildcardScan(redis, patterns, token, originalToken, operationType);
+        if (scanResult) {
+          return scanResult;
+        }
+        
+        logger.warn('Pending operation not found', {
+          originalToken,
+          extractedToken: token,
+          operationType,
+          patternsTried: patterns,
+        });
+        
+        return null;
+      },
     },
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Helper Functions for Pending Operations
+// ═══════════════════════════════════════════════════════════════════
+
+interface RawOperationData {
+  token: string;
+  operationType: string;
+  data: unknown;
+  metadata: Record<string, unknown>;
+  expiresAt: number;
+  ttlSeconds: number;
+  createdAt?: number;
+}
+
+type RedisClient = NonNullable<ReturnType<typeof getRedis>>;
+
+/**
+ * Try direct Redis key lookups (no wildcards) - most efficient approach
+ * 
+ * @param redis - Redis client instance
+ * @param patterns - Array of key patterns to try (non-wildcard patterns only)
+ * @param token - Extracted token (without prefixes)
+ * @param originalToken - Original token as passed by user
+ * @param operationType - Optional operation type hint
+ * @returns Raw operation data if found, null otherwise
+ */
+async function tryDirectKeyLookups(
+  redis: RedisClient,
+  patterns: readonly string[],
+  token: string,
+  originalToken: string,
+  operationType?: string
+): Promise<RawOperationData | null> {
+  if (!redis) return null;
+  
+  for (const pattern of patterns) {
+    if (pattern.includes('*')) continue; // Skip wildcard patterns
+    
+    const value = await redis.get(pattern);
+    if (!value) continue;
+    
+    try {
+      return await parseRedisPayload(pattern, value, originalToken, operationType);
+    } catch (error) {
+      logger.warn('Error parsing Redis raw data', { pattern, error });
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Try scanning Redis with wildcard patterns - fallback when direct lookup fails
+ * 
+ * @param redis - Redis client instance
+ * @param patterns - Array of key patterns to scan (wildcard patterns only)
+ * @param token - Extracted token (without prefixes)
+ * @param originalToken - Original token as passed by user
+ * @param operationType - Optional operation type hint
+ * @returns Raw operation data if found, null otherwise
+ */
+async function tryWildcardScan(
+  redis: RedisClient,
+  patterns: readonly string[],
+  token: string,
+  originalToken: string,
+  operationType?: string
+): Promise<RawOperationData | null> {
+  if (!redis) return null;
+  
+  for (const pattern of patterns) {
+    if (!pattern.includes('*')) continue; // Skip non-wildcard patterns
+    
+    logger.debug('Scanning Redis with pattern', { pattern });
+    
+    for await (const key of scanKeysIterator({ pattern, maxKeys: 100 })) {
+      if (!keyMatchesToken(key, token)) continue;
+      
+      logger.debug('Found matching key via scan', { key, token });
+      
+      const value = await redis.get(key);
+      if (!value) continue;
+      
+      try {
+        return await parseRedisPayload(key, value, originalToken, operationType);
+      } catch (error) {
+        logger.warn('Error parsing Redis raw data', { key, error });
+      }
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Parse Redis payload and extract operation data
+ * 
+ * @param key - Redis key where the data was found
+ * @param value - Raw JSON string from Redis
+ * @param originalToken - Original token as passed by user
+ * @param operationType - Optional operation type hint (fallback if not in key)
+ * @returns Parsed and structured operation data
+ * @throws Error if Redis is unavailable or payload is invalid
+ */
+async function parseRedisPayload(
+  key: string,
+  value: string,
+  originalToken: string,
+  operationType?: string
+): Promise<RawOperationData> {
+  const payload = JSON.parse(value);
+  const redis = getRedis();
+  
+  if (!redis) {
+    throw new Error('Redis not available');
+  }
+  
+  const ttl = await redis.ttl(key);
+  const expiresAt = Date.now() + (ttl > 0 ? ttl * 1000 : 0);
+  const extractedOperationType = extractOperationTypeFromKey(key);
+  
+  return {
+    token: originalToken,
+    operationType: extractedOperationType || operationType || 'unknown',
+    data: payload.data || payload,
+    metadata: payload.metadata || {},
+    expiresAt,
+    ttlSeconds: ttl,
+    createdAt: payload.createdAt,
   };
 }
 

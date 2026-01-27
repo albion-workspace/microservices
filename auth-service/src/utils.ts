@@ -5,6 +5,97 @@
  * Passport.js does NOT automatically hash passwords - we must do it ourselves.
  */
 
+// ═══════════════════════════════════════════════════════════════════
+// Token Utilities
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Extract the actual token from a string that may contain prefixes
+ * Always takes the last segment after the final colon
+ * 
+ * @example
+ * extractToken("approval:token123") => "token123"
+ * extractToken("pending:bonus:approval:token123") => "token123"
+ * extractToken("token123") => "token123"
+ */
+export function extractToken(tokenString: string): string {
+  return tokenString.includes(':') 
+    ? tokenString.split(':').pop() || tokenString
+    : tokenString;
+}
+
+/**
+ * Extract operation type from a Redis key
+ * Key format: pending:{operationType}:{subType}:{token}
+ * 
+ * @example
+ * extractOperationTypeFromKey("pending:bonus:approval:token123") => "bonus"
+ * extractOperationTypeFromKey("pending:payment:token123") => "payment"
+ * extractOperationTypeFromKey("pending:registration:token123") => "registration"
+ */
+export function extractOperationTypeFromKey(key: string): string {
+  if (!key.startsWith('pending:')) {
+    return 'unknown';
+  }
+  
+  const parts = key.split(':');
+  return parts.length >= 2 ? parts[1] : 'unknown';
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Redis Key Pattern Utilities
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Build Redis key patterns for pending operations
+ * Returns patterns in order of specificity (most specific first)
+ * 
+ * @param token - The extracted token (without prefixes)
+ * @param operationType - Optional operation type (e.g., 'bonus', 'payment', 'approval')
+ * @returns Array of Redis key patterns to try, ordered by specificity
+ * 
+ * @example
+ * buildPendingOperationPatterns('token123', 'approval')
+ * // => ['pending:bonus:approval:token123', 'pending:payment:approval:token123', ...]
+ */
+export function buildPendingOperationPatterns(
+  token: string,
+  operationType?: string
+): readonly string[] {
+  const patterns: string[] = [];
+  
+  if (operationType === 'approval') {
+    // Approval operations: use wildcard to find any approval operation dynamically
+    // This avoids hardcoding specific operation types (bonus, payment, etc.)
+    patterns.push(`pending:*:approval:${token}`);
+  } else if (operationType) {
+    // Specific operation type: try direct match first, then approval variant
+    patterns.push(`pending:${operationType}:${token}`);
+    patterns.push(`pending:${operationType}:approval:${token}`);
+  } else {
+    // No operation type - search broadly
+    patterns.push(`pending:*:${token}`);
+    patterns.push(`pending:*:approval:${token}`);
+  }
+  
+  return patterns;
+}
+
+/**
+ * Check if a Redis key matches a token (ends with token)
+ * 
+ * @param key - Redis key to check
+ * @param token - Token to match against
+ * @returns True if key ends with the token
+ * 
+ * @example
+ * keyMatchesToken('pending:bonus:approval:token123', 'token123') => true
+ * keyMatchesToken('pending:bonus:approval:token123', 'approval:token123') => false
+ */
+export function keyMatchesToken(key: string, token: string): boolean {
+  return key.endsWith(`:${token}`) || key.endsWith(token);
+}
+
 import crypto from 'crypto';
 import bcrypt from 'bcrypt';
 import { RoleResolver, type UserRole, type User as AccessEngineUser } from 'access-engine';

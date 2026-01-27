@@ -22,10 +22,12 @@ import {
   startListening,
   getDatabase,
   createWebhookService,
+  requireAuth,
   type IntegrationEvent,
   type ResolverContext,
 } from 'core-service';
 import { setupRecovery } from './recovery-setup.js';
+import { templatePersistence } from './services/bonus-engine/persistence.js';
 
 // Import unified event dispatcher (handles both internal events + webhooks)
 import {
@@ -77,6 +79,17 @@ import type { BonusTemplate } from './types.js';
  */
 const availableBonusesResolver = {
   Query: {
+    bonusTemplateByCode: async (
+      args: Record<string, unknown>,
+      _ctx: ResolverContext
+    ): Promise<BonusTemplate | null> => {
+      const code = args.code as string;
+      if (!code) {
+        return null;
+      }
+      return await templatePersistence.findByCode(code);
+    },
+    
     /**
      * Fetch active bonus templates for client-side eligibility checking.
      * 
@@ -219,8 +232,188 @@ const userBonussCustomResolver = {
   },
 };
 
-// GraphQL type extension for custom query
+const bonusApprovalTypeDefs = `
+  type PendingBonus {
+    token: String!
+    userId: String!
+    tenantId: String!
+    templateId: String!
+    templateCode: String!
+    bonusType: String!
+    calculatedValue: Float!
+    currency: String!
+    depositAmount: Float
+    requestedAt: String!
+    requestedBy: String
+    reason: String
+    expiresAt: String!
+    # Full data including nested objects (context, calculation, etc.)
+    rawData: JSON
+  }
+  
+  type ApproveBonusResult {
+    success: Boolean!
+    bonusId: String
+    error: String
+  }
+  
+  type RejectBonusResult {
+    success: Boolean!
+    error: String
+  }
+  
+  extend type Query {
+    pendingBonuses(userId: String, templateCode: String): [PendingBonus!]!
+    pendingBonus(token: String!): PendingBonus
+  }
+  
+  extend type Mutation {
+    approveBonus(token: String!, reason: String): ApproveBonusResult!
+    rejectBonus(token: String!, reason: String!): RejectBonusResult!
+  }
+`;
+
+const bonusApprovalResolvers = {
+  Query: {
+    pendingBonuses: async (
+      args: Record<string, unknown>,
+      context: ResolverContext
+    ) => {
+      requireAuth(context);
+      if (!context.user!.roles?.includes('system') && !context.user!.roles?.includes('admin')) {
+        throw new Error('System or admin access required');
+      }
+      
+      const { listPendingBonuses } = await import('./services/bonus-approval.js');
+      const filter: { userId?: string; templateCode?: string } = {};
+      if (args.userId) filter.userId = args.userId as string;
+      if (args.templateCode) filter.templateCode = args.templateCode as string;
+      
+      const pending = await listPendingBonuses(filter);
+      
+      return pending.map(item => ({
+        token: item.token,
+        userId: item.data.userId,
+        tenantId: item.data.tenantId,
+        templateId: item.data.templateId,
+        templateCode: item.data.templateCode,
+        bonusType: item.data.bonusType,
+        calculatedValue: item.data.calculatedValue,
+        currency: item.data.currency,
+        depositAmount: item.data.depositAmount,
+        requestedAt: new Date(item.data.requestedAt).toISOString(),
+        requestedBy: item.data.requestedBy,
+        reason: item.data.reason,
+        expiresAt: new Date(item.expiresAt).toISOString(),
+        rawData: item.data, // Include full data with context, calculation, etc.
+      }));
+    },
+    
+    pendingBonus: async (
+      args: Record<string, unknown>,
+      context: ResolverContext
+    ) => {
+      requireAuth(context);
+      if (!context.user!.roles?.includes('system') && !context.user!.roles?.includes('admin')) {
+        throw new Error('System or admin access required');
+      }
+      
+      const { getPendingBonus } = await import('./services/bonus-approval.js');
+      const token = args.token as string;
+      const pending = await getPendingBonus(token);
+      
+      if (!pending) {
+        return null;
+      }
+      
+      const { getRedis } = await import('core-service');
+      const redis = getRedis();
+      if (!redis) {
+        throw new Error('Redis not available');
+      }
+      
+      const key = `pending:bonus:approval:${token}`;
+      const ttl = await redis.ttl(key);
+      const expiresAt = Date.now() + (ttl * 1000);
+      
+      return {
+        token,
+        userId: pending.userId,
+        tenantId: pending.tenantId,
+        templateId: pending.templateId,
+        templateCode: pending.templateCode,
+        bonusType: pending.bonusType,
+        calculatedValue: pending.calculatedValue,
+        currency: pending.currency,
+        depositAmount: pending.depositAmount,
+        requestedAt: new Date(pending.requestedAt).toISOString(),
+        requestedBy: pending.requestedBy,
+        reason: pending.reason,
+        expiresAt: new Date(expiresAt).toISOString(),
+        rawData: pending, // Include full data with context, calculation, etc.
+      };
+    },
+    
+  },
+  
+  Mutation: {
+    approveBonus: async (
+      args: Record<string, unknown>,
+      context: ResolverContext
+    ) => {
+      requireAuth(context);
+      if (!context.user!.roles?.includes('system') && !context.user!.roles?.includes('admin')) {
+        throw new Error('System or admin access required');
+      }
+      
+      const { approvePendingBonus } = await import('./services/bonus-approval.js');
+      const { getUserId } = await import('core-service');
+      
+      const token = args.token as string;
+      const reason = args.reason as string | undefined;
+      const approvedBy = (context.user as any).email || (context.user as any).username || 'system';
+      const approvedByUserId = getUserId(context);
+      
+      const result = await approvePendingBonus(token, approvedBy, approvedByUserId);
+      
+      return {
+        success: result.success,
+        bonusId: result.bonusId,
+        error: result.error,
+      };
+    },
+    
+    rejectBonus: async (
+      args: Record<string, unknown>,
+      context: ResolverContext
+    ) => {
+      requireAuth(context);
+      if (!context.user!.roles?.includes('system') && !context.user!.roles?.includes('admin')) {
+        throw new Error('System or admin access required');
+      }
+      
+      const { rejectPendingBonus } = await import('./services/bonus-approval.js');
+      const { getUserId } = await import('core-service');
+      
+      const token = args.token as string;
+      const reason = args.reason as string;
+      const rejectedBy = (context.user as any).email || (context.user as any).username || 'system';
+      const rejectedByUserId = getUserId(context);
+      
+      const result = await rejectPendingBonus(token, rejectedBy, rejectedByUserId, reason);
+      
+      return {
+        success: result.success,
+        error: result.error,
+      };
+    },
+  },
+};
+
 const availableBonusesTypeDefs = `
+  extend type Query {
+    bonusTemplateByCode(code: String!): BonusTemplate
+  }
   extend type Query {
     """
     Fetch active bonus templates for client-side eligibility checking.
@@ -254,13 +447,34 @@ const config = {
           ...userBonusService.resolvers?.Query,
           ...userBonussCustomResolver.Query,
         },
-        Mutation: userBonusService.resolvers?.Mutation || {},
+        Mutation: {
+          ...userBonusService.resolvers?.Mutation,
+          createUserBonus: async (args: Record<string, unknown>, ctx: ResolverContext) => {
+            // Call the default resolver
+            const result = await (userBonusService.resolvers?.Mutation?.createUserBonus as any)(args, ctx);
+            
+            // Extract pendingToken from error message if present
+            // Format: "BONUS_REQUIRES_APPROVAL|PENDING_TOKEN:{token}"
+            if (!result.success && result.errors && result.errors.length > 0) {
+              const errorMsg = result.errors[0];
+              const tokenMatch = errorMsg.match(/PENDING_TOKEN:([^\s|]+)/);
+              if (tokenMatch) {
+                return {
+                  ...result,
+                  pendingToken: tokenMatch[1],
+                  errors: [errorMsg.replace(/\|PENDING_TOKEN:[^\s|]+/, '')], // Remove token from error message
+                };
+              }
+            }
+            
+            return result;
+          },
+        },
       }
     },
     { name: 'bonusTransaction', types: bonusTransactionService.types, resolvers: bonusTransactionService.resolvers },
-    // Custom resolver for client-side eligibility
+    { name: 'bonusApproval', types: bonusApprovalTypeDefs, resolvers: bonusApprovalResolvers },
     { name: 'availableBonuses', types: availableBonusesTypeDefs, resolvers: availableBonusesResolver },
-    // Webhooks - just plug it in!
     webhookService,
   ],
   // Permission rules using URN-based helpers
@@ -270,6 +484,7 @@ const config = {
       // Templates (read) - system/admin only
       bonusTemplates: hasAnyRole('system', 'admin', 'super-admin'),
       bonusTemplate: hasAnyRole('system', 'admin', 'super-admin'),
+      bonusTemplateByCode: hasAnyRole('system', 'admin', 'super-admin'),
       availableBonuses: isAuthenticated, // Client-side eligibility check (users need to see available bonuses)
       // User bonuses (includes referral bonuses)
       // System/admin see all, regular users see only their own (enforced in resolver)
@@ -278,7 +493,8 @@ const config = {
       // Transactions (includes turnover tracking)
       bonusTransactions: isAuthenticated,
       bonusTransaction: isAuthenticated,
-      // Webhooks (system only)
+      pendingBonuses: hasAnyRole('system', 'admin'),
+      pendingBonus: hasAnyRole('system', 'admin'),
       webhooks: hasRole('system'),
       webhook: hasRole('system'),
       webhookStats: hasRole('system'),
@@ -297,7 +513,8 @@ const config = {
       createBonusTransaction: isAuthenticated,
       updateBonusTransaction: hasRole('system'),
       deleteBonusTransaction: hasRole('system'),
-      // Webhooks (system only)
+      approveBonus: hasAnyRole('system', 'admin'),
+      rejectBonus: hasAnyRole('system', 'admin'),
       registerWebhook: hasRole('system'),
       updateWebhook: hasRole('system'),
       deleteWebhook: hasRole('system'),

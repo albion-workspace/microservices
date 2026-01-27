@@ -21,6 +21,7 @@ import type {
 import { templatePersistence, userBonusPersistence } from './persistence.js';
 import { emitBonusEvent } from '../../event-dispatcher.js';
 // Event-driven architecture: bonus service emits events, payment service handles wallet operations
+// Note: bonus-approval imports are lazy to avoid circular dependency
 
 export abstract class BaseBonusHandler implements IBonusHandler {
   abstract readonly type: BonusType;
@@ -217,7 +218,7 @@ export abstract class BaseBonusHandler implements IBonusHandler {
   // Bonus Awarding
   // ═══════════════════════════════════════════════════════════════════
 
-  async award(template: BonusTemplate, context: BonusContext): Promise<AwardResult> {
+  async award(template: BonusTemplate, context: BonusContext, skipApprovalCheck = false): Promise<AwardResult> {
     const calculation = this.calculate(template, context);
 
     if (calculation.bonusValue <= 0) {
@@ -228,26 +229,42 @@ export abstract class BaseBonusHandler implements IBonusHandler {
       return { success: false, error: 'Bonus value is zero or negative' };
     }
 
+    // Lazy import to avoid circular dependency
+    if (!skipApprovalCheck) {
+      const { requiresApproval, createPendingBonus } = await import('../bonus-approval.js');
+      if (requiresApproval(template, calculation.bonusValue)) {
+        const token = await createPendingBonus(
+          template,
+          context,
+          calculation,
+          (context as any).requestedBy,
+          (context as any).reason
+        );
+
+        logger.info('Bonus requires approval, created pending request', {
+          userId: context.userId,
+          templateCode: template.code,
+          value: calculation.bonusValue,
+          token,
+        });
+
+        return {
+          success: false,
+          error: 'Bonus requires approval',
+          pendingToken: token,
+        };
+      }
+    }
+
     const now = new Date();
     const userBonusData = this.buildUserBonus(template, context, calculation, now);
 
-    // Create bonus first to get MongoDB-generated ID
-    // MongoDB will automatically create _id, which will be normalized to id
     const createdBonus = await userBonusPersistence.create(userBonusData);
 
-    // Emit bonus.awarded event - payment service will handle wallet operations
-    // Payment service will check balance and create transfer when processing the event
-    // If balance is insufficient, payment service will log an error (bonus record still created)
-    // Note: Event emission is non-blocking - payment service handles wallet operations asynchronously
     await this.emitAwardedEvent(createdBonus, calculation);
 
-    // Increment template usage via persistence layer
     await templatePersistence.incrementUsage(template.id);
 
-    // Emit event
-    await this.emitAwardedEvent(createdBonus, calculation);
-
-    // Run post-award hook
     await this.onAwarded(createdBonus, context);
 
     logger.info('Bonus awarded', {

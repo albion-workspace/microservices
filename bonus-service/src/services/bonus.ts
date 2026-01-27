@@ -58,8 +58,30 @@ const bonusTemplateSaga = [
       // Check if template with same code already exists (code is unique index)
       const existing = await repo.findOne({ code: input.code });
       if (existing) {
-        // Template exists, return it (prevents duplicates)
-        return { ...ctx, input, data, entity: existing };
+        // Template exists - update it with new fields (especially requiresApproval)
+        const updates: Partial<BonusTemplate> = {
+          name: input.name,
+          type: input.type as any,
+          domain: input.domain as any,
+          valueType: input.valueType as any,
+          value: input.value,
+          currency: input.currency as any,
+          supportedCurrencies: input.supportedCurrencies as any[],
+          turnoverMultiplier: input.turnoverMultiplier,
+          validFrom: new Date(input.validFrom),
+          validUntil: new Date(input.validUntil),
+          stackable: (input as any).stackable !== undefined ? (input as any).stackable : existing.stackable,
+          priority: (input as any).priority !== undefined ? (input as any).priority : existing.priority,
+          isActive: (input as any).isActive !== undefined ? (input as any).isActive : existing.isActive,
+          requiresApproval: (input as any).requiresApproval !== undefined ? (input as any).requiresApproval : existing.requiresApproval,
+          approvalThreshold: (input as any).approvalThreshold !== undefined ? (input as any).approvalThreshold : existing.approvalThreshold,
+          description: (input as any).description !== undefined ? (input as any).description : existing.description,
+        };
+        const updated = await repo.update(existing.id, updates);
+        if (!updated) {
+          throw new Error('Failed to update template');
+        }
+        return { ...ctx, input, data, entity: updated };
       }
       
       // Template doesn't exist, create new one
@@ -77,9 +99,12 @@ const bonusTemplateSaga = [
         validFrom: new Date(input.validFrom),
         validUntil: new Date(input.validUntil),
         currentUsesTotal: 0,
-        stackable: true,
-        priority: 0,
-        isActive: true,
+        stackable: (input as any).stackable !== undefined ? (input as any).stackable : true,
+        priority: (input as any).priority || 0,
+        isActive: (input as any).isActive !== undefined ? (input as any).isActive : true,
+        requiresApproval: (input as any).requiresApproval || false,
+        approvalThreshold: (input as any).approvalThreshold,
+        description: (input as any).description,
       };
       
       // Repository.create() will generate MongoDB ObjectId automatically
@@ -155,13 +180,18 @@ export const bonusTemplateService = createService<BonusTemplate, CreateBonusTemp
         tags: [String!]
         priority: Int!
         isActive: Boolean!
+        
+        # Approval
+        requiresApproval: Boolean
+        approvalThreshold: Float
+        
         createdAt: String
         updatedAt: String
       }
       type BonusTemplateConnection { nodes: [BonusTemplate!]! totalCount: Int! pageInfo: PageInfo! }
       type CreateBonusTemplateResult { success: Boolean! bonusTemplate: BonusTemplate sagaId: ID! errors: [String!] executionTimeMs: Int }
     `,
-    graphqlInput: `input CreateBonusTemplateInput { name: String! code: String! type: String! domain: String! valueType: String! value: Float! currency: String! supportedCurrencies: [String!] maxValue: Float minDeposit: Float turnoverMultiplier: Float! validFrom: String! validUntil: String! eligibleTiers: [String!] minSelections: Int maxSelections: Int priority: Int }`,
+    graphqlInput: `input CreateBonusTemplateInput { name: String! code: String! type: String! domain: String! valueType: String! value: Float! currency: String! supportedCurrencies: [String!] maxValue: Float minDeposit: Float turnoverMultiplier: Float! validFrom: String! validUntil: String! eligibleTiers: [String!] minSelections: Int maxSelections: Int priority: Int description: String isActive: Boolean stackable: Boolean requiresApproval: Boolean approvalThreshold: Float }`,
     validateInput: (input) => {
       const result = bonusTemplateSchema(input);
       return validateInput(result) as CreateBonusTemplateInput | { errors: string[] };
@@ -258,6 +288,13 @@ const userBonusSaga = [
       const result = await handler.award(template, context);
       
       if (!result.success) {
+        // If bonus requires approval, embed pendingToken in error message
+        // Note: Saga framework converts errors to strings, so we use a structured format
+        // Format: "BONUS_REQUIRES_APPROVAL|PENDING_TOKEN:{token}"
+        if (result.pendingToken) {
+          (data as any).pendingToken = result.pendingToken;
+          throw new Error(`BONUS_REQUIRES_APPROVAL|PENDING_TOKEN:${result.pendingToken}`);
+        }
         throw new Error(result.error || 'Bonus award failed');
       }
 
@@ -327,7 +364,18 @@ export const userBonusService = createService<UserBonus, CreateUserBonusSagaInpu
     graphqlType: `
       type UserBonus { id: ID! userId: String! templateCode: String! type: String! status: String! currency: String! originalValue: Float! currentValue: Float! turnoverRequired: Float! turnoverProgress: Float! expiresAt: String! }
       type UserBonusConnection { nodes: [UserBonus!]! totalCount: Int! pageInfo: PageInfo! }
-      type CreateUserBonusResult { success: Boolean! userBonus: UserBonus sagaId: ID! errors: [String!] executionTimeMs: Int }
+      type CreateUserBonusResult { 
+        success: Boolean! 
+        userBonus: UserBonus 
+        sagaId: ID! 
+        errors: [String!] 
+        executionTimeMs: Int 
+        # pendingToken: Exposed when bonus requires approval (requiresApproval=true)
+        # Purpose: Allows admins/users to track and approve pending bonus requests
+        # Security: Only returned when approval is required, not for successful awards
+        # Usage: Admin can use this token with approveBonus/rejectBonus mutations
+        pendingToken: String 
+      }
     `,
     graphqlInput: `input CreateUserBonusInput { userId: String! templateCode: String! currency: String! tenantId: String depositAmount: Float }`,
     validateInput: (input) => {

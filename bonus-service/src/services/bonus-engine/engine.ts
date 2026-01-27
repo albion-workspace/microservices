@@ -42,8 +42,7 @@ import { emitBonusEvent } from '../../event-dispatcher.js';
 
 export class BonusEngine {
   constructor() {
-    // Initialize the handler registry
-    handlerRegistry.initialize();
+    // Registry will be initialized lazily via getHandler() when needed
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -492,6 +491,7 @@ export class BonusEngine {
    * Get all registered bonus types.
    */
   getSupportedTypes(): BonusType[] {
+    handlerRegistry.initialize();
     return handlerRegistry.getRegisteredTypes();
   }
 
