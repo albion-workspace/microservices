@@ -2,6 +2,8 @@
 
 **Purpose**: This document defines coding standards, best practices, and patterns to follow when working on this codebase. Always review this document before making changes.
 
+**Project Status**: Pre-Production - This project has not yet been released to production. Code cleanup rules are simplified (no backward compatibility concerns). After production/release, these rules will be updated to include backward compatibility and legacy code management.
+
 **Last Updated**: 2026-01-25
 
 ---
@@ -72,8 +74,9 @@ Before making any changes, follow this checklist:
 ### Exports
 - **Always**: Remove unused exports
 - **Always**: Check if exports are used in other files before removing
-- **Always**: Maintain backward compatibility for public APIs (unless explicitly breaking)
+- **Always**: Remove exports that are no longer needed (no backward compatibility concerns pre-production)
 - **Never**: Remove exports that are re-exported elsewhere
+- **Note**: After production/release, backward compatibility rules will apply
 
 ### Dynamic Imports
 - **Always**: Verify dynamic imports are necessary (circular dependencies, code splitting)
@@ -193,8 +196,8 @@ Before making any changes, follow this checklist:
 ### GraphQL
 - **Always**: Keep GraphQL schemas and TypeScript types in sync
 - **Always**: Use cursor-based pagination (not offset)
-- **Always**: Remove deprecated fields from both schema and types
-- **Never**: Leave backward compatibility code unless explicitly needed
+- **Always**: Remove deprecated fields from both schema and types immediately (no backward compatibility needed pre-production)
+- **Note**: After production/release, deprecation and backward compatibility policies will apply
 
 ---
 
@@ -417,24 +420,34 @@ Before making any changes, follow this checklist:
 
 ## 🧹 Code Cleanup Rules
 
-### Legacy Code Removal
+**Note**: This project is pre-production. These rules will be updated after production/release to include backward compatibility and legacy code management.
+
+### Code Removal (Pre-Production)
 - **Always**: Search entire codebase for usages before removing
-- **Always**: Check test scripts and external consumers
-- **Always**: Update all usages to new patterns
-- **Never**: Remove backward compatibility without updating all consumers
+- **Always**: Check test scripts for dependencies
+- **Always**: Update all usages to new patterns immediately
+- **Always**: Remove code immediately when no longer needed (no backward compatibility concerns)
+- **Never**: Keep deprecated code "for compatibility" - remove it directly
 
 ### Unused Code
 - **Always**: Verify code is truly unused:
   - Search for function/variable name across codebase
   - Check for dynamic access (`obj[name]`)
   - Verify not used in templates/strings
+- **When removing**: Remove immediately - no deprecation period needed
 - **When removing**: Remove related comments and documentation
 
 ### Comments & Documentation
-- **Always**: Remove outdated comments
+- **Always**: Remove outdated comments immediately
 - **Always**: Update comments when code changes
 - **Always**: Keep comments that explain "why" not "what"
 - **Never**: Leave TODO/FIXME comments without context
+- **Never**: Keep comments about "legacy" or "deprecated" code - remove the code instead
+
+### Deprecated Code
+- **Pre-Production**: Don't mark code as deprecated - remove it directly
+- **Pre-Production**: No deprecation warnings or migration paths needed
+- **After Production**: Deprecation policies will be established
 
 ---
 
@@ -476,8 +489,9 @@ Before making any changes, follow this checklist:
 - ✅ **Right**: Following existing patterns consistently
 
 ### 4. Breaking Changes Without Updates
-- ❌ **Wrong**: Removing deprecated code without updating consumers
-- ✅ **Right**: Updating all usages before removing deprecated code
+- ❌ **Wrong**: Removing code without checking for usages
+- ✅ **Right**: Search codebase and update all usages before removing code
+- **Note**: Pre-production, we can make breaking changes freely - just ensure all usages are updated
 
 ### 5. Type Mismatches
 - ❌ **Wrong**: Ignoring type errors or using `any`
@@ -578,8 +592,10 @@ Before considering work complete:
 ## 📚 Additional Resources
 
 - `ARCHITECTURE_IMPROVEMENTS.md` - Architectural improvements and patterns
-- `CODE_AUDIT_LEGACY_REMOVAL.md` - Legacy code removal guidelines
+- `CODE_AUDIT_LEGACY_REMOVAL.md` - Legacy code removal guidelines (for reference, not applicable pre-production)
 - `README.md` - Project overview and setup
+
+**Note**: Legacy code removal guidelines are for reference only. This project is pre-production, so legacy code doesn't exist yet. After production/release, these guidelines will become relevant.
 
 ---
 
