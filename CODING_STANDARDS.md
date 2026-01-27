@@ -38,6 +38,7 @@ Before making any changes, follow this checklist:
 - [ ] Check for related files that might be affected
 - [ ] Understand the purpose and context of the code
 - [ ] Check for similar patterns in other files
+- [ ] Consider if a design pattern would be appropriate (see Design Patterns section)
 - [ ] Verify dependencies and imports
 
 ### During Changes
@@ -102,26 +103,315 @@ Before making any changes, follow this checklist:
   - Variables used in comments or documentation
 - **When unused**: Prefix with `_` or remove if truly unused
 
+### Modern TypeScript Patterns
+- **Always**: Use destructuring instead of nested property access
+  - ❌ **Wrong**: `const value = obj.property.nestedProperty.deepProperty;`
+  - ✅ **Right**: `const { property: { nestedProperty: { deepProperty: value } } } = obj;`
+  - ✅ **Right**: `const { nestedProperty } = obj.property; const { deepProperty: value } = nestedProperty;`
+- **Always**: Use destructuring for function parameters
+  - ❌ **Wrong**: `function process(data) { const id = data.user.id; const name = data.user.name; }`
+  - ✅ **Right**: `function process({ user: { id, name } }: DataType) { ... }`
+- **Always**: Use destructuring for array elements
+  - ❌ **Wrong**: `const first = arr[0]; const second = arr[1];`
+  - ✅ **Right**: `const [first, second] = arr;`
+- **Always**: Use optional chaining with destructuring when properties might be undefined
+  - ✅ **Right**: `const { user } = data; const { name } = user ?? {};`
+- **Always**: Use rest/spread operators for modern patterns
+  - ✅ **Right**: `const { id, ...rest } = user; const updated = { ...user, name: 'New' };`
+
 ---
 
 ## 🏗️ Architecture Patterns
+
+### Core-Service Architecture
+- **Core-Service is Generic Only**: Contains only shared, generic utilities and patterns
+- **Microservices Extend Core-Service**: Each microservice adds specialized functionality on top
+- **Never**: Add service-specific logic to `core-service`
+- **Never**: Include infrastructure dependencies (MongoDB, Redis) in `core-service` - these belong in microservices
+- **Always**: Keep `core-service` dependency-free from databases and caches
+- **Pattern**: `core-service` provides abstractions (e.g., `createService`, `emit`, `on`), microservices implement specifics
 
 ### Microservices
 - **Always**: Build services in dependency order
 - **Always**: Verify dependencies are correctly declared
 - **Always**: Check for circular dependencies
 - **Never**: Import services directly (use through `core-service`)
+- **Always**: Extend `core-service` patterns rather than duplicating code
 
-### Access Engine Usage
+### Access Engine Usage (RBAC/HBAC/URN)
 - **React App**: Import directly from `access-engine` package
-- **Services**: Use through `core-service` (not direct imports)
+  ```typescript
+  import { hasRole, can, matchUrn } from 'access-engine';
+  ```
+- **Microservices**: Use through `core-service` (not direct imports)
+  ```typescript
+  import { hasRole, can, matchUrn } from 'core-service/access';
+  ```
+- **URN-Based Permissions**: Use URN format `resource:action:target` (e.g., `wallet:read:own`, `transfer:create:*`)
+- **Role-Based Access Control (RBAC)**: Use `hasRole()`, `hasAnyRole()` for role checks
+- **Hierarchy-Based Access Control (HBAC)**: Use role inheritance and context-based roles
 - **Always**: Verify access-engine usage matches this pattern
+- **Never**: Import `access-engine` directly in microservices - always use `core-service/access`
+
+### Event-Driven Communication
+- **Pattern**: Use `core-service` event system for inter-service communication
+- **Emit Events**: Use `emit()` from `core-service/common/integration`
+  ```typescript
+  import { emit } from 'core-service/common/integration';
+  await emit('payment.processed', tenantId, userId, { paymentId, amount });
+  ```
+- **Listen to Events**: Use `on()` to register handlers
+  ```typescript
+  import { on, startListening } from 'core-service/common/integration';
+  on('payment.processed', async (event) => {
+    // Handle event
+  });
+  await startListening();
+  ```
+- **Event Format**: Follow `IntegrationEvent<T>` structure (eventId, eventType, timestamp, tenantId, userId, data)
+- **Never**: Use direct HTTP calls between services - use events instead
+- **Never**: Include MongoDB or Redis clients in `core-service` - event system uses Redis but is abstracted
+- **Always**: Services define their own event types - `core-service` provides generic pub/sub infrastructure
+
+### Dependencies & Infrastructure
+- **Core-Service**: Must NOT include:
+  - MongoDB client dependencies
+  - Redis client dependencies
+  - Service-specific database schemas
+  - Service-specific business logic
+- **Core-Service**: SHOULD include:
+  - Generic utilities (logging, retry, circuit breaker)
+  - Generic patterns (saga, gateway, event system abstractions)
+  - Type definitions and interfaces
+  - Shared helpers (pagination, validation)
+- **Microservices**: Include their own:
+  - MongoDB connections and models
+  - Redis connections (if needed)
+  - Database-specific schemas
+  - Business logic implementations
 
 ### GraphQL
 - **Always**: Keep GraphQL schemas and TypeScript types in sync
 - **Always**: Use cursor-based pagination (not offset)
 - **Always**: Remove deprecated fields from both schema and types
 - **Never**: Leave backward compatibility code unless explicitly needed
+
+---
+
+## 🎨 Design Patterns
+
+### Pattern-First Approach
+- **Always**: Consider if a design pattern fits before implementing a solution
+- **Always**: Search for existing patterns that solve similar problems
+- **Always**: Review pattern implementations before coding from scratch
+- **Reference**: See [Design Patterns in TypeScript](https://github.com/torokmark/design_patterns_in_typescript) for implementations
+- **When to Apply**: If you find yourself repeating similar structures or facing common architectural problems, check if a pattern applies
+
+### Creational Patterns
+
+#### Singleton
+- **When to Use**: Need exactly one instance of a class (e.g., database connection, logger, configuration manager)
+- **Apply If**: Multiple instances would cause issues (resource conflicts, state inconsistency)
+- **Example**: Service instances, connection pools, cache managers
+- **Reference**: `singleton/singleton.ts`
+
+#### Abstract Factory
+- **When to Use**: Need to create families of related objects without specifying concrete classes
+- **Apply If**: System needs to be independent of how products are created/composed/represented
+- **Example**: Creating UI components for different themes, database adapters for different vendors
+- **Reference**: `abstract_factory/abstractFactory.ts`
+
+#### Factory Method
+- **When to Use**: Need to create objects but let subclasses decide which class to instantiate
+- **Apply If**: Class can't anticipate the class of objects it must create
+- **Example**: Creating different notification providers (email, SMS, push), payment processors
+- **Reference**: `factory_method/factoryMethod.ts`
+
+#### Builder
+- **When to Use**: Need to construct complex objects step by step
+- **Apply If**: Object has many optional parameters or complex initialization
+- **Example**: GraphQL query builders, configuration objects, request builders
+- **Reference**: `builder/builder.ts`
+
+#### Prototype
+- **When to Use**: Need to create objects by cloning existing instances
+- **Apply If**: Object creation is expensive and similar objects already exist
+- **Example**: Template-based object creation, caching cloned objects
+- **Reference**: `prototype/prototype.ts`
+
+### Structural Patterns
+
+#### Adapter
+- **When to Use**: Need to make incompatible interfaces work together
+- **Apply If**: Integrating third-party libraries or legacy code with different interfaces
+- **Example**: Wrapping external APIs, adapting old service interfaces to new ones
+- **Reference**: `adapter/adapter.ts`
+
+#### Bridge
+- **When to Use**: Need to separate abstraction from implementation so both can vary independently
+- **Apply If**: Want to avoid permanent binding between abstraction and implementation
+- **Example**: Platform-independent UI frameworks, database abstraction layers
+- **Reference**: `bridge/bridge.ts`
+
+#### Composite
+- **When to Use**: Need to treat individual objects and compositions uniformly
+- **Apply If**: Working with tree structures where nodes can be leaves or containers
+- **Example**: File systems, UI component hierarchies, nested permissions
+- **Reference**: `composite/composite.ts`
+
+#### Decorator
+- **When to Use**: Need to add behavior to objects dynamically without altering structure
+- **Apply If**: Want to extend functionality without subclassing
+- **Example**: Adding logging, caching, validation layers to services
+- **Reference**: `decorator/decorator.ts`
+
+#### Facade
+- **When to Use**: Need to provide a simplified interface to a complex subsystem
+- **Apply If**: Want to hide complexity and provide easy-to-use API
+- **Example**: API gateways, service wrappers, simplified client interfaces
+- **Reference**: `facade/facade.ts`
+
+#### Flyweight
+- **When to Use**: Need to support large numbers of fine-grained objects efficiently
+- **Apply If**: Many objects share intrinsic state and only differ in extrinsic state
+- **Example**: Character rendering in text editors, icon caching, shared configuration
+- **Reference**: `flyweight/flyweight.ts`
+
+#### Proxy
+- **When to Use**: Need to provide a placeholder or surrogate for another object
+- **Apply If**: Need lazy loading, access control, or remote object access
+- **Example**: Lazy-loaded data, access control wrappers, API proxies
+- **Reference**: `proxy/proxy.ts`
+
+### Behavioral Patterns
+
+#### Chain of Responsibility
+- **When to Use**: Need to pass requests along a chain of handlers
+- **Apply If**: Multiple objects can handle a request and handler isn't known a priori
+- **Example**: Middleware chains, validation pipelines, event handlers
+- **Reference**: `chain_of_responsibility/chainOfResponsibility.ts`
+
+#### Command
+- **When to Use**: Need to encapsulate requests as objects
+- **Apply If**: Need to parameterize objects with operations, queue requests, or support undo
+- **Example**: Transaction systems, undo/redo functionality, job queues
+- **Reference**: `command/command.ts`
+
+#### Interpreter
+- **When to Use**: Need to define a grammar and interpret sentences in that language
+- **Apply If**: Need to interpret domain-specific languages or expressions
+- **Example**: Query parsers, rule engines, expression evaluators
+- **Reference**: `interpreter/interpreter.ts`
+
+#### Iterator
+- **When to Use**: Need to access elements of a collection sequentially without exposing structure
+- **Apply If**: Want to traverse collections in different ways without changing collection code
+- **Example**: Cursor-based pagination, tree traversal, collection iteration
+- **Reference**: `iterator/iterator.ts`
+
+#### Mediator
+- **When to Use**: Need to reduce coupling between classes that communicate
+- **Apply If**: Many classes communicate directly and dependencies are complex
+- **Example**: Event buses, chat systems, component communication
+- **Reference**: `mediator/mediator.ts`
+
+#### Memento
+- **When to Use**: Need to capture and restore object state without violating encapsulation
+- **Apply If**: Need undo functionality or state snapshots
+- **Example**: Undo/redo systems, state restoration, checkpoint systems
+- **Reference**: `memento/memento.ts`
+
+#### Observer
+- **When to Use**: Need to notify multiple objects about state changes
+- **Apply If**: Change to one object requires changing others, and number of objects is unknown
+- **Example**: Event systems, reactive programming, publish/subscribe patterns
+- **Reference**: `observer/observer.ts`
+- **Note**: Already used in our event-driven architecture (`core-service/common/integration`)
+
+#### State
+- **When to Use**: Object behavior changes based on its state
+- **Apply If**: Object has many conditional statements that depend on object's state
+- **Example**: State machines, workflow engines, game character states
+- **Reference**: `state/state.ts`
+
+#### Strategy
+- **When to Use**: Need to define a family of algorithms and make them interchangeable
+- **Apply If**: Multiple ways to perform a task and want to choose at runtime
+- **Example**: Payment processing strategies, sorting algorithms, validation strategies
+- **Reference**: `strategy/strategy.ts`
+
+#### Template Method
+- **When to Use**: Need to define skeleton of algorithm and let subclasses override steps
+- **Apply If**: Algorithm structure is fixed but some steps vary
+- **Example**: Base service classes, workflow templates, processing pipelines
+- **Reference**: `template_method/templateMethod.ts`
+
+#### Visitor
+- **When to Use**: Need to perform operations on elements of object structure without changing classes
+- **Apply If**: Operations vary but object structure is stable
+- **Example**: AST traversal, report generation, type checking
+- **Reference**: `visitor/visitor.ts`
+
+### Pattern Selection Guidelines
+
+1. **Before Implementing**: Search codebase and design patterns repository for similar solutions
+2. **Match Problem to Pattern**: Identify the core problem (creation, structure, behavior) and find matching pattern
+3. **Consider Complexity**: Simple problems may not need patterns - avoid over-engineering
+4. **Check Existing Usage**: See if pattern is already used in codebase (e.g., Observer in event system)
+5. **Document Pattern Usage**: When applying a pattern, document why it was chosen
+
+### Patterns Already in Use
+
+- **Observer**: Event-driven communication (`core-service/common/integration`)
+- **Facade**: API Gateway (`core-service/gateway`)
+- **Strategy**: Payment processors, notification providers
+- **Factory**: Service creation (`core-service/saga`)
+- **Template Method**: Base service classes, recovery handlers
+
+---
+
+## 🔄 Code Reuse & DRY Principles
+
+### Avoid Code Duplication
+- **Always**: Extract common patterns into reusable functions/utilities
+- **Always**: Use shared structures instead of repeating if/else blocks with same structure
+- **Never**: Copy-paste similar code blocks - refactor into shared utilities
+- **Pattern**: If you see the same structure repeated 3+ times, extract it
+
+### Shared Structures Pattern
+- ❌ **Wrong**: Repeated if/else blocks with same structure
+  ```typescript
+  if (condition1) {
+    validate(data1);
+    process(data1);
+    log(data1);
+  } else {
+    validate(data2);
+    process(data2);
+    log(data2);
+  }
+  // ... repeated elsewhere
+  ```
+- ✅ **Right**: Extract to shared function
+  ```typescript
+  function handleOperation<T>(data: T, condition: boolean) {
+    validate(data);
+    process(data);
+    log(data);
+  }
+  handleOperation(condition1 ? data1 : data2, condition1);
+  ```
+
+### Generic Helpers in Core-Service
+- **Always**: Add generic, reusable helpers to `core-service`
+- **Examples**: `extractDocumentId()`, `retry()`, `circuitBreaker()`, pagination helpers
+- **Never**: Add service-specific logic to `core-service`
+- **Pattern**: If a helper can be used by multiple services, it belongs in `core-service`
+
+### Service-Specific Patterns
+- **Always**: Create service-specific utilities when logic is unique to that service
+- **Pattern**: Use `core-service` for generic patterns, service code for specifics
+- **Example**: `core-service` provides `createTransferWithTransactions()`, service provides transfer validation rules
 
 ---
 
@@ -153,8 +443,9 @@ Before making any changes, follow this checklist:
 ### Before Refactoring
 1. **Understand the full scope**: Read all related files
 2. **Identify all usages**: Search codebase for patterns
-3. **Plan the changes**: List all files that need updates
-4. **Check dependencies**: Verify build order and dependencies
+3. **Check design patterns**: Review if a design pattern would improve the structure
+4. **Plan the changes**: List all files that need updates
+5. **Check dependencies**: Verify build order and dependencies
 
 ### During Refactoring
 1. **Make incremental changes**: One logical change at a time
@@ -192,6 +483,31 @@ Before making any changes, follow this checklist:
 - ❌ **Wrong**: Ignoring type errors or using `any`
 - ✅ **Right**: Fixing types properly to match schemas/interfaces
 
+### 6. Nested Property Access
+- ❌ **Wrong**: `const value = obj.property.nestedProperty.deepProperty;`
+- ✅ **Right**: Use destructuring `const { property: { nestedProperty: { deepProperty: value } } } = obj;`
+
+### 7. Code Duplication
+- ❌ **Wrong**: Copy-pasting similar if/else blocks everywhere
+- ✅ **Right**: Extract shared structures into reusable functions
+
+### 8. Service-Specific Logic in Core-Service
+- ❌ **Wrong**: Adding MongoDB models or Redis-specific code to `core-service`
+- ✅ **Right**: Keep `core-service` generic, add specifics in microservices
+
+### 9. Direct Access-Engine Imports in Services
+- ❌ **Wrong**: `import { hasRole } from 'access-engine'` in microservices
+- ✅ **Right**: `import { hasRole } from 'core-service/access'` in microservices
+
+### 10. Direct Service-to-Service Communication
+- ❌ **Wrong**: HTTP calls between services
+- ✅ **Right**: Use event-driven communication via `core-service/common/integration`
+
+### 11. Not Considering Design Patterns
+- ❌ **Wrong**: Implementing custom solutions without checking if a design pattern fits
+- ✅ **Right**: Review design patterns section and reference repository before implementing
+- ✅ **Right**: Search codebase for existing pattern usage before creating new implementations
+
 ---
 
 ## 📝 File-Specific Guidelines
@@ -207,6 +523,10 @@ Before making any changes, follow this checklist:
 - **Always**: Verify GraphQL schemas match TypeScript types
 - **Always**: Check for unused exports before removing
 - **Always**: Maintain service boundaries (no direct cross-service imports)
+- **Always**: Use `core-service` for generic utilities, add service-specific logic on top
+- **Always**: Use event-driven communication (`emit`/`on`) instead of direct HTTP calls
+- **Always**: Import access-engine through `core-service/access`, not directly
+- **Never**: Add generic utilities to service code - use `core-service` instead
 
 ### Test Scripts (`scripts/typescript/`)
 - **Always**: Update test scripts when APIs change
