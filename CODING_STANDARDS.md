@@ -4,7 +4,7 @@
 
 **Project Status**: Pre-Production - This project has not yet been released to production. Code cleanup rules are simplified (no backward compatibility concerns). After production/release, these rules will be updated to include backward compatibility and legacy code management.
 
-**Last Updated**: 2026-01-25
+**Last Updated**: 2026-01-27
 
 ---
 
@@ -62,8 +62,75 @@ Before making any changes, follow this checklist:
 ## 📦 Import/Export Rules
 
 ### Imports
+
+#### Import Grouping Standard
+
+**Always**: Group imports in the following order (separate groups with blank lines):
+
+1. **Node.js Built-ins** (if any)
+   ```typescript
+   import { createServer, IncomingMessage } from 'node:http';
+   import { randomUUID } from 'node:crypto';
+   ```
+
+2. **External Packages** (npm packages)
+   ```typescript
+   import { Server as SocketIOServer } from 'socket.io';
+   import { GraphQLSchema, GraphQLObjectType } from 'graphql';
+   import { createHandler } from 'graphql-http/lib/use/http';
+   ```
+
+3. **Internal Packages** (core-service, core-service/access, etc.)
+   ```typescript
+   import { logger, getDatabase } from 'core-service';
+   import { matchAnyUrn } from 'core-service/access';
+   ```
+
+4. **Local Imports** (relative paths: `./`, `../`)
+   ```typescript
+   import { rolesToArray, normalizeUser } from './utils.js';
+   import { SYSTEM_CURRENCY } from '../constants.js';
+   ```
+
+5. **Type-Only Imports** (can be mixed with regular imports or separate group)
+   ```typescript
+   import type { UserContext, ResolverContext } from 'core-service';
+   import type { RegisterInput, LoginInput } from './types.js';
+   ```
+
+**Best Practices**:
+- Use blank lines to separate groups
+- Within each group, sort alphabetically (optional but recommended)
+- Type-only imports (`import type`) can be:
+  - Mixed with regular imports in the same group (if from same source)
+  - Separated into their own group at the end (if many type imports)
+- Keep related imports together (e.g., all GraphQL imports together)
+
+**Example** (Good):
+```typescript
+// Node.js built-ins
+import { createServer } from 'node:http';
+import { randomUUID } from 'node:crypto';
+
+// External packages
+import { Server as SocketIOServer } from 'socket.io';
+import { GraphQLSchema, GraphQLObjectType } from 'graphql';
+
+// Internal packages
+import { logger, getDatabase } from 'core-service';
+import { matchAnyUrn } from 'core-service/access';
+
+// Local imports
+import { rolesToArray } from './utils.js';
+import { SYSTEM_CURRENCY } from '../constants.js';
+
+// Type imports (can be mixed or separate)
+import type { UserContext, ResolverContext } from 'core-service';
+import type { RegisterInput } from './types.js';
+```
+
+#### General Import Rules
 - **Always**: Remove unused imports
-- **Always**: Group imports logically (external, internal, types)
 - **Always**: Use consistent import styles across similar files
 - **Never**: Remove imports without checking:
   - Dynamic imports (`import()`)
@@ -197,6 +264,48 @@ Before making any changes, follow this checklist:
 - **Always**: Keep GraphQL schemas and TypeScript types in sync
 - **Always**: Use cursor-based pagination (not offset)
 - **Always**: Remove deprecated fields from both schema and types immediately (no backward compatibility needed pre-production)
+
+#### GraphQL Schema ↔ TypeScript Type Sync Verification
+
+**Manual Verification Checklist** (Run before each release):
+
+1. **Input Types** - Verify GraphQL `input` types match TypeScript interfaces:
+   - Check all `input` types in GraphQL schema (e.g., `RegisterInput`, `LoginInput`)
+   - Verify corresponding TypeScript interfaces exist (e.g., `RegisterInput`, `LoginInput` in `types.ts`)
+   - Verify field names match exactly (case-sensitive)
+   - Verify required fields: GraphQL `!` = TypeScript non-optional field
+   - Verify optional fields: GraphQL no `!` = TypeScript optional field (`?`)
+
+2. **Output Types** - Verify GraphQL `type` definitions match TypeScript return types:
+   - Check all `type` definitions in GraphQL schema (e.g., `User`, `AuthResponse`)
+   - Verify resolver return types match GraphQL type structure
+   - Verify field names match exactly
+   - Verify nullable vs non-nullable: GraphQL `!` = TypeScript non-nullable
+
+3. **Enum Types** - Verify GraphQL enums match TypeScript enums:
+   - Check all `enum` definitions in GraphQL schema
+   - Verify corresponding TypeScript enums exist
+   - Verify enum values match exactly (case-sensitive)
+
+4. **Query/Mutation Signatures** - Verify resolver function signatures:
+   - Check GraphQL query/mutation argument types match resolver `args` types
+   - Verify return types match GraphQL return types
+
+**Automated Check** (Run `npm run verify:graphql-types` from `scripts/` directory):
+- Basic validation script extracts GraphQL input types and compares with TypeScript interfaces
+- Reports missing TypeScript interfaces, mismatched field names, and required/optional mismatches
+- Automatically skips GraphQL-only input types (whitelisted - no TypeScript interface needed)
+- Exits with code 0 (success) for warnings/GraphQL-only types, code 1 (failure) only for real type mismatches
+- Safe to use in CI/CD pipelines
+- See `scripts/typescript/verify-graphql-types.ts` for details
+- **Note**: GraphQL-only input types (simple pass-through types used only in resolvers with `(args as any).input`) don't require TypeScript interfaces - this is acceptable and keeps code size minimal
+- **Examples**: `UpdateUserRolesInput`, `UpdateUserPermissionsInput`, `UpdateUserStatusInput`, `SendNotificationInput` are GraphQL-only and automatically skipped
+
+**When to Verify**:
+- Before each release/deployment
+- After adding new GraphQL types or inputs
+- After modifying existing GraphQL schemas
+- When TypeScript type errors occur in resolvers
 - **Note**: After production/release, deprecation and backward compatibility policies will apply
 
 ---

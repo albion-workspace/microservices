@@ -4,7 +4,7 @@
 
 **Current Status**: 9/10 ✅ (improved from 8.5/10)
 
-**Last Updated**: 2026-01-25
+**Last Updated**: 2026-01-27
 
 ---
 
@@ -166,12 +166,17 @@
 - ✅ Created `extractDocumentId()` helper to replace manual patterns
 - ⚠️ Some deprecated functions still marked `@deprecated` in core-service (for external library compatibility, not our code)
 
-### 2.2 Clean Up TODOs ⏳ MEDIUM PRIORITY
+### 2.2 Clean Up TODOs ✅ COMPLETED
 
-**Current TODOs**:
-- `payment-service/src/services/exchange-rate.ts` - TODO: Integrate with actual exchange rate API
+**Status**: ✅ **COMPLETED** (2026-01-27)
 
-**Action**: Either implement or document as future enhancement
+**Completed**:
+- ✅ `payment-service/src/services/exchange-rate.ts` - Documented as future enhancement with comprehensive JSDoc notes
+  - Added provider recommendations (Fixer.io, ExchangeRate-API, etc.)
+  - Documented implementation requirements and security considerations
+  - Made it clear this is intentional (not forgotten code)
+
+**Files**: `payment-service/src/services/exchange-rate.ts`
 
 ### 2.3 Code Consistency ⏳ MEDIUM PRIORITY
 
@@ -429,6 +434,92 @@
 
 ---
 
+## 🧪 Code Quality & Testing Improvements
+
+### TypeScript Type Safety
+
+#### Review TypeScript `any` Usage ✅ PARTIALLY ADDRESSED
+
+**File**: `core-service/src/gateway/server.ts`
+
+**Status**: Reviewed and improved where practical without increasing complexity
+
+**Changes Made** (2026-01-27):
+- ✅ **Error handling**: Changed `catch (error: any)` → `catch (error: unknown)` with proper type guards
+- ✅ **Socket.IO callbacks**: Added specific types for callback responses `{ success: boolean; room?: string; error?: string }`
+- ✅ **Documentation**: Added inline comments explaining why `any` is used for GraphQL dynamic building
+
+**Remaining `any` Usage** (Justified):
+- **GraphQL dynamic field building** (lines 310, 331, 437, 444, 475, 560): GraphQL's type system is complex and dynamic. Using strict types would require extensive type definitions that would significantly increase code size and complexity without practical benefit.
+- **GraphQL context functions** (lines 767, 778): `graphql-http` and `graphql-sse` expect specific context types that don't match our `GatewayContext`. Type assertion is necessary for compatibility.
+
+**Justification**: 
+- GraphQL schema building is inherently dynamic - fields are added at runtime from service definitions
+- GraphQL's type system (`GraphQLType`, `GraphQLFieldConfig`, etc.) is complex and doesn't map cleanly to TypeScript's type system
+- Attempting to use strict types would require extensive type definitions (~200+ lines) for minimal benefit
+- The current approach balances type safety with code maintainability
+
+**Impact**: Type safety improved where practical (error handling, Socket.IO), GraphQL `any` usage documented and justified
+
+**Status**: ✅ **ACCEPTABLE** - Remaining `any` usage is justified and documented
+
+---
+
+### Testing Improvements (From Access Engine Refactoring)
+
+After refactoring access control to use `RoleResolver` from `access-engine`, the following tests should be added to verify safety features work correctly:
+
+#### Add Tests for Circular Inheritance Protection ⏳ PENDING
+
+**Context**: After refactoring `store.getRolePermissions()` to use `RoleResolver`, verify circular inheritance protection works correctly.
+
+**Action Required**:
+- Add test cases for circular role inheritance
+- Verify `RoleResolver` prevents infinite loops
+- Test with `maxDepth` protection
+
+**Impact**: Ensures safety feature works correctly
+
+**Effort**: Low-Medium
+
+**Files**: `access-engine/test/access-engine.test.ts` or `core-service/test/access.test.ts`
+
+---
+
+#### Add Tests for Role Expiration Filtering ⏳ PENDING
+
+**Context**: After refactoring `CachedAccessEngine.compileUserPermissions()` to use `RoleResolver`, verify role expiration filtering works.
+
+**Action Required**:
+- Add test cases for expired roles
+- Verify expired roles are filtered out
+- Test with `UserRole[]` format with `expiresAt` field
+
+**Impact**: Ensures expired roles don't grant permissions
+
+**Effort**: Low-Medium
+
+**Files**: `access-engine/test/access-engine.test.ts` or `core-service/test/access.test.ts`
+
+---
+
+#### Add Tests for Active Role Filtering ⏳ PENDING
+
+**Context**: After refactoring to use `RoleResolver`, verify inactive roles are filtered correctly.
+
+**Action Required**:
+- Add test cases for inactive roles (`active: false`)
+- Verify inactive roles are filtered out
+- Test with `UserRole[]` format with `active` field
+
+**Impact**: Ensures inactive roles don't grant permissions
+
+**Effort**: Low-Medium
+
+**Files**: `access-engine/test/access-engine.test.ts` or `core-service/test/access.test.ts`
+
+---
+
 ## 🎯 Implementation Priority
 
 ### Phase 1: High Priority (Next Steps)
@@ -543,6 +634,11 @@
 - Event-driven architecture expansion
 - Advanced type safety
 
+### ⏳ Testing Improvements (3 items)
+- Add tests for circular inheritance protection
+- Add tests for role expiration filtering
+- Add tests for active role filtering
+
 ---
 
 ## 🎯 Expected Outcomes
@@ -567,7 +663,8 @@ After implementing remaining improvements:
 - **Current Rating**: 9/10 (improved from 8.5/10)
 - **Next Focus**: Distributed tracing, performance metrics, caching, and batch operations
 - **Code Cleanup**: ✅ Removed all backward compatibility and legacy code (cursor pagination only, OTP requires otpToken)
+- **Code Quality**: ✅ TypeScript `any` usage reviewed and improved, TODO comments resolved, import grouping standardized
 
 ---
 
-**Last Updated**: 2026-01-25
+**Last Updated**: 2026-01-27

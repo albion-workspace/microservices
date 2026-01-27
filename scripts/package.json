@@ -61,7 +61,8 @@
     "auth:manage": "npx tsx typescript/auth/manage-user.ts",
     "benchmark": "npx tsx typescript/benchmark.ts",
     "load-test": "npx tsx typescript/load-test.ts",
-    "channels-test": "npx tsx typescript/channels-tests.ts"
+    "channels-test": "npx tsx typescript/channels-tests.ts",
+    "verify:graphql-types": "npx tsx typescript/verify-graphql-types.ts"
   },
   "dependencies": {
     "mongodb": "^7.0.0"
