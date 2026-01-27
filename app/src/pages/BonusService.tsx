@@ -3,7 +3,7 @@
  * View claimed bonuses, manage bonus templates
  */
 
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { 
   Gift, 
@@ -14,11 +14,7 @@ import {
   Trash2, 
   Save,
   X,
-  Filter,
   TrendingUp,
-  Calendar,
-  DollarSign,
-  Users,
   CheckCircle,
   XCircle,
   Clock,
@@ -29,7 +25,7 @@ import {
 } from 'lucide-react'
 import { graphqlBonus, graphql, SERVICE_URLS } from '../lib/graphql-utils'
 import { useAuth } from '../lib/auth-context'
-import { hasRole, isSystem as checkIsSystem, hasAnyRole } from '../lib/access'
+import { isSystem as checkIsSystem, hasAnyRole } from '../lib/access'
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -97,7 +93,7 @@ export default function BonusService() {
   const [categoryFilter, setCategoryFilter] = useState<string>('all')
   const [claimedCategoryFilter, setClaimedCategoryFilter] = useState<string>('all')
   const [editingTemplate, setEditingTemplate] = useState<BonusTemplate | null>(null)
-  const [showCreateForm, setShowCreateForm] = useState(false)
+  const [, setShowCreateForm] = useState(false)
 
   // ═══════════════════════════════════════════════════════════════════
   // Queries

@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation, Link } from 'react-router-dom';
-import { useAuth, useAuthRequest } from '../lib/auth-context';
+import { useAuthRequest } from '../lib/auth-context';
 import { Shield, AlertCircle, Loader2, ArrowLeft, CheckCircle, Mail, Phone } from 'lucide-react';
 
 const TENANT_ID = 'default-tenant';
@@ -13,7 +13,7 @@ const TENANT_ID = 'default-tenant';
 export default function VerifyOTP() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { register } = useAuth();
+  // Removed unused register
   const authRequest = useAuthRequest();
 
   // Get state from navigation (recipient, purpose, registrationToken, otpToken, etc.)

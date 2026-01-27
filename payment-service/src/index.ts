@@ -85,13 +85,8 @@ import { setupRecovery } from './recovery-setup.js';
 
 import {
   walletService,
-  userWalletResolvers,
   walletResolvers,
   walletTypes,
-  walletBalanceResolvers,
-  walletBalanceTypes,
-  ledgerResolvers,
-  ledgerTypes,
 } from './services/wallet.js';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -332,15 +327,11 @@ const config = {
       // Wallets
       wallets: isAuthenticated,
       wallet: isAuthenticated,
-      // User wallet API (clean client response)
+      // User wallet API
       userWallets: isAuthenticated,
       walletBalance: isAuthenticated,
-      bulkWalletBalances: isAuthenticated, // Allow authenticated users to query balances
-      transactionHistory: isAuthenticated, // Allow authenticated users to query transaction history
-      // Legacy query aliases (for test scripts that use old names)
-      ledgerAccountBalance: isAuthenticated, // Alias for walletBalance
-      bulkLedgerBalances: isAuthenticated, // Alias for bulkWalletBalances
-      ledgerTransactions: isAuthenticated, // Alias for transactionHistory
+      bulkWalletBalances: isAuthenticated,
+      transactionHistory: isAuthenticated,
       providerLedgerBalance: hasRole('system'),
       bonusPoolBalance: hasRole('system'),
       systemHouseBalance: hasRole('system'),

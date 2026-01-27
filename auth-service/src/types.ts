@@ -216,9 +216,8 @@ export interface SocialAuthInput {
 
 export interface VerifyOTPInput {
   tenantId: string;
-  recipient: string; // email or phone
   code: string;
-  purpose: OTPPurpose;
+  otpToken: string; // JWT token from sendOTP response (required)
 }
 
 export interface SendOTPInput {

@@ -33,8 +33,6 @@ import type {
   IEligibilityValidator,
 } from './types.js';
 
-// Re-export types for backward compatibility
-export type { ValidatorResult, IEligibilityValidator };
 
 // ═══════════════════════════════════════════════════════════════════
 // SERVER-ONLY VALIDATORS (Require Database Access)

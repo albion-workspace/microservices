@@ -132,7 +132,7 @@ export class BonusEngine {
       userId: event.userId,
       tenantId: event.tenantId,
       depositAmount: event.amount,
-      depositId: event.transactionId,
+      transactionId: event.transactionId,
       walletId: event.walletId,
       currency: event.currency,
     };
@@ -153,7 +153,7 @@ export class BonusEngine {
 
     logger.info('Deposit bonuses processed', {
       userId: event.userId,
-      depositId: event.transactionId,
+      transactionId: event.transactionId,
       awarded: awarded.map(b => ({ id: b.id, type: b.type, value: b.currentValue })),
     });
 

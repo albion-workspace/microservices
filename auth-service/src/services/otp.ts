@@ -116,50 +116,45 @@ export class OTPService {
   
   /**
    * Verify OTP code
-   * Accepts either otpToken (JWT) + code, or recipient + purpose + code (for backward compatibility)
+   * Requires otpToken (JWT) from sendOTP response + code
    */
-  async verifyOTP(input: VerifyOTPInput & { otpToken?: string }): Promise<OTPResponse> {
+  async verifyOTP(input: VerifyOTPInput): Promise<OTPResponse> {
     try {
-      let otpData: any;
-      
-      // If otpToken provided, use JWT-based verification (new unified pattern)
-      if (input.otpToken) {
-        const operation = await this.otpStore.verify<{
-          userId?: string;
-          tenantId: string;
-          recipient: string;
-          channel: string;
-          purpose: string;
-          otp: {
-            hashedCode: string;
-            createdAt: number;
-            expiresIn: number;
-          };
-        }>(input.otpToken, 'otp_verification');
-        
-        if (!operation) {
-          return {
-            success: false,
-            message: 'Invalid or expired OTP token',
-          };
-        }
-        
-        otpData = operation.data;
-        
-        // Verify tenant matches
-        if (otpData.tenantId !== input.tenantId) {
-          return {
-            success: false,
-            message: 'Tenant mismatch',
-          };
-        }
-      } else {
-        // Backward compatibility: find OTP by recipient/purpose
-        // This requires scanning Redis or we need to store a mapping
-        // For now, return error - users should use otpToken
+      if (!input.otpToken) {
         return {
           success: false,
           message: 'OTP token is required. Please use the token from sendOTP response.',
+        };
+      }
+      
+      // Use JWT-based verification (unified pattern)
+      const operation = await this.otpStore.verify<{
+        userId?: string;
+        tenantId: string;
+        recipient: string;
+        channel: string;
+        purpose: string;
+        otp: {
+          hashedCode: string;
+          createdAt: number;
+          expiresIn: number;
+        };
+      }>(input.otpToken, 'otp_verification');
+      
+      if (!operation) {
+        return {
+          success: false,
+          message: 'Invalid or expired OTP token',
+        };
+      }
+      
+      const otpData = operation.data;
+      
+      // Verify tenant matches
+      if (otpData.tenantId !== input.tenantId) {
+        return {
+          success: false,
+          message: 'Tenant mismatch',
         };
       }
       
@@ -241,12 +236,18 @@ export class OTPService {
   
   /**
    * Resend OTP (with rate limiting)
-   * Note: Since OTPs are now JWT-based, we need otpToken to resend
-   * For backward compatibility, we can accept recipient/purpose but it's less efficient
+   * Requires otpToken from previous sendOTP response
    */
-  async resendOTP(recipient: string, purpose: string, tenantId: string, otpToken?: string): Promise<OTPResponse> {
-    // If otpToken provided, extract channel/userId from it
-    if (otpToken) {
+  async resendOTP(recipient: string, purpose: string, tenantId: string, otpToken: string): Promise<OTPResponse> {
+    if (!otpToken) {
+      return {
+        success: false,
+        message: 'OTP token is required for resending OTP',
+      };
+    }
+    
+    // Extract channel/userId from otpToken
+    {
       const operation = await this.otpStore.verify<{
         userId?: string;
         channel: string;

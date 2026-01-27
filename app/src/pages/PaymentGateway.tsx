@@ -18,7 +18,7 @@ import {
 } from 'lucide-react'
 import { graphql as gql, SERVICE_URLS } from '../lib/auth'
 import { useAuth } from '../lib/auth-context'
-import { getRoleNames, hasRole, isSystem as checkIsSystem } from '../lib/access'
+import { hasRole, isSystem as checkIsSystem } from '../lib/access'
 import { graphql as graphqlQuery, SERVICE_URLS as GRAPHQL_SERVICE_URLS } from '../lib/graphql-utils'
 
 const PAYMENT_URL = SERVICE_URLS.payment
@@ -162,10 +162,7 @@ function WalletsTab() {
   
   // Wallet balances state - now supports multi-currency (replaces ledger balances)
   const [providerWalletBalances, setProviderWalletBalances] = useState<Record<string, Record<string, number>>>({}) // userId -> currency -> balance
-  const [systemHouseBalance, setSystemHouseBalance] = useState<number | null>(null)
-  const [systemHouseBalancesByCurrency, setSystemHouseBalancesByCurrency] = useState<Record<string, number>>({})
-  const [systemPrimaryCurrency, setSystemPrimaryCurrency] = useState<string>('EUR')
-  const [systemBalanceFetched, setSystemBalanceFetched] = useState(false)
+  // Removed unused system balance state variables
   const [walletBalancesLoading, setWalletBalancesLoading] = useState(false)
   
   // Base currency selection - controls which currency the system primarily works with
@@ -181,7 +178,7 @@ function WalletsTab() {
     
     try {
       // Fetch users by role using the new usersByRole query (from AUTH service)
-      const [systemResult, providerResult, allUsersResult] = await Promise.all([
+      const [systemResult, providerResult] = await Promise.all([
         // System users: system role only
         graphqlWithAuth(GRAPHQL_SERVICE_URLS.auth, `
           query GetSystemUsers($first: Int) {
@@ -194,7 +191,7 @@ function WalletsTab() {
               }
             }
           }
-        `, { first: 100 }, authToken, { operation: 'query', showResponse: false }).catch((err) => {
+        `, { first: 100 }, authToken, { operation: 'query', showResponse: false }).catch(() => {
           return { usersByRole: { nodes: [] } }
         }),
         
@@ -230,7 +227,7 @@ function WalletsTab() {
               }
             }
           }
-        `, { first: 100 }, authToken, { operation: 'query', showResponse: false }).catch((err) => {
+        `, { first: 100 }, authToken, { operation: 'query', showResponse: false }).catch(() => {
           return { usersByRole: { nodes: [] } }
         }),
       ])
@@ -247,7 +244,7 @@ function WalletsTab() {
             }
           }
         }
-      `, { first: 100 }, authToken, { operation: 'query', showResponse: false }).catch((err) => {
+      `, { first: 100 }, authToken, { operation: 'query', showResponse: false }).catch(() => {
         return { users: { nodes: [] } }
       })
       
@@ -549,7 +546,6 @@ function WalletsTab() {
     if (userCategory === 'system' || userCategory === 'provider') {
       // Log if we find a negative wallet that should be excluded (system/provider)
       if ((w.balance || 0) < 0) {
-        const walletUser = allUsersForLookup.find(u => u.id === w.userId)
         console.log(`[Wallet Categorization] ✅ Wallet ${w.id} (userId: ${w.userId}, category: ${userCategory}) has negative balance €${((w.balance || 0) / 100).toFixed(2)} - correctly excluded from userWallets`)
       }
       return false // Exclude system/provider wallets
@@ -1072,10 +1068,6 @@ function WalletsTab() {
       
       if (!transferResult?.createTransfer?.success) {
         throw new Error(transferResult?.createTransfer?.errors?.join(', ') || 'Failed to create transfer')
-      }
-      
-      if (!transferInResult?.createWalletTransaction?.success) {
-        throw new Error(transferInResult?.createWalletTransaction?.errors?.join(', ') || 'Failed to create transfer_in')
       }
       
       const fundResult = transferResult
@@ -1686,7 +1678,7 @@ function WalletsTab() {
                     setBaseCurrency(e.target.value)
                     setSystemFundForm({ ...systemFundForm, currency: e.target.value })
                     // Refetch system balance when base currency changes
-                    fetchProviderLedgerBalances()
+                    fetchProviderWalletBalances()
                   }}
                   style={{ width: 120 }}
                 >
@@ -1742,7 +1734,7 @@ function WalletsTab() {
                     <select className="input" value={systemFundForm.currency} onChange={e => {
                       setSystemFundForm({ ...systemFundForm, currency: e.target.value })
                       // Refetch balances when currency changes
-                      fetchProviderLedgerBalances()
+                      fetchProviderWalletBalances()
                     }}>
                       {supportedCurrencies.map(currency => (
                         <option key={currency} value={currency}>{currency}</option>
@@ -2278,7 +2270,6 @@ interface TransferFilter {
 }
 
 function LedgerTab() {
-  const queryClient = useQueryClient()
   const { tokens } = useAuth()
   const authToken = tokens?.accessToken
   
@@ -2742,6 +2733,7 @@ function LedgerTab() {
                   className="btn btn-sm btn-secondary"
                   disabled={!pageInfo.hasPreviousPage}
                   onClick={() => setPagination({ 
+                    first: pagination.first || 25,
                     last: pagination.first || 25, 
                     before: pageInfo.startCursor || undefined 
                   })}
@@ -2779,10 +2771,7 @@ interface TransactionFilter {
   dateTo: string
 }
 
-interface PaginationState {
-  page: number
-  pageSize: number
-}
+// Removed unused PaginationState interface
 
 function TransactionsTab() {
   const queryClient = useQueryClient()
@@ -2793,7 +2782,7 @@ function TransactionsTab() {
   const supportedCurrencies = ['EUR', 'USD', 'GBP', 'BTC', 'ETH']
   
   // Provider users state (for deposit form)
-  const [providerUsers, setProviderUsers] = useState<any[]>([])
+  const [providerUsers] = useState<any[]>([])
   
   // Filters
   const [filters, setFilters] = useState<TransactionFilter>({
@@ -2813,7 +2802,7 @@ function TransactionsTab() {
   }>({
     first: 1000, // Fetch more for client-side filtering/pagination
   })
-  const [pageInfo, setPageInfo] = useState<{
+  const [, setPageInfo] = useState<{
     hasNextPage: boolean
     hasPreviousPage: boolean
     startCursor?: string | null
@@ -3352,7 +3341,7 @@ function TransactionsTab() {
           <div className="card-header">
           <h3 className="card-title">Transaction Statement</h3>
           <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-            Page {pagination.page + 1} of {totalPages || 1}
+            Page {uiPagination.page + 1} of {totalPages || 1}
           </div>
         </div>
 

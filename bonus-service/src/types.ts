@@ -270,10 +270,6 @@ export interface UserBonus {
    * For deposit bonuses, links to the qualifying deposit
    */
   triggerTransactionId?: string;
-  
-  // Related
-  /** @deprecated Use triggerTransactionId instead */
-  depositId?: string;
   referrerId?: string;             // For referral bonuses
   refereeId?: string;              // For referee bonuses
   
@@ -393,9 +389,9 @@ export interface ReferralBonusConfig {
 export interface ClaimBonusInput {
   templateId?: string;
   code?: string;
-  depositId?: string;
-  depositCurrency?: Currency;      // Currency of the qualifying deposit
-  depositAmount?: number;          // Amount in deposit currency
+  transactionId?: string;          // Transaction ID that triggered the bonus claim
+  depositCurrency?: Currency;       // Currency of the qualifying deposit
+  depositAmount?: number;           // Amount in deposit currency
   referralCode?: string;
 }
 

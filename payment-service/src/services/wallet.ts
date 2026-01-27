@@ -207,7 +207,7 @@ export const walletResolvers = {
      * 
      * Supports both formats:
      * 1. Direct args: walletBalance(userId: String, category: String, currency: String)
-     * 2. JSON input: walletBalance(input: JSON) - for backward compatibility
+     * 2. JSON input: walletBalance(input: JSON)
      */
     walletBalance: async (
       args: Record<string, unknown>,
@@ -276,7 +276,6 @@ export const walletResolvers = {
           pendingIn: 0, // Not tracked separately - use transactions for pending
           pendingOut: 0, // Not tracked separately - use transactions for pending
           allowNegative,
-          // Additional fields for backward compatibility with WalletBalanceResponse type
           realBalance: balance,
           bonusBalance,
           lockedBalance,
@@ -561,8 +560,6 @@ export const walletResolvers = {
   Mutation: {},
 };
 
-// Export with "userWallet" name for backward compatibility
-export const userWalletResolvers = walletResolvers;
 
 // ═══════════════════════════════════════════════════════════════════
 // Wallet Types & Validation
@@ -728,7 +725,6 @@ export const walletTypes = `
     pendingIn: Float!
     pendingOut: Float!
     allowNegative: Boolean!
-    # Additional fields for backward compatibility
     realBalance: Float!
     bonusBalance: Float!
     lockedBalance: Float!
@@ -795,7 +791,7 @@ export const walletTypes = `
     
     Supports both formats:
     - Direct args: walletBalance(userId: String, category: String, currency: String)
-    - JSON input: walletBalance(input: JSON) - for backward compatibility
+    - JSON input: walletBalance(input: JSON)
     """
     walletBalance(
       userId: String
@@ -837,29 +833,3 @@ export const walletTypes = `
   }
 `;
 
-// Export with "ledger" names for backward compatibility with test scripts
-// These map old GraphQL query names to new implementations
-export const ledgerResolvers = {
-  Query: {
-    ...walletResolvers.Query,
-    // Legacy query aliases (for test scripts that use old names)
-    ledgerAccountBalance: walletResolvers.Query.walletBalance,
-    bulkLedgerBalances: walletResolvers.Query.bulkWalletBalances,
-    ledgerTransactions: walletResolvers.Query.transactionHistory,
-  },
-  Mutation: walletResolvers.Mutation,
-};
-
-// Export types with both old and new names for backward compatibility
-export const ledgerTypes = walletTypes + `
-  # Legacy type aliases for backward compatibility
-  type LedgerAccountBalance = WalletBalance
-  type BulkLedgerBalance = BulkWalletBalance
-  type BulkLedgerBalancesResponse = BulkWalletBalancesResponse
-  type LedgerTransaction = TransactionHistory
-  type LedgerTransactionConnection = TransactionHistoryConnection
-`;
-
-// Export walletBalanceResolvers and walletBalanceTypes as aliases for backward compatibility
-export const walletBalanceResolvers = walletResolvers;
-export const walletBalanceTypes = walletTypes;

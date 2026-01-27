@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { Bell, X, Check } from 'lucide-react'
+import { Bell, Check } from 'lucide-react'
 import { useAuth } from '../lib/auth-context'
 import { useToast } from '../lib/toast-context'
 import { io, Socket } from 'socket.io-client'
@@ -25,7 +25,7 @@ export default function NotificationBell() {
   const [notifications, setNotifications] = useState<Notification[]>([])
   const [isOpen, setIsOpen] = useState(false)
   const [unreadCount, setUnreadCount] = useState(0)
-  const [loadingNotifications, setLoadingNotifications] = useState(false)
+  const [, setLoadingNotifications] = useState(false)
   const socketRef = useRef<Socket | null>(null)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
@@ -335,7 +335,7 @@ export default function NotificationBell() {
                 } else if (line.trim() === ':ping') {
                   // Keep-alive ping, ignore
                 } else if (line.startsWith('event: connected')) {
-                  console.log('NotificationBell: SSE connected', data)
+                  console.log('NotificationBell: SSE connected')
                 }
               }
             }
@@ -401,7 +401,7 @@ export default function NotificationBell() {
     }
   }, [notifications, unreadCount])
 
-  const unreadNotifications = notifications.filter(n => !n.read)
+  // Removed unused unreadNotifications calculation (using unreadCount instead)
 
   return (
     <div className="notification-bell-container" ref={dropdownRef}>

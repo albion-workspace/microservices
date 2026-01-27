@@ -4,7 +4,7 @@
 
 import React, { useState } from 'react';
 import { useAuth, useAuthRequest } from '../lib/auth-context';
-import { User, Shield, Monitor, LogOut, AlertCircle, CheckCircle, Lock, Eye, EyeOff } from 'lucide-react';
+import { User, Shield, Monitor, LogOut, AlertCircle, CheckCircle, Lock, Eye, EyeOff, Loader2 } from 'lucide-react';
 
 export default function Profile() {
   const { user, logout, logoutAll, updateUser } = useAuth();

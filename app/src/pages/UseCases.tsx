@@ -3,18 +3,14 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import { 
   CreditCard, 
   Gift, 
-  ArrowRight, 
-  CheckCircle, 
-  AlertCircle,
   TrendingUp,
-  Users,
-  Wallet,
-  Zap,
   PlayCircle,
+  Users,
 } from 'lucide-react'
-import { graphql as gql, SERVICE_URLS } from '../lib/auth'
+import { graphql as gql } from '../lib/graphql-utils'
+import { SERVICE_URLS } from '../lib/graphql-utils'
 import { useAuth } from '../lib/auth-context'
-import { hasRole, getRoleNames } from '../lib/access'
+import { hasRole } from '../lib/access'
 
 /**
  * Real-World Use Cases Page
@@ -87,7 +83,7 @@ const useCases: UseCase[] = [
 ]
 
 export default function UseCases() {
-  const { tokens, user } = useAuth()
+  const { tokens } = useAuth()
   const [activeUseCase, setActiveUseCase] = useState<UseCaseId>('payment-flow')
   const [executionLog, setExecutionLog] = useState<string[]>([])
   const [isRunning, setIsRunning] = useState(false)
@@ -132,7 +128,7 @@ export default function UseCases() {
     queryFn: async () => {
       if (!tokens?.accessToken) return []
       const data = await gql<{ users: { nodes: Array<{ id: string; email: string; roles: string[] }> } }>(
-        'auth',
+        SERVICE_URLS.auth,
         `
           query GetUsers($first: Int) {
             users(first: $first) {
@@ -541,7 +537,8 @@ export default function UseCases() {
         )
 
         if (!result.createUserBonus.success) {
-          throw new Error(result.createUserBonus.errors?.join(', ') || 'Failed to claim bonus')
+          const errorMsg = (result.createUserBonus as any)?.errors?.join(', ') || 'Failed to claim bonus'
+          throw new Error(errorMsg)
         }
 
         addLog(`✅ Bonus claimed successfully! ID: ${result.createUserBonus.userBonus?.id}`, 'success')

@@ -185,10 +185,8 @@ export const authGraphQLTypes = `
   
   input VerifyOTPInput {
     tenantId: String!
-    recipient: String  # Optional: for backward compatibility
     code: String!
-    purpose: String  # Optional: for backward compatibility
-    otpToken: String  # JWT token from sendOTP response (preferred)
+    otpToken: String!  # JWT token from sendOTP response (required)
   }
   
   input ForgotPasswordInput {
@@ -326,7 +324,7 @@ export const authGraphQLTypes = `
     # OTP
     sendOTP(input: SendOTPInput!): OTPResponse!
     verifyOTP(input: VerifyOTPInput!): OTPResponse!
-    resendOTP(recipient: String!, purpose: String!, tenantId: String!, otpToken: String): OTPResponse!
+      resendOTP(recipient: String!, purpose: String!, tenantId: String!, otpToken: String!): OTPResponse!
     
     # Password Management
     forgotPassword(input: ForgotPasswordInput!): ForgotPasswordResponse!

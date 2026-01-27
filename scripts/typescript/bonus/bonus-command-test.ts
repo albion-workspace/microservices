@@ -2221,7 +2221,7 @@ async function testAll() {
     console.log('╚═══════════════════════════════════════════════════════════════════╝\n');
     
     try {
-      const { createTransferWithTransactions } = await import('../../../core-service/src/common/transfer-helper.js');
+      // createTransferWithTransactions already imported at top of file
       const paymentDb = await getPaymentDatabase();
       const walletsCollection = paymentDb.collection('wallets');
       

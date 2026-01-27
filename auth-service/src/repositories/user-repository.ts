@@ -13,6 +13,7 @@ import {
   findOneAndUpdateById,
   updateOneById,
   deleteOneById,
+  paginateCollection,
 } from 'core-service';
 import type { User, UserFilter, UserQueryOptions, UpdateUserInput, UpdateUserMetadataInput } from '../types/user-types.js';
 import type { UserRole, AssignRoleInput } from '../types.js';
@@ -248,69 +249,76 @@ export class UserRepository {
   
   /**
    * Query users with filters
+   * Uses cursor-based pagination for O(1) performance and sharding compatibility
    */
   async query(options: UserQueryOptions = {}): Promise<{ users: User[]; total: number }> {
     const collection = this.getCollection();
     const { filter = {}, sort, pagination } = options;
     
-    // Build query
-    const query: any = {};
+    // Build query filter
+    const queryFilter: any = {};
     
-    if (filter.tenantId) query.tenantId = filter.tenantId;
+    if (filter.tenantId) queryFilter.tenantId = filter.tenantId;
     if (filter.status) {
-      query.status = Array.isArray(filter.status)
+      queryFilter.status = Array.isArray(filter.status)
         ? { $in: filter.status }
         : filter.status;
     }
-    if (filter.emailVerified !== undefined) query.emailVerified = filter.emailVerified;
-    if (filter.phoneVerified !== undefined) query.phoneVerified = filter.phoneVerified;
-    if (filter.twoFactorEnabled !== undefined) query.twoFactorEnabled = filter.twoFactorEnabled;
+    if (filter.emailVerified !== undefined) queryFilter.emailVerified = filter.emailVerified;
+    if (filter.phoneVerified !== undefined) queryFilter.phoneVerified = filter.phoneVerified;
+    if (filter.twoFactorEnabled !== undefined) queryFilter.twoFactorEnabled = filter.twoFactorEnabled;
     
     if (filter.createdAfter || filter.createdBefore) {
-      query.createdAt = {};
-      if (filter.createdAfter) query.createdAt.$gte = filter.createdAfter;
-      if (filter.createdBefore) query.createdAt.$lte = filter.createdBefore;
+      queryFilter.createdAt = {};
+      if (filter.createdAfter) queryFilter.createdAt.$gte = filter.createdAfter;
+      if (filter.createdBefore) queryFilter.createdAt.$lte = filter.createdBefore;
     }
     
     // Role filter
     if (filter.roles && filter.roles.length > 0) {
-      query['roles.role'] = { $in: filter.roles };
+      queryFilter['roles.role'] = { $in: filter.roles };
       if (filter.context) {
-        query['roles.context'] = filter.context;
+        queryFilter['roles.context'] = filter.context;
       }
     }
     
     // Metadata filter
     if (filter.metadata) {
       for (const [key, value] of Object.entries(filter.metadata)) {
-        query[`metadata.${key}`] = value;
+        queryFilter[`metadata.${key}`] = value;
       }
     }
     
-    // Build sort
-    const sortOptions: any = {};
-    if (sort) {
-      sortOptions[sort.field] = sort.direction === 'asc' ? 1 : -1;
-    } else {
-      sortOptions.createdAt = -1; // Default: newest first
+    // Determine sort field and direction
+    const sortField = sort?.field || 'createdAt';
+    const sortDirection = sort?.direction || 'desc';
+    
+    // Use cursor-based pagination (O(1) performance, sharding-friendly)
+    // If no pagination provided, default to first 100 items
+    const paginationOptions = pagination || { first: 100 };
+    
+    const result = await paginateCollection<User>(
+      collection,
+      {
+        first: paginationOptions.first,
+        after: paginationOptions.after,
+        last: paginationOptions.last,
+        before: paginationOptions.before,
+        filter: queryFilter,
+        sortField,
+        sortDirection,
+      }
+    );
+    
+    // Get total count if not provided
+    let total = result.totalCount;
+    if (total === undefined || total === null) {
+      total = await collection.countDocuments(queryFilter);
     }
-    
-    // Get total count
-    const total = await collection.countDocuments(query);
-    
-    // Build cursor
-    let cursor = collection.find(query).sort(sortOptions);
-    
-    // Apply pagination
-    if (pagination) {
-      cursor = cursor.skip(pagination.offset).limit(pagination.limit);
-    }
-    
-    const users = await cursor.toArray();
     
     return {
-      users: users as User[],
-      total,
+      users: result.edges.map(edge => edge.node),
+      total: total || 0,
     };
   }
   

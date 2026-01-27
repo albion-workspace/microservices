@@ -413,13 +413,14 @@ export const transactionsQueryResolver = async (args: Record<string, unknown>) =
       // Build MongoDB query filter
       const queryFilter: Record<string, unknown> = {};
       
-      // Filter by type/charge if specified (support both charge and type for backward compatibility)
-      if (filter.type) {
-        // Support filtering by charge (credit/debit) or objectModel (deposit, withdrawal, etc.)
+      // Filter by charge (credit/debit) or objectModel (deposit, withdrawal, etc.)
+      if (filter.charge) {
+        queryFilter.charge = filter.charge;
+      } else if (filter.type) {
+        // Support filtering by objectModel for transaction types like 'deposit', 'withdrawal'
         if (filter.type === 'credit' || filter.type === 'debit') {
           queryFilter.charge = filter.type;
         } else {
-          // For other types like 'deposit', 'withdrawal', filter by objectModel
           queryFilter.objectModel = filter.type;
         }
       }
@@ -429,8 +430,7 @@ export const transactionsQueryResolver = async (args: Record<string, unknown>) =
         queryFilter.userId = filter.userId;
       }
       
-      // Filter by status if specified (transactions don't have status, but transfers do)
-      // This filter is kept for backward compatibility but won't match anything
+      // Note: Transactions don't have status (they're immutable)
       // Status filtering should be done on transfers, not transactions
       
       // Filter by date range if specified
@@ -489,7 +489,7 @@ export const transactionsQueryResolver = async (args: Record<string, unknown>) =
           return {
             id: tx.id,
             userId: tx.userId,
-            type: tx.charge || tx.type, // Use charge (credit/debit) or fallback to type
+            type: tx.charge, // credit or debit
             status: tx.status || 'completed', // Transactions are immutable, default to completed
             amount: tx.amount,
             currency: meta.currency || tx.currency, // Currency is in meta object

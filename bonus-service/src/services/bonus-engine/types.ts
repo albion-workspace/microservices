@@ -18,7 +18,6 @@ export interface BonusContext {
   
   // Deposit/transaction context
   depositAmount?: number;
-  depositId?: string;
   transactionId?: string;
   walletId?: string;
   isFirstDeposit?: boolean;

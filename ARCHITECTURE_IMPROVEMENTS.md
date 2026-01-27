@@ -43,8 +43,9 @@
    - Backend schema generation enforces cursor pagination only (no `skip` parameter)
    - Frontend updated: Transactions and Transfers queries use cursor pagination
    - Removed redundant queries (deposits/withdrawals - unified transactions query)
-   - **Files**: `core-service/src/common/pagination.ts`, `core-service/src/common/repository.ts`, `app/src/pages/PaymentGateway.tsx`
-   - ⚠️ **Note**: One instance in `auth-service/src/repositories/user-repository.ts` still uses offset pagination (needs update)
+   - Updated `auth-service/src/repositories/user-repository.ts` to use cursor pagination only (no backward compatibility)
+   - Removed all offset pagination and backward compatibility code
+   - **Files**: `core-service/src/common/pagination.ts`, `core-service/src/common/repository.ts`, `app/src/pages/PaymentGateway.tsx`, `auth-service/src/repositories/user-repository.ts`
 
 4. ✅ **Add Health Check Endpoints** - COMPLETED
    - Unified `/health` endpoint implemented (replaces `/health/live`, `/health/ready`, `/health/metrics`)
@@ -159,12 +160,11 @@
 
 ### 2.1 Remove Legacy Code ✅ COMPLETED
 - ✅ `core-service/src/common/ledger.ts` - **REMOVED** (deleted from codebase)
-- ⚠️ `core-service/src/common/mongodb-utils.ts` - `findUserById` marked `@deprecated` (still in use, will remove in future)
-- ⚠️ `core-service/src/common/redis.ts` - `scanKeysArray` marked `@deprecated` (still in use, will remove in future)
-- ⚠️ `core-service/src/common/integration.ts` - Deprecated functions marked (backward compatibility maintained)
+- ✅ Removed backward compatibility code from `auth-service/src/repositories/user-repository.ts` (cursor pagination only)
+- ✅ Removed backward compatibility from OTP verification (requires `otpToken`, no optional fields)
+- ✅ Removed backward compatibility comments from GraphQL schema
 - ✅ Created `extractDocumentId()` helper to replace manual patterns
-
-**Note**: Deprecated functions are still exported but properly marked. They remain until all usages are migrated (acceptable for now).
+- ⚠️ Some deprecated functions still marked `@deprecated` in core-service (for external library compatibility, not our code)
 
 ### 2.2 Clean Up TODOs ⏳ MEDIUM PRIORITY
 
@@ -566,7 +566,7 @@ After implementing remaining improvements:
 - **Quick Wins**: All 5 completed ✅
 - **Current Rating**: 9/10 (improved from 8.5/10)
 - **Next Focus**: Distributed tracing, performance metrics, caching, and batch operations
-- **One Remaining Issue**: Offset pagination in `user-repository.ts` needs cursor pagination update
+- **Code Cleanup**: ✅ Removed all backward compatibility and legacy code (cursor pagination only, OTP requires otpToken)
 
 ---
 

@@ -5,7 +5,7 @@ import {
   Bell, Send, Mail, MessageSquare, Smartphone, Radio, 
   Activity, RefreshCw, Trash2, CheckCircle, XCircle, 
   Clock, BarChart3, Wifi, WifiOff, Play, Square, X,
-  Users, Globe, Hash, MessageCircle, LogIn, LogOut, Zap
+  Hash, MessageCircle, LogIn, Zap
 } from 'lucide-react'
 
 const NOTIFICATION_SERVICE_URL = 'http://localhost:3006/graphql'
