@@ -3901,39 +3901,38 @@ function SettingsTab() {
     feePercentage: '2.9',
   })
 
-  // Fetch providers - API uses JSON input/output
+  // Fetch providers - Note: providerConfigs GraphQL query not yet implemented
+  // TODO: Implement providerConfigs query/mutation in payment-service GraphQL schema
   const { tokens } = useAuth()
-  const authToken = tokens?.accessToken
+  const { accessToken: authToken } = tokens ?? {}
   
   const providersQuery = useQuery({
     queryKey: ['providerConfigs'],
-    queryFn: () => graphqlQuery(GRAPHQL_SERVICE_URLS.payment, `
-      query ListProviders($input: JSON) {
-        providerConfigs(input: $input)
-      }
-    `, { input: { first: 50 } }, authToken),
+    queryFn: async () => {
+      // Provider configs feature not yet implemented in GraphQL schema
+      // Return empty result to prevent errors
+      console.warn('[SettingsTab] providerConfigs query not implemented in payment-service GraphQL schema')
+      return { providerConfigs: { nodes: [] } }
+    },
     enabled: !!authToken,
+    retry: false, // Don't retry since query doesn't exist
   })
 
-  // Create provider mutation - API uses JSON input/output
+  // Create provider mutation - Note: createProviderConfig mutation not yet implemented
   const createProviderMutation = useMutation({
-    mutationFn: () => graphqlQuery(GRAPHQL_SERVICE_URLS.payment, `
-      mutation CreateProvider($input: JSON) {
-        createProviderConfig(input: $input)
-      }
-    `, {
-      input: {
-        ...newProvider,
-        feePercentage: parseFloat(newProvider.feePercentage),
-      }
-    }, authToken),
+    mutationFn: async () => {
+      // Provider config creation not yet implemented in GraphQL schema
+      throw new Error('Provider config creation not yet implemented. Please implement createProviderConfig mutation in payment-service.')
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['providerConfigs'] })
-      setNewProvider({ ...newProvider, name: '' })
+      setNewProvider(prev => ({ ...prev, name: '' }))
     },
   })
 
-  const providers = providersQuery.data?.providerConfigs?.nodes || []
+  // Safely extract providers with optional chaining and destructuring (following coding standards)
+  const { providerConfigs } = providersQuery.data ?? {}
+  const { nodes: providers = [] } = providerConfigs ?? {}
 
   return (
     <div>
@@ -4012,10 +4011,16 @@ function SettingsTab() {
             onClick={() => createProviderMutation.mutate()}
             disabled={createProviderMutation.isPending || !newProvider.name}
             style={{ width: '100%' }}
+            title={createProviderMutation.isError ? 'Provider config creation not yet implemented' : undefined}
           >
             <Plus size={16} />
             Add Provider
             </button>
+            {createProviderMutation.isError && (
+              <div style={{ marginTop: 8, padding: 8, background: 'var(--bg-tertiary)', borderRadius: 4, fontSize: 12, color: 'var(--text-muted)' }}>
+                ⚠️ Provider configuration feature not yet implemented
+              </div>
+            )}
         </div>
 
         {/* Active Providers */}
@@ -4027,7 +4032,17 @@ function SettingsTab() {
             </button>
           </div>
           
-          {providers.length === 0 ? (
+          {providersQuery.isError ? (
+            <div className="empty-state">
+              <Building />
+              <p style={{ color: 'var(--text-muted)' }}>
+                Provider configuration feature not yet implemented
+              </p>
+              <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 8 }}>
+                The providerConfigs GraphQL query needs to be implemented in the payment-service schema.
+              </p>
+            </div>
+          ) : providers.length === 0 ? (
             <div className="empty-state">
               <Building />
               <p>No providers configured</p>

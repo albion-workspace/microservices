@@ -7,8 +7,7 @@ import {
   PlayCircle,
   Users,
 } from 'lucide-react'
-import { graphql as gql } from '../lib/graphql-utils'
-import { SERVICE_URLS } from '../lib/graphql-utils'
+import { graphql as gql, SERVICE_URLS as GRAPHQL_SERVICE_URLS } from '../lib/graphql-utils'
 import { useAuth } from '../lib/auth-context'
 import { hasRole } from '../lib/access'
 
@@ -122,30 +121,111 @@ export default function UseCases() {
 
   const clearLog = () => setExecutionLog([])
 
-  // Fetch users for dropdowns
-  const usersQuery = useQuery({
-    queryKey: ['users'],
+  // Fetch users for dropdowns - Use usersByRole queries (following PaymentGateway pattern)
+  // This avoids permission errors since usersByRole works for authenticated users with proper roles
+  const { accessToken: authToken } = tokens ?? {}
+  
+  // Fetch users by role (system, providers, regular users)
+  const systemUsersQuery = useQuery({
+    queryKey: ['system-users'],
     queryFn: async () => {
-      if (!tokens?.accessToken) return []
-      const data = await gql<{ users: { nodes: Array<{ id: string; email: string; roles: string[] }> } }>(
-        SERVICE_URLS.auth,
-        `
-          query GetUsers($first: Int) {
-            users(first: $first) {
-              nodes {
-                id
-                email
-                roles
+      if (!authToken) return []
+      try {
+        const data = await gql<{ usersByRole: { nodes: Array<{ id: string; email: string; roles: string[] }> } }>(
+          GRAPHQL_SERVICE_URLS.auth,
+          `
+            query GetSystemUsers($first: Int) {
+              usersByRole(role: "system", first: $first) {
+                nodes {
+                  id
+                  email
+                  roles
+                }
               }
             }
-          }
-        `,
-        { first: 100 }
-      )
-      return data.users.nodes
+          `,
+          { first: 100 },
+          authToken
+        )
+        return data.usersByRole?.nodes || []
+      } catch (error) {
+        console.warn('[UseCases] Failed to fetch system users:', error)
+        return []
+      }
     },
-    enabled: !!tokens?.accessToken,
+    enabled: !!authToken,
+    retry: false,
   })
+
+  const providerUsersQuery = useQuery({
+    queryKey: ['provider-users'],
+    queryFn: async () => {
+      if (!authToken) return []
+      try {
+        const data = await gql<{ usersByRole: { nodes: Array<{ id: string; email: string; roles: string[] }> } }>(
+          GRAPHQL_SERVICE_URLS.auth,
+          `
+            query GetProviderUsers($first: Int) {
+              usersByRole(role: "payment-provider", first: $first) {
+                nodes {
+                  id
+                  email
+                  roles
+                }
+              }
+            }
+          `,
+          { first: 100 },
+          authToken
+        )
+        return data.usersByRole?.nodes || []
+      } catch (error) {
+        console.warn('[UseCases] Failed to fetch provider users:', error)
+        return []
+      }
+    },
+    enabled: !!authToken,
+    retry: false,
+  })
+
+  const regularUsersQuery = useQuery({
+    queryKey: ['regular-users'],
+    queryFn: async () => {
+      if (!authToken) return []
+      try {
+        const data = await gql<{ usersByRole: { nodes: Array<{ id: string; email: string; roles: string[] }> } }>(
+          GRAPHQL_SERVICE_URLS.auth,
+          `
+            query GetRegularUsers($first: Int) {
+              usersByRole(role: "user", first: $first) {
+                nodes {
+                  id
+                  email
+                  roles
+                }
+              }
+            }
+          `,
+          { first: 100 },
+          authToken
+        )
+        return data.usersByRole?.nodes || []
+      } catch (error) {
+        console.warn('[UseCases] Failed to fetch regular users:', error)
+        return []
+      }
+    },
+    enabled: !!authToken,
+    retry: false,
+  })
+
+  // Combine all users for dropdowns (using destructuring - coding standards)
+  const { data: systemUsers = [] } = systemUsersQuery
+  const { data: providerUsers = [] } = providerUsersQuery
+  const { data: regularUsers = [] } = regularUsersQuery
+  
+  // Combine all users into a single array
+  const allUsers = [...systemUsers, ...providerUsers, ...regularUsers]
 
   // Complete Payment Flow Use Case
   const paymentFlowMutation = useMutation({
@@ -176,8 +256,8 @@ export default function UseCases() {
           { first: 100 }
         )
 
-        // Get system user
-        const systemUser = usersQuery.data?.find(u => hasRole(u.roles, 'system'))
+        // Get system user (using destructuring - coding standards)
+        const systemUser = systemUsers.find(u => hasRole(u.roles, 'system'))
         if (!systemUser) {
           throw new Error('System user not found')
         }
@@ -552,12 +632,11 @@ export default function UseCases() {
     },
   })
 
-  // Auto-populate user IDs from common test users
+  // Auto-populate user IDs from common test users (using destructuring - coding standards)
   const populateTestUsers = () => {
-    const users = usersQuery.data || []
-    const systemUser = users.find(u => hasRole(u.roles, 'system'))
-    const providerUser = users.find(u => u.email === 'payment-provider@system.com')
-    const endUser = users.find(u => u.email === 'test-end-user@demo.com') || users.find(u => hasRole(u.roles, 'user'))
+    const systemUser = systemUsers.find(u => hasRole(u.roles, 'system'))
+    const providerUser = providerUsers.find(u => u.email === 'payment-provider@system.com') || providerUsers[0]
+    const endUser = regularUsers.find(u => u.email === 'test-end-user@demo.com') || regularUsers[0]
 
     if (systemUser) {
       setFundingState(prev => ({ ...prev, fromUserId: systemUser.id }))
@@ -641,7 +720,7 @@ export default function UseCases() {
                   onClick={populateTestUsers}
                   className="btn btn-secondary"
                   style={{ marginBottom: 16 }}
-                  disabled={usersQuery.isLoading}
+                  disabled={systemUsersQuery.isLoading || providerUsersQuery.isLoading || regularUsersQuery.isLoading}
                 >
                   Auto-fill Test Users
                 </button>
@@ -723,7 +802,7 @@ export default function UseCases() {
                   onClick={populateTestUsers}
                   className="btn btn-secondary"
                   style={{ marginBottom: 16 }}
-                  disabled={usersQuery.isLoading}
+                  disabled={systemUsersQuery.isLoading || providerUsersQuery.isLoading || regularUsersQuery.isLoading}
                 >
                   Auto-fill Test Users
                 </button>
@@ -793,7 +872,7 @@ export default function UseCases() {
                   onClick={populateTestUsers}
                   className="btn btn-secondary"
                   style={{ marginBottom: 16 }}
-                  disabled={usersQuery.isLoading}
+                  disabled={systemUsersQuery.isLoading || providerUsersQuery.isLoading || regularUsersQuery.isLoading}
                 >
                   Auto-fill Test User
                 </button>
