@@ -102,7 +102,13 @@ export default function Notifications() {
     
     const result = await response.json()
     if (result.errors) {
-      throw new Error(result.errors[0]?.message || 'GraphQL error')
+      const error = result.errors[0]
+      const errorMessage = error?.message || 'GraphQL error'
+      const errorCode = error?.extensions?.code || errorMessage
+      const errorObj = new Error(errorMessage)
+      ;(errorObj as any).code = errorCode
+      ;(errorObj as any).extensions = error?.extensions || {}
+      throw errorObj
     }
     return result.data
   }

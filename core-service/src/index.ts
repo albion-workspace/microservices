@@ -300,6 +300,27 @@ export type {
 
 // Resolver Utilities
 export { requireAuth, getTenantId, getUserId, createObjectModelQueryResolver } from './common/resolvers.js';
+export { 
+  ValidationHandler,
+  AuthValidator,
+  RequiredFieldValidator,
+  TypeValidator,
+  ExtractInputValidator,
+  PermissionValidator,
+  ValidationChainBuilder,
+  createValidationChain,
+} from './common/validation-chain.js';
+export type { ValidationContext, ValidationResult } from './common/validation-chain.js';
+export { 
+  ResolverBuilder,
+  createResolverBuilder,
+} from './common/resolver-builder.js';
+export type { ResolverFunction, ServiceResolvers } from './common/resolver-builder.js';
+export { 
+  GraphQLError,
+  createServiceError,
+  formatGraphQLError,
+} from './common/graphql-error.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types (from src/types/)

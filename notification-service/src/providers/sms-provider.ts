@@ -4,7 +4,7 @@
 
 import twilio from 'twilio';
 import type { Twilio } from 'twilio';
-import { logger, generateId } from 'core-service';
+import { logger, generateId, createServiceError } from 'core-service';
 import type { NotificationProvider, SmsNotification, NotificationResponse, NotificationConfig } from '../types.js';
 
 export class SmsProvider implements NotificationProvider {
@@ -29,7 +29,7 @@ export class SmsProvider implements NotificationProvider {
   
   async send(notification: SmsNotification): Promise<NotificationResponse> {
     if (!this.client) {
-      throw new Error('SMS provider not configured');
+      throw createServiceError('notification', 'SMSProviderNotConfigured', {});
     }
     
     const recipients = Array.isArray(notification.to) ? notification.to : [notification.to];
@@ -57,12 +57,8 @@ export class SmsProvider implements NotificationProvider {
           providerMessageId: message.sid,
         });
       } catch (error: any) {
-        logger.error('Failed to send SMS', { error: error.message, to });
-        
-        results.push({
-          id: generateId(),
-          status: 'failed',
-          channel: 'sms',
+        throw createServiceError('notification', 'FailedToSendSMS', {
+          to,
           error: error.message,
         });
       }

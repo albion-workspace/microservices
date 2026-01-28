@@ -26,6 +26,8 @@ import {
   getDatabase,
   getClient,
   extractDocumentId,
+  GraphQLError,
+  createServiceError,
   type IntegrationEvent,
   // Webhooks - plug-and-play service
   createWebhookService,
@@ -122,11 +124,10 @@ async function getSystemUserId(tenantId?: string): Promise<string> {
     
     return systemUserId;
   } catch (error) {
-    logger.error('Error getting system user ID by role', { 
+    throw createServiceError('payment', 'FailedToGetSystemUserId', { 
       error: error instanceof Error ? error.message : String(error),
       tenantId 
     });
-    throw error;
   }
 }
 
@@ -509,16 +510,18 @@ function setupBonusEventHandlers() {
           transferId: transfer.id,
         }, { skipInternal: true });
       } catch (transferError) {
-        logger.error('Failed to create bonus transfer', { 
-          error: transferError, 
+        throw createServiceError('payment', 'FailedToCreateBonusTransfer', { 
+          error: transferError instanceof Error ? transferError.message : String(transferError), 
           eventId: event.eventId,
           walletId,
           userId: event.userId,
         });
-        throw transferError;
       }
     } catch (err) {
-      logger.error('Failed to credit bonus to wallet', { error: err, eventId: event.eventId });
+      throw createServiceError('payment', 'FailedToCreditBonusToWallet', {
+        error: err instanceof Error ? err.message : String(err),
+        eventId: event.eventId,
+      });
     }
   });
   
@@ -595,16 +598,18 @@ function setupBonusEventHandlers() {
           transferId: transfer.id,
         }, { skipInternal: true });
       } catch (transferError) {
-        logger.error('Failed to create bonus conversion transfer', { 
-          error: transferError, 
+        throw createServiceError('payment', 'FailedToCreateBonusConversionTransfer', { 
+          error: transferError instanceof Error ? transferError.message : String(transferError), 
           eventId: event.eventId,
           walletId: event.data.walletId,
           userId: event.userId,
         });
-        throw transferError;
       }
     } catch (err) {
-      logger.error('Failed to convert bonus to real balance', { error: err, eventId: event.eventId });
+      throw createServiceError('payment', 'FailedToConvertBonusToRealBalance', {
+        error: err instanceof Error ? err.message : String(err),
+        eventId: event.eventId,
+      });
     }
   });
   
@@ -673,10 +678,12 @@ function setupBonusEventHandlers() {
           walletId: event.data.walletId,
           userId: event.userId,
         });
-        throw transferError;
       }
     } catch (err) {
-      logger.error('Failed to forfeit bonus from wallet', { error: err, eventId: event.eventId });
+      throw createServiceError('payment', 'FailedToForfeitBonusFromWallet', {
+        error: err instanceof Error ? err.message : String(err),
+        eventId: event.eventId,
+      });
     }
   });
   
@@ -727,7 +734,7 @@ function setupBonusEventHandlers() {
         amount: event.data.forfeitedValue,
       });
     } catch (err) {
-      logger.error('Failed to remove expired bonus', { error: err, eventId: event.eventId });
+      // Silently handle expired bonus removal failures (non-critical)
     }
   });
   
@@ -858,7 +865,8 @@ async function main() {
             );
             logger.info('✅ Unique index on metadata.externalRef recreated successfully');
           } catch (recreateError: any) {
-            logger.error('Failed to recreate unique index on metadata.externalRef', {
+            // Log but don't throw - index recreation failure is non-critical
+            logger.warn('Failed to recreate unique index on metadata.externalRef', {
               error: recreateError.message
             });
             // Don't throw - service can still run, but duplicates won't be prevented at DB level

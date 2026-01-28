@@ -42,7 +42,13 @@ async function graphqlRequest<T = any>(
   
   const data = await res.json()
   if (data.errors) {
-    throw new Error(data.errors[0]?.message || 'GraphQL error')
+    const error = data.errors[0]
+    const errorMessage = error?.message || 'GraphQL error'
+    const errorCode = error?.extensions?.code || errorMessage
+    const errorObj = new Error(errorMessage)
+    ;(errorObj as any).code = errorCode
+    ;(errorObj as any).extensions = error?.extensions || {}
+    throw errorObj
   }
   return data.data
 }

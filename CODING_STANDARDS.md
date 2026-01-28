@@ -4,7 +4,7 @@
 
 **Project Status**: Pre-Production - This project has not yet been released to production. Code cleanup rules are simplified (no backward compatibility concerns). After production/release, these rules will be updated to include backward compatibility and legacy code management.
 
-**Last Updated**: 2026-01-27
+**Last Updated**: 2026-01-28
 
 ---
 
@@ -27,6 +27,13 @@
 - **Always**: Check if variables/functions are used elsewhere
 - **Always**: Verify imports are truly unused (check dynamic imports, re-exports)
 - **Never**: Remove code based on linter warnings alone without verification
+
+### 4. **Remove Dead Code After Error Throws**
+- **Always**: Remove unreachable code after `throw` statements
+- **Always**: Remove unreachable `return` statements after `throw`
+- **Always**: Remove unreachable variable assignments after `throw`
+- **Never**: Leave dead code after error throws (it's unreachable and confusing)
+- **Example**: After `throw createServiceError(...)`, remove any code that follows in the same block
 
 ---
 

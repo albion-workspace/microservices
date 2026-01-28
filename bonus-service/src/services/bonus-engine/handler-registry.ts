@@ -255,70 +255,22 @@ export function getHandler(type: BonusType): IBonusHandler | undefined {
 }
 
 /**
- * Factory function to create a new handler instance.
- * Useful when you need a fresh instance instead of singleton.
+ * Factory function to create/get a handler instance.
+ * Uses registry pattern - eliminates need for large switch statement.
+ * 
+ * Note: Handlers are singletons from the registry. If you need a fresh instance,
+ * you can extend the registry to support cloning, but typically singleton is sufficient.
  */
 export function createHandler(type: BonusType): IBonusHandler | null {
-  switch (type) {
-    // Onboarding & Deposit
-    case 'welcome': return new WelcomeHandler();
-    case 'first_deposit': return new FirstDepositHandler();
-    case 'first_purchase': return new FirstPurchaseHandler();
-    case 'first_action': return new FirstActionHandler();
-    case 'reload': return new ReloadHandler();
-    case 'top_up': return new TopUpHandler();
-    
-    // Referral
-    case 'referral': return new ReferralHandler();
-    case 'referee': return new RefereeHandler();
-    case 'commission': return new CommissionHandler();
-    
-    // Activity
-    case 'activity': return new ActivityHandler();
-    case 'milestone': return new MilestoneHandler();
-    case 'streak': return new StreakHandler();
-    
-    // Recovery
-    case 'cashback': return new CashbackHandler();
-    case 'consolation': return new ConsolationHandler();
-    case 'winback': return new WinbackHandler();
-    
-    // Loyalty
-    case 'loyalty': return new LoyaltyHandler();
-    case 'loyalty_points': return new LoyaltyPointsHandler();
-    case 'vip': return new VipHandler();
-    case 'tier_upgrade': return new TierUpgradeHandler();
-    
-    // Time-based
-    case 'birthday': return new BirthdayHandler();
-    case 'anniversary': return new AnniversaryHandler();
-    case 'seasonal': return new SeasonalHandler();
-    case 'daily_login': return new DailyLoginHandler();
-    case 'flash': return new FlashHandler();
-    
-    // Achievement
-    case 'achievement': return new AchievementHandler();
-    case 'task_completion': return new TaskCompletionHandler();
-    case 'challenge': return new ChallengeHandler();
-    
-    // Competition
-    case 'tournament': return new TournamentHandler();
-    case 'leaderboard': return new LeaderboardHandler();
-    
-    // Promotional
-    case 'promo_code': return new PromoCodeHandler();
-    case 'special_event': return new SpecialEventHandler();
-    case 'custom': return new CustomHandler();
-    
-    // Credits & Bundles
-    case 'free_credit': return new FreeCreditHandler();
-    case 'trial': return new TrialHandler();
-    case 'selection': return new SelectionHandler();
-    case 'combo': return new ComboHandler();
-    case 'bundle': return new BundleHandler();
-    
-    default:
-      logger.warn('No handler available for bonus type', { type });
-      return null;
+  handlerRegistry.initialize();
+  const handler = handlerRegistry.getHandler(type);
+  
+  if (!handler) {
+    logger.warn('No handler available for bonus type', { type });
+    return null;
   }
+  
+  // Return handler from registry (singleton pattern)
+  // If fresh instances are needed in the future, implement cloning here
+  return handler;
 }

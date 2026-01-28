@@ -7,7 +7,7 @@
  * - Transfers = User-to-user operations (creates 2 transactions)
  */
 
-import { createService, type, type Repository, type SagaContext, validateInput, getDatabase, logger, findUserIdByRole } from 'core-service';
+import { createService, type, type Repository, type SagaContext, validateInput, getDatabase, logger, findUserIdByRole, GraphQLError, createServiceError } from 'core-service';
 import type { BonusTemplate, UserBonus, BonusTransaction, BonusStatus } from '../types.js';
 import { bonusEngine } from './bonus-engine/index.js';
 import { templatePersistence } from './bonus-engine/persistence.js';
@@ -79,7 +79,7 @@ const bonusTemplateSaga = [
         };
         const updated = await repo.update(existing.id, updates);
         if (!updated) {
-          throw new Error('Failed to update template');
+          throw createServiceError('bonus', 'FailedToUpdateTemplate', {});
         }
         return { ...ctx, input, data, entity: updated };
       }
@@ -237,7 +237,7 @@ const userBonusSaga = [
       // Load template by code
       const template = await templatePersistence.findByCode(input.templateCode);
       if (!template) {
-        throw new Error(`Template not found: ${input.templateCode}`);
+        throw createServiceError('bonus', 'TemplateNotFound', { templateCode: input.templateCode });
       }
       if (!template.isActive) {
         throw new Error(`Template ${input.templateCode} is not active`);
@@ -253,7 +253,7 @@ const userBonusSaga = [
     execute: async ({ input, data, ...ctx }: UserBonusCtx): Promise<UserBonusCtx> => {
       const template = data.template as BonusTemplate;
       if (!template) {
-        throw new Error('Template not loaded');
+        throw createServiceError('bonus', 'TemplateNotLoaded', {});
       }
 
       // Get handler for this bonus type
@@ -275,13 +275,17 @@ const userBonusSaga = [
       // First, run common validators
       const commonResult = await (handler as any).runCommonValidators(template, context);
       if (!commonResult.eligible) {
-        throw new Error(commonResult.reason || 'User is not eligible for this bonus');
+        throw createServiceError('bonus', 'UserNotEligible', { 
+          reason: commonResult.reason || 'User is not eligible for this bonus' 
+        });
       }
 
       // Then run specific validators
       const specificResult = await (handler as any).validateSpecific(template, context);
       if (!specificResult.eligible) {
-        throw new Error(specificResult.reason || 'User is not eligible for this bonus');
+        throw createServiceError('bonus', 'UserNotEligible', { 
+          reason: specificResult.reason || 'User is not eligible for this bonus' 
+        });
       }
 
       // Award bonus using the handler with the specific template
@@ -293,13 +297,19 @@ const userBonusSaga = [
         // Format: "BONUS_REQUIRES_APPROVAL|PENDING_TOKEN:{token}"
         if (result.pendingToken) {
           (data as any).pendingToken = result.pendingToken;
-          throw new Error(`BONUS_REQUIRES_APPROVAL|PENDING_TOKEN:${result.pendingToken}`);
+          throw createServiceError('bonus', 'BonusRequiresApproval', { 
+            pendingToken: result.pendingToken 
+          });
         }
-        throw new Error(result.error || 'Bonus award failed');
+        throw createServiceError('bonus', 'BonusAwardFailed', { 
+          error: result.error || 'Bonus award failed' 
+        });
       }
 
       if (!result.bonus) {
-        throw new Error('Bonus award failed - no bonus returned');
+        throw createServiceError('bonus', 'BonusAwardFailed', { 
+          reason: 'No bonus returned' 
+        });
       }
 
       // Verify the bonus was created with the correct template
@@ -307,7 +317,7 @@ const userBonusSaga = [
         // Delete the incorrectly awarded bonus and throw error
         const repo = data._repository as Repository<UserBonus>;
         await repo.delete(result.bonus.id);
-        throw new Error(`Bonus was created with wrong template`);
+        throw createServiceError('bonus', 'BonusWrongTemplate', {});
       }
 
       // Store the awarded bonus
@@ -335,14 +345,14 @@ const userBonusSaga = [
       const awardedBonus = data.awardedBonus as UserBonus;
       
       if (!awardedBonus) {
-        throw new Error('Bonus not awarded');
+        throw createServiceError('bonus', 'BonusNotAwarded', {});
       }
 
       // Bonus was already created by the engine, just verify and return it
       const repo = data._repository as Repository<UserBonus>;
       const existing = await repo.findById(awardedBonus.id);
       if (!existing) {
-        throw new Error('Awarded bonus not found in database');
+        throw createServiceError('bonus', 'AwardedBonusNotFound', {});
       }
 
       return { ...ctx, input, data, entity: existing };
@@ -533,11 +543,10 @@ async function getSystemUserId(tenantId?: string): Promise<string> {
     
     return systemUserId;
   } catch (error) {
-    logger.error('Error getting system user ID by role', { 
+    throw createServiceError('bonus', 'FailedToGetSystemUserId', { 
       error: error instanceof Error ? error.message : String(error),
       tenantId 
     });
-    throw error;
   }
 }
 

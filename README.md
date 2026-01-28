@@ -238,8 +238,69 @@ tst/
   - **API Gateway** - GraphQL gateway for microservices
   - **Database Utilities** - MongoDB connection, session management
   - **Redis Utilities** - Caching, state tracking
-  - **Validation** - Shared validation utilities
+  - **Validation Chain** - Reusable validation logic (Chain of Responsibility pattern)
+  - **Resolver Builder** - Fluent API for GraphQL resolver construction (Builder pattern)
   - **Error Handling** - Standardized error utilities
+
+#### Validation Chain (Chain of Responsibility Pattern)
+
+Reusable validation logic for GraphQL resolvers. Eliminates repetitive validation code.
+
+**Usage Example**:
+```typescript
+import { createValidationChain } from 'core-service';
+
+async function updateUserRoles(args: Record<string, unknown>, ctx: ResolverContext) {
+  const validationChain = createValidationChain()
+    .requireAuth()
+    .extractInput()
+    .requirePermission('user', 'update', '*')
+    .requireFields(['userId', 'tenantId', 'roles'], 'input')
+    .validateTypes({ roles: 'array' }, 'input')
+    .build();
+  
+  const result = validationChain.handle({ args, ctx });
+  if (!result.valid) {
+    throw new Error(result.error);
+  }
+  
+  // Input is guaranteed to be valid and extracted
+  const input = (args as any).input;
+  const { userId, tenantId, roles } = input;
+  // ... rest of logic
+}
+```
+
+**Available Validators**:
+- `requireAuth()` - Ensures user is authenticated
+- `extractInput()` - Extracts `input` wrapper for mutations
+- `requirePermission(resource, action, target)` - Checks URN-based permissions
+- `requireFields(fields[], source)` - Validates required fields exist
+- `validateTypes(validations, source)` - Validates field types (array, string, number, object)
+
+#### Resolver Builder (Builder Pattern)
+
+Fluent API for constructing GraphQL resolver objects. Simplifies resolver merging in gateways.
+
+**Usage Example**:
+```typescript
+import { createResolverBuilder } from 'core-service';
+
+const resolverBuilder = createResolverBuilder()
+  .addQuery('health', async () => ({ status: 'ok' }))
+  .addMutation('createUser', async (args, ctx) => { return user; })
+  .addService(authService)
+  .addService(bonusService);
+
+const resolvers = resolverBuilder.build();
+```
+
+**Available Methods**:
+- `addQuery(name, resolver)` - Add a query resolver
+- `addMutation(name, resolver)` - Add a mutation resolver
+- `addSubscription(name, resolver)` - Add a subscription resolver
+- `addService(service)` - Merge resolvers from a service module
+- `build()` - Build the final resolver object
 
 ---
 

@@ -23,6 +23,8 @@ import {
   getDatabase,
   createWebhookService,
   requireAuth,
+  GraphQLError,
+  createServiceError,
   type IntegrationEvent,
   type ResolverContext,
 } from 'core-service';
@@ -167,7 +169,7 @@ const userBonussCustomResolver = {
       // Get default resolver from userBonusService
       const defaultResolver = userBonusService.resolvers?.Query?.userBonuss;
       if (!defaultResolver) {
-        throw new Error('Default userBonuss resolver not found');
+        throw createServiceError('bonus', 'ResolverNotFound', { resolver: 'userBonuss' });
       }
       
       // Check if user is system or admin
@@ -281,7 +283,7 @@ const bonusApprovalResolvers = {
     ) => {
       requireAuth(context);
       if (!context.user!.roles?.includes('system') && !context.user!.roles?.includes('admin')) {
-        throw new Error('System or admin access required');
+        throw createServiceError('bonus', 'SystemOrAdminAccessRequired', {});
       }
       
       const { listPendingBonuses } = await import('./services/bonus-approval.js');
@@ -315,7 +317,7 @@ const bonusApprovalResolvers = {
     ) => {
       requireAuth(context);
       if (!context.user!.roles?.includes('system') && !context.user!.roles?.includes('admin')) {
-        throw new Error('System or admin access required');
+        throw createServiceError('bonus', 'SystemOrAdminAccessRequired', {});
       }
       
       const { getPendingBonus } = await import('./services/bonus-approval.js');
@@ -329,7 +331,7 @@ const bonusApprovalResolvers = {
       const { getRedis } = await import('core-service');
       const redis = getRedis();
       if (!redis) {
-        throw new Error('Redis not available');
+        throw createServiceError('bonus', 'RedisNotAvailable', {});
       }
       
       const key = `pending:bonus:approval:${token}`;
@@ -363,7 +365,7 @@ const bonusApprovalResolvers = {
     ) => {
       requireAuth(context);
       if (!context.user!.roles?.includes('system') && !context.user!.roles?.includes('admin')) {
-        throw new Error('System or admin access required');
+        throw createServiceError('bonus', 'SystemOrAdminAccessRequired', {});
       }
       
       const { approvePendingBonus } = await import('./services/bonus-approval.js');
@@ -389,7 +391,7 @@ const bonusApprovalResolvers = {
     ) => {
       requireAuth(context);
       if (!context.user!.roles?.includes('system') && !context.user!.roles?.includes('admin')) {
-        throw new Error('System or admin access required');
+        throw createServiceError('bonus', 'SystemOrAdminAccessRequired', {});
       }
       
       const { rejectPendingBonus } = await import('./services/bonus-approval.js');

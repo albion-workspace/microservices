@@ -133,25 +133,26 @@ export async function graphql<T = any>(
     const data = await response.json()
     
     if (data.errors) {
-      const errorMessage = data.errors[0]?.message || 'GraphQL error'
-      const errorLower = errorMessage.toLowerCase()
+      const graphqlError = data.errors[0]
+      const errorMessage = graphqlError?.message || 'GraphQL error'
+      const errorExtensions = graphqlError?.extensions || {}
+      const errorCode = errorExtensions?.code || errorMessage
       
       // Distinguish between authentication errors and permission errors
+      // Use error code from extensions (CapitalCamelCase format)
       // Authentication errors: token invalid/expired/missing - should refresh
       // Permission errors: user authenticated but lacks permission - should NOT refresh
-      const isAuthError = errorLower.includes('authentication required') ||
-                         errorLower.includes('invalid token') ||
-                         errorLower.includes('token expired') ||
-                         errorLower.includes('token invalid') ||
-                         errorLower.includes('malformed token') ||
-                         (errorLower.includes('expired') && errorLower.includes('token'))
+      const isAuthError = errorCode.includes('AuthenticationRequired') ||
+                         errorCode.includes('InvalidToken') ||
+                         errorCode.includes('TokenExpired') ||
+                         errorCode.includes('TokenRequired')
       
       // Permission errors - user IS authenticated but lacks permission
-      // "Not authorized" means user is authenticated but lacks permission - DO NOT refresh!
-      const isPermissionError = errorLower.includes('not authorized') ||
-                                (errorLower.includes('unauthorized') && !errorLower.includes('authentication'))
+      const isPermissionError = errorCode.includes('PermissionDenied') ||
+                                errorCode.includes('InsufficientPermissions') ||
+                                errorCode.includes('SystemOrAdminAccessRequired')
       
-      console.error('GraphQL Errors:', data.errors)
+      console.error('GraphQL Errors:', data.errors, { code: errorCode, extensions: errorExtensions })
       
       // Only refresh on authentication errors, NOT permission errors, and only once
       if (isAuthError && !isPermissionError && retryOn401 && !isRetry && currentToken && tokenRefreshCallback) {
@@ -178,7 +179,12 @@ export async function graphql<T = any>(
       
       console.groupEnd()
       retryCountMap.delete(retryKey);
-      throw new Error(errorMessage)
+      const errorObj = new Error(errorMessage)
+      // Attach error code and extensions for i18n support
+      ;(errorObj as any).code = errorCode
+      ;(errorObj as any).extensions = errorExtensions
+      ;(errorObj as any).errors = data.errors
+      throw errorObj
     }
     
     // Success - clear retry count

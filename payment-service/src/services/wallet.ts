@@ -51,7 +51,7 @@
  *    - Consistent across all entities
  */
 
-import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, getDatabase, deleteCache, deleteCachePattern, logger, validateInput, findOneById, findOneAndUpdateById, requireAuth, getUserId, getTenantId, getOrCreateWallet, paginateCollection, extractDocumentId } from 'core-service';
+import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, getDatabase, deleteCache, deleteCachePattern, logger, validateInput, findOneById, findOneAndUpdateById, requireAuth, getUserId, getTenantId, getOrCreateWallet, paginateCollection, extractDocumentId, GraphQLError, createServiceError } from 'core-service';
 import type { Wallet, WalletCategory } from '../types.js';
 import { SYSTEM_CURRENCY } from '../constants.js';
 import { emitPaymentEvent } from '../event-dispatcher.js';
@@ -145,7 +145,7 @@ export const walletResolvers = {
       // Use authenticated user's ID if not provided (self-service)
       const userId = (input.userId as string) || ctx.user?.userId;
       if (!userId) {
-        throw new Error('userId is required');
+        throw createServiceError('payment', 'UserIdRequired', {});
       }
       
       // Build query
@@ -284,8 +284,11 @@ export const walletResolvers = {
           status: (wallet as any).status || 'active',
         };
       } catch (error) {
-        logger.error('Failed to get wallet balance', { error, userId, category });
-        throw new Error(`Failed to get wallet balance: ${error instanceof Error ? error.message : String(error)}`);
+        throw createServiceError('payment', 'FailedToGetWalletBalance', {
+          userId,
+          category,
+          originalError: error instanceof Error ? error.message : String(error),
+        });
       }
     },
     
@@ -334,8 +337,10 @@ export const walletResolvers = {
           balances,
         };
       } catch (error) {
-        logger.error('Failed to get user balances', { error, userId });
-        throw new Error(`Failed to get user balances: ${error instanceof Error ? error.message : String(error)}`);
+        throw createServiceError('payment', 'FailedToGetUserBalances', {
+          userId,
+          originalError: error instanceof Error ? error.message : String(error),
+        });
       }
     },
     
@@ -601,7 +606,11 @@ const walletSaga = [
       } as any);
       
       if (existing) {
-        throw new Error(`Wallet already exists for this user, currency (${input.currency}), and category (${category})`);
+        throw createServiceError('payment', 'WalletAlreadyExists', {
+          userId: input.userId,
+          currency: input.currency,
+          category,
+        });
       }
       return { ...ctx, input, data };
     },

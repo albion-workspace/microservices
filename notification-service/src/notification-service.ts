@@ -4,7 +4,7 @@
  * Manages all notification channels and providers
  */
 
-import { logger, getDatabase, updateOneById, generateMongoId } from 'core-service';
+import { logger, getDatabase, updateOneById, generateMongoId, createServiceError } from 'core-service';
 import type { 
   NotificationRequest, 
   NotificationResponse, 
@@ -13,7 +13,8 @@ import type {
   NotificationConfig,
 } from './types.js';
 import type { UnifiedRealtimeProvider } from './providers/realtime-interface.js';
-import { 
+import { NotificationProviderFactory } from './providers/provider-factory.js';
+import type { 
   EmailProvider, 
   SmsProvider, 
   WhatsAppProvider,
@@ -23,9 +24,9 @@ import {
 
 export class NotificationService {
   private providers: Map<NotificationChannel, NotificationProvider> = new Map();
-  private emailProvider: EmailProvider;
-  private smsProvider: SmsProvider;
-  private whatsappProvider: WhatsAppProvider;
+  private emailProvider?: EmailProvider;
+  private smsProvider?: SmsProvider;
+  private whatsappProvider?: WhatsAppProvider;
   private sseProvider: SseProvider;
   private socketProvider: SocketProvider;
   private gateway: { 
@@ -44,37 +45,25 @@ export class NotificationService {
   } | null = null;
   
   constructor(private config: NotificationConfig) {
-    // Initialize all providers
-    this.emailProvider = new EmailProvider(config);
-    this.smsProvider = new SmsProvider(config);
-    this.whatsappProvider = new WhatsAppProvider(config);
-    this.sseProvider = new SseProvider();
-    this.socketProvider = new SocketProvider(config);
+    // Use Factory Method pattern to create and register providers
+    // This eliminates repetitive if/else blocks and makes it easy to add new providers
+    this.providers = NotificationProviderFactory.createProviders(config);
     
-    // Register configured providers
-    // Always register SSE and Socket (they don't require external config)
-    this.providers.set('sse', this.sseProvider);
-    this.providers.set('socket', this.socketProvider);
+    // Store provider references for direct access (backward compatibility)
+    // These are already in the providers Map, but we keep references for convenience
+    // SSE and Socket are required providers, so they're always available
+    const sseProvider = this.providers.get('sse');
+    const socketProvider = this.providers.get('socket');
     
-    // Register other providers only if configured
-    if (this.emailProvider.isConfigured()) {
-      this.providers.set('email', this.emailProvider);
-      logger.info('Email provider registered (SMTP configured)');
-    } else {
-      logger.warn('Email provider not registered - SMTP not configured (set SMTP_HOST and SMTP_FROM env vars)');
-    }
-    if (this.smsProvider.isConfigured()) {
-      this.providers.set('sms', this.smsProvider);
-      logger.info('SMS provider registered (Twilio configured)');
-    }
-    if (this.whatsappProvider.isConfigured()) {
-      this.providers.set('whatsapp', this.whatsappProvider);
-      logger.info('WhatsApp provider registered (Twilio configured)');
+    if (!sseProvider || !socketProvider) {
+      throw createServiceError('notification', 'RequiredProvidersFailedToInitialize', {});
     }
     
-    logger.info('Notification service initialized', {
-      providers: Array.from(this.providers.keys()),
-    });
+    this.sseProvider = sseProvider as SseProvider;
+    this.socketProvider = socketProvider as SocketProvider;
+    this.emailProvider = this.providers.get('email') as EmailProvider | undefined;
+    this.smsProvider = this.providers.get('sms') as SmsProvider | undefined;
+    this.whatsappProvider = this.providers.get('whatsapp') as WhatsAppProvider | undefined;
   }
   
   /**
@@ -103,6 +92,7 @@ export class NotificationService {
   }): void {
     this.gateway = gateway;
     // Update providers with gateway reference
+    // SSE and Socket providers are always available (required providers)
     if (this.socketProvider.setGateway) {
       this.socketProvider.setGateway(gateway.broadcast, gateway.io);
     }
@@ -187,7 +177,7 @@ export class NotificationService {
       const provider = this.providers.get(channel);
       
       if (!provider) {
-        throw new Error(`Provider not configured for channel: ${channel}`);
+        throw createServiceError('notification', 'ProviderNotConfigured', { channel });
       }
       
       // Update request with normalized channel
@@ -238,7 +228,7 @@ export class NotificationService {
       return result;
       
     } catch (error: any) {
-      logger.error('Failed to send notification', {
+      throw createServiceError('notification', 'FailedToSendNotification', {
         error: error.message,
         originalChannel: request.channel,
         normalizedChannel: channel,

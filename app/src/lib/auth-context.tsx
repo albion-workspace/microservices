@@ -135,7 +135,9 @@ async function graphqlRequest(query: string, variables?: any, token?: string) {
     console.error('[Auth] GraphQL Error:', errorMessage, errorDetails);
     const error = new Error(errorMessage);
     // Set status from error extensions if available, otherwise infer from message
-    (error as any).status = errorCode || (errorMessage.toLowerCase().includes('authentication required') ? 401 : response.status);
+    // Use error code to determine status (CapitalCamelCase format)
+    const isAuthErrorCode = errorCode && (errorCode.includes('AuthenticationRequired') || errorCode.includes('InvalidToken') || errorCode.includes('TokenExpired'))
+    ;(error as any).status = errorCode || (isAuthErrorCode ? 401 : response.status);
     (error as any).errors = result.errors;
     throw error;
   }
@@ -405,24 +407,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             return;
           }
           
-          // Distinguish between auth errors and permission errors:
-          // - 401 = authentication failed (token invalid/expired) - TRY REFRESH, THEN CLEAR IF FAILS
-          // - "Not authorized" = permission error (user is authenticated but lacks permission) - KEEP AUTH
-          // - 403 = usually permission error, but could be auth - TREAT AS PERMISSION ERROR
-          // - "Authentication required" with 401 = auth error - TRY REFRESH
-          // - "Authentication required" without 401 = might be GraphQL error, try refresh first
+          // Distinguish between auth errors and permission errors using error codes
+          // Use error code from extensions if available (CapitalCamelCase format)
+          const errorCode = error.code || error.extensions?.code || error.message
           const isAuthError = isHttp401 || 
-                             (error.message?.toLowerCase().includes('token') && 
-                              (error.message?.toLowerCase().includes('expired') || 
-                               error.message?.toLowerCase().includes('invalid') ||
-                               error.message?.toLowerCase().includes('malformed'))) ||
-                             (error.message?.includes('Authentication required') && isHttp401) ||
-                             error.message?.includes('Invalid token');
+                             errorCode.includes('AuthenticationRequired') ||
+                             errorCode.includes('InvalidToken') ||
+                             errorCode.includes('TokenExpired') ||
+                             errorCode.includes('TokenRequired')
           
-          // "Not authorized" means user IS authenticated but lacks permission - don't clear auth!
-          const isPermissionError = error.message?.includes('Not authorized') ||
-                                   (error.message?.includes('Unauthorized') && !isHttp401) ||
-                                   isHttp403;
+          // Permission errors - user IS authenticated but lacks permission
+          const isPermissionError = errorCode.includes('PermissionDenied') ||
+                                   errorCode.includes('InsufficientPermissions') ||
+                                   errorCode.includes('SystemOrAdminAccessRequired') ||
+                                   isHttp403
           
           // Try refresh if it's an auth error (401 or token-related)
           if (isAuthError && !isPermissionError) {
@@ -446,7 +444,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               localStorage.removeItem('auth_token_expires_at');
               return;
             }
-          } else if (!isPermissionError && error.message?.includes('Authentication required')) {
+          } else if (!isPermissionError && (isHttp401 || errorCode.includes('AuthenticationRequired'))) {
             // "Authentication required" without 401 - might be expired token, try refresh
             console.log('[Auth] 🔄 "Authentication required" error detected, attempting token refresh...');
             const refreshed = await tryRefreshToken(refreshToken);
@@ -865,18 +863,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
       
       console.warn('[Auth] ⚠️ Token refresh failed via callback:', result?.message);
-      // If refresh failed, check if refresh token might be expired
-      const errorMessage = result?.message?.toLowerCase() || '';
-      if (errorMessage.includes('expired') || errorMessage.includes('invalid') || errorMessage.includes('refresh')) {
+      // If refresh failed, check if refresh token might be expired using error code
+      const errorCode = result?.extensions?.code || result?.message || '';
+      if (errorCode.includes('TokenExpired') || errorCode.includes('InvalidToken') || errorCode.includes('RefreshToken')) {
         console.warn('[Auth] ❌ Refresh token appears to be expired, clearing auth');
         clearAuth();
       }
       return null;
     } catch (error: any) {
       console.error('[Auth] ❌ Token refresh error via callback:', error.message);
-      // Check if error indicates refresh token is expired
-      const errorMessage = error.message?.toLowerCase() || '';
-      if (errorMessage.includes('expired') || errorMessage.includes('invalid') || errorMessage.includes('refresh')) {
+      // Check if error indicates refresh token is expired using error code
+      const errorCode = error.code || error.extensions?.code || error.message || '';
+      if (errorCode.includes('TokenExpired') || errorCode.includes('InvalidToken') || errorCode.includes('RefreshToken')) {
         console.warn('[Auth] ❌ Refresh token appears to be expired, clearing auth');
         clearAuth();
       }
@@ -941,9 +939,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       console.log('[Auth] 🔄 Proactively refreshing token (expires soon)');
       refreshTokenFn().catch((error) => {
         console.warn('[Auth] ⚠️ Proactive token refresh failed:', error.message);
-        // If refresh fails, check if refresh token might be expired
-        const errorMessage = error.message?.toLowerCase() || '';
-        if (errorMessage.includes('expired') || errorMessage.includes('invalid') || errorMessage.includes('refresh')) {
+        // If refresh fails, check if refresh token might be expired using error code
+        const errorCode = error.code || error.extensions?.code || error.message || '';
+        if (errorCode.includes('TokenExpired') || errorCode.includes('InvalidToken') || errorCode.includes('RefreshToken')) {
           console.warn('[Auth] ❌ Refresh token appears to be expired during proactive refresh, clearing auth');
           clearAuth();
         }
@@ -957,9 +955,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         scheduledRefreshRef.current = null;
         refreshTokenFn().catch((error) => {
           console.warn('[Auth] ⚠️ Scheduled token refresh failed:', error.message);
-          // If refresh fails, check if refresh token might be expired
-          const errorMessage = error.message?.toLowerCase() || '';
-          if (errorMessage.includes('expired') || errorMessage.includes('invalid') || errorMessage.includes('refresh')) {
+          // If refresh fails, check if refresh token might be expired using error code
+          const errorCode = error.code || error.extensions?.code || error.message || '';
+          if (errorCode.includes('TokenExpired') || errorCode.includes('InvalidToken') || errorCode.includes('RefreshToken')) {
             console.warn('[Auth] ❌ Refresh token appears to be expired during scheduled refresh, clearing auth');
             clearAuth();
           }

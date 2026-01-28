@@ -5,7 +5,7 @@
  * Socket.IO server is automatically created by createGateway() with enableSocketIO: true
  */
 
-import { logger, emit, generateId } from 'core-service';
+import { logger, emit, generateId, createServiceError } from 'core-service';
 import type { NotificationProvider, SocketNotification, NotificationResponse, NotificationConfig } from '../types.js';
 import type { SocketIOBroadcast, UnifiedRealtimeProvider, SocketIOFeatures } from './realtime-interface.js';
 
@@ -214,16 +214,9 @@ export class SocketProvider implements NotificationProvider, UnifiedRealtimeProv
         sentAt: new Date(),
       };
     } catch (error: any) {
-      logger.error('Failed to send Socket notification', {
+      throw createServiceError('notification', 'FailedToSendSocketNotification', {
         error: error.message,
       });
-      
-      return {
-        id: generateId(),
-        status: 'failed',
-        channel: 'socket',
-        error: error.message,
-      };
     }
   }
   

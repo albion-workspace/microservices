@@ -51,6 +51,8 @@ import { connectDatabase, checkDatabaseHealth } from '../common/database.js';
 import { connectRedis, checkRedisHealth, getRedis } from '../common/redis.js';
 import { getCacheStats } from '../common/cache.js';
 import { logger, subscribeToLogs, type LogEntry, setCorrelationId, generateCorrelationId, getCorrelationId } from '../common/logger.js';
+import { createResolverBuilder, type ServiceResolvers } from '../common/resolver-builder.js';
+import { formatGraphQLError } from '../common/graphql-error.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -457,16 +459,24 @@ function buildSchema(
       const subFn = subscriptionConfig[fieldName];
       if (subFn) {
         fieldConfig.subscribe = async function* (_root: unknown, args: unknown, ctx: GatewayContext) {
-          // Health and logs subscriptions are always allowed
-          if (fieldName !== 'health' && fieldName !== 'logs') {
-            const result = await checkPermission('Subscription', fieldName, ctx.user, args as Record<string, unknown> || {});
-            if (!result.allowed) {
-              throw new Error(`Not authorized: Subscription.${fieldName}`);
+          try {
+            // Health and logs subscriptions are always allowed
+            if (fieldName !== 'health' && fieldName !== 'logs') {
+              const result = await checkPermission('Subscription', fieldName, ctx.user, args as Record<string, unknown> || {});
+              if (!result.allowed) {
+                throw new Error(`Not authorized: Subscription.${fieldName}`);
+              }
             }
-          }
-          const generator = subFn(args as Record<string, unknown>, ctx);
-          for await (const value of generator) {
-            yield { [fieldName]: value };
+            const generator = subFn(args as Record<string, unknown>, ctx);
+            for await (const value of generator) {
+              yield { [fieldName]: value };
+            }
+          } catch (error) {
+            // Format error for GraphQL response (auto-logged in GraphQLError constructor)
+            throw formatGraphQLError(error, {
+              correlationId: getCorrelationId(),
+              userId: ctx.user?.userId,
+            });
           }
         };
         fieldConfig.resolve = (payload: Record<string, unknown>) => payload[fieldName];
@@ -479,32 +489,40 @@ function buildSchema(
       // Query and Mutation use resolve
       // Note: args and info use any due to GraphQL's dynamic nature
       fieldConfig.resolve = async (_root: unknown, args: any, ctx: GatewayContext, info: any) => {
-        // Use resolver if available
-        if (resolvers[fieldName]) {
-          // Check if mutation uses input wrapper or direct arguments
-          // Some mutations like testWebhook(id: ID!) use direct args, not input wrapper
-          // Some mutations like updateWebhook(id: ID!, input: UpdateWebhookInput!) have both id and input
-          const hasInputArg = opType === 'Mutation' && args.input !== undefined;
-          const checkArgs = hasInputArg 
-            ? (args.input as Record<string, unknown> || {})
-            : (args || {});
-          const result = await checkPermission(opType, fieldName, ctx.user || null, checkArgs);
-          if (!result.allowed) {
-            throw new Error(`Not authorized: ${opType}.${fieldName}`);
+        try {
+          // Use resolver if available
+          if (resolvers[fieldName]) {
+            // Check if mutation uses input wrapper or direct arguments
+            // Some mutations like testWebhook(id: ID!) use direct args, not input wrapper
+            // Some mutations like updateWebhook(id: ID!, input: UpdateWebhookInput!) have both id and input
+            const hasInputArg = opType === 'Mutation' && args.input !== undefined;
+            const checkArgs = hasInputArg 
+              ? (args.input as Record<string, unknown> || {})
+              : (args || {});
+            const result = await checkPermission(opType, fieldName, ctx.user || null, checkArgs);
+            if (!result.allowed) {
+              throw new Error(`Not authorized: ${opType}.${fieldName}`);
+            }
+            // Mutations with input wrapper: pass all args (including id if present)
+            // Mutations with direct args (like testWebhook, deleteWebhook): pass args directly
+            if (opType === 'Mutation' && hasInputArg) {
+              // Preserve all args (id, input, etc.) for mutations like updateWebhook
+              return await resolvers[fieldName](args, ctx);
+            }
+            return await resolvers[fieldName](checkArgs, ctx);
           }
-          // Mutations with input wrapper: pass all args (including id if present)
-          // Mutations with direct args (like testWebhook, deleteWebhook): pass args directly
-          if (opType === 'Mutation' && hasInputArg) {
-            // Preserve all args (id, input, etc.) for mutations like updateWebhook
-            return resolvers[fieldName](args, ctx);
+          // Fallback to field's resolver
+          if (field.resolve) {
+            return await field.resolve(_root, args, ctx, info);
           }
-          return resolvers[fieldName](checkArgs, ctx);
+          throw new Error(`No resolver for ${opType}.${fieldName}`);
+        } catch (error) {
+          // Format error for GraphQL response (auto-logged in GraphQLError constructor)
+          throw formatGraphQLError(error, {
+            correlationId: getCorrelationId(),
+            userId: ctx.user?.userId,
+          });
         }
-        // Fallback to field's resolver
-        if (field.resolve) {
-          return field.resolve(_root, args, ctx, info);
-        }
-        throw new Error(`No resolver for ${opType}.${fieldName}`);
       };
     }
 
@@ -700,9 +718,9 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
 
   const checkPermission = createPermissionMiddleware(permissions, defaultPermission);
 
-  // Merge resolvers from all services
-  const resolvers: Record<string, (args: Record<string, unknown>, ctx: ResolverContext) => unknown> = {
-    health: async () => {
+  // Build resolvers using Builder pattern (simplifies merging and construction)
+  const resolverBuilder = createResolverBuilder()
+    .addQuery('health', async () => {
       const dbHealth = await checkDatabaseHealth();
       const redis = getRedis();
       return { 
@@ -713,26 +731,21 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
         redis: { connected: redis !== null },
         cache: getCacheStats(),
       };
-    },
-  };
+    });
 
-  /**
-   * Helper function to merge resolvers from services
-   */
-  function mergeResolvers(
-    sourceResolvers: Record<string, any> | undefined,
-    targetResolvers: Record<string, any>
-  ): void {
-    if (!sourceResolvers) return;
-    for (const [key, resolver] of Object.entries(sourceResolvers)) {
-      targetResolvers[key] = resolver;
-    }
-  }
-
+  // Add resolvers from all services
   for (const svc of services) {
-    mergeResolvers(svc.resolvers.Query, resolvers);
-    mergeResolvers(svc.resolvers.Mutation, resolvers);
+    resolverBuilder.addService(svc.resolvers as ServiceResolvers);
   }
+
+  // Build resolver object
+  const builtResolvers = resolverBuilder.build();
+  
+  // Convert to format expected by buildSchema (flat object)
+  const resolvers: Record<string, (args: Record<string, unknown>, ctx: ResolverContext) => unknown> = {
+    ...builtResolvers.Query,
+    ...builtResolvers.Mutation,
+  };
 
   // All subscriptions
   const allSubscriptions: SubscriptionConfig = {

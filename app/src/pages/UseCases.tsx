@@ -223,9 +223,6 @@ export default function UseCases() {
   const { data: systemUsers = [] } = systemUsersQuery
   const { data: providerUsers = [] } = providerUsersQuery
   const { data: regularUsers = [] } = regularUsersQuery
-  
-  // Combine all users into a single array
-  const allUsers = [...systemUsers, ...providerUsers, ...regularUsers]
 
   // Complete Payment Flow Use Case
   const paymentFlowMutation = useMutation({

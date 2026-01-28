@@ -16,7 +16,7 @@
  * - Exchange rates are cached for 5 minutes to reduce API calls
  */
 
-import { getDatabase, logger, CircuitBreaker } from 'core-service';
+import { getDatabase, logger, CircuitBreaker, createServiceError } from 'core-service';
 import { SYSTEM_CURRENCY } from '../constants.js';
 
 export interface ExchangeRate {
@@ -137,11 +137,12 @@ export async function getExchangeRate(
     }
     
     // Last resort: throw error (don't guess exchange rates!)
-    throw new Error(
-      `Exchange rate not available for ${fromCurrency} to ${toCurrency}. ` +
-      `Please configure manual rate or ensure exchange rate API is available. ` +
-      `Circuit breaker state: ${circuitBreakerState}`
-    );
+    throw createServiceError('payment', 'ExchangeRateNotAvailable', {
+      fromCurrency,
+      toCurrency,
+      circuitBreakerState,
+      reason: 'Please configure manual rate or ensure exchange rate API is available',
+    });
   }
 }
 
@@ -255,7 +256,11 @@ async function fetchExchangeRateFromAPI(
     return mockRates[fromCurrency][toCurrency];
   }
   
-  throw new Error(`Mock exchange rate not available for ${fromCurrency} to ${toCurrency}`);
+  throw createServiceError('payment', 'ExchangeRateNotAvailable', {
+    fromCurrency,
+    toCurrency,
+    reason: 'Mock exchange rate not available',
+  });
 }
 
 /**

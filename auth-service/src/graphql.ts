@@ -17,6 +17,8 @@ import {
   getRedis,
   scanKeysIterator,
   createPendingOperationStore,
+  GraphQLError,
+  createServiceError,
   type CursorPaginationOptions,
   type CursorPaginationResult,
 } from 'core-service';
@@ -434,7 +436,10 @@ export function createAuthResolvers(
             requestedUserId,
             isOwnProfile
           });
-          throw new Error('Unauthorized: Insufficient permissions to read user');
+          throw createServiceError('auth', 'InsufficientPermissions', { 
+            action: 'read user',
+            requestedUserId 
+          });
         }
         
         const db = getDatabase();
@@ -442,11 +447,11 @@ export function createAuthResolvers(
         const tenantId = (args as any).tenantId;
         
         if (!userId) {
-          throw new Error('User ID is required');
+          throw createServiceError('auth', 'UserIdRequired', {});
         }
         
         if (!tenantId) {
-          throw new Error('Tenant ID is required');
+          throw createServiceError('auth', 'TenantIdRequired', {});
         }
         
         // Use generic helper function for document lookup with automatic ObjectId handling
@@ -470,7 +475,9 @@ export function createAuthResolvers(
         // Check permissions: system or user:list permission
         if (!checkSystemOrPermission(ctx.user, 'user', 'list', '*')) {
           logger.warn('Unauthorized users query attempt', { userId: ctx.user!.userId });
-          throw new Error('Unauthorized: Insufficient permissions to list users');
+          throw createServiceError('auth', 'InsufficientPermissions', { 
+            action: 'list users' 
+          });
         }
         
         const db = getDatabase();
@@ -512,8 +519,10 @@ export function createAuthResolvers(
             pageInfo: result.pageInfo,
           };
         } catch (error) {
-          logger.error('Error fetching users', { error, tenantId });
-          throw new Error('Failed to fetch users');
+          throw createServiceError('auth', 'FailedToFetchUsers', { 
+            tenantId,
+            originalError: error instanceof Error ? error.message : String(error),
+          });
         }
       },
       
@@ -530,14 +539,16 @@ export function createAuthResolvers(
             userId: ctx.user!.userId,
             requestedRole: (args as any).role 
           });
-          throw new Error('Unauthorized: Insufficient permissions to list users by role');
+          throw createServiceError('auth', 'InsufficientPermissions', { 
+            action: 'list users by role' 
+          });
         }
         
         const db = getDatabase();
         const { role, tenantId, first, after, last, before } = args as any;
         
         if (!role || typeof role !== 'string') {
-          throw new Error('Role parameter is required and must be a string');
+          throw createServiceError('auth', 'RoleRequired', {});
         }
         
         const finalTenantId = tenantId || 'default-tenant';
@@ -587,8 +598,11 @@ export function createAuthResolvers(
             pageInfo: result.pageInfo,
           };
         } catch (error) {
-          logger.error('Error fetching users by role', { error, role, tenantId: finalTenantId });
-          throw new Error('Failed to fetch users by role');
+          throw createServiceError('auth', 'FailedToFetchUsersByRole', { 
+            role,
+            tenantId: finalTenantId,
+            originalError: error instanceof Error ? error.message : String(error),
+          });
         }
       },
       
@@ -844,22 +858,24 @@ export function createAuthResolvers(
             userId: ctx.user!.userId,
             targetUserId
           });
-          throw new Error('Unauthorized: Insufficient permissions to update user roles');
+          throw createServiceError('auth', 'InsufficientPermissions', { 
+            action: 'update user roles' 
+          });
         }
         
         const db = getDatabase();
         const { userId, tenantId, roles } = (args as any).input;
         
         if (!userId) {
-          throw new Error('User ID is required');
+          throw createServiceError('auth', 'UserIdRequired', {});
         }
         
         if (!tenantId) {
-          throw new Error('Tenant ID is required');
+          throw createServiceError('auth', 'TenantIdRequired', {});
         }
         
         if (!Array.isArray(roles)) {
-          throw new Error('Roles must be an array');
+          throw createServiceError('auth', 'RolesMustBeArray', {});
         }
         
         try {
@@ -879,7 +895,7 @@ export function createAuthResolvers(
           
           if (!result || !result.value) {
             logger.warn('User not found for role update', { userId, tenantId });
-            throw new Error('User not found');
+            throw createServiceError('auth', 'UserNotFound', { userId, tenantId });
           }
           
           logger.info('User roles updated', { 
@@ -891,8 +907,11 @@ export function createAuthResolvers(
           
           return normalizeUser(result.value);
         } catch (error) {
-          logger.error('Error updating user roles', { error, userId, tenantId });
-          throw error instanceof Error ? error : new Error('Failed to update user roles');
+          throw createServiceError('auth', 'FailedToUpdateUserRoles', { 
+            userId,
+            tenantId,
+            originalError: error instanceof Error ? error.message : String(error),
+          });
         }
       },
       
@@ -910,22 +929,24 @@ export function createAuthResolvers(
             userId: ctx.user!.userId,
             targetUserId
           });
-          throw new Error('Unauthorized: Insufficient permissions to update user permissions');
+          throw createServiceError('auth', 'InsufficientPermissions', { 
+            action: 'update user permissions' 
+          });
         }
         
         const db = getDatabase();
         const { userId, tenantId, permissions } = (args as any).input;
         
         if (!userId) {
-          throw new Error('User ID is required');
+          throw createServiceError('auth', 'UserIdRequired', {});
         }
         
         if (!tenantId) {
-          throw new Error('Tenant ID is required');
+          throw createServiceError('auth', 'TenantIdRequired', {});
         }
         
         if (!Array.isArray(permissions)) {
-          throw new Error('Permissions must be an array');
+          throw createServiceError('auth', 'PermissionsMustBeArray', {});
         }
         
         try {
@@ -945,7 +966,7 @@ export function createAuthResolvers(
           
           if (!result) {
             logger.warn('User not found for permission update', { userId, tenantId });
-            throw new Error('User not found');
+            throw createServiceError('auth', 'UserNotFound', { userId, tenantId });
           }
           
           logger.info('User permissions updated', { 
@@ -957,8 +978,11 @@ export function createAuthResolvers(
           
           return normalizeUser(result);
         } catch (error) {
-          logger.error('Error updating user permissions', { error, userId, tenantId });
-          throw error instanceof Error ? error : new Error('Failed to update user permissions');
+          throw createServiceError('auth', 'FailedToUpdateUserPermissions', { 
+            userId,
+            tenantId,
+            originalError: error instanceof Error ? error.message : String(error),
+          });
         }
       },
       
@@ -1016,7 +1040,7 @@ export function createAuthResolvers(
           
           if (!result) {
             logger.warn('User not found for status update', { userId, tenantId });
-            throw new Error('User not found');
+            throw createServiceError('auth', 'UserNotFound', { userId, tenantId });
           }
           
           logger.info('User status updated', { 
@@ -1028,8 +1052,12 @@ export function createAuthResolvers(
           
           return normalizeUser(result);
         } catch (error) {
-          logger.error('Error updating user status', { error, userId, tenantId, status });
-          throw error instanceof Error ? error : new Error('Failed to update user status');
+          throw createServiceError('auth', 'FailedToUpdateUserStatus', { 
+            userId,
+            tenantId,
+            status,
+            originalError: error instanceof Error ? error.message : String(error),
+          });
         }
       },
       
@@ -1184,7 +1212,7 @@ export function createAuthResolvers(
         const operationType = (args as any).operationType as string | undefined;
         
         if (!token) {
-          throw new Error('Token is required');
+          throw createServiceError('auth', 'TokenRequired', {});
         }
         
         const jwtSecret = authConfig?.jwtSecret || 
@@ -1297,7 +1325,6 @@ export function createAuthResolvers(
             }
           }
         } catch (error) {
-          logger.error('Error scanning Redis for operation types', { error });
           return [];
         }
         
@@ -1316,7 +1343,7 @@ export function createAuthResolvers(
         const isAdmin = user.roles?.includes('system') || user.roles?.includes('admin');
         
         if (!isAdmin) {
-          throw new Error('System or admin access required');
+          throw createServiceError('auth', 'SystemOrAdminAccessRequired', {});
         }
         
         const originalToken = args.token as string;
@@ -1325,7 +1352,7 @@ export function createAuthResolvers(
         
         const redis = getRedis();
         if (!redis) {
-          throw new Error('Redis not available');
+          throw createServiceError('auth', 'RedisNotAvailable', {});
         }
         
         // Determine if this is an approval operation

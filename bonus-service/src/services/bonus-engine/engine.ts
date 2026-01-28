@@ -26,7 +26,7 @@ import type {
   ActivityEvent,
   WithdrawalEvent,
 } from './types.js';
-import { handlerRegistry, getHandler, createHandler } from './handler-registry.js';
+import { handlerRegistry, getHandler } from './handler-registry.js';
 import { validatorChain } from './validators.js';
 import { 
   templatePersistence, 
