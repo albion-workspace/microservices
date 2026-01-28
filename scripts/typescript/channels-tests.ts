@@ -13,17 +13,26 @@
 
 import http from 'node:http';
 import { createHmac } from 'node:crypto';
-import { loginAs, users, createJWT, createSystemToken, createTokenForUser, decodeJWT } from './config/users.js';
+import { loginAs, users, createJWT, createSystemToken, createTokenForUser, decodeJWT, initializeConfig } from './config/users.js';
+import { 
+  AUTH_SERVICE_URL, 
+  PAYMENT_SERVICE_URL, 
+  BONUS_SERVICE_URL, 
+  NOTIFICATION_SERVICE_URL,
+  loadScriptConfig,
+} from './config/scripts.js';
 
 // ═══════════════════════════════════════════════════════════════════
-// Configuration
+// Configuration (loaded dynamically from MongoDB config store)
 // ═══════════════════════════════════════════════════════════════════
 
-const CONFIG = {
-  notificationServiceUrl: process.env.NOTIFICATION_URL || 'http://localhost:3006',
-  bonusServiceUrl: process.env.BONUS_URL || 'http://localhost:3005/graphql',
-  paymentServiceUrl: process.env.PAYMENT_URL || 'http://localhost:3004/graphql',
-  authServiceUrl: process.env.AUTH_URL || 'http://localhost:3003/graphql',
+// Note: Service URLs are loaded from scripts.ts (single source of truth)
+// These will be initialized in runAllTests() before use
+let CONFIG = {
+  notificationServiceUrl: NOTIFICATION_SERVICE_URL.replace('/graphql', ''),
+  bonusServiceUrl: BONUS_SERVICE_URL,
+  paymentServiceUrl: PAYMENT_SERVICE_URL,
+  authServiceUrl: AUTH_SERVICE_URL,
   webhookReceiverPort: 9999,
   webhookSecret: 'test-webhook-secret-12345',
   // All services use the same shared JWT secret
@@ -1283,6 +1292,17 @@ async function testWebhooks(): Promise<void> {
 // ═══════════════════════════════════════════════════════════════════
 
 async function runAllTests() {
+  // Initialize configuration from MongoDB config store
+  // This ensures service URLs are loaded from scripts.ts (single source of truth)
+  await initializeConfig();
+  await loadScriptConfig();
+  
+  // Update CONFIG with dynamically loaded URLs
+  CONFIG.notificationServiceUrl = NOTIFICATION_SERVICE_URL.replace('/graphql', '');
+  CONFIG.bonusServiceUrl = BONUS_SERVICE_URL;
+  CONFIG.paymentServiceUrl = PAYMENT_SERVICE_URL;
+  CONFIG.authServiceUrl = AUTH_SERVICE_URL;
+  
   console.log('═'.repeat(60));
   console.log('  Real-Time Communication Channels Test Suite');
   console.log('═'.repeat(60));
@@ -1290,6 +1310,12 @@ async function runAllTests() {
   console.log('  • Server-Sent Events (SSE)');
   console.log('  • Socket.IO (polling & websocket transport)');
   console.log('  • Webhooks (HTTP callbacks)');
+  console.log('═'.repeat(60));
+  console.log('\nService URLs (from config store):');
+  console.log(`  Auth: ${CONFIG.authServiceUrl}`);
+  console.log(`  Payment: ${CONFIG.paymentServiceUrl}`);
+  console.log(`  Bonus: ${CONFIG.bonusServiceUrl}`);
+  console.log(`  Notification: ${CONFIG.notificationServiceUrl}`);
   console.log('═'.repeat(60));
 
   try {

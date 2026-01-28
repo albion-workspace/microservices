@@ -5,19 +5,29 @@
  * - JSON files (local or remote URL)
  * - Environment variables (for k8s/docker)
  * - API endpoints (for dynamic config)
+ * - MongoDB config store (dynamic, permission-aware)
  * - Hierarchical config (base + brand-specific overrides)
  * 
  * Best Practice: Use single source of truth per deployment
  * - Development: JSON file
  * - Docker: Environment variables
  * - Kubernetes: ConfigMap/Secrets (via env vars)
- * - Production: API endpoint or JSON file
+ * - Production: MongoDB config store (dynamic, multi-brand)
+ * 
+ * Priority order (lowest to highest):
+ * 1. Base config file
+ * 2. Brand-specific config file
+ * 3. Environment-specific config file
+ * 4. MongoDB config store (if configStore provided)
+ * 5. Remote config URL/API
+ * 6. Environment variables (highest priority - overrides everything)
  */
 
 import { readFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import { logger } from './logger.js';
 import path from 'path';
+import type { ConfigStore } from './config-store.js';
 
 export interface ConfigLoaderOptions {
   /** Service name (e.g., 'auth-service', 'payment-service') */
@@ -26,9 +36,13 @@ export interface ConfigLoaderOptions {
   configFile?: string;
   /** Remote config URL (API endpoint or JSON file URL) */
   configUrl?: string;
+  /** MongoDB config store instance (for dynamic config) */
+  configStore?: ConfigStore;
+  /** Tenant ID for tenant-specific configs */
+  tenantId?: string;
   /** Brand identifier for brand-specific configs */
   brand?: string;
-  /** Environment (development, staging, production) */
+  /** Environment (development, staging, production) - Note: handled via database selection, not field */
   environment?: string;
   /** Whether to use environment variables (default: true) */
   useEnvVars?: boolean;
@@ -50,8 +64,9 @@ export interface ConfigSource {
  * 1. Base config file
  * 2. Brand-specific config file
  * 3. Environment-specific config file
- * 4. Remote config URL/API
- * 5. Environment variables (highest priority - overrides everything)
+ * 4. MongoDB config store (if configStore provided)
+ * 5. Remote config URL/API
+ * 6. Environment variables (highest priority - overrides everything)
  * 
  * @example
  * // Development: Load from JSON file
@@ -70,12 +85,24 @@ export interface ConfigSource {
  * });
  * 
  * @example
- * // Production: Load from API endpoint
+ * // Production: Load from MongoDB config store (dynamic, multi-brand)
+ * const configStore = createConfigStore();
  * const config = await loadConfig({
  *   serviceName: 'auth-service',
- *   configUrl: 'https://config-api.example.com/config/auth-service',
+ *   configStore,
  *   brand: process.env.BRAND_ID,
- *   environment: 'production',
+ *   tenantId: process.env.TENANT_ID,
+ * });
+ * 
+ * @example
+ * // Hybrid: MongoDB + env vars (env vars override MongoDB)
+ * const configStore = createConfigStore();
+ * const config = await loadConfig({
+ *   serviceName: 'auth-service',
+ *   configStore,
+ *   configFile: './config/default.json', // Fallback
+ *   useEnvVars: true, // Env vars override everything
+ *   brand: process.env.BRAND_ID,
  * });
  */
 export async function loadConfig<T = Record<string, unknown>>(
@@ -85,6 +112,8 @@ export async function loadConfig<T = Record<string, unknown>>(
     serviceName,
     configFile,
     configUrl,
+    configStore,
+    tenantId,
     brand,
     environment = process.env.NODE_ENV || 'development',
     useEnvVars = true,
@@ -146,7 +175,29 @@ export async function loadConfig<T = Record<string, unknown>>(
     }
   }
 
-  // 4. Load remote config (API or URL)
+  // 4. Load from MongoDB config store (if provided)
+  // Note: Environment is handled via database selection, not field
+  if (configStore) {
+    try {
+      const dbConfig = await configStore.getAll(serviceName, {
+        brand,
+        tenantId,
+        includeSensitive: true, // Service can access its own sensitive configs
+      });
+      mergedConfig = { ...mergedConfig, ...dbConfig };
+      logger.debug('Loaded MongoDB config store', { serviceName, brand, tenantId });
+    } catch (error: any) {
+      logger.warn('Failed to load MongoDB config store', { 
+        serviceName, 
+        brand, 
+        tenantId,
+        error: error.message 
+      });
+      // Don't throw - allow fallback to other sources
+    }
+  }
+
+  // 5. Load remote config (API or URL)
   if (configUrl) {
     try {
       const remoteConfig = await loadConfigFromUrl(configUrl);
@@ -162,7 +213,7 @@ export async function loadConfig<T = Record<string, unknown>>(
     }
   }
 
-  // 5. Override with environment variables (highest priority)
+  // 6. Override with environment variables (highest priority)
   if (useEnvVars) {
     const envConfig = loadConfigFromEnv(serviceName);
     mergedConfig = { ...mergedConfig, ...envConfig };

@@ -28,6 +28,11 @@ import {
   extractDocumentId,
   GraphQLError,
   registerServiceErrorCodes,
+  registerServiceConfigDefaults,
+  ensureDefaultConfigsCreated,
+  resolveContext,
+  initializeServiceDatabase,
+  initializeWebhooks,
   // Webhooks - plug-and-play service
   createWebhookService,
   findOneById,
@@ -37,6 +42,8 @@ import {
   findUserIdByRole,
   type IntegrationEvent,
   type ResolverContext,
+  type DatabaseStrategyResolver,
+  type DatabaseContext,
 } from 'core-service';
 // Ledger service imports removed - wallets are updated atomically via createTransferWithTransactions
 import { createTransferWithTransactions } from 'core-service';
@@ -45,11 +52,14 @@ import { createTransferWithTransactions } from 'core-service';
 import {
   paymentWebhooks,
   emitPaymentEvent,
-  initializePaymentWebhooks,
   cleanupPaymentWebhookDeliveries,
   type PaymentWebhookEvents,
 } from './event-dispatcher.js';
 import { PAYMENT_ERROR_CODES, PAYMENT_ERRORS } from './error-codes.js';
+
+// Import configuration
+import { loadConfig, validateConfig, printConfigSummary, type PaymentConfig } from './config.js';
+import { PAYMENT_CONFIG_DEFAULTS } from './config-defaults.js';
 
 // Re-export for consumers
 export { emitPaymentEvent, type PaymentWebhookEvents };
@@ -133,16 +143,27 @@ async function getSystemUserId(tenantId?: string): Promise<string> {
 }
 
 
-const config = {
-  name: 'payment-service',
-  port: parseInt(process.env.PORT || '3002'),
-  cors: {
-    origins: ['http://localhost:5173', 'http://localhost:3000', 'http://127.0.0.1:5173'],
-  },
-  jwt: {
-    secret: process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || 'shared-jwt-secret-change-in-production',
-    expiresIn: '8h',
-  },
+// Configuration will be loaded asynchronously in main()
+let paymentConfig: PaymentConfig | null = null;
+
+// Gateway config (will be built from paymentConfig)
+const buildGatewayConfig = (): Parameters<typeof createGateway>[0] => {
+  if (!paymentConfig) {
+    throw new Error('Configuration not loaded yet');
+  }
+  
+  const config = paymentConfig; // Type narrowing helper
+  
+  return {
+    name: 'payment-service',
+    port: config.port,
+    cors: {
+      origins: paymentConfig.corsOrigins,
+    },
+    jwt: {
+      secret: paymentConfig.jwtSecret,
+      expiresIn: paymentConfig.jwtExpiresIn,
+    },
   services: [
     // Register transfer service FIRST so Transfer type is available for deposit/withdrawal results
     { name: 'transfer', types: transferService.types, resolvers: transferService.resolvers },
@@ -305,7 +326,7 @@ const config = {
           description: (parent: any) => parent.description || parent.meta?.description || null,
           metadata: (parent: any) => parent.metadata || parent.meta || null,
         },
-      }
+      } as any // Field resolvers are valid but not in ServiceResolvers type
     },
     // Webhooks - just plug it in!
     webhookService,
@@ -372,11 +393,12 @@ const config = {
       testWebhook: hasRole('system'),
     },
   },
-  // Note: When connecting from localhost, directConnection=true prevents replica set member discovery
-  mongoUri: process.env.MONGO_URI || 'mongodb://localhost:27017/payment_service?directConnection=true',
-  // Redis password: default is redis123 (from Docker container), can be overridden via REDIS_PASSWORD env var
-  redisUrl: process.env.REDIS_URL || `redis://:${process.env.REDIS_PASSWORD || 'redis123'}@localhost:6379`,
-  defaultPermission: 'deny' as const, // Secure default
+    // Note: When connecting from localhost, directConnection=true prevents replica set member discovery
+    mongoUri: config.mongoUri,
+    // Redis password: default is redis123 (from Docker container), can be overridden via REDIS_PASSWORD env var
+    redisUrl: config.redisUrl,
+    defaultPermission: 'deny' as const, // Secure default
+  };
 };
 
 
@@ -476,6 +498,7 @@ function setupBonusEventHandlers() {
       // Create transfer: system (bonus) -> user (bonus)
       // Uses system user's bonusBalance as the bonus pool
       try {
+        const db = getDatabase();
         const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
           fromUserId: systemUserId,
           toUserId: userId,
@@ -492,7 +515,7 @@ function setupBonusEventHandlers() {
           bonusType: event.data.type,
           fromBalanceType: 'bonus',  // Debit from system user's bonusBalance (bonus pool)
           toBalanceType: 'bonus',    // Credit to user bonus balance
-        });
+        }, { database: db });
         
         logger.info('Bonus awarded via transfer', {
           transferId: transfer.id,
@@ -563,6 +586,7 @@ function setupBonusEventHandlers() {
       
       // Create transfer: user (bonus) -> user (real) - same user, different balance types
       try {
+        const db = getDatabase();
         const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
           fromUserId: event.userId!,
           toUserId: event.userId!,  // Same user
@@ -578,7 +602,7 @@ function setupBonusEventHandlers() {
           objectId: event.data.bonusId,  // Transactions reference bonus, not transfer
           objectModel: 'bonus',
           bonusId: event.data.bonusId,
-        });
+        }, { database: db });
         
         logger.info('Bonus converted via transfer', {
           transferId: transfer.id,
@@ -638,6 +662,7 @@ function setupBonusEventHandlers() {
       // Create transfer: user (bonus) -> system (bonus)
       // Returns forfeited bonus to system user's bonusBalance (bonus pool)
       try {
+        const db = getDatabase();
         const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
           fromUserId: event.userId!,
           toUserId: systemUserId,
@@ -654,7 +679,7 @@ function setupBonusEventHandlers() {
           objectModel: 'bonus',
           bonusId: event.data.bonusId,
           reason: event.data.reason,
-        });
+        }, { database: db });
         
         logger.info('Bonus forfeited via transfer', {
           transferId: transfer.id,
@@ -711,6 +736,7 @@ function setupBonusEventHandlers() {
       
       // Create transfer: user (bonus) -> system (bonus)
       // Returns expired bonus to system user's bonusBalance (bonus pool)
+      const db = getDatabase();
       const { transfer } = await createTransferWithTransactions({
         fromUserId: event.userId!,
         toUserId: systemUserId,
@@ -727,7 +753,7 @@ function setupBonusEventHandlers() {
         reason: 'expired',
         fromBalanceType: 'bonus',  // Debit from user bonus balance
         toBalanceType: 'bonus',    // Credit to system user's bonusBalance (bonus pool)
-      });
+      }, { database: db });
       
       logger.info('Expired bonus removed via transfer', {
         transferId: transfer.id,
@@ -754,45 +780,66 @@ function setupBonusEventHandlers() {
 // ═══════════════════════════════════════════════════════════════════
 
 async function main() {
+  // ═══════════════════════════════════════════════════════════════════
+  // Configuration
+  // ═══════════════════════════════════════════════════════════════════
+
   // Register error codes
   registerServiceErrorCodes(PAYMENT_ERROR_CODES);
-  logger.info(`
-╔═══════════════════════════════════════════════════════════════════════╗
-║                     PAYMENT SERVICE                                   ║
-╠═══════════════════════════════════════════════════════════════════════╣
-║                                                                       ║
-║  Features:                                                            ║
-║  • User-to-user deposits and withdrawals                              ║
-║  • Multi-currency wallet management                                   ║
-║  • Balance validation based on permissions                            ║
-║  • Saga-based rollback for atomic operations                          ║
-║  • Event-driven balance synchronization                               ║
-║                                                                       ║
-║  Bonus Integration (listens to bonus-service events):                 ║
-║  • bonus.awarded → credit bonusBalance                                ║
-║  • bonus.converted → move to real balance                             ║
-║  • bonus.forfeited/expired → debit bonusBalance                       ║
-║                                                                       ║
-╚═══════════════════════════════════════════════════════════════════════╝
-`);
 
-  logger.info('Environment:', {
-    PORT: config.port,
-    MONGO_URI: process.env.MONGO_URI || 'mongodb://localhost:27017/payment_service',
-    REDIS_URL: process.env.REDIS_URL || 'not configured',
-  });
+  // Register default configs (auto-created in DB if missing)
+  registerServiceConfigDefaults('payment-service', PAYMENT_CONFIG_DEFAULTS);
+
+  // Load config (MongoDB + env vars + defaults)
+  // Resolve brand/tenantId dynamically (from user context, config store, or env vars)
+  const context = await resolveContext();
+  paymentConfig = await loadConfig(context.brand, context.tenantId);
+  validateConfig(paymentConfig);
+  printConfigSummary(paymentConfig);
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Initialize Services
+  // ═══════════════════════════════════════════════════════════════════
 
   // Register event handlers before starting
   setupBonusEventHandlers();
 
-  // Create gateway first (this connects to database)
-  await createGateway({
-    ...config,
-  });
+  // ═══════════════════════════════════════════════════════════════════
+  // Gateway Configuration
+  // ═══════════════════════════════════════════════════════════════════
+
+  // Create gateway (this connects to database)
+  await createGateway(buildGatewayConfig());
+
+  // Ensure all registered default configs are created in database
+  // This happens after database connection is established
+  try {
+    const createdCount = await ensureDefaultConfigsCreated('payment-service', {
+      brand: context.brand,
+      tenantId: context.tenantId,
+    });
+    if (createdCount > 0) {
+      logger.info(`Created ${createdCount} default config(s) in database`);
+    }
+  } catch (error) {
+    logger.warn('Failed to ensure default configs are created', { error });
+    // Continue - configs will be created on first access
+  }
 
   // Initialize payment webhooks AFTER database connection is established
   try {
-    await initializePaymentWebhooks();
+    // Use centralized initializeServiceDatabase from core-service
+    const { strategy: databaseStrategy, context: dbContext } = await initializeServiceDatabase({
+      serviceName: 'payment-service',
+      brand: context.brand,
+      tenantId: context.tenantId,
+    });
+    // Use centralized initializeWebhooks helper
+    await initializeWebhooks(paymentWebhooks, {
+      databaseStrategy,
+      defaultContext: dbContext,
+    });
+    logger.info('Payment webhooks initialized via centralized helper');
   } catch (error) {
     logger.error('Failed to initialize payment webhooks', { error });
     // Continue - webhooks are optional

@@ -42,11 +42,12 @@
 
 import { createHmac, timingSafeEqual } from 'crypto';
 import { logger } from './logger.js';
-import { getDatabase } from './database.js';
 import { getErrorMessage } from './errors.js';
-import { generateMongoId, normalizeDocument } from './mongodb-utils.js';
+import { generateMongoId, normalizeDocument } from '../databases/mongodb-utils.js';
 import { CircuitBreaker, CircuitBreakerOpenError } from './circuit-breaker.js';
 import { retry, RetryConfigs } from './retry.js';
+import type { Db } from 'mongodb';
+import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/strategy.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -185,6 +186,12 @@ export interface WebhookManagerConfig {
   maxResponseBodyLength?: number;
   /** User-Agent header (default: 'Webhooks/1.0') */
   userAgent?: string;
+  /** Database instance (if provided, uses this directly) */
+  database?: Db;
+  /** Database strategy resolver (for dynamic database resolution) */
+  databaseStrategy?: DatabaseStrategyResolver;
+  /** Default database context for strategy resolution */
+  defaultContext?: DatabaseContext;
 }
 
 export interface WebhookTestResult {
@@ -306,10 +313,15 @@ export function verifySignature(
  * Uses separate MongoDB collections per service.
  */
 export class WebhookManager<TEvents extends string = string> {
-  private config: Required<WebhookManagerConfig>;
+  private config: Required<Omit<WebhookManagerConfig, 'database' | 'databaseStrategy' | 'defaultContext'>> & {
+    database?: Db;
+    databaseStrategy?: DatabaseStrategyResolver;
+    defaultContext?: DatabaseContext;
+  };
   private enabled = false;
   /** Circuit breakers per webhook URL to prevent cascading failures */
   private circuitBreakers = new Map<string, CircuitBreaker>();
+  private db: Db | null = null;
 
   constructor(config: WebhookManagerConfig) {
     this.config = {
@@ -325,7 +337,33 @@ export class WebhookManager<TEvents extends string = string> {
       idHeader: config.idHeader ?? DEFAULT_CONFIG.idHeader,
       maxResponseBodyLength: config.maxResponseBodyLength ?? DEFAULT_CONFIG.maxResponseBodyLength,
       userAgent: config.userAgent ?? DEFAULT_CONFIG.userAgent,
+      database: config.database,
+      databaseStrategy: config.databaseStrategy,
+      defaultContext: config.defaultContext,
     };
+    this.db = config.database || null;
+  }
+
+  /**
+   * Configure the webhook manager with database or database strategy.
+   * Call this after database connection is established when the manager
+   * was created at module level without database configuration.
+   */
+  configure(options: {
+    database?: Db;
+    databaseStrategy?: DatabaseStrategyResolver;
+    defaultContext?: DatabaseContext;
+  }): void {
+    if (options.database) {
+      this.db = options.database;
+      this.config.database = options.database;
+    }
+    if (options.databaseStrategy) {
+      this.config.databaseStrategy = options.databaseStrategy;
+    }
+    if (options.defaultContext) {
+      this.config.defaultContext = options.defaultContext;
+    }
   }
 
   /**
@@ -350,8 +388,24 @@ export class WebhookManager<TEvents extends string = string> {
   // Collection Access (service-namespaced)
   // ─────────────────────────────────────────────────────────────────
 
-  private getWebhooksCollection() {
-    return getDatabase().collection<WebhookConfig>(`${this.config.serviceName}_webhooks`);
+  private async getWebhooksCollection(context?: Partial<DatabaseContext>) {
+    let db: Db;
+    
+    if (this.db) {
+      db = this.db;
+    } else if (this.config.databaseStrategy) {
+      // Merge context with service name and default context
+      const resolvedContext: DatabaseContext = {
+        service: this.config.serviceName,
+        ...this.config.defaultContext,
+        ...context,
+      };
+      db = await this.config.databaseStrategy.resolve(resolvedContext);
+    } else {
+      throw new Error('WebhookManager requires either database or databaseStrategy with defaultContext');
+    }
+    
+    return db.collection<WebhookConfig>(`${this.config.serviceName}_webhooks`);
   }
 
   /**
@@ -367,8 +421,8 @@ export class WebhookManager<TEvents extends string = string> {
    * Initialize webhook system (call at service startup).
    * Creates indexes and enables webhook dispatching.
    */
-  async initialize(): Promise<void> {
-    await this.createIndexes();
+  async initialize(context?: DatabaseContext): Promise<void> {
+    await this.createIndexes(context);
     this.enabled = true;
     logger.info(`Webhook manager initialized for ${this.config.serviceName}`);
   }
@@ -424,7 +478,8 @@ export class WebhookManager<TEvents extends string = string> {
       deliveryCount: 0, // Initialize delivery count
     };
     
-    await this.getWebhooksCollection().insertOne(webhook as any);
+    const collection = await this.getWebhooksCollection({ tenantId: input.tenantId } as Partial<DatabaseContext>);
+    await collection.insertOne(webhook as any);
     
     logger.info('Webhook registered', { 
       service: this.config.serviceName,
@@ -451,8 +506,9 @@ export class WebhookManager<TEvents extends string = string> {
       ...(updates.isActive === true && { consecutiveFailures: 0, disabledReason: undefined }),
     };
 
+    const collection = await this.getWebhooksCollection({ tenantId } as Partial<DatabaseContext>);
     // Ensure deliveries and deliveryCount are initialized if missing
-    const webhook = await this.getWebhooksCollection().findOne({ id, tenantId });
+    const webhook = await collection.findOne({ id, tenantId });
     if (webhook) {
       if (!webhook.deliveries) {
         updateDoc.deliveries = [];
@@ -462,7 +518,7 @@ export class WebhookManager<TEvents extends string = string> {
       }
     }
 
-    const result = await this.getWebhooksCollection().findOneAndUpdate(
+    const result = await collection.findOneAndUpdate(
       { id, tenantId },
       { $set: updateDoc },
       { returnDocument: 'after' }
@@ -482,7 +538,8 @@ export class WebhookManager<TEvents extends string = string> {
    * Delete a webhook.
    */
   async delete(id: string, tenantId: string): Promise<boolean> {
-    const result = await this.getWebhooksCollection().deleteOne({ id, tenantId });
+    const collection = await this.getWebhooksCollection({ tenantId } as Partial<DatabaseContext>);
+    const result = await collection.deleteOne({ id, tenantId });
     return result.deletedCount > 0;
   }
 
@@ -491,7 +548,8 @@ export class WebhookManager<TEvents extends string = string> {
    * Returns webhook with deliveries array and deliveryCount (merged structure).
    */
   async get(id: string, tenantId: string): Promise<WebhookConfig | null> {
-    const result = await this.getWebhooksCollection().findOne({ id, tenantId }) as WebhookConfig | null;
+    const collection = await this.getWebhooksCollection({ tenantId } as Partial<DatabaseContext>);
+    const result = await collection.findOne({ id, tenantId }) as WebhookConfig | null;
     if (!result) {
       logger.debug(`Webhook not found: id=${id}, tenantId=${tenantId}, service=${this.config.serviceName}, collection=${this.config.serviceName}_webhooks`);
       return null;
@@ -518,7 +576,8 @@ export class WebhookManager<TEvents extends string = string> {
     if (!options.includeInactive) {
       filter.isActive = true;
     }
-    const webhooks = await this.getWebhooksCollection().find(filter).toArray() as WebhookConfig[];
+    const collection = await this.getWebhooksCollection({ tenantId } as Partial<DatabaseContext>);
+    const webhooks = await collection.find(filter).toArray() as WebhookConfig[];
     // Ensure deliveries and deliveryCount are initialized for all webhooks
     return webhooks.map(webhook => ({
       ...webhook,
@@ -705,7 +764,8 @@ export class WebhookManager<TEvents extends string = string> {
       delivery.status = 'success';
       delivery.deliveredAt = new Date();
 
-      await this.getWebhooksCollection().updateOne(
+      const collection = await this.getWebhooksCollection({ tenantId: webhook.tenantId });
+      await collection.updateOne(
         { id: webhook.id },
         { 
           $set: { 
@@ -749,7 +809,8 @@ export class WebhookManager<TEvents extends string = string> {
       }
 
       // Update consecutive failures
-      await this.getWebhooksCollection().updateOne(
+      const collection1 = await this.getWebhooksCollection({ tenantId: webhook.tenantId });
+      await collection1.updateOne(
         { id: webhook.id },
         { 
           $inc: { consecutiveFailures: 1 },
@@ -764,7 +825,8 @@ export class WebhookManager<TEvents extends string = string> {
     if (delivery.status !== 'success') {
       delivery.status = 'failed';
 
-      await this.getWebhooksCollection().updateOne(
+      const collection2 = await this.getWebhooksCollection({ tenantId: webhook.tenantId });
+      await collection2.updateOne(
         { id: webhook.id },
         { 
           $set: { 
@@ -780,7 +842,8 @@ export class WebhookManager<TEvents extends string = string> {
         const updatedWebhook = await this.get(webhook.id, webhook.tenantId);
         if (updatedWebhook && updatedWebhook.consecutiveFailures >= this.config.maxConsecutiveFailures) {
           await this.update(webhook.id, webhook.tenantId, { isActive: false });
-          await this.getWebhooksCollection().updateOne(
+          const collection3 = await this.getWebhooksCollection({ tenantId: webhook.tenantId });
+          await collection3.updateOne(
             { id: webhook.id },
             { $set: { disabledReason: `Auto-disabled after ${this.config.maxConsecutiveFailures} consecutive failures` } }
           );
@@ -813,7 +876,8 @@ export class WebhookManager<TEvents extends string = string> {
     };
 
     // Update webhook with delivery using $push and $slice to keep only recent deliveries
-    await this.getWebhooksCollection().updateOne(
+    const collection4 = await this.getWebhooksCollection({ tenantId: webhook.tenantId });
+    await collection4.updateOne(
       { id: webhook.id },
       {
         $push: {
@@ -843,7 +907,8 @@ export class WebhookManager<TEvents extends string = string> {
     if (!webhook) {
       logger.warn(`Webhook not found in test(): id=${id}, tenantId=${tenantId}, service=${this.config.serviceName}`);
       // Try to find any webhooks with this ID to debug
-      const allWithId = await this.getWebhooksCollection().find({ id }).toArray();
+      const collection5 = await this.getWebhooksCollection({ tenantId });
+      const allWithId = await collection5.find({ id }).toArray();
       if (allWithId.length > 0) {
         logger.warn(`Found ${allWithId.length} webhook(s) with id=${id} but different tenantIds: ${allWithId.map(w => w.tenantId).join(', ')}`);
       }
@@ -909,7 +974,8 @@ export class WebhookManager<TEvents extends string = string> {
    * Now counts from webhook.deliveries arrays (optimized: no separate query needed)
    */
   async getStats(tenantId: string): Promise<WebhookStats> {
-    const webhooks = await this.getWebhooksCollection().find({ tenantId }).toArray();
+    const collection = await this.getWebhooksCollection({ tenantId } as Partial<DatabaseContext>);
+    const webhooks = await collection.find({ tenantId }).toArray();
 
     const last24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
     
@@ -947,7 +1013,9 @@ export class WebhookManager<TEvents extends string = string> {
     let cleanedCount = 0;
 
     // Clean up old deliveries from webhook documents
-    const webhooks = await this.getWebhooksCollection()
+    // Note: This method needs to query across all tenants, so we use defaultContext
+    const collection = await this.getWebhooksCollection();
+    const webhooks = await collection
       .find({ 'deliveries.createdAt': { $lt: cutoff } })
       .toArray();
 
@@ -958,7 +1026,8 @@ export class WebhookManager<TEvents extends string = string> {
         );
         
         if (filteredDeliveries.length !== webhook.deliveries.length) {
-          await this.getWebhooksCollection().updateOne(
+          const webhookCollection = await this.getWebhooksCollection({ tenantId: webhook.tenantId });
+          await webhookCollection.updateOne(
             { id: webhook.id },
             {
               $set: {
@@ -989,8 +1058,8 @@ export class WebhookManager<TEvents extends string = string> {
   /**
    * Create database indexes.
    */
-  private async createIndexes(): Promise<void> {
-    const webhooksCol = this.getWebhooksCollection();
+  private async createIndexes(context?: DatabaseContext): Promise<void> {
+    const webhooksCol = await this.getWebhooksCollection(context);
 
     await webhooksCol.createIndex({ tenantId: 1 });
     await webhooksCol.createIndex({ tenantId: 1, isActive: 1 });
@@ -1385,3 +1454,48 @@ export function createWebhookService<TEvents extends string>(
 }
 
 export { createWebhookResolvers };
+
+// ═══════════════════════════════════════════════════════════════════
+// Generic Webhook Initialization Helper
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Generic webhook initialization function for any service.
+ * Configures the webhook manager with database strategy and initializes indexes.
+ * 
+ * @example
+ * // In your service's event-dispatcher.ts:
+ * export const myWebhooks = createWebhookManager<MyEvents>({ serviceName: 'my-service' });
+ * 
+ * // In your service's index.ts (after DB connection):
+ * await initializeWebhooks(myWebhooks, {
+ *   databaseStrategy,
+ *   defaultContext: { service: 'my-service', brand, tenantId },
+ * });
+ */
+export async function initializeWebhooks<TEvents extends string>(
+  webhookManager: WebhookManager<TEvents>,
+  options: {
+    databaseStrategy: DatabaseStrategyResolver;
+    defaultContext: DatabaseContext;
+  }
+): Promise<void> {
+  try {
+    // Configure the webhook manager with database strategy
+    webhookManager.configure({
+      databaseStrategy: options.databaseStrategy,
+      defaultContext: options.defaultContext,
+    });
+    
+    // Initialize indexes and enable dispatching
+    await webhookManager.initialize();
+    logger.info('Webhooks initialized with database strategy', { 
+      service: options.defaultContext.service,
+    });
+  } catch (err) {
+    logger.warn('Could not initialize webhooks', { 
+      service: options.defaultContext.service,
+      error: (err as Error).message,
+    });
+  }
+}

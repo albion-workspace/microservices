@@ -5,9 +5,14 @@
  * - MongoDB driver (no Mongoose overhead)
  * - UUIDs (not ObjectIds)
  * - Microservices (cross-service references)
+ * 
+ * DATABASE ACCESS PATTERN:
+ * - Uses getClient() to access other service databases (e.g., core_service)
+ * - Uses getDatabase() for same-service database access
+ * - This is intentional for cross-service data access (see DATABASE_ACCESS_PATTERNS.md)
  */
 
-import { getDatabase, getClient, logger, findOneById } from 'core-service';
+import { getDatabase, getClient, logger, findOneById, CORE_DATABASE_NAME } from 'core-service';
 
 /**
  * Collection mapping for reference types
@@ -51,13 +56,13 @@ export async function resolveReference(
 ): Promise<any | null> {
   if (!refId || !refType) return null;
   
-  // CRITICAL: User references must come from auth_service database, not payment_service
+  // CRITICAL: User references must come from core_service database, not payment_service
   // All other references come from payment_service database
   if (refType === 'user' || refType === 'player') {
     try {
       const client = getClient();
-      const authDb = client.db('auth_service');
-      const usersCollection = authDb.collection('users');
+      const coreDb = client.db(CORE_DATABASE_NAME);
+      const usersCollection = coreDb.collection('users');
       // Use optimized findOneById utility (performance-optimized)
       const doc = await findOneById(usersCollection, refId, {});
       if (doc) {
@@ -67,7 +72,7 @@ export async function resolveReference(
       }
       return null;
     } catch (error) {
-      logger.error(`Failed to resolve user reference ${refId} from auth_service`, { error });
+      logger.error(`Failed to resolve user reference ${refId} from ${CORE_DATABASE_NAME}`, { error });
       return null;
     }
   }
@@ -161,11 +166,11 @@ export async function batchResolveReferences<T extends Record<string, any>>(
     try {
       let refs: any[] = [];
       
-      // CRITICAL: User references must come from auth_service database
+      // CRITICAL: User references must come from core_service database
       if (refType === 'user' || refType === 'player') {
         const client = getClient();
-        const authDb = client.db('auth_service');
-        const usersCollection = authDb.collection('users');
+        const coreDb = client.db(CORE_DATABASE_NAME);
+        const usersCollection = coreDb.collection('users');
         // Batch lookup: use $in query (efficient for multiple IDs)
         const docs = await usersCollection
           .find({ id: { $in: ids } }, { projection: { _id: 0 } })
@@ -217,11 +222,11 @@ export async function referenceExists(
   if (!refId || !refType) return false;
   
   try {
-    // CRITICAL: User references must come from auth_service database
+    // CRITICAL: User references must come from core_service database
     if (refType === 'user' || refType === 'player') {
       const client = getClient();
-      const authDb = client.db('auth_service');
-      const usersCollection = authDb.collection('users');
+      const coreDb = client.db(CORE_DATABASE_NAME);
+      const usersCollection = coreDb.collection('users');
       // Use optimized findOneById utility (performance-optimized)
       const doc = await findOneById(usersCollection, refId, {});
       return doc !== null;

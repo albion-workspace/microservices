@@ -4,7 +4,11 @@
  * Generic MongoDB repository with caching, pagination, and transactions
  */
 
-import type { ClientSession } from 'mongodb';
+import type { ClientSession, Db } from 'mongodb';
+import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/strategy.js';
+
+// Re-export for convenience
+export type { DatabaseContext } from '../databases/strategy.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Write Options (transactions)
@@ -16,6 +20,8 @@ export interface WriteOptions {
   session?: ClientSession;
   /** Skip automatic timestamp updates for this operation */
   skipTimestamps?: boolean;
+  /** Database context for strategy resolution (service, brand, tenantId, shardKey) */
+  context?: DatabaseContext;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -27,9 +33,9 @@ export interface Repository<T> {
   findById(id: string, options?: WriteOptions): Promise<T | null>;
   findMany(options: FindManyOptions): Promise<{ items: T[]; total: number }>;
   findOne(filter: Partial<T>, options?: WriteOptions): Promise<T | null>;
-  findByIds(ids: string[]): Promise<T[]>;
-  exists(filter: Partial<T>): Promise<boolean>;
-  count(filter?: Partial<T>): Promise<number>;
+  findByIds(ids: string[], options?: WriteOptions): Promise<T[]>;
+  exists(filter: Partial<T>, options?: WriteOptions): Promise<boolean>;
+  count(filter?: Partial<T>, options?: WriteOptions): Promise<number>;
   
   // Cursor-based pagination (optimized for large datasets)
   paginate(options: CursorPaginationOptions): Promise<CursorPaginationResult<T>>;
@@ -51,6 +57,8 @@ export interface FindManyOptions {
   sort?: Record<string, 1 | -1>;
   /** Select specific fields only (projection) */
   fields?: string[];
+  /** Database context for strategy resolution (service, brand, tenantId, shardKey) */
+  context?: DatabaseContext;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -73,6 +81,8 @@ export interface CursorPaginationOptions {
   sortDirection?: 'asc' | 'desc';
   /** Select specific fields only */
   fields?: string[];
+  /** Database context for strategy resolution (service, brand, tenantId, shardKey) */
+  context?: DatabaseContext;
 }
 
 export interface CursorPaginationResult<T> {
@@ -152,5 +162,20 @@ export interface RepositoryOptions {
    * Default: true
    */
   timestamps?: boolean | TimestampConfig;
+  /** 
+   * Database instance (if provided, uses this directly)
+   * If not provided, uses getDatabase() or databaseStrategy
+   */
+  database?: Db;
+  /** 
+   * Database strategy resolver (for dynamic database resolution)
+   * Takes precedence over database option
+   */
+  databaseStrategy?: DatabaseStrategyResolver;
+  /** 
+   * Default database context for strategy resolution
+   * Used when context is not provided in individual operations
+   */
+  defaultContext?: DatabaseContext;
 }
 

@@ -162,6 +162,9 @@ const depositSaga = [
       // Ensure description is always set (never null/undefined)
       const finalDescription = description || 'Deposit';
       
+      // Get database instance (gateway connects to payment_service database)
+      const db = getDatabase();
+      
       const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
         fromUserId: fromUserIdValue,
         toUserId,
@@ -175,7 +178,10 @@ const depositSaga = [
         // Payment-specific details from rest params
         ...rest,
         externalTransactionId,
-      }, session);
+      }, { 
+        database: db,
+        ...(session && { session })
+      });
       
       // Return credit transaction as the primary entity
       return { ...ctx, input, data: { ...data, transfer, debitTx, creditTx }, entity: creditTx };
@@ -344,6 +350,9 @@ const withdrawalSaga = [
       // Ensure description is always set (never null/undefined)
       const finalDescription = description || 'Withdrawal';
       
+      // Get database instance (gateway connects to payment_service database)
+      const db = getDatabase();
+      
       const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
         fromUserId,
         toUserId,
@@ -357,7 +366,10 @@ const withdrawalSaga = [
         // Payment-specific details from rest params
         ...rest,
         externalTransactionId,
-      }, session);
+      }, { 
+        database: db,
+        ...(session && { session })
+      });
       
       return { ...ctx, input, data: { ...data, transfer, debitTx, creditTx }, entity: debitTx };
     },

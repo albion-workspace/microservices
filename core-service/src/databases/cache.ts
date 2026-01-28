@@ -10,7 +10,7 @@
  */
 
 import { getRedis } from './redis.js';
-import { logger } from './logger.js';
+import { logger } from '../common/logger.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // In-memory fallback cache (for when Redis is not available)
@@ -240,4 +240,3 @@ export const CacheKeys = {
   /** Create invalidation pattern */
   pattern: (type: string) => `${type}*`,
 };
-

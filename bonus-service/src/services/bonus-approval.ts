@@ -8,7 +8,7 @@
 import { logger } from 'core-service';
 import type { BonusTemplate } from '../types.js';
 import type { BonusContext, BonusCalculation } from './bonus-engine/types.js';
-import { templatePersistence } from './bonus-engine/persistence.js';
+import { getInitializedPersistence } from './bonus-engine/persistence-singleton.js';
 import {
   createPendingOperationApprovalService,
   type PendingOperationData,
@@ -45,7 +45,8 @@ const approvalService = createPendingOperationApprovalService<PendingBonusData>(
 
 // Register bonus-specific approval handler
 approvalService.registerApprovalHandler(async (data, context) => {
-  const template = await templatePersistence.findByCode(data.templateCode);
+  const persistence = await getInitializedPersistence();
+  const template = await persistence.template.findByCode(data.templateCode);
   
   if (!template) {
     return { success: false, error: 'Template not found' };

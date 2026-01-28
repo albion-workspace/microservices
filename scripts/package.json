@@ -64,7 +64,5 @@
     "channels-test": "npx tsx typescript/channels-tests.ts",
     "verify:graphql-types": "npx tsx typescript/verify-graphql-types.ts"
   },
-  "dependencies": {
-    "mongodb": "^7.0.0"
-  }
+  "dependencies": {}
 }

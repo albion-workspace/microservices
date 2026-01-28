@@ -9,7 +9,7 @@
  * - Saga services (for transactional writes)
  */
 
-import { logger } from 'core-service';
+import { logger, resolveDatabase, type DatabaseResolutionOptions, type Collection, type Db } from 'core-service';
 import type { BonusTemplate, UserBonus, BonusType, BonusHistoryEntry } from '../../types.js';
 import type {
   BonusContext,
@@ -18,13 +18,32 @@ import type {
   AwardResult,
   IBonusHandler,
 } from './types.js';
-import { templatePersistence, userBonusPersistence } from './persistence.js';
+import { createBonusPersistence, type BonusPersistenceOptions } from './persistence.js';
 import { emitBonusEvent } from '../../event-dispatcher.js';
 // Event-driven architecture: bonus service emits events, payment service handles wallet operations
 // Note: bonus-approval imports are lazy to avoid circular dependency
 
+export interface BaseHandlerOptions extends DatabaseResolutionOptions {
+  // Can extend with handler-specific options if needed
+}
+
 export abstract class BaseBonusHandler implements IBonusHandler {
   abstract readonly type: BonusType;
+  protected persistence: ReturnType<typeof createBonusPersistence>;
+  
+  constructor(protected options?: BaseHandlerOptions) {
+    // Create persistence with database strategy if provided
+    this.persistence = createBonusPersistence(options || {});
+  }
+  
+  // Helper to get user bonuses collection
+  protected async getUserBonusesCollection(tenantId?: string): Promise<Collection> {
+    if (!this.options?.databaseStrategy && !this.options?.database) {
+      throw new Error('BaseBonusHandler requires database or databaseStrategy in options. Ensure handler is initialized via handlerRegistry.initialize() with database strategy.');
+    }
+    const db = await resolveDatabase(this.options, 'bonus-service', tenantId);
+    return db.collection('user_bonuses');
+  }
 
   // ═══════════════════════════════════════════════════════════════════
   // Template Method - Main Algorithm
@@ -63,7 +82,7 @@ export abstract class BaseBonusHandler implements IBonusHandler {
 
   async checkEligibility(context: BonusContext): Promise<EligibilityResult> {
     // Find active template for this bonus type using persistence layer
-    const templates = await templatePersistence.findByType(this.type);
+    const templates = await this.persistence.template.findByType(this.type, context.tenantId);
     const template = templates[0] || null;
 
     if (!template) {
@@ -112,7 +131,7 @@ export abstract class BaseBonusHandler implements IBonusHandler {
 
     // Check max uses per user using persistence layer
     if (template.maxUsesPerUser) {
-      const userCount = await userBonusPersistence.countByTemplate(
+      const userCount = await this.persistence.userBonus.countByTemplate(
         context.userId, 
         template.id
       );
@@ -259,11 +278,11 @@ export abstract class BaseBonusHandler implements IBonusHandler {
     const now = new Date();
     const userBonusData = this.buildUserBonus(template, context, calculation, now);
 
-    const createdBonus = await userBonusPersistence.create(userBonusData);
+    const createdBonus = await this.persistence.userBonus.create(userBonusData, context.tenantId);
 
     await this.emitAwardedEvent(createdBonus, calculation);
 
-    await templatePersistence.incrementUsage(template.id);
+    await this.persistence.template.incrementUsage(template.id, context.tenantId);
 
     await this.onAwarded(createdBonus, context);
 

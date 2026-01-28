@@ -11,7 +11,7 @@
 import {
   createWebhookManager,
   createUnifiedEmitter,
-  logger,
+  initializeWebhooks,
 } from 'core-service';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -118,16 +118,18 @@ export interface BonusRequirementsMetData {
 // ═══════════════════════════════════════════════════════════════════
 
 /**
- * Initialize the bonus webhooks system.
+ * Initialize the bonus webhooks system with database strategy.
  * Call this after database connection is established.
+ * Uses generic initializeWebhooks helper from core-service.
  */
-export async function initializeBonusWebhooks(): Promise<void> {
-  try {
-    await bonusWebhooks.initialize();
-    logger.info('Bonus webhooks initialized');
-  } catch (err) {
-    logger.warn('Could not initialize bonus webhooks', { error: (err as Error).message });
-  }
+export { initializeWebhooks as initializeBonusWebhooksGeneric };
+
+// Re-export for backward compatibility with existing service code
+export async function initializeBonusWebhooks(options: {
+  databaseStrategy: import('core-service').DatabaseStrategyResolver;
+  defaultContext: import('core-service').DatabaseContext;
+}): Promise<void> {
+  return initializeWebhooks(bonusWebhooks, options);
 }
 
 /**

@@ -25,9 +25,13 @@ import {
   logger,
   startListening,
   registerServiceErrorCodes,
+  registerServiceConfigDefaults,
+  ensureDefaultConfigsCreated,
+  resolveContext,
 } from 'core-service';
 
-import { loadConfig, validateConfig, printConfigSummary } from './config.js';
+import { loadConfig, validateConfig, printConfigSummary, type NotificationConfig } from './config.js';
+import { NOTIFICATION_CONFIG_DEFAULTS } from './config-defaults.js';
 import { NotificationService } from './notification-service.js';
 import { notificationGraphQLTypes, createNotificationResolvers } from './graphql.js';
 import { handlerRegistry } from './plugins/index.js';
@@ -35,61 +39,54 @@ import type { NotificationHandlerPlugin } from './plugins/index.js';
 import { NOTIFICATION_ERROR_CODES } from './error-codes.js';
 
 // ═══════════════════════════════════════════════════════════════════
-// Configuration
+// Configuration (will be loaded asynchronously in main())
 // ═══════════════════════════════════════════════════════════════════
 
-const config = loadConfig();
-validateConfig(config);
+let notificationConfig: NotificationConfig | null = null;
 
-// ═══════════════════════════════════════════════════════════════════
-// Initialize Service
-// ═══════════════════════════════════════════════════════════════════
-
-const notificationService = new NotificationService(config);
-const notificationResolvers = createNotificationResolvers(notificationService);
-
-// ═══════════════════════════════════════════════════════════════════
-// Gateway Configuration
-// ═══════════════════════════════════════════════════════════════════
-
-const gatewayConfig = {
-  name: 'notification-service',
-  port: config.port,
-  cors: {
-    origins: (process.env.CORS_ORIGINS || 'http://localhost:5173,http://localhost:3000')
-      .split(',')
-      .map(o => o.trim()),
-  },
-  jwt: {
-    secret: process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || 'shared-jwt-secret-change-in-production',
-    expiresIn: '1h',
-  },
-  services: [
-    {
-      name: 'notifications',
-      types: notificationGraphQLTypes,
-      resolvers: notificationResolvers,
+// Gateway config builder (will be built from notificationConfig)
+const buildGatewayConfig = (notificationService: NotificationService, notificationResolvers: ReturnType<typeof createNotificationResolvers>): Parameters<typeof createGateway>[0] => {
+  if (!notificationConfig) {
+    throw new Error('Configuration not loaded yet');
+  }
+  
+  const config = notificationConfig; // Type narrowing helper
+  
+  return {
+    name: 'notification-service',
+    port: config.port,
+    cors: {
+      origins: (process.env.CORS_ORIGINS || 'http://localhost:5173,http://localhost:3000')
+        .split(',')
+        .map(o => o.trim()),
     },
-  ],
-  permissions: {
-    Query: {
-      health: allow,
-      notificationHealth: allow,
-      myNotifications: isAuthenticated,
-      notificationStats: hasRole('system'),
-      availableChannels: allow,
+    jwt: {
+      secret: process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || 'shared-jwt-secret-change-in-production',
+      expiresIn: '1h',
     },
-    Mutation: {
-      sendNotification: allow, // Allow service-to-service calls (auth-service, etc.)
+    services: [
+      {
+        name: 'notifications',
+        types: notificationGraphQLTypes,
+        resolvers: notificationResolvers,
+      },
+    ],
+    permissions: {
+      Query: {
+        health: allow,
+        notificationHealth: allow,
+        myNotifications: isAuthenticated,
+        notificationStats: hasRole('system'),
+        availableChannels: allow,
+      },
+      Mutation: {
+        sendNotification: allow, // Allow service-to-service calls (auth-service, etc.)
+      },
     },
-  },
-  mongoUri: config.mongoUri,
-  redisUrl: config.redisUrl,
-  defaultPermission: 'deny' as const,
-  enableSocketIO: true,
-  socketIOPath: '/notifications/socket.io',
-  enableSSE: true,
-  ssePath: '/notifications/events',
+    mongoUri: config.mongoUri,
+    redisUrl: config.redisUrl,
+    defaultPermission: 'deny' as const,
+  };
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -97,43 +94,36 @@ const gatewayConfig = {
 // ═══════════════════════════════════════════════════════════════════
 
 async function main() {
+  // ═══════════════════════════════════════════════════════════════════
+  // Configuration
+  // ═══════════════════════════════════════════════════════════════════
+
   // Register error codes
   registerServiceErrorCodes(NOTIFICATION_ERROR_CODES);
 
-  logger.info(`
-╔═══════════════════════════════════════════════════════════════════════╗
-║                     NOTIFICATION SERVICE                              ║
-╠═══════════════════════════════════════════════════════════════════════╣
-║                                                                       ║
-║  Multi-Channel Notifications:                                         ║
-║  • Email (SMTP)                                                       ║
-║  • SMS (Twilio)                                                       ║
-║  • WhatsApp (Twilio)                                                  ║
-║  • Push Notifications                                                 ║
-║  • SSE (Server-Sent Events)                                           ║
-║  • Socket.IO (Real-time WebSocket)                                    ║
-║                                                                       ║
-║  Features:                                                            ║
-║  • Template management                                                ║
-║  • Queue processing with BullMQ                                       ║
-║  • Webhook callbacks                                                  ║
-║  • Real-time delivery to end users                                    ║
-║  • Multi-tenant support                                               ║
-║  • Priority routing                                                   ║
-║  • Retry logic                                                        ║
-║  • Delivery tracking                                                  ║
-║                                                                       ║
-║  Extensible Plugin System:                                            ║
-║  • Handlers loaded dynamically from other services                   ║
-║  • Works standalone or with service integrations                     ║
-║                                                                       ║
-╚═══════════════════════════════════════════════════════════════════════╝
-`);
+  // Register default configs (auto-created in DB if missing)
+  registerServiceConfigDefaults('notification-service', NOTIFICATION_CONFIG_DEFAULTS);
 
-  printConfigSummary(config);
+  // Load config (MongoDB + env vars + defaults)
+  // Resolve brand/tenantId dynamically (from user context, config store, or env vars)
+  const context = await resolveContext();
+  notificationConfig = await loadConfig(context.brand, context.tenantId);
+  validateConfig(notificationConfig);
+  printConfigSummary(notificationConfig);
   
-  // Create gateway
-  const gateway = await createGateway(gatewayConfig);
+  // ═══════════════════════════════════════════════════════════════════
+  // Initialize Service
+  // ═══════════════════════════════════════════════════════════════════
+
+  const notificationService = new NotificationService(notificationConfig);
+  const notificationResolvers = createNotificationResolvers(notificationService);
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Gateway Configuration
+  // ═══════════════════════════════════════════════════════════════════
+
+  // Create gateway (this connects to database)
+  const gateway = await createGateway(buildGatewayConfig(notificationService, notificationResolvers));
   
   // Set gateway instance for direct Socket.IO and SSE broadcasting
   notificationService.setGateway({
@@ -153,7 +143,7 @@ async function main() {
   handlerRegistry.initialize(notificationService);
   
   // Start listening to Redis events (only for channels that have handlers)
-  if (config.redisUrl) {
+  if (notificationConfig.redisUrl) {
     try {
       const channels = handlerRegistry.getChannels();
       
@@ -173,7 +163,7 @@ async function main() {
     logger.warn('Redis not configured - inter-service events disabled');
   }
   
-  logger.info('Notification service started successfully', { port: config.port });
+  logger.info('Notification service started successfully', { port: notificationConfig.port });
 }
 
 /**

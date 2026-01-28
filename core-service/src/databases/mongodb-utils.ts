@@ -9,11 +9,19 @@
  */
 
 import { ObjectId, type Collection, type Filter, type Document } from 'mongodb';
-import { logger } from './logger.js';
+import { logger } from '../common/logger.js';
 
 // Re-export MongoDB types for convenience
+// This allows microservices to use MongoDB types without depending on mongodb package directly
 export { ObjectId } from 'mongodb';
-export type { Collection, Filter, Document, ClientSession } from 'mongodb';
+export type { 
+  Collection, 
+  Filter, 
+  Document, 
+  ClientSession,
+  Db,
+  MongoClient,
+} from 'mongodb';
 
 // ═══════════════════════════════════════════════════════════════════
 // ObjectId Utilities

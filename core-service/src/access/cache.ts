@@ -5,8 +5,8 @@
  * Provides fast permission checks with automatic invalidation.
  */
 
-import { getCache, setCache, deleteCache, deleteCachePattern } from '../common/cache.js';
-import { publish, subscribe } from '../common/redis.js';
+import { getCache, setCache, deleteCache, deleteCachePattern } from '../databases/cache.js';
+import { publish, subscribe } from '../databases/redis.js';
 import { matchUrn, parseUrn } from 'access-engine';
 import type { CompiledPermissions, ResolvedAccessConfig, URN } from './types-ext.js';
 

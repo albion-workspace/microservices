@@ -6,10 +6,11 @@
 import { randomUUID } from 'node:crypto';
 import type { ServiceConfig, SagaContext, SagaOptions } from './types.js';
 import type { Repository, Resolvers, ResolverContext } from '../types/index.js';
-import { createRepository, generateId } from '../common/repository.js';
-import { publish } from '../common/redis.js';
+import { createRepository, generateId } from '../databases/repository.js';
+import { publish } from '../databases/redis.js';
 import { executeSaga } from './engine.js';
 import { logger } from '../common/logger.js';
+import { getClient } from '../databases/mongodb.js';
 
 export function createService<TEntity extends { id: string }, TInput>(
   config: ServiceConfig<TEntity, TInput>
@@ -150,9 +151,20 @@ export function createService<TEntity extends { id: string }, TInput>(
           transactional: sagaOptions.useTransaction 
         });
 
+        // Get client for transactional sagas (gateway connects to database)
+        let client;
+        try {
+          client = getClient();
+        } catch (error) {
+          // Database not connected yet - this shouldn't happen in normal operation
+          logger.error('Database client not available for saga', { error });
+          throw new Error('Database not connected');
+        }
+        
         const result = await executeSaga(sagaWithDeps, validated as TInput, sagaId, {
           useTransaction: sagaOptions.useTransaction,
           maxRetries: sagaOptions.maxRetries,
+          client, // Pass client for transactional sagas
         });
         
         return {

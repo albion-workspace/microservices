@@ -168,6 +168,7 @@ async function getManualExchangeRate(
   toCurrency: string
 ): Promise<number | null> {
   try {
+    // GraphQL resolvers use getDatabase() as database strategies are initialized at gateway level
     const db = getDatabase();
     const rate = await db.collection('exchange_rates').findOne(
       {
@@ -196,6 +197,7 @@ async function storeExchangeRate(
   source: 'api' | 'manual'
 ): Promise<void> {
   try {
+    // GraphQL resolvers use getDatabase() as database strategies are initialized at gateway level
     const db = getDatabase();
     await db.collection('exchange_rates').insertOne({
       fromCurrency,
@@ -273,6 +275,7 @@ export async function setManualExchangeRate(
   rate: number,
   expiresAt?: Date
 ): Promise<void> {
+  // GraphQL resolvers use getDatabase() as database strategies are initialized at gateway level
   const db = getDatabase();
   
   // Deactivate existing manual rates for this pair
@@ -311,6 +314,7 @@ export async function setManualExchangeRate(
  * Get all active exchange rates
  */
 export async function getAllExchangeRates(): Promise<ExchangeRate[]> {
+  // GraphQL resolvers use getDatabase() as database strategies are initialized at gateway level
   const db = getDatabase();
   const rates = await db.collection('exchange_rates')
     .find({ isActive: true })

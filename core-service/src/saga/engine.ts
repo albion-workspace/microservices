@@ -6,17 +6,23 @@
  * 2. MongoDB Transactions: Atomic multi-document operations (for financial data)
  */
 
-import type { ClientSession } from 'mongodb';
+import type { ClientSession, MongoClient } from 'mongodb';
 import { logger } from '../common/logger.js';
-import { getClient } from '../common/database.js';
 import { getErrorMessage } from '../common/errors.js';
 import type { SagaStep, SagaContext, SagaResult, SagaOptions } from './types.js';
+import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/strategy.js';
 
 export interface ExecuteSagaOptions {
   /** Use MongoDB transaction for atomic rollback (recommended for financial operations) */
   useTransaction?: boolean;
   /** Max commit retries on transient errors */
   maxRetries?: number;
+  /** MongoDB client for transaction support */
+  client?: MongoClient;
+  /** Database strategy resolver */
+  databaseStrategy?: DatabaseStrategyResolver;
+  /** Database context for strategy resolution */
+  context?: DatabaseContext;
 }
 
 export async function executeSaga<TEntity, TInput>(
@@ -28,7 +34,7 @@ export async function executeSaga<TEntity, TInput>(
   const { useTransaction = false, maxRetries = 3 } = options;
   
   if (useTransaction) {
-    return executeSagaWithTransaction(steps, input, sagaId, maxRetries);
+    return executeSagaWithTransaction(steps, input, sagaId, maxRetries, options);
   }
   
   return executeSagaWithCompensation(steps, input, sagaId);
@@ -42,12 +48,24 @@ async function executeSagaWithTransaction<TEntity, TInput>(
   steps: SagaStep<TEntity, TInput>[],
   input: TInput,
   sagaId: string,
-  maxRetries: number
+  maxRetries: number,
+  options: ExecuteSagaOptions
 ): Promise<SagaResult<TEntity, TInput>> {
   const completedSteps: string[] = [];
   let context: SagaContext<TEntity, TInput> = { sagaId, input, data: {} };
   
-  const client = getClient();
+  // Resolve MongoDB client
+  let client: MongoClient;
+  if (options.client) {
+    client = options.client;
+  } else if (options.databaseStrategy && options.context) {
+    // Get client from database strategy
+    const db = await options.databaseStrategy.resolve(options.context);
+    client = db.client;
+  } else {
+    throw new Error('Saga with transaction requires either client or databaseStrategy with context');
+  }
+  
   const session = client.startSession();
   
   // Inject session into context for repository operations

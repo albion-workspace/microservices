@@ -45,7 +45,12 @@
  *   npx tsx scripts/typescript/auth/manage-user.ts user@test.com --email-verified
  */
 
-import { getAuthDatabase, getPaymentDatabase, closeAllConnections } from '../config/mongodb.js';
+import { 
+  getAuthDatabase, 
+  getPaymentDatabase, 
+  closeAllConnections,
+  getDatabaseContextFromArgs,
+} from '../config/scripts.js';
 
 const DEFAULT_TENANT_ID = 'default-tenant';
 
@@ -132,8 +137,8 @@ function parseArgs() {
   return options;
 }
 
-async function showUser(email: string) {
-  const db = await getAuthDatabase();
+async function showUser(email: string, dbContext?: { brand?: string; tenantId?: string }) {
+  const db = await getAuthDatabase(dbContext);
   try {
     const usersCollection = db.collection('users');
     
@@ -168,16 +173,20 @@ async function showUser(email: string) {
 
 async function manageUser() {
   const options = parseArgs();
+  const args = process.argv.slice(2);
+  
+  // Get database context from command line args (--brand, --tenant)
+  const dbContext = await getDatabaseContextFromArgs(args);
   
   try {
-    const db = await getAuthDatabase();
+    const db = await getAuthDatabase(dbContext);
     console.log('✅ Connected to MongoDB\n');
     
     const usersCollection = db.collection('users');
     
     // Handle show command
     if (options.command === 'show') {
-      await showUser(options.email);
+      await showUser(options.email, dbContext);
       return;
     }
     
@@ -200,28 +209,35 @@ async function manageUser() {
     // Determine roles
     let roles: string[] = [];
     if (options.all) {
+      // --all: Give system role (highest level)
       roles = ['system'];
     } else if (options.roles) {
+      // --roles: Use specified roles
       roles = options.roles;
     } else if (options.command === 'roles') {
-      // For roles command, require roles to be specified
+      // roles command: require --roles flag
       if (!options.roles) {
         console.error('❌ Error: --roles required for roles command');
         process.exit(1);
       }
       roles = options.roles;
-    } else if (user.roles) {
+    } else if (user.roles && user.roles.length > 0) {
+      // Preserve existing roles
       roles = Array.isArray(user.roles) ? user.roles : [user.roles];
+    } else if (options.command === 'promote') {
+      // Default promote: ensure at least 'user' role if no roles exist
+      roles = ['user'];
     }
     
     // Determine permissions
     const permissions: UserPermissions = {};
     
     if (options.all) {
+      // --all: Grant all permissions
       permissions.allowNegative = true;
       permissions.acceptFee = true;
       permissions.bonuses = true;
-      permissions['*:*:*'] = true; // Full access
+      permissions['*:*:*'] = true; // Full access (URN-based)
     } else {
       // Set specific permissions
       if (options.allowNegative !== undefined) {
@@ -268,6 +284,9 @@ async function manageUser() {
         process.exit(1);
       }
       updateData.status = options.status || user.status;
+    } else if (options.all || options.command === 'promote') {
+      // --all or promote: ensure user is active
+      updateData.status = 'active';
     }
     
     // Handle roles update
@@ -299,7 +318,7 @@ async function manageUser() {
     
     // Update wallet allowNegative permission (wallet-level is more flexible and performant)
     if (permissions.allowNegative) {
-      const paymentDb = await getPaymentDatabase();
+      const paymentDb = await getPaymentDatabase(dbContext);
       const walletsCollection = paymentDb.collection('wallets');
       
       // Update all wallets for this user to allow negative balance
@@ -311,19 +330,13 @@ async function manageUser() {
       console.log(`✅ Updated ${updateResult.modifiedCount} wallet(s) to allow negative balance`);
     }
     
-    console.log(`\n✅ User updated successfully!`);
+    console.log(`\n✅ User promoted successfully!`);
     console.log(`   Email: ${user.email || user.username || user.id}`);
     console.log(`   User ID: ${user.id}`);
+    console.log(`   Status: ${updateData.status || user.status || 'unchanged'}`);
+    console.log(`   Roles: ${updateData.roles?.join(', ') || user.roles?.join(', ') || 'none'}`);
+    console.log(`   Permissions: ${updateData.permissions?.join(', ') || user.permissions?.join?.(', ') || 'none'}`);
     
-    if (updateData.status) {
-      console.log(`   Status: ${updateData.status}`);
-    }
-    if (updateData.roles) {
-      console.log(`   Roles: ${updateData.roles.join(', ') || 'none'}`);
-    }
-    if (updateData.permissions) {
-      console.log(`   Permissions: ${updateData.permissions.join(', ') || 'none'}`);
-    }
     if (updateData.emailVerified !== undefined) {
       console.log(`   Email Verified: ${updateData.emailVerified}`);
     }
@@ -331,13 +344,20 @@ async function manageUser() {
       console.log(`   Phone Verified: ${updateData.phoneVerified}`);
     }
     
-    if (permissions.allowNegative || permissions.acceptFee || permissions.bonuses || roles.includes('system')) {
-      console.log(`\n   User can now:`);
-      if (permissions.allowNegative) console.log(`     ✓ Go negative balance`);
-      if (permissions.acceptFee) console.log(`     ✓ Accept fees`);
-      if (permissions.bonuses) console.log(`     ✓ Receive bonuses`);
-      if (roles.includes('system')) console.log(`     ✓ Perform system operations`);
-      if (roles.includes('bonus-admin')) console.log(`     ✓ Manage bonus templates and operations`);
+    // Show capabilities summary
+    const finalRoles = updateData.roles || user.roles || [];
+    const finalPermissions = updateData.permissions || [];
+    
+    if (finalPermissions.length > 0 || finalRoles.length > 0) {
+      console.log(`\n   Capabilities:`);
+      if (finalRoles.includes('system')) console.log(`     ✓ System role - full system access`);
+      if (finalRoles.includes('admin')) console.log(`     ✓ Admin role - administrative access`);
+      if (finalRoles.includes('bonus-admin')) console.log(`     ✓ Bonus Admin - manage bonus templates`);
+      if (finalRoles.includes('user')) console.log(`     ✓ User role - standard user access`);
+      if (finalPermissions.includes('allowNegative') || permissions.allowNegative) console.log(`     ✓ Allow negative balance`);
+      if (finalPermissions.includes('acceptFee') || permissions.acceptFee) console.log(`     ✓ Accept fees`);
+      if (finalPermissions.includes('bonuses') || permissions.bonuses) console.log(`     ✓ Receive bonuses`);
+      if (finalPermissions.includes('*:*:*')) console.log(`     ✓ Full URN access (*:*:*)`);
     }
     
   } catch (error: any) {

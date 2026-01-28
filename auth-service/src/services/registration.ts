@@ -3,7 +3,7 @@
  * Handles user registration with flexible identifiers (username/email/phone)
  */
 
-import { getDatabase, logger, generateMongoId, createRegistrationStore, getRedis, createPendingOperationStore } from 'core-service';
+import { logger, generateMongoId, createRegistrationStore, getRedis, createPendingOperationStore, resolveDatabase, type DatabaseStrategyResolver, type DatabaseContext, type Db } from 'core-service';
 import type { RegisterInput, User, AuthResponse, OTPChannel, DeviceInfo } from '../types.js';
 import { 
   validatePassword, 
@@ -21,15 +21,28 @@ import {
 import type { AuthConfig } from '../types.js';
 import type { OTPProviderFactory } from '../providers/otp-provider.js';
 
+export interface RegistrationServiceOptions {
+  database?: Db;
+  databaseStrategy?: DatabaseStrategyResolver;
+  defaultContext?: DatabaseContext;
+}
+
 export class RegistrationService {
   private registrationStore: ReturnType<typeof createRegistrationStore>;
   private otpStore: ReturnType<typeof createPendingOperationStore>;
+  private db: Db | null = null;
+  private databaseStrategy: DatabaseStrategyResolver | undefined;
+  private defaultContext: DatabaseContext | undefined;
   
   constructor(
     private config: AuthConfig,
     private otpProviders: OTPProviderFactory,
-    private authenticationService?: any // Optional: for token generation after verification
+    private authenticationService?: any, // Optional: for token generation after verification
+    options?: RegistrationServiceOptions
   ) {
+    this.db = options?.database || null;
+    this.databaseStrategy = options?.databaseStrategy;
+    this.defaultContext = options?.defaultContext;
     // Use generic pending operation store for registration
     this.registrationStore = createRegistrationStore(this.config.jwtSecret);
     // Use generic pending operation store for OTPs (unified pattern)
@@ -52,8 +65,20 @@ export class RegistrationService {
    * - Saves user to DB immediately
    * - Returns user and tokens
    */
+  private async getDb(tenantId?: string): Promise<Db> {
+    return await resolveDatabase(
+      {
+        database: this.db || undefined,
+        databaseStrategy: this.databaseStrategy,
+        defaultContext: this.defaultContext,
+      },
+      'auth-service',
+      tenantId
+    );
+  }
+  
   async register(input: RegisterInput): Promise<AuthResponse> {
-    const db = getDatabase();
+    const db = await this.getDb(input.tenantId);
     
     // Validate input
     const validation = await this.validateRegistrationInput(input);
@@ -285,7 +310,7 @@ export class RegistrationService {
     // Create user in DB (now that verification is complete)
     // CRITICAL: Set status to 'pending' so user cannot perform operations until first login
     // Default role: 'user' - assigned automatically
-    const db = getDatabase();
+    const db = await this.getDb(tenantId);
     const createdAt = new Date();
     const user: User = {
       tenantId: registrationData.tenantId,
@@ -384,7 +409,7 @@ export class RegistrationService {
    * Check if user already exists
    */
   private async findExistingUser(input: RegisterInput): Promise<User | null> {
-    const db = getDatabase();
+    const db = await this.getDb(input.tenantId);
     
     const conditions: any[] = [];
     
@@ -419,7 +444,7 @@ export class RegistrationService {
    * Create new user in database
    */
   private async createUser(input: RegisterInput): Promise<User> {
-    const db = getDatabase();
+    const db = await this.getDb(input.tenantId);
     
     const now = new Date();
     

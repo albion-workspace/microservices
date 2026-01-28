@@ -125,7 +125,7 @@ tst/
 - **Purpose**: Primary data storage
 - **Collections**: `wallets`, `transactions`, `transfers`, `users`, `bonuses`, etc.
 - **Usage**: All microservices use MongoDB for persistent data
-- **Databases**: Each service has its own database (`payment_service`, `bonus_service`, `auth_service`, `notification_service`)
+- **Databases**: Each service has its own database (`core_service`, `payment_service`, `bonus_service`, `notification_service`)
 
 ### Redis
 - **Purpose**: Caching and state tracking
@@ -185,7 +185,7 @@ tst/
 
 ### 3. Auth Service (`auth-service`)
 - **Port**: 3003
-- **Database**: `auth_service`
+- **Database**: `core_service` (central database for users and core entities)
 - **Dependencies**: `core-service`, `access-engine`, `notification-service`
 - **Responsibilities**: 
   - User authentication and authorization
@@ -1258,7 +1258,10 @@ scripts/
 
 **Configuration** (`scripts/typescript/config/`):
 - `users.ts` - Centralized user configuration for all tests
-- `mongodb.ts` - MongoDB connection utilities
+- `scripts.ts` - Centralized script configuration, database utilities, and service URLs (single source of truth)
+  - Loads configuration dynamically from MongoDB config store
+  - Provides database access using database strategy pattern
+  - Supports `--brand` and `--tenant` command-line arguments
 
 See [`scripts/README.md`](./scripts/README.md) for detailed script documentation.
 

@@ -4,9 +4,9 @@
  * Handles: free_credit, trial, selection, combo, bundle bonuses
  */
 
-import { getDatabase, logger } from 'core-service';
+import { logger } from 'core-service';
 import type { BonusTemplate, BonusType, UserBonus } from '../../../types.js';
-import { BaseBonusHandler } from '../base-handler.js';
+import { BaseBonusHandler, type BaseHandlerOptions } from '../base-handler.js';
 import type { BonusContext, EligibilityResult, BonusCalculation } from '../types.js';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -20,8 +20,7 @@ export class FreeCreditHandler extends BaseBonusHandler {
     template: BonusTemplate,
     context: BonusContext
   ): Promise<EligibilityResult> {
-    const db = getDatabase();
-    const userBonuses = db.collection('user_bonuses');
+    const userBonuses = await this.getUserBonusesCollection(context.tenantId);
 
     // Check cooldown (free credits may have daily/weekly limits)
     const cooldownHours = (template as any).cooldownHours || 24;
@@ -69,8 +68,7 @@ export class TrialHandler extends BaseBonusHandler {
     template: BonusTemplate,
     context: BonusContext
   ): Promise<EligibilityResult> {
-    const db = getDatabase();
-    const userBonuses = db.collection('user_bonuses');
+    const userBonuses = await this.getUserBonusesCollection(context.tenantId);
 
     // Trial bonus is one-time only
     const existing = await userBonuses.findOne({
@@ -110,8 +108,7 @@ export class SelectionHandler extends BaseBonusHandler {
     template: BonusTemplate,
     context: BonusContext
   ): Promise<EligibilityResult> {
-    const db = getDatabase();
-    const userBonuses = db.collection('user_bonuses');
+    const userBonuses = await this.getUserBonusesCollection(context.tenantId);
 
     // Selection bonuses are typically one per offer period
     const selectionId = context.metadata?.selectionId as string;

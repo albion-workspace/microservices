@@ -19,27 +19,39 @@
  *   npx tsx payment-command-db-check.ts clean              # Clean payment data (drops all databases)
  */
 
-import { MongoClient } from 'mongodb';
-import { closeAllConnections, getAuthDatabase, getPaymentDatabase } from '../config/mongodb.js';
+import { 
+  closeAllConnections, 
+  getAuthDatabase, 
+  getPaymentDatabase, 
+  getMongoClient, 
+  loadScriptConfig,
+  getDatabaseContextFromArgs,
+} from '../config/scripts.js';
+import type { MongoClient, Db } from '../../../core-service/src/index.js';
 
 // ═══════════════════════════════════════════════════════════════════
-// Configuration - Single Source of Truth
+// Shared Database Helper (using strategy pattern)
 // ═══════════════════════════════════════════════════════════════════
 
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/payment_service?directConnection=true';
-
-// ═══════════════════════════════════════════════════════════════════
-// Shared Database Helper
-// ═══════════════════════════════════════════════════════════════════
-
-async function withDatabase<T>(fn: (db: any, client: MongoClient) => Promise<T>): Promise<T> {
-  const client = new MongoClient(MONGO_URI);
+async function withDatabase<T>(
+  fn: (db: Db, client: MongoClient) => Promise<T>,
+  service: string = 'payment-service',
+  options?: { brand?: string; tenantId?: string }
+): Promise<T> {
+  // Initialize config to ensure strategies are loaded
+  await loadScriptConfig();
+  
+  // Use provided options or fallback to global context from command line args
+  const dbContext = options || (global as any).__dbContext || {};
+  
+  const client = await getMongoClient(service, dbContext);
+  const db = await getPaymentDatabase(dbContext);
+  
   try {
-    await client.connect();
-    const db = client.db();
     return await fn(db, client);
   } finally {
-    await client.close();
+    // Note: Client connections are managed by core-service connection pool
+    // They will be closed when closeAllConnections() is called
   }
 }
 
@@ -867,16 +879,14 @@ async function cleanPaymentData() {
   console.log('║           CLEANUP PAYMENT SERVICE DATA                          ║');
   console.log('╚═══════════════════════════════════════════════════════════════════╝\n');
 
-  const { execSync } = await import('child_process');
-  
   try {
-    // Drop all databases
+    // Drop all databases directly (no nested execSync to prevent blocking)
     console.log('📊 Dropping all databases...\n');
-    execSync('npx tsx typescript/config/drop-all-databases.ts', { 
-      stdio: 'inherit', 
-      cwd: process.cwd() 
-    });
+    const { dropAllDatabases } = await import('../config/scripts.js');
+    const dropped = await dropAllDatabases();
     
+    console.log(`\n✅ Successfully dropped ${dropped.length} database(s):`);
+    dropped.forEach(dbName => console.log(`   - ${dbName}`));
     console.log('\n✅ All databases dropped!');
     console.log('\nℹ️  All databases will be recreated fresh when services start.');
     console.log('   Indexes will be created automatically after services start.\n');
@@ -906,7 +916,7 @@ const COMMAND_REGISTRY: Record<string, () => Promise<void>> = {
   clean: cleanPaymentData,
 };
 
-async function runCommands(commandNames: string[]) {
+async function runCommands(commandNames: string[], dbContext?: { brand?: string; tenantId?: string }) {
   // Filter out flags
   const filteredCommands = commandNames.filter(name => !name.startsWith('--'));
   

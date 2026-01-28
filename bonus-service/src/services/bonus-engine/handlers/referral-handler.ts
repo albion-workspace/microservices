@@ -8,11 +8,10 @@
  * - UserBonus.referrerId: who referred this user (for referee bonuses)
  */
 
-import { getDatabase, logger } from 'core-service';
+import { logger } from 'core-service';
 import type { BonusTemplate, BonusType, UserBonus } from '../../../types.js';
-import { BaseBonusHandler } from '../base-handler.js';
+import { BaseBonusHandler, type BaseHandlerOptions } from '../base-handler.js';
 import type { BonusContext, EligibilityResult, BonusCalculation } from '../types.js';
-import { userBonusPersistence } from '../persistence.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Referral Handler (for the referrer)
@@ -36,7 +35,7 @@ export class ReferralHandler extends BaseBonusHandler {
     // Check max referrals limit from template config
     const config = template.referralConfig;
     if (config?.maxReferralsPerUser) {
-      const referralCount = await userBonusPersistence.countReferralsByUser(context.userId);
+      const referralCount = await this.persistence.userBonus.countReferralsByUser(context.userId, context.tenantId);
       if (referralCount >= config.maxReferralsPerUser) {
         return {
           eligible: false,
@@ -46,10 +45,10 @@ export class ReferralHandler extends BaseBonusHandler {
     }
 
     // Check if already claimed for this specific referee
-    const existingBonuses = await userBonusPersistence.findByUserId(context.userId, {
+    const existingBonuses = await this.persistence.userBonus.findByUserId(context.userId, {
       type: 'referral',
       refereeId: context.refereeId,
-    });
+    }, context.tenantId);
 
     if (existingBonuses.length > 0) {
       return {
@@ -141,7 +140,7 @@ export class RefereeHandler extends BaseBonusHandler {
     }
 
     // Check if already claimed (can only be referred once)
-    const isReferred = await userBonusPersistence.isUserReferred(context.userId);
+    const isReferred = await this.persistence.userBonus.isUserReferred(context.userId, context.tenantId);
     if (isReferred) {
       return {
         eligible: false,
@@ -201,10 +200,10 @@ export class CommissionHandler extends BaseBonusHandler {
     }
 
     // Verify this user actually referred the referee
-    const referralBonuses = await userBonusPersistence.findByUserId(context.userId, {
+    const referralBonuses = await this.persistence.userBonus.findByUserId(context.userId, {
       type: 'referral',
       refereeId: context.refereeId,
-    });
+    }, context.tenantId);
 
     if (referralBonuses.length === 0) {
       return {
@@ -216,9 +215,9 @@ export class CommissionHandler extends BaseBonusHandler {
     // Check max reward limit
     const config = template.referralConfig;
     if (config?.maxRewardPerUser) {
-      const existingCommissions = await userBonusPersistence.findByUserId(context.userId, {
+      const existingCommissions = await this.persistence.userBonus.findByUserId(context.userId, {
         type: 'commission',
-      });
+      }, context.tenantId);
       const totalEarned = existingCommissions.reduce((sum, b) => sum + b.originalValue, 0);
       
       if (totalEarned >= config.maxRewardPerUser) {

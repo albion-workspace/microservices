@@ -4,9 +4,9 @@
  * Handles: tournament, leaderboard, custom bonuses
  */
 
-import { getDatabase, logger } from 'core-service';
+import { logger } from 'core-service';
 import type { BonusTemplate, BonusType, UserBonus } from '../../../types.js';
-import { BaseBonusHandler } from '../base-handler.js';
+import { BaseBonusHandler, type BaseHandlerOptions } from '../base-handler.js';
 import type { BonusContext, EligibilityResult, BonusCalculation } from '../types.js';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -20,8 +20,7 @@ export class TournamentHandler extends BaseBonusHandler {
     template: BonusTemplate,
     context: BonusContext
   ): Promise<EligibilityResult> {
-    const db = getDatabase();
-    const userBonuses = db.collection('user_bonuses');
+    const userBonuses = await this.getUserBonusesCollection(context.tenantId);
 
     const tournamentId = context.metadata?.tournamentId as string;
     const position = context.metadata?.position as number;
@@ -105,8 +104,7 @@ export class LeaderboardHandler extends BaseBonusHandler {
     template: BonusTemplate,
     context: BonusContext
   ): Promise<EligibilityResult> {
-    const db = getDatabase();
-    const userBonuses = db.collection('user_bonuses');
+    const userBonuses = await this.getUserBonusesCollection(context.tenantId);
 
     const leaderboardId = context.metadata?.leaderboardId as string;
     const period = context.metadata?.period as string; // e.g., "2026-W01" or "2026-01"
@@ -207,8 +205,7 @@ export class CustomHandler extends BaseBonusHandler {
     // Custom bonuses are highly flexible - minimal validation
     // Business logic should be defined in template or via external system
     
-    const db = getDatabase();
-    const userBonuses = db.collection('user_bonuses');
+    const userBonuses = await this.getUserBonusesCollection(context.tenantId);
 
     // Check per-user usage limits
     if (template.maxUsesPerUser) {

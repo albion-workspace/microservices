@@ -5,8 +5,10 @@
  * Supports role-based user lookup for flexible system user management.
  */
 
-import { getClient } from './database.js';
-import { logger } from './logger.js';
+import type { MongoClient, Db } from 'mongodb';
+import { logger } from '../common/logger.js';
+import { CORE_DATABASE_NAME } from './core-database.js';
+import type { DatabaseStrategyResolver, DatabaseContext } from './strategy.js';
 
 export interface FindUserByRoleOptions {
   /**
@@ -20,7 +22,7 @@ export interface FindUserByRoleOptions {
   tenantId?: string;
   
   /**
-   * Database name (defaults to 'auth_service')
+   * Database name (defaults to 'core_service')
    */
   database?: string;
   
@@ -28,6 +30,26 @@ export interface FindUserByRoleOptions {
    * Whether to throw an error if no user is found (default: true)
    */
   throwIfNotFound?: boolean;
+  
+  /**
+   * MongoDB client (for direct database access)
+   */
+  client?: MongoClient;
+  
+  /**
+   * Database instance (for direct database access)
+   */
+  databaseInstance?: Db;
+  
+  /**
+   * Database strategy resolver
+   */
+  databaseStrategy?: DatabaseStrategyResolver;
+  
+  /**
+   * Database context for strategy resolution
+   */
+  context?: DatabaseContext;
 }
 
 /**
@@ -56,12 +78,21 @@ export async function findUserIdByRole(options: FindUserByRoleOptions): Promise<
   const {
     role,
     tenantId,
-    database = 'auth_service',
+    database = CORE_DATABASE_NAME,
     throwIfNotFound = true,
   } = options;
 
   try {
-    const client = getClient();
+    // Resolve MongoDB client
+    let client: MongoClient;
+    if (options.client) {
+      client = options.client;
+    } else if (options.databaseStrategy && options.context) {
+      const db = await options.databaseStrategy.resolve(options.context);
+      client = db.client;
+    } else {
+      throw new Error('findUserIdByRole requires either client or databaseStrategy with context');
+    }
     const authDb = client.db(database);
     const usersCollection = authDb.collection('users');
 
@@ -136,11 +167,20 @@ export async function findUserIdsByRole(options: FindUserByRoleOptions): Promise
   const {
     role,
     tenantId,
-    database = 'auth_service',
+    database = CORE_DATABASE_NAME,
   } = options;
 
   try {
-    const client = getClient();
+    // Resolve MongoDB client
+    let client: MongoClient;
+    if (options.client) {
+      client = options.client;
+    } else if (options.databaseStrategy && options.context) {
+      const db = await options.databaseStrategy.resolve(options.context);
+      client = db.client;
+    } else {
+      throw new Error('findUserIdByRole requires either client or databaseStrategy with context');
+    }
     const authDb = client.db(database);
     const usersCollection = authDb.collection('users');
 

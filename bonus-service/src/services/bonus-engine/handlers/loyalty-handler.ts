@@ -5,9 +5,9 @@
  *          loyalty, vip, anniversary, seasonal, flash
  */
 
-import { getDatabase, logger } from 'core-service';
+import { logger } from 'core-service';
 import type { BonusTemplate, BonusType, UserBonus } from '../../../types.js';
-import { BaseBonusHandler } from '../base-handler.js';
+import { BaseBonusHandler, type BaseHandlerOptions } from '../base-handler.js';
 import type { BonusContext, EligibilityResult, BonusCalculation } from '../types.js';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -21,8 +21,7 @@ export class DailyLoginHandler extends BaseBonusHandler {
     template: BonusTemplate,
     context: BonusContext
   ): Promise<EligibilityResult> {
-    const db = getDatabase();
-    const userBonuses = db.collection('user_bonuses');
+    const userBonuses = await this.getUserBonusesCollection(context.tenantId);
 
     // Check if already claimed today
     const todayStart = new Date();
@@ -83,8 +82,7 @@ export class BirthdayHandler extends BaseBonusHandler {
     template: BonusTemplate,
     context: BonusContext
   ): Promise<EligibilityResult> {
-    const db = getDatabase();
-    const userBonuses = db.collection('user_bonuses');
+    const userBonuses = await this.getUserBonusesCollection(context.tenantId);
 
     // Check if already claimed this year
     const thisYearStart = new Date();
@@ -311,8 +309,7 @@ export class AnniversaryHandler extends BaseBonusHandler {
     template: BonusTemplate,
     context: BonusContext
   ): Promise<EligibilityResult> {
-    const db = getDatabase();
-    const userBonuses = db.collection('user_bonuses');
+    const userBonuses = await this.getUserBonusesCollection(context.tenantId);
 
     // Check if already claimed this year
     const thisYearStart = new Date();
@@ -360,8 +357,7 @@ export class SeasonalHandler extends BaseBonusHandler {
     template: BonusTemplate,
     context: BonusContext
   ): Promise<EligibilityResult> {
-    const db = getDatabase();
-    const userBonuses = db.collection('user_bonuses');
+    const userBonuses = await this.getUserBonusesCollection(context.tenantId);
 
     // Check if already claimed this seasonal period (by template code)
     const existing = await userBonuses.findOne({

@@ -309,11 +309,6 @@ export function createNotificationResolvers(notificationService: NotificationSer
             originalChannel: input.channel,
             normalizedChannel,
           });
-          
-          return {
-            success: false,
-            message: error
-          };
         }
       },
     },

@@ -31,11 +31,19 @@ import {
   createWebhookService,
   setupCleanupTasks,
   registerServiceErrorCodes,
+  registerServiceConfigDefaults,
+  ensureDefaultConfigsCreated,
+  resolveContext,
+  initializeServiceDatabase,
+  initializeWebhooks,
   type IntegrationEvent,
   type ResolverContext,
+  type DatabaseStrategyResolver,
+  type DatabaseContext,
 } from 'core-service';
 
 import { loadConfig, validateConfig, printConfigSummary } from './config.js';
+import { AUTH_CONFIG_DEFAULTS } from './config-defaults.js';
 import { configurePassport } from './providers/passport-strategies.js';
 import { setupOAuthRoutes } from './oauth-routes.js';
 import { OTPProviderFactory } from './providers/otp-provider.js';
@@ -50,7 +58,6 @@ import { authGraphQLTypes, createAuthResolvers } from './graphql.js';
 import {
   authWebhooks,
   emitAuthEvent,
-  initializeAuthWebhooks,
   cleanupAuthWebhookDeliveries,
   type AuthWebhookEvents,
 } from './event-dispatcher.js';
@@ -60,151 +67,18 @@ import { AUTH_ERROR_CODES } from './error-codes.js';
 export { emitAuthEvent, type AuthWebhookEvents };
 
 // ═══════════════════════════════════════════════════════════════════
-// Configuration
+// Service Instances (initialized in main function)
 // ═══════════════════════════════════════════════════════════════════
 
-const authConfig = loadConfig();
-validateConfig(authConfig);
+let authConfig: Awaited<ReturnType<typeof loadConfig>>;
+let otpProviders: OTPProviderFactory;
+let authenticationService: AuthenticationService;
+let registrationService: RegistrationService;
+let otpService: OTPService;
+let passwordService: PasswordService;
+let twoFactorService: TwoFactorService;
+let authResolvers: ReturnType<typeof createAuthResolvers>;
 
-// ═══════════════════════════════════════════════════════════════════
-// Initialize Services
-// ═══════════════════════════════════════════════════════════════════
-
-const otpProviders = new OTPProviderFactory(authConfig);
-
-const authenticationService = new AuthenticationService(authConfig);
-const registrationService = new RegistrationService(authConfig, otpProviders, authenticationService);
-const otpService = new OTPService(authConfig, otpProviders);
-const passwordService = new PasswordService(authConfig, otpProviders);
-const twoFactorService = new TwoFactorService();
-
-// Configure Passport.js strategies
-configurePassport(authConfig);
-
-// Create resolvers
-const authResolvers = createAuthResolvers(
-  registrationService,
-  authenticationService,
-  otpService,
-  passwordService,
-  twoFactorService,
-  authConfig // Pass config for JWT secret access
-);
-
-// ═══════════════════════════════════════════════════════════════════
-// Webhook Service
-// ═══════════════════════════════════════════════════════════════════
-
-const webhookService = createWebhookService({
-  manager: authWebhooks as any,
-  eventsDocs: `
-    Authentication Service Webhook Events:
-    • user.registered - New user registered
-    • user.login - User logged in
-    • user.logout - User logged out
-    • user.email_verified - Email verified
-    • user.phone_verified - Phone verified
-    • user.password_changed - Password changed
-    • user.password_reset - Password reset
-    • user.2fa_enabled - Two-factor authentication enabled
-    • user.2fa_disabled - Two-factor authentication disabled
-    • user.locked - Account locked due to failed attempts
-    • user.unlocked - Account unlocked
-    • user.suspended - Account suspended
-    • user.deleted - Account deleted
-    • user.metadata - User metadata updated (type: deposit/withdrawal/purchase/action)
-    • session.created - New session created
-    • session.expired - Session expired
-    • session.revoked - Session revoked
-    • social.connected - Social profile connected
-    • social.disconnected - Social profile disconnected
-    • user.* - All user events (wildcard)
-  `,
-});
-
-// ═══════════════════════════════════════════════════════════════════
-// Gateway Configuration
-// ═══════════════════════════════════════════════════════════════════
-
-const config = {
-  name: authConfig.serviceName,
-  port: authConfig.port,
-  cors: {
-    origins: authConfig.corsOrigins,
-  },
-  jwt: {
-    secret: authConfig.jwtSecret,
-    refreshSecret: authConfig.jwtRefreshSecret,
-    expiresIn: authConfig.jwtExpiresIn,
-    refreshExpiresIn: authConfig.jwtRefreshExpiresIn,
-  },
-  services: [
-    { 
-      name: 'auth', 
-      types: authGraphQLTypes, 
-      resolvers: authResolvers 
-    },
-    webhookService,
-  ],
-  permissions: {
-    Query: {
-      health: allow,
-      authHealth: allow,
-      me: isAuthenticated,
-      // URN-based permissions for user management
-      getUser: or(hasRole('system'), can('user', 'read')), // System or user:read permission
-      users: or(hasRole('system'), can('user', 'list')), // System or user:list permission
-      usersByRole: or(hasRole('system'), can('user', 'list')), // System or user:list permission
-      mySessions: isAuthenticated,
-      // Pending Operations - allow all authenticated users (including system)
-      // Same pattern as payment-service: transactions, transfers, etc.
-      pendingOperations: or(hasRole('system'), isAuthenticated),
-      pendingOperation: or(hasRole('system'), isAuthenticated),
-      pendingOperationTypes: or(hasRole('system'), isAuthenticated),
-      pendingOperationRawData: hasAnyRole('system', 'admin'), // Admin-only for security
-      // Webhooks (system only - using URN for consistency)
-      webhooks: or(hasRole('system'), can('webhook', 'read')),
-      webhook: or(hasRole('system'), can('webhook', 'read')),
-      webhookStats: or(hasRole('system'), can('webhook', 'read')),
-      webhookDeliveries: or(hasRole('system'), can('webhook', 'read')),
-    },
-    Mutation: {
-      // Public mutations (no auth required)
-      register: allow,
-      verifyRegistration: allow, // Public - part of registration flow
-      login: allow,
-      forgotPassword: allow,
-      resetPassword: allow,
-      sendOTP: allow,
-      verifyOTP: allow,
-      resendOTP: allow,
-      
-      // Authenticated mutations (users can manage their own account)
-      logout: isAuthenticated,
-      logoutAll: isAuthenticated,
-      refreshToken: allow, // Token validation in resolver
-      changePassword: isAuthenticated, // Users can change their own password
-      enable2FA: isAuthenticated, // Users can enable 2FA for themselves
-      verify2FA: isAuthenticated,
-      disable2FA: isAuthenticated,
-      regenerateBackupCodes: isAuthenticated,
-      
-      // Webhooks (system only - using URN for consistency)
-      registerWebhook: or(hasRole('system'), can('webhook', 'create')),
-      updateWebhook: or(hasRole('system'), can('webhook', 'update')),
-      deleteWebhook: or(hasRole('system'), can('webhook', 'delete')),
-      testWebhook: or(hasRole('system'), can('webhook', 'execute')),
-
-      // User Management (system only - using URN for granular control)
-      updateUserRoles: or(hasRole('system'), can('user', 'update')), // System or user:update permission
-      updateUserPermissions: or(hasRole('system'), can('user', 'update')), // System or user:update permission
-      updateUserStatus: or(hasRole('system'), can('user', 'update')), // System or user:update permission
-    },
-  },
-  mongoUri: authConfig.mongoUri,
-  redisUrl: authConfig.redisUrl,
-  defaultPermission: 'deny' as const,
-};
 
 
 // ═══════════════════════════════════════════════════════════════════
@@ -469,41 +343,175 @@ function setupEventHandlers() {
 // ═══════════════════════════════════════════════════════════════════
 
 async function main() {
-  logger.info(`
-╔═══════════════════════════════════════════════════════════════════════╗
-║                     AUTHENTICATION SERVICE                            ║
-╠═══════════════════════════════════════════════════════════════════════╣
-║                                                                       ║
-║  Features:                                                            ║
-║  • Multi-identifier registration (username/email/phone)               ║
-║  • Password authentication with security features                     ║
-║  • Social OAuth (Google, Facebook, LinkedIn, Instagram)               ║
-║  • Multi-channel OTP (Email, SMS, WhatsApp, Telegram)                 ║
-║  • Two-factor authentication (TOTP + backup codes)                    ║
-║  • Password management (forgot/reset/change)                          ║
-║  • JWT + refresh token management                                     ║
-║  • Session management & device tracking                               ║
-║  • Account security (validation)                                       ║
-║  • Dynamic user metadata (flexible fields)                            ║
-║                                                                       ║
-║  Security:                                                            ║
-║  • Password: min ${authConfig.passwordMinLength} chars, uppercase, numbers, symbols       ║
-║  • OTP: ${authConfig.otpLength} digits, expires in ${authConfig.otpExpiryMinutes} minutes                       ║
-║  • Session: max ${authConfig.sessionMaxAge} days                                          ║
-║                                                                       ║
-║  Available OTP Channels:                                              ║
-║  ${otpProviders.getAvailableChannels().map(c => `• ${c}`).join('\n║  ') || '  • None configured'}
-║                                                                       ║
-║  Social Auth Providers:                                               ║
-║  ${[
-    authConfig.googleClientId ? '• Google' : null,
-    authConfig.facebookAppId ? '• Facebook' : null,
-    authConfig.linkedinClientId ? '• LinkedIn' : null,
-    authConfig.instagramClientId ? '• Instagram' : null,
-  ].filter(Boolean).join('\n║  ') || '  • None configured'}
-║                                                                       ║
-╚═══════════════════════════════════════════════════════════════════════╝
-`);
+  // ═══════════════════════════════════════════════════════════════════
+  // Configuration
+  // ═══════════════════════════════════════════════════════════════════
+
+  // Register default configs (auto-created in DB if missing)
+  registerServiceConfigDefaults('auth-service', AUTH_CONFIG_DEFAULTS);
+
+  // Load config (MongoDB + env vars + defaults)
+  // Resolve brand/tenantId dynamically (from user context, config store, or env vars)
+  const context = await resolveContext();
+  authConfig = await loadConfig(context.brand, context.tenantId);
+  validateConfig(authConfig);
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Initialize Services
+  // ═══════════════════════════════════════════════════════════════════
+
+  // Initialize database using centralized helper
+  // Auth-service uses core_service database (users, sessions are shared)
+  // Use 'core-service' as serviceName so per-service strategy resolves to 'core_service'
+  const { database: registrationDb, strategy: databaseStrategy, context: defaultContext } = await initializeServiceDatabase({
+    serviceName: 'core-service', // Users are in core_service database
+    brand: context.brand,
+    tenantId: context.tenantId,
+  });
+  
+  logger.info('Database initialized via initializeServiceDatabase', {
+    database: registrationDb.databaseName,
+    context: defaultContext,
+  });
+
+  otpProviders = new OTPProviderFactory(authConfig);
+  authenticationService = new AuthenticationService(authConfig);
+  registrationService = new RegistrationService(authConfig, otpProviders, authenticationService, {
+    database: registrationDb, // Use core_service database directly
+    databaseStrategy,
+    defaultContext,
+  });
+  otpService = new OTPService(authConfig, otpProviders);
+  passwordService = new PasswordService(authConfig, otpProviders);
+  twoFactorService = new TwoFactorService();
+
+  // Configure Passport.js strategies
+  configurePassport(authConfig);
+
+  // Create resolvers
+  authResolvers = createAuthResolvers(
+    registrationService,
+    authenticationService,
+    otpService,
+    passwordService,
+    twoFactorService,
+    authConfig // Pass config for JWT secret access
+  );
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Webhook Service
+  // ═══════════════════════════════════════════════════════════════════
+
+  const webhookService = createWebhookService({
+    manager: authWebhooks as any,
+    eventsDocs: `
+      Authentication Service Webhook Events:
+      • user.registered - New user registered
+      • user.login - User logged in
+      • user.logout - User logged out
+      • user.email_verified - Email verified
+      • user.phone_verified - Phone verified
+      • user.password_changed - Password changed
+      • user.password_reset - Password reset
+      • user.2fa_enabled - Two-factor authentication enabled
+      • user.2fa_disabled - Two-factor authentication disabled
+      • user.locked - Account locked due to failed attempts
+      • user.unlocked - Account unlocked
+      • user.suspended - Account suspended
+      • user.deleted - Account deleted
+      • user.metadata - User metadata updated (type: deposit/withdrawal/purchase/action)
+      • session.created - New session created
+      • session.expired - Session expired
+      • session.revoked - Session revoked
+      • social.connected - Social profile connected
+      • social.disconnected - Social profile disconnected
+      • user.* - All user events (wildcard)
+    `,
+  });
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Gateway Configuration
+  // ═══════════════════════════════════════════════════════════════════
+
+  const config = {
+    name: authConfig.serviceName,
+    port: authConfig.port,
+    cors: {
+      origins: authConfig.corsOrigins,
+    },
+    jwt: {
+      secret: authConfig.jwtSecret,
+      refreshSecret: authConfig.jwtRefreshSecret,
+      expiresIn: authConfig.jwtExpiresIn,
+      refreshExpiresIn: authConfig.jwtRefreshExpiresIn,
+    },
+    services: [
+      { 
+        name: 'auth', 
+        types: authGraphQLTypes, 
+        resolvers: authResolvers 
+      },
+      webhookService,
+    ],
+    permissions: {
+      Query: {
+        health: allow,
+        authHealth: allow,
+        me: isAuthenticated,
+        // URN-based permissions for user management
+        getUser: or(hasRole('system'), can('user', 'read')), // System or user:read permission
+        users: or(hasRole('system'), can('user', 'list')), // System or user:list permission
+        usersByRole: or(hasRole('system'), can('user', 'list')), // System or user:list permission
+        mySessions: isAuthenticated,
+        // Pending Operations - allow all authenticated users (including system)
+        // Same pattern as payment-service: transactions, transfers, etc.
+        pendingOperations: or(hasRole('system'), isAuthenticated),
+        pendingOperation: or(hasRole('system'), isAuthenticated),
+        pendingOperationTypes: or(hasRole('system'), isAuthenticated),
+        pendingOperationRawData: hasAnyRole('system', 'admin'), // Admin-only for security
+        // Webhooks (system only - using URN for consistency)
+        webhooks: or(hasRole('system'), can('webhook', 'read')),
+        webhook: or(hasRole('system'), can('webhook', 'read')),
+        webhookStats: or(hasRole('system'), can('webhook', 'read')),
+        webhookDeliveries: or(hasRole('system'), can('webhook', 'read')),
+      },
+      Mutation: {
+        // Public mutations (no auth required)
+        register: allow,
+        verifyRegistration: allow, // Public - part of registration flow
+        login: allow,
+        forgotPassword: allow,
+        resetPassword: allow,
+        sendOTP: allow,
+        verifyOTP: allow,
+        resendOTP: allow,
+        
+        // Authenticated mutations (users can manage their own account)
+        logout: isAuthenticated,
+        logoutAll: isAuthenticated,
+        refreshToken: allow, // Token validation in resolver
+        changePassword: isAuthenticated, // Users can change their own password
+        enable2FA: isAuthenticated, // Users can enable 2FA for themselves
+        verify2FA: isAuthenticated,
+        disable2FA: isAuthenticated,
+        regenerateBackupCodes: isAuthenticated,
+        
+        // Webhooks (system only - using URN for consistency)
+        registerWebhook: or(hasRole('system'), can('webhook', 'create')),
+        updateWebhook: or(hasRole('system'), can('webhook', 'update')),
+        deleteWebhook: or(hasRole('system'), can('webhook', 'delete')),
+        testWebhook: or(hasRole('system'), can('webhook', 'execute')),
+
+        // User Management (system only - using URN for granular control)
+        updateUserRoles: or(hasRole('system'), can('user', 'update')), // System or user:update permission
+        updateUserPermissions: or(hasRole('system'), can('user', 'update')), // System or user:update permission
+        updateUserStatus: or(hasRole('system'), can('user', 'update')), // System or user:update permission
+      },
+    },
+    mongoUri: authConfig.mongoUri,
+    redisUrl: authConfig.redisUrl,
+    defaultPermission: 'deny' as const,
+  };
 
   printConfigSummary(authConfig);
 
@@ -513,14 +521,44 @@ async function main() {
   // Register event handlers
   setupEventHandlers();
 
+  // Create resolvers
+  authResolvers = createAuthResolvers(
+    registrationService,
+    authenticationService,
+    otpService,
+    passwordService,
+    twoFactorService,
+    authConfig // Pass config for JWT secret access
+  );
+
   // Create and start gateway first (this connects to database)
   await createGateway({
     ...config,
   });
 
-  // Initialize webhooks AFTER database connection is established
+  // Ensure all registered default configs are created in database
+  // This happens after database connection is established
   try {
-    await initializeAuthWebhooks();
+    const createdCount = await ensureDefaultConfigsCreated('auth-service', {
+      brand: context.brand,
+      tenantId: context.tenantId,
+    });
+    if (createdCount > 0) {
+      logger.info(`Created ${createdCount} default config(s) in database`);
+    }
+  } catch (error) {
+    logger.warn('Failed to ensure default configs are created', { error });
+    // Continue - configs will be created on first access
+  }
+
+  // Initialize webhooks AFTER database connection is established
+  // Use centralized initializeWebhooks helper from core-service
+  try {
+    await initializeWebhooks(authWebhooks, {
+      databaseStrategy,
+      defaultContext,
+    });
+    logger.info('Auth webhooks initialized via centralized helper');
   } catch (error) {
     logger.error('Failed to initialize auth webhooks', { error });
     // Continue - webhooks are optional

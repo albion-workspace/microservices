@@ -10,7 +10,7 @@
  */
 
 import { MongoClient, Db, ReadPreference, WriteConcern } from 'mongodb';
-import { logger } from './logger.js';
+import { logger } from '../common/logger.js';
 
 let client: MongoClient | null = null;
 let db: Db | null = null;
@@ -54,8 +54,33 @@ export const DEFAULT_MONGO_CONFIG: Omit<Required<MongoConfig>, 'uri' | 'dbName'>
 // Connection
 // ═══════════════════════════════════════════════════════════════════
 
+// Track base URI (server) to reuse client for same server
+let baseUri: string | null = null;
+
 export async function connectDatabase(uri: string, config: Partial<MongoConfig> = {}): Promise<Db> {
-  if (db) return db;
+  // Parse URI to extract base (server) and database name
+  const uriObj = new URL(uri);
+  const currentBaseUri = `${uriObj.protocol}//${uriObj.host}${uriObj.search || ''}`;
+  
+  // Check if we have a cached client for the same server AND it's actually connected
+  if (client && baseUri === currentBaseUri) {
+    try {
+      // Verify client is actually connected using ping command (modern MongoDB driver approach)
+      await client.db('admin').command({ ping: 1 });
+      // Client is connected to same server - just return database for requested dbName
+      let dbName = config.dbName || uriObj.pathname.slice(1) || 'default';
+      if (dbName.includes('?')) {
+        dbName = dbName.split('?')[0];
+      }
+      dbName = dbName.trim();
+      return client.db(dbName);
+    } catch {
+      // Client exists but not connected - fall through to reconnect
+      client = null;
+      db = null;
+      baseUri = null;
+    }
+  }
 
   const cfg = { ...DEFAULT_MONGO_CONFIG, ...config };
   
@@ -66,7 +91,6 @@ export async function connectDatabase(uri: string, config: Partial<MongoConfig> 
   };
 
   // Parse URI to check if we're connecting to localhost
-  const uriObj = new URL(uri);
   const isLocalhost = uriObj.hostname === 'localhost' || uriObj.hostname === '127.0.0.1';
   
   // When connecting from localhost to a Docker container, we need directConnection
@@ -102,7 +126,11 @@ export async function connectDatabase(uri: string, config: Partial<MongoConfig> 
     }
   }
 
-  client = new MongoClient(uri, clientOptions);
+  // Use base URI (server only) for client connection
+  // This allows reusing the same client for different databases on the same server
+  const clientUri = currentBaseUri;
+  baseUri = currentBaseUri;
+  client = new MongoClient(clientUri, clientOptions);
 
   // Connection events
   client.on('connectionPoolCreated', () => logger.debug('MongoDB pool created'));
@@ -146,6 +174,7 @@ export async function closeDatabase(): Promise<void> {
     await client.close();
     client = null;
     db = null;
+    baseUri = null;
     logger.info('MongoDB disconnected');
   }
 }

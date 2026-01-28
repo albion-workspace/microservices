@@ -2,15 +2,43 @@
 # Auto-restarts on code changes
 #
 # Usage:
-#   .\scripts\start-service-dev.ps1 payment-service
-#   .\scripts\start-service-dev.ps1 auth-service
-#   .\scripts\start-service-dev.ps1 bonus-service
-#   .\scripts\start-service-dev.ps1 notification-service
+#   .\scripts\bin\start-service-dev.ps1 all              # Start all services
+#   .\scripts\bin\start-service-dev.ps1 payment-service  # Start single service
+#   .\scripts\bin\start-service-dev.ps1 auth-service
+#   .\scripts\bin\start-service-dev.ps1 bonus-service
+#   .\scripts\bin\start-service-dev.ps1 notification-service
 
 param(
     [Parameter(Mandatory=$true)]
     [string]$ServiceName
 )
+
+# Handle "all" - start all services sequentially
+if ($ServiceName -eq "all") {
+    $rootDir = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+    $scriptPath = $MyInvocation.MyCommand.Path
+    
+    Write-Host ""
+    Write-Host "================================================================" -ForegroundColor Cyan
+    Write-Host "           STARTING ALL SERVICES" -ForegroundColor Cyan
+    Write-Host "================================================================" -ForegroundColor Cyan
+    Write-Host ""
+    
+    $services = @("auth-service", "payment-service", "bonus-service", "notification-service")
+    foreach ($svc in $services) {
+        Write-Host "[INFO] Starting $svc..." -ForegroundColor Green
+        & $scriptPath $svc
+        Write-Host "[INFO] Waiting 3 seconds before next service..." -ForegroundColor Gray
+        Start-Sleep -Seconds 3
+    }
+    
+    Write-Host ""
+    Write-Host "================================================================" -ForegroundColor Green
+    Write-Host "           ALL SERVICES STARTED" -ForegroundColor Green
+    Write-Host "================================================================" -ForegroundColor Green
+    Write-Host ""
+    exit 0
+}
 
 # Calculate paths
 # Go up two levels: scripts/bin -> scripts -> root
@@ -26,7 +54,7 @@ $serviceConfig = @{
     }
     "auth-service" = @{
         Port = 3003
-        MongoDb = "auth_service"
+        MongoDb = "core_service"
         DisplayName = "AUTH SERVICE"
     }
     "bonus-service" = @{
@@ -52,8 +80,13 @@ $config = $serviceConfig[$ServiceName]
 $serviceDir = "$rootDir\$ServiceName"
 
 # CRITICAL: Derive database name from service name (replace - with _)
+# Special case: auth-service uses core_service (not auth_service)
 # This ensures consistency regardless of config value
-$dbName = $ServiceName -replace '-', '_'
+if ($ServiceName -eq "auth-service") {
+    $dbName = "core_service"
+} else {
+    $dbName = $ServiceName -replace '-', '_'
+}
 Write-Host "[DEBUG] Service name: '$ServiceName'" -ForegroundColor Gray
 Write-Host "[DEBUG] Database name: '$dbName'" -ForegroundColor Gray
 

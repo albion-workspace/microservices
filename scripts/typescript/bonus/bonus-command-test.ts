@@ -10,8 +10,35 @@
  *   npx tsx bonus-command-test.ts         # Run all tests
  *   npx tsx bonus-command-test.ts setup   # Setup users
  *   npx tsx bonus-command-test.ts all    # Run complete test suite (clean, setup, all tests)
+ * 
+ * Following CODING_STANDARDS.md:
+ * - Import ordering: Node built-ins → External packages → Local imports → Type imports
  */
 
+// External packages (core-service)
+import { 
+  connectRedis, 
+  checkRedisHealth, 
+  connectDatabase, 
+  getDatabase,
+  getClient,
+  findUserIdByRole,
+  findUserIdsByRole,
+} from '../../../core-service/src/index.js';
+import { 
+  recoverOperation,
+  recoverStuckOperations,
+  getOperationStateTracker,
+  getRecoveryHandler,
+  registerRecoveryHandler,
+} from '../../../core-service/src/common/recovery.js';
+import { createTransferRecoveryHandler } from '../../../core-service/src/common/transfer-recovery.js';
+import { createTransferWithTransactions } from '../../../core-service/src/common/transfer-helper.js';
+
+// External packages (bonus-shared)
+import { BonusEligibility } from '../../../bonus-shared/src/BonusEligibility.js';
+
+// Local imports
 import { 
   loginAs, 
   registerAs, 
@@ -23,32 +50,31 @@ import {
   getSystemUserIdByRole,
   getBonusPoolUserIdByRole,
   getUserIdsByRole,
+  initializeConfig,
+  getDefaultTenantId,
 } from '../config/users.js';
-import { getBonusDatabase, getAuthDatabase, getPaymentDatabase, closeAllConnections } from '../config/mongodb.js';
 import { 
-  BonusEligibility, 
-  type BonusTemplate as ClientBonusTemplate,
-  type EligibilityContext 
-} from '../../../bonus-shared/src/BonusEligibility.js';
-import { 
-  recoverOperation,
-  recoverStuckOperations,
-  getOperationStateTracker,
-  getRecoveryHandler,
-  registerRecoveryHandler,
-} from '../../../core-service/src/common/recovery.js';
-import { createTransferRecoveryHandler } from '../../../core-service/src/common/transfer-recovery.js';
-import { connectRedis, checkRedisHealth } from '../../../core-service/src/common/redis.js';
-import { connectDatabase, getDatabase } from '../../../core-service/src/common/database.js';
-import { createTransferWithTransactions } from '../../../core-service/src/common/transfer-helper.js';
+  getBonusDatabase,
+  getAuthDatabase,
+  getPaymentDatabase,
+  closeAllConnections,
+  loadScriptConfig,
+  getDatabaseContextFromArgs,
+  AUTH_SERVICE_URL,
+  PAYMENT_SERVICE_URL,
+  BONUS_SERVICE_URL,
+} from '../config/scripts.js';
+
+// Type imports
+import type { BonusTemplate as ClientBonusTemplate, EligibilityContext } from '../../../bonus-shared/src/BonusEligibility.js';
 
 // ═══════════════════════════════════════════════════════════════════
-// Configuration - Single Source of Truth
+// Configuration - Loaded dynamically from MongoDB config store
+// Service URLs are imported from scripts.ts (single source of truth)
 // ═══════════════════════════════════════════════════════════════════
 
-const BONUS_URL = process.env.BONUS_URL || 'http://localhost:3005/graphql';
-const AUTH_SERVICE_URL = 'http://localhost:3003/graphql';
-const PAYMENT_SERVICE_URL = 'http://localhost:3004/graphql';
+// Use BONUS_SERVICE_URL from scripts.ts
+const BONUS_URL = BONUS_SERVICE_URL;
 
 const CONFIG = {
   currency: DEFAULT_CURRENCY, // Use shared currency from users.ts
@@ -501,7 +527,8 @@ async function testSetup() {
     console.log('ℹ️  Bonus pool uses system user\'s bonusBalance (no separate user needed)');
 
     // Normalize system user roles in MongoDB to string array format if needed
-    const db = await getAuthDatabase();
+    const dbContext = (global as any).__dbContext || {};
+    const db = await getAuthDatabase(dbContext);
     const usersCollection = db.collection('users');
     const systemUserDoc = await usersCollection.findOne({ id: systemUser.userId });
     
@@ -519,16 +546,17 @@ async function testSetup() {
       }
     }
     
-    await closeAllConnections();
-    
     // Test role-based user lookup (demonstrates flexibility)
     console.log('🔍 Testing role-based user lookup...');
     try {
+      const client = getClient();
+      
       // Find system user by role (same approach as services use)
       const systemUserIdByRole = await findUserIdByRole({ 
         role: 'system', 
-        tenantId: DEFAULT_TENANT_ID,
-        throwIfNotFound: false 
+        tenantId: getDefaultTenantId(),
+        throwIfNotFound: false,
+        client,
       });
       
       if (systemUserIdByRole) {
@@ -541,8 +569,9 @@ async function testSetup() {
       try {
         const bonusPoolUserId = await findUserIdByRole({ 
           role: 'bonus-pool', 
-          tenantId: DEFAULT_TENANT_ID,
-          throwIfNotFound: false 
+          tenantId: getDefaultTenantId(),
+          throwIfNotFound: false,
+          client,
         });
         
         if (bonusPoolUserId) {
@@ -557,7 +586,8 @@ async function testSetup() {
       // Find all users with system role (demonstrates multi-user support)
       const allSystemUsers = await findUserIdsByRole({ 
         role: 'system', 
-        tenantId: DEFAULT_TENANT_ID 
+        tenantId: DEFAULT_TENANT_ID,
+        client,
       });
       console.log(`  ℹ️  Total users with 'system' role: ${allSystemUsers.length}`);
       
@@ -632,7 +662,7 @@ async function testOnboardingBonuses() {
         userId: testUserId,
         templateCode: welcomeTemplateCode,
         currency: CONFIG.currency,
-        tenantId: DEFAULT_TENANT_ID,
+        tenantId: getDefaultTenantId(),
       }
     });
     
@@ -675,7 +705,7 @@ async function testOnboardingBonuses() {
         userId: testUserId6,
         templateCode: firstDepositTemplateCode,
         currency: CONFIG.currency,
-        tenantId: DEFAULT_TENANT_ID,
+        tenantId: getDefaultTenantId(),
         depositAmount: depositAmount / 100, // Convert to dollars
       }
     });
@@ -704,7 +734,7 @@ async function testOnboardingBonuses() {
         userId: testUserId6,
         templateCode: firstDepositTemplateCode,
         currency: CONFIG.currency,
-        tenantId: DEFAULT_TENANT_ID,
+        tenantId: getDefaultTenantId(),
         depositAmount: depositAmount / 100, // Convert to dollars
       }
     });
@@ -801,7 +831,7 @@ async function testTimeBasedBonuses() {
         toUserId: systemUserId,  // Same user, different balance types
         amount: fundAmount,
         currency: CONFIG.currency,
-        tenantId: DEFAULT_TENANT_ID,
+        tenantId: getDefaultTenantId(),
         feeAmount: 0,
         method: 'bonus_pool_funding',
         externalRef: `bonus-pool-topup-${Date.now()}`,
@@ -848,7 +878,7 @@ async function testTimeBasedBonuses() {
         userId: birthdayUser.userId,
         templateCode: birthdayTemplateCode,
         currency: CONFIG.currency,
-        tenantId: DEFAULT_TENANT_ID,
+        tenantId: getDefaultTenantId(),
       }
     }, systemToken);
     
@@ -890,7 +920,7 @@ async function testTimeBasedBonuses() {
         userId: loginUser.userId,
         templateCode: dailyLoginTemplateCode,
         currency: CONFIG.currency,
-        tenantId: DEFAULT_TENANT_ID,
+        tenantId: getDefaultTenantId(),
       }
     }, systemToken);
     
@@ -917,7 +947,8 @@ async function testTimeBasedBonuses() {
     const anniversaryUser = await registerAs('user5');
     
     // Delete any existing anniversary bonus for this user (to allow re-testing)
-    const bonusDb = await getBonusDatabase();
+    const dbContext = (global as any).__dbContext || {};
+    const bonusDb = await getBonusDatabase(dbContext);
     const userBonusesCollection = bonusDb.collection('user_bonuses');
     const deleteResult = await userBonusesCollection.deleteMany({
       userId: anniversaryUser.userId,
@@ -926,7 +957,6 @@ async function testTimeBasedBonuses() {
     if (deleteResult.deletedCount > 0) {
       console.log(`     → Deleted ${deleteResult.deletedCount} existing anniversary bonus(es) for clean test`);
     }
-    await closeAllConnections();
     
     // Update the user's createdAt date to one year ago (simulating account created 1 year ago)
     // This is what the anniversary handler checks
@@ -934,13 +964,12 @@ async function testTimeBasedBonuses() {
     oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
     oneYearAgo.setHours(0, 0, 0, 0); // Set to start of day for consistency
     
-    const authDb = await getAuthDatabase();
+    const authDb = await getAuthDatabase(dbContext);
     const usersCollection = authDb.collection('users');
     await usersCollection.updateOne(
       { id: anniversaryUser.userId },
       { $set: { createdAt: oneYearAgo } }
     );
-    await closeAllConnections();
     
     console.log(`     → Updated user ${anniversaryUser.userId} createdAt to ${oneYearAgo.toISOString().split('T')[0]} (1 year ago)`);
 
@@ -958,7 +987,7 @@ async function testTimeBasedBonuses() {
         userId: anniversaryUser.userId,
         templateCode: anniversaryTemplateCode,
         currency: CONFIG.currency,
-        tenantId: DEFAULT_TENANT_ID,
+        tenantId: getDefaultTenantId(),
       }
     }, systemToken);
     
@@ -1313,10 +1342,10 @@ async function testRecovery() {
   
   console.log('  ✅ Redis is available and healthy\n');
   
-  // Connect to database
-  const mongoUri = process.env.MONGO_URI || 'mongodb://localhost:27017/bonus_service?directConnection=true';
-  await connectDatabase(mongoUri);
-  const db = getDatabase();
+  // Connect to database using strategy
+  const dbContext = (global as any).__dbContext || {};
+  const { getBonusDatabase } = await import('../config/scripts.js');
+  const db = await getBonusDatabase(dbContext);
   
   // Get test users
   // Use role-based lookup to find system user (same approach as services)
@@ -1346,7 +1375,7 @@ async function testRecovery() {
         toUserId: systemUserId,  // Same user, different balance types
         amount: 100000,
         currency: CONFIG.currency,
-        tenantId: DEFAULT_TENANT_ID,
+        tenantId: getDefaultTenantId(),
         feeAmount: 0,
         method: 'test_funding',
         externalRef: `test-bonus-pool-funding-${Date.now()}`,
@@ -1711,7 +1740,7 @@ async function testBonusApproval() {
               userId: testUserId,
               templateCode: actualCode,
               currency: CONFIG.currency,
-              tenantId: DEFAULT_TENANT_ID,
+              tenantId: getDefaultTenantId(),
             },
           },
           systemToken
@@ -1865,7 +1894,7 @@ async function testBonusApproval() {
           userId: testUserId2, // Use different user
           templateCode: actualCode,
           currency: CONFIG.currency,
-          tenantId: DEFAULT_TENANT_ID,
+          tenantId: getDefaultTenantId(),
         },
       },
       systemToken
@@ -1946,7 +1975,7 @@ async function testBonusApproval() {
               userId: testUserId,
               templateCode: actualCode,
               currency: CONFIG.currency,
-              tenantId: DEFAULT_TENANT_ID,
+              tenantId: getDefaultTenantId(),
             },
           },
           systemToken
@@ -2122,7 +2151,8 @@ async function testAll() {
   console.log();
   
   // Connect to payment database for wallet operations (wallets are stored in payment_service)
-  const paymentDb = await getPaymentDatabase();
+  const dbContext = (global as any).__dbContext || {};
+  const paymentDb = await getPaymentDatabase(dbContext);
   const walletsCollection = paymentDb.collection('wallets');
   
   try {
@@ -2222,7 +2252,8 @@ async function testAll() {
     
     try {
       // createTransferWithTransactions already imported at top of file
-      const paymentDb = await getPaymentDatabase();
+      const dbContext = (global as any).__dbContext || {};
+      const paymentDb = await getPaymentDatabase(dbContext);
       const walletsCollection = paymentDb.collection('wallets');
       
       // Get bonus-pool user's wallet
@@ -2245,7 +2276,7 @@ async function testAll() {
           toUserId: bonusPoolUserId,
           amount: creditAmount,
           currency: CONFIG.currency,
-          tenantId: DEFAULT_TENANT_ID,
+          tenantId: getDefaultTenantId(),
           feeAmount: 0,
           method: 'test_funding',
           externalRef: `bonus-pool-test-funding-${Date.now()}`,
@@ -2282,7 +2313,7 @@ async function testAll() {
             toUserId: systemUserId,
             amount: debitAmount,
             currency: CONFIG.currency,
-            tenantId: DEFAULT_TENANT_ID,
+            tenantId: getDefaultTenantId(),
             feeAmount: 0,
             method: 'test_debit',
             externalRef: `bonus-pool-test-debit-${Date.now()}`,
@@ -2504,6 +2535,17 @@ const COMMAND_REGISTRY: Record<string, () => Promise<void>> = {
 
 async function main() {
   const args = process.argv.slice(2);
+  
+  // Initialize configuration from MongoDB config store
+  // This will populate AUTH_SERVICE_URL, PAYMENT_SERVICE_URL, BONUS_SERVICE_URL
+  await initializeConfig();
+  await loadScriptConfig();
+  
+  // Get database context from command line args (--brand, --tenant)
+  const dbContext = await getDatabaseContextFromArgs(args);
+  
+  // Store context globally for use in test functions
+  (global as any).__dbContext = dbContext;
   
   if (args.length === 0) {
     // Default: run all tests

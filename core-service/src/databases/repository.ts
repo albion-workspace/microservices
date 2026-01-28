@@ -3,11 +3,11 @@
  * Supports MongoDB sessions for transactional operations
  */
 
-import { Collection, Document, Filter, FindOptions, ClientSession } from 'mongodb';
+import { Collection, Document, Filter, FindOptions, ClientSession, Db } from 'mongodb';
 import { randomUUID } from 'node:crypto';
-import { getDatabase } from './database.js';
+import { getDatabase } from './mongodb.js';
 import { cached, deleteCache, deleteCachePattern } from './cache.js';
-import { logger } from './logger.js';
+import { logger } from '../common/logger.js';
 import { normalizeDocument, generateMongoId } from './mongodb-utils.js';
 import type { 
   Repository, 
@@ -20,6 +20,7 @@ import type {
   RepositoryOptions,
   TimestampConfig,
 } from '../types/index.js';
+import type { DatabaseStrategyResolver, DatabaseContext } from './strategy.js';
 
 export const generateId = () => randomUUID();
 
@@ -46,9 +47,15 @@ export function createRepository<T extends { id: string }>(
     excludeFields = ['_id'],
     batchSize = 100,
     timestamps = true,  // Default: enabled like Mongoose
+    database,
+    databaseStrategy,
+    defaultContext,
   } = options;
   const ttl = cacheTTL === null ? null : { ...DEFAULT_CACHE_TTL, ...cacheTTL };
   let collection: Collection<Document> | null = null;
+  let db: Db | null = database || null;
+  const strategy: DatabaseStrategyResolver | undefined = databaseStrategy;
+  const defaultCtx: DatabaseContext | undefined = defaultContext;
   
   // Parse timestamp configuration (like Mongoose)
   const tsConfig: { 
@@ -73,9 +80,23 @@ export function createRepository<T extends { id: string }>(
     projection[field] = 0;
   }
 
-  const getCollection = async (): Promise<Collection<Document>> => {
+  const getCollection = async (context?: DatabaseContext): Promise<Collection<Document>> => {
+    // Resolve database instance
+    if (!db) {
+      if (strategy) {
+        const resolvedContext = context || defaultCtx;
+        if (resolvedContext) {
+          db = await strategy.resolve(resolvedContext);
+        } else {
+          db = getDatabase(); // Fallback to default
+        }
+      } else {
+        db = getDatabase(); // Fallback to default
+      }
+    }
+    
     if (!collection) {
-      collection = getDatabase().collection(collectionName);
+      collection = db.collection(collectionName);
       if (indexes) {
         for (const idx of indexes) {
           await collection.createIndex(idx.fields, idx.options).catch(() => {});
@@ -99,7 +120,7 @@ export function createRepository<T extends { id: string }>(
     async findById(id: string, options?: WriteOptions): Promise<T | null> {
       // Skip cache when using session (transactional read)
       if (options?.session) {
-        const col = await getCollection();
+        const col = await getCollection(options?.context);
         const doc = await col.findOne(
           { id }, 
           { projection: LEAN_PROJECTION, session: options.session }
@@ -110,7 +131,7 @@ export function createRepository<T extends { id: string }>(
       const cacheKey = `${cachePrefix}:id:${id}`;
       
       return withCache(cacheKey, ttl?.single ?? 300, async () => {
-        const col = await getCollection();
+        const col = await getCollection(options?.context);
         // Lean query: exclude _id, return raw document
         const doc = await col.findOne(
           { id }, 
@@ -125,7 +146,7 @@ export function createRepository<T extends { id: string }>(
       const cacheKey = `${cachePrefix}:list:${JSON.stringify({ filter, skip, take, sort, fields })}`;
 
       return withCache(cacheKey, ttl?.list ?? 60, async () => {
-        const col = await getCollection();
+        const col = await getCollection(opts.context);
         const mongoFilter = filter as Filter<Document>;
         
         // Build find options with lean projection
@@ -155,7 +176,7 @@ export function createRepository<T extends { id: string }>(
 
     // Optimized: Find one by any field (lean)
     async findOne(filter: Partial<T>, options?: WriteOptions): Promise<T | null> {
-      const col = await getCollection();
+      const col = await getCollection(options?.context);
       const doc = await col.findOne(
         filter as Filter<Document>,
         { projection: LEAN_PROJECTION, session: options?.session }
@@ -164,22 +185,22 @@ export function createRepository<T extends { id: string }>(
     },
 
     // Optimized: Check existence without fetching data
-    async exists(filter: Partial<T>): Promise<boolean> {
-      const col = await getCollection();
+    async exists(filter: Partial<T>, options?: WriteOptions): Promise<boolean> {
+      const col = await getCollection(options?.context);
       // Use projection to fetch minimal data
       const doc = await col.findOne(
         filter as Filter<Document>,
-        { projection: { id: 1 } }
+        { projection: { id: 1 }, session: options?.session }
       );
       return doc !== null;
     },
 
     // Optimized: Count with caching
-    async count(filter: Partial<T> = {}): Promise<number> {
+    async count(filter: Partial<T> = {}, options?: WriteOptions): Promise<number> {
       const cacheKey = `${cachePrefix}:count:${JSON.stringify(filter)}`;
       
       return withCache(cacheKey, ttl?.count ?? 30, async () => {
-        const col = await getCollection();
+        const col = await getCollection(options?.context);
         // Use estimatedDocumentCount when no filter (instant, uses metadata)
         if (Object.keys(filter).length === 0) {
           return col.estimatedDocumentCount();
@@ -193,7 +214,7 @@ export function createRepository<T extends { id: string }>(
     // ═══════════════════════════════════════════════════════════════
 
     async create(entity: T, options?: WriteOptions): Promise<T> {
-      const col = await getCollection();
+      const col = await getCollection(options?.context);
       // Remove id if present - we'll generate it using MongoDB ObjectId
       const { id, ...entityWithoutId } = entity as any;
       
@@ -230,7 +251,7 @@ export function createRepository<T extends { id: string }>(
     },
 
     async update(id: string, data: Partial<T>, options?: WriteOptions): Promise<T | null> {
-      const col = await getCollection();
+      const col = await getCollection(options?.context);
       
       // Prepare update data with optional timestamp
       let updateData = { ...data };
@@ -258,7 +279,7 @@ export function createRepository<T extends { id: string }>(
     },
 
     async delete(id: string, options?: WriteOptions): Promise<boolean> {
-      const col = await getCollection();
+      const col = await getCollection(options?.context);
       const result = await col.deleteOne({ id }, { session: options?.session });
       
       if (result.deletedCount > 0 && !options?.session) {
@@ -275,10 +296,10 @@ export function createRepository<T extends { id: string }>(
     // Batch Operations (optimized)
     // ═══════════════════════════════════════════════════════════════
 
-    async findByIds(ids: string[]): Promise<T[]> {
+    async findByIds(ids: string[], options?: WriteOptions): Promise<T[]> {
       if (ids.length === 0) return [];
       
-      const col = await getCollection();
+      const col = await getCollection(options?.context);
       const docs = await col.find(
         { id: { $in: ids } },
         { projection: LEAN_PROJECTION, batchSize }
@@ -303,7 +324,7 @@ export function createRepository<T extends { id: string }>(
         fields,
       } = opts;
 
-      const col = await getCollection();
+      const col = await getCollection(opts.context);
       const limit = last ?? first;
       const isBackward = !!last || !!before;
       

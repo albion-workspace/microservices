@@ -4,7 +4,7 @@
  * Uses PendingOperationStore (JWT-based) for unified OTP storage pattern
  */
 
-import { logger, createPendingOperationStore, getRedis } from 'core-service';
+import { logger, createPendingOperationStore, getRedis, getDatabase } from 'core-service';
 import type { SendOTPInput, VerifyOTPInput, OTPResponse, OTPChannel, OTPPurpose } from '../types.js';
 import { generateOTP, hashToken } from '../utils.js';
 import type { AuthConfig } from '../types.js';
@@ -209,7 +209,6 @@ export class OTPService {
   }): Promise<void> {
     if (!otpData.userId) return;
     
-    const { getDatabase } = await import('core-service');
     const db = getDatabase();
     const update: any = { updatedAt: new Date() };
     

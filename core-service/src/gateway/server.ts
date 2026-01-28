@@ -47,12 +47,13 @@ import { createHandler as createHttpHandler } from 'graphql-http/lib/use/http';
 import { createHandler as createSSEHandler } from 'graphql-sse/lib/use/http';
 import type { UserContext, PermissionRule, Resolvers, ResolverContext, JwtConfig, SubscriptionResolver } from '../types/index.js';
 import { extractToken, verifyToken, createToken } from '../common/jwt.js';
-import { connectDatabase, checkDatabaseHealth } from '../common/database.js';
-import { connectRedis, checkRedisHealth, getRedis } from '../common/redis.js';
-import { getCacheStats } from '../common/cache.js';
+import { connectDatabase, checkDatabaseHealth } from '../databases/mongodb.js';
+import { connectRedis, checkRedisHealth, getRedis } from '../databases/redis.js';
+import { getCacheStats } from '../databases/cache.js';
 import { logger, subscribeToLogs, type LogEntry, setCorrelationId, generateCorrelationId, getCorrelationId } from '../common/logger.js';
 import { createResolverBuilder, type ServiceResolvers } from '../common/resolver-builder.js';
-import { formatGraphQLError, getAllErrorCodes, getErrorMessage } from '../common/errors.js'; '../common/graphql-error.js';
+import { formatGraphQLError, getAllErrorCodes, getErrorMessage } from '../common/errors.js';
+import { configGraphQLTypes, configResolvers } from '../common/config-graphql.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -300,10 +301,10 @@ function buildSchema(
   // Parse and merge type definitions from all services
   // Note: JSON scalar is already added to schema.types array (JSONScalar), so we don't declare it in SDL
   // Declaring it in SDL would cause "Type JSON already exists" error
-  let allTypeDefs = '';
+  let allTypeDefs = configGraphQLTypes; // Add config GraphQL types first (core service)
   for (const svc of services) {
     if (svc.types) {
-      allTypeDefs += (allTypeDefs ? '\n' : '') + svc.types;
+      allTypeDefs += '\n' + svc.types;
     }
   }
 
@@ -740,6 +741,22 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
     })
     .addQuery('errorCodes', async () => {
       return getAllErrorCodes();
+    })
+    // Add config resolvers (core service) - wrap to match ResolverFunction signature
+    .addQuery('config', async (args, ctx) => {
+      return configResolvers.Query.config(null, args as any, ctx);
+    })
+    .addQuery('configs', async (args, ctx) => {
+      return configResolvers.Query.configs(null, args as any, ctx);
+    })
+    .addMutation('setConfig', async (args, ctx) => {
+      return configResolvers.Mutation.setConfig(null, args as any, ctx);
+    })
+    .addMutation('deleteConfig', async (args, ctx) => {
+      return configResolvers.Mutation.deleteConfig(null, args as any, ctx);
+    })
+    .addMutation('reloadConfig', async (args, ctx) => {
+      return configResolvers.Mutation.reloadConfig(null, args as any, ctx);
     });
 
   // Add resolvers from all services

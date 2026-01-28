@@ -16,8 +16,18 @@
  *   npx tsx auth-command-test.ts 2fa    # Test 2FA flow
  *   npx tsx auth-command-test.ts token   # Test token refresh flow
  *   npx tsx auth-command-test.ts all     # Run complete test suite (clean, setup, all tests)
+ * 
+ * Following CODING_STANDARDS.md:
+ * - Import ordering: Node built-ins → External packages → Local imports → Type imports
  */
 
+// Node built-ins
+import { randomUUID } from 'crypto';
+
+// External packages (core-service)
+import { connectRedis, getRedis, scanKeysIterator, hashToken } from '../../../core-service/src/index.js';
+
+// Local imports
 import { 
   loginAs, 
   registerAs, 
@@ -25,17 +35,20 @@ import {
   DEFAULT_TENANT_ID,
   getUserDefinition,
   getUserId,
+  initializeConfig,
+  getDefaultTenantId,
 } from '../config/users.js';
-import { getAuthDatabase, closeAllConnections } from '../config/mongodb.js';
-import { connectRedis, getRedis, scanKeysIterator } from '../../../core-service/src/common/redis.js';
-import { hashToken } from '../../../core-service/src/common/utils.js';
-import { randomUUID } from 'crypto';
+import { 
+  loadScriptConfig,
+  AUTH_SERVICE_URL,
+  getAuthDatabase, 
+  closeAllConnections,
+} from '../config/scripts.js';
 
 // ═══════════════════════════════════════════════════════════════════
-// Configuration - Single Source of Truth
+// Configuration - Loaded dynamically from MongoDB config store
+// Service URLs are imported from scripts.ts (single source of truth)
 // ═══════════════════════════════════════════════════════════════════
-
-const AUTH_SERVICE_URL = process.env.AUTH_URL || 'http://localhost:3003/graphql';
 
 // ═══════════════════════════════════════════════════════════════════
 // Shared GraphQL Helper - Single Implementation
@@ -47,6 +60,11 @@ async function graphql<T = any>(
   variables?: Record<string, unknown>,
   token?: string
 ): Promise<T> {
+  // Use AUTH_SERVICE_URL if url matches the old hardcoded value
+  const finalUrl = url === 'http://localhost:3003/graphql' 
+    ? AUTH_SERVICE_URL 
+    : url;
+  
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
@@ -55,7 +73,7 @@ async function graphql<T = any>(
     headers['Authorization'] = `Bearer ${token}`;
   }
 
-  const response = await fetch(url, {
+  const response = await fetch(finalUrl, {
     method: 'POST',
     headers,
     body: JSON.stringify({ query, variables }),
@@ -192,7 +210,7 @@ async function testRegistrationAutoVerify() {
       `,
       {
         input: {
-          tenantId: DEFAULT_TENANT_ID,
+          tenantId: getDefaultTenantId(),
           email: testEmail,
           password: testPassword,
           autoVerify: true,
@@ -255,7 +273,7 @@ async function testRegistrationWithVerification() {
       `,
       {
         input: {
-          tenantId: DEFAULT_TENANT_ID,
+          tenantId: getDefaultTenantId(),
           email: testEmail,
           password: testPassword,
           autoVerify: false,
@@ -313,7 +331,7 @@ async function testRegistrationWithVerification() {
       `,
       {
         input: {
-          tenantId: DEFAULT_TENANT_ID,
+          tenantId: getDefaultTenantId(),
           registrationToken: registerResult.register.registrationToken,
           otpCode: testOTPCode,
         },
@@ -396,7 +414,7 @@ async function testLogin(userKey: string = 'system') {
       `,
       {
         input: {
-          tenantId: DEFAULT_TENANT_ID,
+          tenantId: getDefaultTenantId(),
           identifier: user.email,
           password: user.password,
         },
@@ -483,7 +501,7 @@ async function testPasswordReset() {
         `,
         {
           input: {
-            tenantId: DEFAULT_TENANT_ID,
+            tenantId: getDefaultTenantId(),
             identifier: user.email,
           },
         }
@@ -529,7 +547,7 @@ async function testPasswordReset() {
       `,
       {
         input: {
-          tenantId: DEFAULT_TENANT_ID,
+          tenantId: getDefaultTenantId(),
           token: forgotResult.forgotPassword.resetToken,
           newPassword: newPassword,
           // If OTP-based reset, we'd need the OTP code here
@@ -559,7 +577,7 @@ async function testPasswordReset() {
         `,
         {
           input: {
-            tenantId: DEFAULT_TENANT_ID,
+            tenantId: getDefaultTenantId(),
             identifier: user.email,
             password: newPassword,
           },
@@ -621,7 +639,7 @@ async function testOTPFlow() {
       `,
       {
         input: {
-          tenantId: DEFAULT_TENANT_ID,
+          tenantId: getDefaultTenantId(),
           recipient: testEmail,
           channel: 'email',
           purpose: 'email_verification',
@@ -675,7 +693,7 @@ async function testOTPFlow() {
       `,
       {
         input: {
-          tenantId: DEFAULT_TENANT_ID,
+          tenantId: getDefaultTenantId(),
           otpToken: sendResult.sendOTP.otpToken,
           code: testOTPCode,
         },
@@ -739,7 +757,7 @@ async function testTokenRefresh() {
       `,
       {
         input: {
-          tenantId: DEFAULT_TENANT_ID,
+          tenantId: getDefaultTenantId(),
           identifier: user.email,
           password: user.password,
         },
@@ -780,7 +798,7 @@ async function testTokenRefresh() {
       `,
       {
         input: {
-          tenantId: DEFAULT_TENANT_ID,
+          tenantId: getDefaultTenantId(),
           refreshToken: refreshToken,
         },
       }
@@ -853,7 +871,7 @@ async function testMySessions() {
       `,
       {
         input: {
-          tenantId: DEFAULT_TENANT_ID,
+          tenantId: getDefaultTenantId(),
           identifier: user.email,
           password: user.password,
         },
@@ -950,7 +968,7 @@ async function testLogout() {
       `,
       {
         input: {
-          tenantId: DEFAULT_TENANT_ID,
+          tenantId: getDefaultTenantId(),
           identifier: user.email,
           password: user.password,
         },
@@ -1008,7 +1026,7 @@ async function testLogout() {
         `,
         {
           input: {
-            tenantId: DEFAULT_TENANT_ID,
+            tenantId: getDefaultTenantId(),
             refreshToken: refreshToken,
           },
         }
@@ -1061,7 +1079,7 @@ async function testLogoutAll() {
       `,
       {
         input: {
-          tenantId: DEFAULT_TENANT_ID,
+          tenantId: getDefaultTenantId(),
           identifier: user.email,
           password: user.password,
           userAgent: 'Test Agent 1',
@@ -1089,7 +1107,7 @@ async function testLogoutAll() {
       `,
       {
         input: {
-          tenantId: DEFAULT_TENANT_ID,
+          tenantId: getDefaultTenantId(),
           identifier: user.email,
           password: user.password,
           userAgent: 'Test Agent 2',
@@ -1169,7 +1187,7 @@ async function testLogoutAll() {
         `,
         {
           input: {
-            tenantId: DEFAULT_TENANT_ID,
+            tenantId: getDefaultTenantId(),
             identifier: user.email,
             password: user.password,
           },
@@ -1553,6 +1571,11 @@ async function runAllTests() {
 
 async function main() {
   const args = process.argv.slice(2);
+  
+  // Initialize configuration from MongoDB config store
+  // This will populate AUTH_SERVICE_URL
+  await initializeConfig();
+  await loadScriptConfig();
   
   if (args.length === 0) {
     console.log(`

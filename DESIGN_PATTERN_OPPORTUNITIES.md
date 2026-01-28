@@ -15,7 +15,7 @@
 | GraphQL Resolver Building | Manual object construction | Builder Pattern | Medium | Low-Medium | ✅ Completed |
 | Validation Logic | Repeated if/else chains | Chain of Responsibility | High | Medium | ✅ Completed |
 | Error Handling | Scattered try/catch | Unified Error System | High | Medium | ✅ Completed |
-| Service Configuration | Manual object creation | Builder Pattern | Low | Low | ⏳ Optional |
+| Service Configuration | Manual object creation | Dynamic Config System | High | Medium | ✅ Complete (4/4 services) |
 
 ---
 
@@ -479,16 +479,50 @@ query {
 
 ---
 
-### 6. Service Configuration - Builder Pattern (Optional)
+### 6. Dynamic Configuration Management System - MongoDB-Based Config Store 🔴 HIGH PRIORITY
 
-**File**: `core-service/src/gateway/server.ts`, service index files
+**Status**: ✅ **COMPLETE** (All 4 services migrated - 2026-01-28)
 
-**Current Issue**:
-- Complex configuration objects
-- Hard to see what's required vs optional
-- Easy to make mistakes
+**Files**: 
+- `core-service/src/common/config-store.ts` (NEW)
+- `core-service/src/common/config-loader.ts` (enhance existing)
+- `core-service/src/common/config-graphql.ts` (NEW)
 
-**Proposed Solution**: Configuration Builder
+**Current Issues**:
+- Configuration changes require rebuild + redeploy entire container
+- No multi-brand support (can't easily manage different configs per brand)
+- No permission separation (all configs are either all-public or all-secret)
+- No dynamic updates (configs loaded at startup, can't change without restart)
+- Scattered configuration (each service manages its own config files/env vars)
+
+**Proposed Solution**: MongoDB-Based Dynamic Configuration System
+
+**Key Features**:
+- MongoDB key-value storage (single source of truth)
+- Permission-based access (sensitive vs public configs)
+- Multi-brand/tenant support
+- Dynamic reloading (no rebuild required)
+- GraphQL API for admin management
+- Backward compatible (env vars still work as override)
+
+**Detailed Plan**: See `DYNAMIC_CONFIG_MANAGEMENT_PLAN.md` for complete implementation plan.
+
+**Benefits**:
+- ✅ No rebuild required: Change configs in MongoDB, services reload automatically
+- ✅ Multi-brand support: Easy brand-specific and tenant-specific configs
+- ✅ Permission-based: Sensitive data protected, public data accessible to clients
+- ✅ Single source of truth: MongoDB as central config store
+- ✅ Generic implementation: Works for all services
+
+**Effort**: Medium (4 weeks estimated)
+
+---
+
+### 6.1. Service Configuration - Builder Pattern (Original - Superseded by Dynamic Config)
+
+**Note**: This was the original optional proposal. It's been superseded by the Dynamic Configuration Management System above, which addresses the real business need (multi-brand, no rebuild, permission-based access).
+
+**Original Proposed Solution**: Configuration Builder
 
 **Improvement**:
 ```typescript
@@ -583,15 +617,13 @@ const gateway = await createGateway(
    - **File**: `core-service/src/common/errors.ts` (unified)
    - **Status**: All services refactored, error code constants implemented, GraphQL discovery added
 
-### Low Priority (Optional Improvements)
+### High Priority (Next Phase)
 
-6. **Configuration Builder** - Builder for service configuration
-   - **Impact**: Low (nice to have, but current approach works)
-   - **Effort**: Low
-
-6. **Configuration Builder** - Builder for service configuration
-   - **Impact**: Low (nice to have, but current approach works)
-   - **Effort**: Low
+6. 🔴 **Dynamic Configuration Management System** - MongoDB-Based Config Store
+   - **Impact**: High (enables multi-brand, no rebuild, permission-based access)
+   - **Effort**: Medium (4 weeks estimated)
+   - **Status**: 📋 Planning
+   - **Plan**: See `DYNAMIC_CONFIG_MANAGEMENT_PLAN.md` for complete details
 
 ---
 
@@ -648,11 +680,40 @@ const gateway = await createGateway(
    - **Impact**: Eliminated hundreds of manual `logger.error()` calls, unified error handling, type-safe error codes
    - **Status**: ✅ Complete - All services updated
 
-### Phase 4: Optional Enhancements (Future)
-6. ⏳ Configuration builder (if time permits)
-   - **Impact**: Low (nice to have, but current approach works)
-   - **Effort**: Low
-   - **Status**: Not started
+### Phase 4: Dynamic Configuration Management System 🔴 HIGH PRIORITY
+6. 🔄 **Dynamic Configuration Management System** - MongoDB-Based Config Store
+   - ✅ Core implementation complete
+   - ✅ Database strategy configuration complete (2026-01-28)
+     - ✅ Strategy resolver from config store
+     - ✅ Redis URL from config store
+     - ✅ URI template support with placeholders
+   - ✅ Auth-service migration complete (2026-01-28)
+     - ✅ Config defaults registered
+     - ✅ Database strategy configurable from MongoDB
+     - ✅ Redis URL configurable from MongoDB
+   - ✅ Payment-service migration complete (2026-01-28)
+     - ✅ Database strategy configurable from MongoDB
+     - ✅ Redis URL configurable from MongoDB
+   - ✅ Bonus-service migration complete (2026-01-28)
+     - ✅ Database strategy configurable from MongoDB
+     - ✅ Redis URL configurable from MongoDB
+   - ✅ Notification-service migration complete (2026-01-28)
+     - ✅ Database strategy configurable from MongoDB
+     - ✅ Redis URL configurable from MongoDB
+   - ✅ Database migration complete (`auth_service` → `core_service`) (2026-01-28)
+   - ✅ Brand/tenant collections implemented with caching (2026-01-28)
+   - ✅ Dynamic brand/tenant resolution implemented (2026-01-28)
+   - **Impact**: High (enables multi-brand, no rebuild, permission-based access)
+   - **Effort**: Medium (4 weeks estimated)
+   - **Status**: Planning
+   - **Plan**: See `DYNAMIC_CONFIG_MANAGEMENT_PLAN.md` for complete implementation plan
+   - **Key Features**:
+     - MongoDB key-value storage (single source of truth)
+     - Permission-based access (sensitive vs public configs)
+     - Multi-brand/tenant support
+     - Dynamic reloading (no rebuild required)
+     - GraphQL API for admin management
+     - Backward compatible (env vars still work as override)
 
 ---
 
@@ -839,8 +900,19 @@ const resolvers = builder.build();
 - ✅ Phase 2: Chain of Responsibility (Validation), Builder Pattern (Resolvers)
 - ✅ Phase 3: Unified Error Handling System (Error codes, auto-logging, GraphQL discovery)
 
-**Remaining**:
-- ⏳ Phase 4 (Optional): Configuration Builder (if needed in future)
+**Completed**:
+- ✅ Phase 4 (HIGH PRIORITY): Dynamic Configuration Management System ✅ **COMPLETE**
+  - ✅ Core implementation complete
+  - ✅ Database strategy configuration complete (2026-01-28)
+    - ✅ Strategy resolver from config store
+    - ✅ Redis URL from config store
+    - ✅ URI template support with placeholders
+  - ✅ All 4 services migrated (2026-01-28)
+    - ✅ Auth-service: Database strategy + Redis URL configurable from MongoDB
+    - ✅ Payment-service: Database strategy + Redis URL configurable from MongoDB
+    - ✅ Bonus-service: Database strategy + Redis URL configurable from MongoDB
+    - ✅ Notification-service: Database strategy + Redis URL configurable from MongoDB
+  - See `DYNAMIC_CONFIG_MANAGEMENT_PLAN.md` for complete details
 
 **Adoption Notes**:
 - Error handling system is fully implemented and used across all services

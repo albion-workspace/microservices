@@ -123,8 +123,8 @@ export {
   getDatabaseStats,
   registerIndexes,
   DEFAULT_MONGO_CONFIG,
-} from './common/database.js';
-export type { MongoConfig } from './common/database.js';
+} from './databases/mongodb.js';
+export type { MongoConfig } from './databases/mongodb.js';
 
 // MongoDB Utilities
 export {
@@ -150,20 +150,22 @@ export {
   updateOneById,
   deleteOneById,
   findOneAndUpdateById,
-} from './common/mongodb-utils.js';
+} from './databases/mongodb-utils.js';
 
 // User Utilities
 export {
   findUserIdByRole,
   findUserIdsByRole,
-} from './common/user-utils.js';
-export type { FindUserByRoleOptions } from './common/user-utils.js';
+} from './databases/user-utils.js';
+export type { FindUserByRoleOptions } from './databases/user-utils.js';
 export type {
   Collection,
   Filter,
   Document,
   ClientSession,
-} from './common/mongodb-utils.js';
+  Db,
+  MongoClient,
+} from './databases/mongodb-utils.js';
 
 // MongoDB Error Handling (sharding-optimized)
 export {
@@ -171,7 +173,7 @@ export {
   handleDuplicateKeyError,
   executeWithDuplicateHandling,
   type DuplicateKeyErrorOptions,
-} from './common/mongodb-errors.js';
+} from './databases/mongodb-errors.js';
 
 // Pagination Utilities (cursor-based, sharding-optimized)
 export {
@@ -179,7 +181,7 @@ export {
   convertOffsetToCursor,
   type CursorPaginationOptions,
   type CursorPaginationResult,
-} from './common/pagination.js';
+} from './databases/pagination.js';
 
 // Configuration Management (unified, multi-source)
 export {
@@ -188,8 +190,76 @@ export {
   type ConfigLoaderOptions,
 } from './common/config-loader.js';
 
+// Dynamic Configuration Store (MongoDB-based, permission-aware)
+export {
+  createConfigStore,
+  createServiceConfigStore,
+  getCentralConfigStore,
+  clearCentralConfigStore,
+  clearServiceConfigStores,
+  registerServiceConfigDefaults,
+  getConfigWithDefault,
+  ensureDefaultConfigsCreated,
+  ConfigStore,
+} from './common/config-store.js';
+export type {
+  ConfigEntry,
+  ConfigStoreOptions,
+  GetConfigOptions,
+  GetAllConfigOptions,
+  SetConfigOptions,
+} from './common/config-store.js';
+
+// Dynamic Configuration GraphQL API
+export {
+  configGraphQLTypes,
+  configResolvers,
+} from './common/config-graphql.js';
+
+// NOTE: DatabaseConfigStore (db-config-store.ts) is DEPRECATED
+// All database config is now stored in service_configs collection as 'database' key
+// Use getConfigWithDefault(service, 'database') instead
+
+// Database Strategy Pattern (Flexible Database Architecture)
+export {
+  createDatabaseStrategy,
+  getDatabaseByStrategy,
+  createSharedDatabaseStrategy,
+  createPerServiceDatabaseStrategy,
+  createPerBrandDatabaseStrategy,
+  createPerBrandServiceDatabaseStrategy,
+  createPerTenantDatabaseStrategy,
+  createPerTenantServiceDatabaseStrategy,
+  createPerShardDatabaseStrategy,
+  DatabaseStrategyResolver,
+} from './databases/strategy.js';
+export type {
+  DatabaseStrategy,
+  DatabaseResolver,
+  DatabaseContext,
+  DatabaseStrategyConfig,
+  DatabaseResolutionOptions,
+} from './databases/strategy.js';
+export {
+  resolveDatabase,
+} from './databases/strategy.js';
+export {
+  // Strategy resolution from config
+  resolveDatabaseStrategyFromConfig,
+  resolveRedisUrlFromConfig,
+  // Centralized database access (simplified API)
+  getCentralDatabase,
+  getCentralClient,
+  getServiceDatabase,
+  getServiceStrategy,
+  initializeServiceDatabase,
+  clearDatabaseCaches,
+  type DatabaseConfig,
+  type ServiceDatabaseOptions,
+} from './databases/strategy-config.js';
+
 // Repository (with caching)
-export { createRepository, generateId as generateUUID, bulkInsert, bulkUpdate } from './common/repository.js';
+export { createRepository, generateId as generateUUID, bulkInsert, bulkUpdate } from './databases/repository.js';
 
 // Cache
 export { 
@@ -202,7 +272,7 @@ export {
   getCacheStats,
   createCacheKeys,
   CacheKeys,
-} from './common/cache.js';
+} from './databases/cache.js';
 
 // Redis
 export { 
@@ -217,8 +287,8 @@ export {
   scanKeysArray,
   scanKeysWithCallback,
   batchGetValues,
-} from './common/redis.js';
-export type { RedisConfig, ScanOptions } from './common/redis.js';
+} from './databases/redis.js';
+export type { RedisConfig, ScanOptions } from './databases/redis.js';
 
 // Logger
 export { 
@@ -362,6 +432,35 @@ export type {
   PermissionMap,
 } from './types/index.js';
 
+// Context Resolution
+export {
+  resolveContext,
+  getBrand,
+  getTenantId as getTenantIdFromContext,
+} from './common/context-resolver.js';
+
+// Core Database
+export {
+  CORE_DATABASE_NAME,
+} from './databases/core-database.js';
+
+// Brand & Tenant Store
+export {
+  getBrandById,
+  getBrandByCode,
+  getAllBrands,
+  invalidateBrandCache,
+  getTenantById,
+  getTenantByCode,
+  getTenantsByBrand,
+  getAllTenants,
+  invalidateTenantCache,
+} from './databases/brand-tenant-store.js';
+export type {
+  Brand,
+  Tenant,
+} from './databases/brand-tenant-store.js';
+
 // Repository
 export type { 
   WriteOptions,
@@ -462,6 +561,8 @@ export {
   createWebhookService,
   createWebhookManager,
   WebhookManager,
+  // Generic initialization helper (use in service's main() after DB connection)
+  initializeWebhooks,
   // Signature utilities (for webhook receivers)
   generateSignature,
   verifySignature,

@@ -10,18 +10,41 @@
  * Also provides centralized JWT token generation utilities.
  */
 
-import { getAuthDatabase } from './mongodb.js';
+import { getAuthDatabase, loadScriptConfig } from './scripts.js';
 import { createHmac } from 'crypto';
-import { connectDatabase } from '../../../core-service/src/common/database.js';
-import { findUserIdByRole, findUserIdsByRole } from '../../../core-service/src/common/user-utils.js';
+import { connectDatabase, resolveContext, getClient } from '../../../core-service/src/index.js';
+import { findUserIdByRole, findUserIdsByRole } from '../../../core-service/src/index.js';
 
 // ═══════════════════════════════════════════════════════════════════
-// Configuration
+// Configuration (loaded dynamically from MongoDB config store)
 // ═══════════════════════════════════════════════════════════════════
 
-const AUTH_SERVICE_URL = process.env.AUTH_SERVICE_URL || 'http://localhost:3003/graphql';
-export const DEFAULT_TENANT_ID = 'default-tenant';
+let AUTH_SERVICE_URL: string = process.env.AUTH_SERVICE_URL || 'http://localhost:3003/graphql';
+let DEFAULT_TENANT_ID: string = 'default-tenant';
+
+// Export DEFAULT_TENANT_ID for backward compatibility
+export { DEFAULT_TENANT_ID };
 const JWT_SECRET = process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || 'shared-jwt-secret-change-in-production';
+
+/**
+ * Initialize configuration from MongoDB config store
+ * Should be called before using AUTH_SERVICE_URL or DEFAULT_TENANT_ID
+ */
+export async function initializeConfig(): Promise<void> {
+  const config = await loadScriptConfig();
+  AUTH_SERVICE_URL = config.serviceUrls.auth;
+  const context = await resolveContext();
+  DEFAULT_TENANT_ID = context.tenantId || 'default-tenant';
+}
+
+// Export getter functions for backward compatibility
+export function getAuthServiceUrl(): string {
+  return AUTH_SERVICE_URL;
+}
+
+export function getDefaultTenantId(): string {
+  return DEFAULT_TENANT_ID;
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // Currency Configuration - Shared across all tests
@@ -166,28 +189,44 @@ export const ALL_USERS: Record<string, UserDefinition> = {
 async function graphql<T = any>(
   query: string,
   variables?: Record<string, unknown>,
-  token?: string
+  token?: string,
+  timeoutMs: number = 30000 // Default 30 second timeout
 ): Promise<T> {
-  const response = await fetch(AUTH_SERVICE_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token && { Authorization: `Bearer ${token}` }),
-    },
-    body: JSON.stringify({ query, variables }),
-  });
+  // Add timeout to prevent hanging
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-  if (!response.ok) {
-    throw new Error(`HTTP error! status: ${response.status}`);
+  try {
+    const response = await fetch(getAuthServiceUrl(), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token && { Authorization: `Bearer ${token}` }),
+      },
+      body: JSON.stringify({ query, variables }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const result = await response.json();
+
+    if (result.errors) {
+      throw new Error(`GraphQL errors: ${JSON.stringify(result.errors)}`);
+    }
+
+    return result.data;
+  } catch (error: any) {
+    clearTimeout(timeoutId);
+    if (error.name === 'AbortError') {
+      throw new Error(`GraphQL request timed out after ${timeoutMs}ms to ${getAuthServiceUrl()}`);
+    }
+    throw error;
   }
-
-  const result = await response.json();
-
-  if (result.errors) {
-    throw new Error(`GraphQL errors: ${JSON.stringify(result.errors)}`);
-  }
-
-  return result.data;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -251,7 +290,7 @@ export async function loginAs(
 
   const loginVars = {
     input: {
-      tenantId: DEFAULT_TENANT_ID,
+      tenantId: getDefaultTenantId(),
       identifier: user.email.toLowerCase().trim(), // Normalize email to match Passport
       password: user.password,
     },
@@ -335,26 +374,54 @@ export async function registerAs(
   // Check if user already exists in MongoDB (more reliable)
   // CRITICAL: Check by both email AND tenantId (Passport queries by tenantId)
   // Also normalize email to match Passport's normalization
-  const db = await getAuthDatabase();
+  // Get dbContext from global if available (set by test scripts)
+  const dbContext = (global as any).__dbContext || {};
+  const db = await getAuthDatabase(dbContext);
   const usersCollection = db.collection('users');
   const normalizedEmail = user.email.toLowerCase().trim(); // Match Passport's normalizeEmail
   const existingUser = await usersCollection.findOne({ 
     email: normalizedEmail,
-    tenantId: DEFAULT_TENANT_ID 
+    tenantId: getDefaultTenantId() 
   });
 
   if (existingUser) {
     const userId = existingUser._id?.toString() || existingUser.id;
     
-    // CRITICAL: Delete and recreate user to ensure password hash is correct
-    // This is safer than updating password hash (which requires bcrypt in scripts)
-    // Registration service handles password hashing correctly
-    await usersCollection.deleteOne({ 
-      email: normalizedEmail,
-      tenantId: DEFAULT_TENANT_ID 
-    });
+    // IMPORTANT: Don't delete/recreate if user exists - just update roles/permissions
+    // This preserves the user ID and prevents creating new wallets each time
+    // Only delete/recreate if we need to update the password (which we don't for system users)
+    if (updateRoles || updatePermissions) {
+      // Convert permissions object to array format
+      const permissionsArray = typeof user.permissions === 'object' && !Array.isArray(user.permissions)
+        ? Object.keys(user.permissions).filter(key => user.permissions[key] === true)
+        : Array.isArray(user.permissions)
+        ? user.permissions
+        : [];
+      
+      // Update roles and permissions without deleting user (preserves user ID)
+      await usersCollection.updateOne(
+        { email: normalizedEmail, tenantId: DEFAULT_TENANT_ID },
+        {
+          $set: {
+            roles: user.roles, // Roles should already be array
+            permissions: permissionsArray, // Convert to array format
+          },
+        }
+      );
+      
+      return {
+        userId,
+        email: normalizedEmail,
+        created: false, // User already existed, just updated
+      };
+    }
     
-    // Fall through to registration below
+    // If no updates needed, just return existing user
+    return {
+      userId,
+      email: normalizedEmail,
+      created: false,
+    };
   }
 
   // Try to register via GraphQL
@@ -391,7 +458,7 @@ export async function registerAs(
   // In production, only system users would use autoVerify
   const registerVars = {
     input: {
-      tenantId: DEFAULT_TENANT_ID,
+      tenantId: getDefaultTenantId(),
       email: normalizedEmail, // Use normalized email for consistency
       password: user.password,
       autoVerify: true, // Bypass verification for testing/system setup
@@ -421,12 +488,25 @@ export async function registerAs(
       // Update roles and permissions via MongoDB (more reliable)
       // CRITICAL: Update by both email AND tenantId, use normalized email
       // Password hash is already correct (created by registration service)
-      await usersCollection.updateOne(
+      // Re-get database connection in case it was closed during GraphQL call
+      const dbContext = (global as any).__dbContext || {};
+      const dbUpdate = await getAuthDatabase(dbContext);
+      const usersCollectionUpdate = dbUpdate.collection('users');
+      
+      // Convert permissions object to array format (GraphQL expects array)
+      // Permissions can be stored as object { '*:*:*': true } or array ['*:*:*']
+      const permissionsArray = typeof user.permissions === 'object' && !Array.isArray(user.permissions)
+        ? Object.keys(user.permissions).filter(key => user.permissions[key] === true)
+        : Array.isArray(user.permissions)
+        ? user.permissions
+        : [];
+      
+      await usersCollectionUpdate.updateOne(
         { email: normalizedEmail, tenantId: DEFAULT_TENANT_ID },
         {
           $set: {
-            roles: user.roles,
-            permissions: user.permissions,
+            roles: user.roles, // Roles should already be array
+            permissions: permissionsArray, // Convert to array format
           },
         }
       );
@@ -440,22 +520,52 @@ export async function registerAs(
 
     throw new Error(`Registration failed: ${data.register.message || 'Unknown error'}`);
   } catch (error: any) {
-    // If registration fails (e.g., user already exists), try to find user
+    // If registration fails (e.g., user already exists), try to find and update user
     // CRITICAL: Check by both email AND tenantId, use normalized email
-    const foundUser = await usersCollection.findOne({ 
+    // Re-get database connection in case it was closed
+    const dbContext = (global as any).__dbContext || {};
+    const dbRetry = await getAuthDatabase(dbContext);
+    const usersCollectionRetry = dbRetry.collection('users');
+    const foundUser = await usersCollectionRetry.findOne({ 
       email: normalizedEmail,
       tenantId: DEFAULT_TENANT_ID 
     });
     if (foundUser) {
-      // User exists but registration failed - delete and recreate
-      // This ensures password hash is correct (registration service handles hashing)
-      await usersCollection.deleteOne({ 
-        email: normalizedEmail,
-        tenantId: DEFAULT_TENANT_ID 
-      });
+      // User exists - update roles and permissions instead of deleting
+      // This avoids race conditions with services that auto-create default users
+      const userId = foundUser.id || foundUser._id?.toString();
       
-      // Retry registration (will create fresh user with correct password hash)
-      return await registerAs(userKeyOrEmail, options);
+      if (options.updateRoles || options.updatePermissions) {
+        const updateFields: Record<string, unknown> = {};
+        
+        if (options.updateRoles) {
+          updateFields.roles = user.roles;
+        }
+        
+        if (options.updatePermissions) {
+          const permissionsArray = typeof user.permissions === 'object' && !Array.isArray(user.permissions)
+            ? Object.entries(user.permissions)
+                .filter(([_, v]) => v === true)
+                .map(([k]) => k)
+            : Array.isArray(user.permissions)
+            ? user.permissions
+            : [];
+          updateFields.permissions = permissionsArray;
+        }
+        
+        if (Object.keys(updateFields).length > 0) {
+          await usersCollectionRetry.updateOne(
+            { email: normalizedEmail, tenantId: DEFAULT_TENANT_ID },
+            { $set: updateFields }
+          );
+        }
+      }
+      
+      return {
+        userId,
+        email: normalizedEmail,
+        created: false, // User already existed
+      };
     }
 
     throw new Error(`Failed to register ${normalizedEmail}: ${error.message}`);
@@ -483,7 +593,9 @@ export async function getUserId(userKeyOrEmail: string): Promise<string> {
     }
   }
 
-  const db = await getAuthDatabase();
+  // Get dbContext from global if available (set by test scripts)
+  const dbContext = (global as any).__dbContext || {};
+  const db = await getAuthDatabase(dbContext);
   const usersCollection = db.collection('users');
   const normalizedEmail = user.email.toLowerCase().trim(); // Match Passport's normalization
   const userDoc = await usersCollection.findOne({ 
@@ -510,7 +622,9 @@ export async function getUserIds(userKeys: string[]): Promise<Record<string, str
     return user.email;
   });
 
-  const db = await getAuthDatabase();
+  // Get dbContext from global if available (set by test scripts)
+  const dbContext = (global as any).__dbContext || {};
+  const db = await getAuthDatabase(dbContext);
   const usersCollection = db.collection('users');
   const users = await usersCollection.find({ email: { $in: emails } }).toArray();
 
@@ -723,7 +837,7 @@ export function decodeJWT(token: string): JWTPayload {
  * Pre-generated tokens for common users (for testing without auth service)
  * These are mock tokens - use loginAs() for real tokens from auth service
  */
-export function getMockTokens(tenantId: string = DEFAULT_TENANT_ID) {
+export function getMockTokens(tenantId: string = getDefaultTenantId()) {
   return {
     system: createTokenForUser('system', '8h', { tenantId }),
     paymentGateway: createTokenForUser('paymentGateway', '8h', { tenantId }),
@@ -765,13 +879,18 @@ export async function getUserIdByRole(
   throwIfNotFound: boolean = true
 ): Promise<string> {
   // Ensure database is connected (required for role-based lookup)
-  const mongoUri = process.env.MONGO_URI || 'mongodb://localhost:27017?directConnection=true';
-  await connectDatabase(mongoUri);
+  // Use script config to get MongoDB URI dynamically
+  const config = await loadScriptConfig();
+  await connectDatabase(config.coreMongoUri);
+  
+  // Get the MongoDB client to pass to findUserIdByRole
+  const client = getClient();
   
   return await findUserIdByRole({
     role,
     tenantId: tenantId || DEFAULT_TENANT_ID,
     throwIfNotFound,
+    client,
   });
 }
 
@@ -795,12 +914,17 @@ export async function getUserIdsByRole(
   tenantId?: string
 ): Promise<string[]> {
   // Ensure database is connected (required for role-based lookup)
-  const mongoUri = process.env.MONGO_URI || 'mongodb://localhost:27017?directConnection=true';
-  await connectDatabase(mongoUri);
+  // Use script config to get MongoDB URI dynamically
+  const config = await loadScriptConfig();
+  await connectDatabase(config.coreMongoUri);
+  
+  // Get the MongoDB client to pass to findUserIdsByRole
+  const client = getClient();
   
   return await findUserIdsByRole({
     role,
-    tenantId: tenantId || DEFAULT_TENANT_ID,
+    tenantId: tenantId || getDefaultTenantId(),
+    client,
   });
 }
 

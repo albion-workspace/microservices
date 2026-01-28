@@ -7,13 +7,17 @@
  * - Transfers = User-to-user operations (creates 2 transactions)
  */
 
-import { createService, type, type Repository, type SagaContext, validateInput, getDatabase, logger, findUserIdByRole, GraphQLError } from 'core-service';
+import { createService, type, type Repository, type SagaContext, validateInput, logger, findUserIdByRole, GraphQLError, type DatabaseResolutionOptions } from 'core-service';
 import { BONUS_ERRORS } from '../error-codes.js';
 import type { BonusTemplate, UserBonus, BonusTransaction, BonusStatus } from '../types.js';
-import { bonusEngine } from './bonus-engine/index.js';
-import { templatePersistence } from './bonus-engine/persistence.js';
+import { createBonusEngine, type BonusEngineOptions } from './bonus-engine/index.js';
+import { createBonusPersistence } from './bonus-engine/persistence.js';
 import type { BonusContext } from './bonus-engine/types.js';
 import { getHandler } from './bonus-engine/handler-registry.js';
+import type { BaseHandlerOptions } from './bonus-engine/base-handler.js';
+
+// Import initialized persistence getter from singleton module
+import { getInitializedPersistence } from './bonus-engine/persistence-singleton.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Bonus Template Types & Validation
@@ -235,8 +239,9 @@ const userBonusSaga = [
     name: 'loadTemplate',
     critical: true,
     execute: async ({ input, data, ...ctx }: UserBonusCtx): Promise<UserBonusCtx> => {
-      // Load template by code
-      const template = await templatePersistence.findByCode(input.templateCode);
+      // Load template by code using initialized persistence
+      const persistence = await getInitializedPersistence();
+      const template = await persistence.template.findByCode(input.templateCode);
       if (!template) {
         throw new GraphQLError(BONUS_ERRORS.TemplateNotFound, { templateCode: input.templateCode });
       }

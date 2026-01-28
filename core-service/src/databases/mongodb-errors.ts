@@ -6,7 +6,7 @@
  */
 
 import type { Collection, Filter, Document } from 'mongodb';
-import { logger } from './logger.js';
+import { logger } from '../common/logger.js';
 
 export interface DuplicateKeyErrorOptions {
   /** Field to query for existing document (e.g., 'externalRef') */

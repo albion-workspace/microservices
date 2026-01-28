@@ -12,7 +12,7 @@
  *   npx tsx bonus-command-db-check.ts   # Run all checks (when implemented)
  */
 
-import { closeAllConnections } from '../config/mongodb.js';
+import { closeAllConnections } from '../config/scripts.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Command Registry
