@@ -362,6 +362,16 @@ mutation { setConfig(service: "auth-service", key: "otpLength", value: 8) { key,
   - **Resolver Builder** - Fluent API for GraphQL resolver construction (Builder pattern)
   - **Error Handling** - Unified error handling (`core-service/src/common/errors.ts`)
 
+#### Design Patterns Implemented
+
+| Pattern | Location | Purpose |
+|---------|----------|---------|
+| **Registry** | `bonus-service/handler-registry.ts` | Handler lookup by type (eliminates switch statements) |
+| **Factory Method** | `notification-service/provider-factory.ts` | Provider creation based on configuration |
+| **Chain of Responsibility** | `core-service/validation-chain.ts` | Composable validation logic |
+| **Builder** | `core-service/resolver-builder.ts` | Fluent GraphQL resolver construction |
+| **Strategy** | `core-service/databases/strategy.ts` | Database selection per brand/tenant |
+
 #### Validation Chain (Chain of Responsibility Pattern)
 
 Reusable validation logic for GraphQL resolvers. Eliminates repetitive validation code.
@@ -1519,6 +1529,30 @@ All error handling is unified in `core-service/src/common/errors.ts`:
 - Generic error utilities (`getErrorMessage`, `normalizeError`)
 - GraphQL error handling (`GraphQLError` class, `formatGraphQLError`)
 - Error code registry (`registerServiceErrorCodes`, `getAllErrorCodes`)
+
+---
+
+## 🛣️ Future Roadmap
+
+### High Priority
+- **Distributed Tracing**: OpenTelemetry integration for request tracing
+- **Performance Metrics**: Prometheus-compatible metrics endpoint
+- **Multi-Level Caching**: Memory → Redis → Database caching strategy
+- **Connection Pool Optimization**: Auto-scale MongoDB pools based on load
+
+### Medium Priority
+- **API Gateway Improvements**: Rate limiting, request caching, query complexity analysis
+- **Database Sharding Strategy**: Shard key selection, cross-shard query patterns
+- **Read Replicas Support**: MongoDB read preferences for scaling reads
+
+### Completed Improvements
+- ✅ Cursor pagination (O(1) performance)
+- ✅ Circuit breaker pattern (prevents cascading failures)
+- ✅ Enhanced retry logic (exponential backoff, jitter)
+- ✅ Health check endpoints (`/health`)
+- ✅ Correlation IDs (request tracing)
+- ✅ Dynamic configuration (MongoDB config store)
+- ✅ Design patterns (Registry, Factory, Builder, Chain of Responsibility)
 
 ---
 

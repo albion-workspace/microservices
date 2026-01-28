@@ -707,8 +707,8 @@ Before considering work complete:
 
 ## 📚 Additional Resources
 
-- `README.md` - Project overview, database strategy, and dynamic configuration
-- `ARCHITECTURE_IMPROVEMENTS.md` - Architectural improvements and patterns
+- `README.md` - Project overview, architecture, database strategy, dynamic configuration, and future roadmap
+- `ARCHITECTURE_IMPROVEMENTS.md` - Detailed architectural improvements tracking and priorities
 
 ---
 
