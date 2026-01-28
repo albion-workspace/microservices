@@ -7,9 +7,8 @@
  * - Microservices (cross-service references)
  * 
  * DATABASE ACCESS PATTERN:
- * - Uses getClient() to access other service databases (e.g., core_service)
+ * - Uses getClient().db(CORE_DATABASE_NAME) to access other service databases
  * - Uses getDatabase() for same-service database access
- * - This is intentional for cross-service data access (see DATABASE_ACCESS_PATTERNS.md)
  */
 
 import { getDatabase, getClient, logger, findOneById, CORE_DATABASE_NAME } from 'core-service';

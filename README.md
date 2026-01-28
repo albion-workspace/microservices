@@ -1,6 +1,6 @@
 # Microservices Payment System - Complete Documentation
 
-**Last Updated**: 2026-01-21  
+**Last Updated**: 2026-01-28  
 **Status**: ✅ Production Ready
 
 ---
@@ -12,7 +12,7 @@
 3. [Architecture](#architecture)
 4. [Microservices](#microservices)
 5. [Dependencies](#dependencies)
-6. [Databases](#databases)
+6. [Databases & Configuration](#databases)
 7. [Quick Start](#quick-start)
 8. [Testing](#testing)
 9. [Recovery System](#recovery-system)
@@ -119,13 +119,12 @@ tst/
 
 ---
 
-## 🗄️ Databases
+## 🗄️ Databases & Configuration
 
 ### MongoDB
 - **Purpose**: Primary data storage
 - **Collections**: `wallets`, `transactions`, `transfers`, `users`, `bonuses`, etc.
 - **Usage**: All microservices use MongoDB for persistent data
-- **Databases**: Each service has its own database (`core_service`, `payment_service`, `bonus_service`, `notification_service`)
 
 ### Redis
 - **Purpose**: Caching and state tracking
@@ -133,7 +132,127 @@ tst/
   - Cache invalidation (wallet balances, user data)
   - Recovery system state tracking (operation states with TTL)
   - Session management
-- **Required**: For recovery system (graceful degradation without Redis)
+  - Configuration caching
+
+### Database Strategy Pattern
+
+A flexible database architecture that supports multiple strategies:
+
+| Strategy | Function | Database Name | Use Case |
+|----------|----------|---------------|----------|
+| `shared` | `createSharedDatabaseStrategy()` | `core_service` | Single tenant/brand |
+| `per-service` | `createPerServiceDatabaseStrategy()` | `{service}_service` | Microservices (default) |
+| `per-brand` | `createPerBrandDatabaseStrategy()` | `brand_{brand}` | Multi-brand: all services share |
+| `per-brand-service` | `createPerBrandServiceDatabaseStrategy()` | `brand_{brand}_{service}` | Multi-brand: max isolation |
+| `per-tenant` | `createPerTenantDatabaseStrategy()` | `tenant_{tenantId}` | Multi-tenant SaaS |
+| `per-shard` | `createPerShardDatabaseStrategy()` | `shard_0`, `shard_1` | Horizontal partitioning |
+
+**Centralized Database Access API**:
+
+```typescript
+import { 
+  getCentralDatabase,      // Bootstrap layer - always core_service
+  getServiceDatabase,      // Business layer - uses strategy from config
+  initializeServiceDatabase, // Full initialization helper
+} from 'core-service';
+
+// Central database (for config, auth data)
+const coreDb = getCentralDatabase();
+const users = coreDb.collection('users');
+
+// Service database (strategy-based, for business data)
+const db = await getServiceDatabase('bonus-service', { brand, tenantId });
+const bonuses = db.collection('user_bonuses');
+
+// Full initialization (for service startup)
+const { database, strategy, context } = await initializeServiceDatabase({
+  serviceName: 'bonus-service',
+  brand: process.env.BRAND,
+  tenantId: process.env.TENANT_ID,
+});
+```
+
+**Database Architecture**:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     BOOTSTRAP LAYER (Fixed)                     │
+│  getCentralDatabase() → core_service                           │
+│  - Config (service_configs)                                     │
+│  - Auth data (users, sessions)                                  │
+│  - System data (brands, tenants)                                │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                   BUSINESS LAYER (Strategy-based)               │
+│  getServiceDatabase('service-name', { brand, tenantId })        │
+│  - Reads strategy from config (core_service.service_configs)    │
+│  - Resolves to: per-service | per-brand | per-tenant | ...      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Database Layout (per-service strategy)**:
+
+| Database | Collections |
+|----------|-------------|
+| `core_service` | `service_configs`, `sessions`, `users`, `brands`, `tenants` |
+| `bonus_service` | `bonus_templates`, `user_bonuses`, `bonus_transactions`, `bonus_webhooks` |
+| `payment_service` | `wallets`, `transfers`, `transactions`, `exchange_rates`, `payment_webhooks` |
+| `notification_service` | `notifications` |
+
+### Dynamic Configuration Management
+
+All service configuration is stored in MongoDB (`core_service.service_configs`) and can be changed without redeployment.
+
+**Priority order** (highest to lowest):
+1. Environment variables
+2. MongoDB config store
+3. Registered defaults
+
+**Register and Load Configuration**:
+
+```typescript
+import { 
+  registerServiceConfigDefaults, 
+  getConfigWithDefault,
+  resolveRedisUrlFromConfig,
+} from 'core-service';
+
+// 1. Register defaults at startup
+registerServiceConfigDefaults('my-service', {
+  jwt: { value: { expiresIn: '8h', secret: '' }, sensitivePaths: ['jwt.secret'] },
+  corsOrigins: { value: ['http://localhost:5173'] },
+});
+
+// 2. Load config (auto-creates from defaults if missing)
+const jwtConfig = await getConfigWithDefault<JwtConfig>('my-service', 'jwt', { brand, tenantId });
+const redisUrl = await resolveRedisUrlFromConfig('my-service', { brand, tenantId });
+```
+
+**Database Strategy Configuration** (stored in `service_configs`):
+
+```typescript
+// Database config is always read from core_service (bootstrap)
+const dbConfig = await getConfigWithDefault<DatabaseConfig>('bonus-service', 'database');
+// → { strategy: 'per-service', mongoUri: 'mongodb://localhost:27017/{service}' }
+```
+
+**GraphQL Admin API**:
+
+```graphql
+# Query configurations
+query { configs(service: "auth-service", brand: "brand-a") { key, value } }
+
+# Set configuration (admin only)
+mutation { setConfig(service: "auth-service", key: "otpLength", value: 8) { key, value } }
+```
+
+**Benefits**:
+- ✅ No redeployment needed for config changes
+- ✅ Multi-brand/tenant configuration support
+- ✅ Permission-based access (sensitive vs public)
+- ✅ Automatic default creation
 
 ---
 

@@ -505,7 +505,7 @@ query {
 - GraphQL API for admin management
 - Backward compatible (env vars still work as override)
 
-**Detailed Plan**: See `DYNAMIC_CONFIG_MANAGEMENT_PLAN.md` for complete implementation plan.
+**Documentation**: See `README.md` "Databases & Configuration" section for details.
 
 **Benefits**:
 - ✅ No rebuild required: Change configs in MongoDB, services reload automatically
@@ -623,7 +623,7 @@ const gateway = await createGateway(
    - **Impact**: High (enables multi-brand, no rebuild, permission-based access)
    - **Effort**: Medium (4 weeks estimated)
    - **Status**: 📋 Planning
-   - **Plan**: See `DYNAMIC_CONFIG_MANAGEMENT_PLAN.md` for complete details
+   - **Documentation**: See `README.md` "Databases & Configuration" section
 
 ---
 
@@ -706,7 +706,7 @@ const gateway = await createGateway(
    - **Impact**: High (enables multi-brand, no rebuild, permission-based access)
    - **Effort**: Medium (4 weeks estimated)
    - **Status**: Planning
-   - **Plan**: See `DYNAMIC_CONFIG_MANAGEMENT_PLAN.md` for complete implementation plan
+   - **Documentation**: See `README.md` "Databases & Configuration" section
    - **Key Features**:
      - MongoDB key-value storage (single source of truth)
      - Permission-based access (sensitive vs public configs)
@@ -912,7 +912,7 @@ const resolvers = builder.build();
     - ✅ Payment-service: Database strategy + Redis URL configurable from MongoDB
     - ✅ Bonus-service: Database strategy + Redis URL configurable from MongoDB
     - ✅ Notification-service: Database strategy + Redis URL configurable from MongoDB
-  - See `DYNAMIC_CONFIG_MANAGEMENT_PLAN.md` for complete details
+  - See `README.md` "Databases & Configuration" section for details
 
 **Adoption Notes**:
 - Error handling system is fully implemented and used across all services

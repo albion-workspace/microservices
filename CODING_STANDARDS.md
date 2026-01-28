@@ -707,11 +707,8 @@ Before considering work complete:
 
 ## 📚 Additional Resources
 
+- `README.md` - Project overview, database strategy, and dynamic configuration
 - `ARCHITECTURE_IMPROVEMENTS.md` - Architectural improvements and patterns
-- `CODE_AUDIT_LEGACY_REMOVAL.md` - Legacy code removal guidelines (for reference, not applicable pre-production)
-- `README.md` - Project overview and setup
-
-**Note**: Legacy code removal guidelines are for reference only. This project is pre-production, so legacy code doesn't exist yet. After production/release, these guidelines will become relevant.
 
 ---
 

@@ -30,8 +30,8 @@ async function resolveCoreServiceDatabase(options: UserStatusOptions, tenantId?:
     return await resolveDatabase(options, 'auth-service', tenantId);
   }
   
-  // Option 2: Cross-service access using getClient() (per DATABASE_ACCESS_PATTERNS.md)
-  // This is the correct pattern for accessing users from another service
+  // Option 2: Cross-service access using getClient()
+  // Use getClient().db(CORE_DATABASE_NAME) for accessing other service databases
   const client = getClient();
   return client.db(CORE_DATABASE_NAME);
 }
