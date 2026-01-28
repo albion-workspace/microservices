@@ -20,6 +20,8 @@
 import { requireAuth, getUserId, getTenantId } from './resolvers.js';
 import type { ResolverContext } from '../types/index.js';
 import { logger } from './logger.js';
+import { getErrorMessage } from './errors.js';
+import { hasRole } from '../access/index.js';
 
 /**
  * Validation context passed through the chain
@@ -94,7 +96,7 @@ export class AuthValidator extends ValidationHandler {
     } catch (error) {
       return {
         valid: false,
-        error: error instanceof Error ? error.message : 'Authentication required',
+        error: getErrorMessage(error) || 'Authentication required',
       };
     }
   }
@@ -226,8 +228,8 @@ export class PermissionValidator extends ValidationHandler {
       return { valid: false, error: 'Authentication required' };
     }
     
-    // Check system role
-    if (user.roles?.includes('system')) {
+    // Check system role - use hasRole from access-engine
+    if (hasRole('system')(user)) {
       return { valid: true };
     }
     

@@ -100,7 +100,7 @@ async function main() {
   // Register error codes
   registerServiceErrorCodes(NOTIFICATION_ERROR_CODES);
 
-  console.log(`
+  logger.info(`
 ╔═══════════════════════════════════════════════════════════════════════╗
 ║                     NOTIFICATION SERVICE                              ║
 ╠═══════════════════════════════════════════════════════════════════════╣

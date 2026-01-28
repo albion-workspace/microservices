@@ -52,7 +52,7 @@ import { connectRedis, checkRedisHealth, getRedis } from '../common/redis.js';
 import { getCacheStats } from '../common/cache.js';
 import { logger, subscribeToLogs, type LogEntry, setCorrelationId, generateCorrelationId, getCorrelationId } from '../common/logger.js';
 import { createResolverBuilder, type ServiceResolvers } from '../common/resolver-builder.js';
-import { formatGraphQLError, getAllErrorCodes } from '../common/errors.js'; '../common/graphql-error.js';
+import { formatGraphQLError, getAllErrorCodes, getErrorMessage } from '../common/errors.js'; '../common/graphql-error.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -408,7 +408,7 @@ function buildSchema(
       });
     } catch (error: unknown) {
       // Even if extendSchema throws, it might have partially extended the schema
-      const errorMessage = error instanceof Error ? error.message : String(error);
+      const errorMessage = getErrorMessage(error);
       const errorStack = error instanceof Error ? error.stack : undefined;
       // Check if mutations were added by inspecting the extended schema
       const tempExtendedMutation = baseSchema.getMutationType();
@@ -698,7 +698,7 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
     }
   } catch (error) {
     logger.error(`Failed to connect to database for ${name}`, {
-      error: error instanceof Error ? error.message : String(error),
+      error: getErrorMessage(error),
       uri: dbUri.replace(/:[^:@]+@/, ':***@'), // Hide password
     });
     throw error;
@@ -716,7 +716,7 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
       }
     } catch (error) {
       logger.warn(`Failed to connect to Redis for ${name} - continuing without Redis`, {
-        error: error instanceof Error ? error.message : String(error),
+        error: getErrorMessage(error),
       });
       // Don't throw - Redis is optional for most services
     }

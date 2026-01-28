@@ -28,6 +28,7 @@ import {
   type IntegrationEvent,
   type ResolverContext,
 } from 'core-service';
+import { hasAnyRole as hasAnyRoleAccess } from 'core-service/access';
 import { BONUS_ERRORS } from './error-codes.js';
 import { setupRecovery } from './recovery-setup.js';
 import { templatePersistence } from './services/bonus-engine/persistence.js';
@@ -284,7 +285,7 @@ const bonusApprovalResolvers = {
       context: ResolverContext
     ) => {
       requireAuth(context);
-      if (!context.user!.roles?.includes('system') && !context.user!.roles?.includes('admin')) {
+      if (!hasAnyRoleAccess(['system', 'admin'])(context.user!)) {
         throw new GraphQLError(BONUS_ERRORS.SystemOrAdminAccessRequired, {});
       }
       
@@ -318,7 +319,7 @@ const bonusApprovalResolvers = {
       context: ResolverContext
     ) => {
       requireAuth(context);
-      if (!context.user!.roles?.includes('system') && !context.user!.roles?.includes('admin')) {
+      if (!hasAnyRoleAccess(['system', 'admin'])(context.user!)) {
         throw new GraphQLError(BONUS_ERRORS.SystemOrAdminAccessRequired, {});
       }
       
@@ -366,7 +367,7 @@ const bonusApprovalResolvers = {
       context: ResolverContext
     ) => {
       requireAuth(context);
-      if (!context.user!.roles?.includes('system') && !context.user!.roles?.includes('admin')) {
+      if (!hasAnyRoleAccess(['system', 'admin'])(context.user!)) {
         throw new GraphQLError(BONUS_ERRORS.SystemOrAdminAccessRequired, {});
       }
       
@@ -392,7 +393,7 @@ const bonusApprovalResolvers = {
       context: ResolverContext
     ) => {
       requireAuth(context);
-      if (!context.user!.roles?.includes('system') && !context.user!.roles?.includes('admin')) {
+      if (!hasAnyRoleAccess(['system', 'admin'])(context.user!)) {
         throw new GraphQLError(BONUS_ERRORS.SystemOrAdminAccessRequired, {});
       }
       

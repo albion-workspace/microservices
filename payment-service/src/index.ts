@@ -28,15 +28,15 @@ import {
   extractDocumentId,
   GraphQLError,
   registerServiceErrorCodes,
-  type IntegrationEvent,
   // Webhooks - plug-and-play service
   createWebhookService,
-  type ResolverContext,
   findOneById,
   generateMongoId,
   isDuplicateKeyError,
   createObjectModelQueryResolver,
   findUserIdByRole,
+  type IntegrationEvent,
+  type ResolverContext,
 } from 'core-service';
 // Ledger service imports removed - wallets are updated atomically via createTransferWithTransactions
 import { createTransferWithTransactions } from 'core-service';
@@ -756,7 +756,7 @@ function setupBonusEventHandlers() {
 async function main() {
   // Register error codes
   registerServiceErrorCodes(PAYMENT_ERROR_CODES);
-  console.log(`
+  logger.info(`
 ╔═══════════════════════════════════════════════════════════════════════╗
 ║                     PAYMENT SERVICE                                   ║
 ╠═══════════════════════════════════════════════════════════════════════╣
@@ -776,11 +776,11 @@ async function main() {
 ╚═══════════════════════════════════════════════════════════════════════╝
 `);
 
-  console.log('Environment:');
-  console.log(`  PORT:       ${config.port}`);
-  console.log(`  MONGO_URI:  ${process.env.MONGO_URI || 'mongodb://localhost:27017/payment_service'}`);
-  console.log(`  REDIS_URL:  ${process.env.REDIS_URL || 'not configured'}`);
-  console.log('');
+  logger.info('Environment:', {
+    PORT: config.port,
+    MONGO_URI: process.env.MONGO_URI || 'mongodb://localhost:27017/payment_service',
+    REDIS_URL: process.env.REDIS_URL || 'not configured',
+  });
 
   // Register event handlers before starting
   setupBonusEventHandlers();

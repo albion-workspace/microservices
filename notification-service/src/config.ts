@@ -2,6 +2,7 @@
  * Notification Service Configuration
  */
 
+import { logger } from 'core-service';
 import type { NotificationConfig } from './types.js';
 
 export function loadConfig(): NotificationConfig {
@@ -54,15 +55,15 @@ export function validateConfig(config: NotificationConfig): void {
   
   // Warn about missing providers
   if (!config.smtpHost) {
-    console.warn('⚠ SMTP not configured - Email notifications disabled');
+    logger.warn('SMTP not configured - Email notifications disabled');
   }
   
   if (!config.twilioAccountSid) {
-    console.warn('⚠ Twilio not configured - SMS/WhatsApp notifications disabled');
+    logger.warn('Twilio not configured - SMS/WhatsApp notifications disabled');
   }
   
   if (!config.pushProviderApiKey) {
-    console.warn('⚠ Push provider not configured - Push notifications disabled');
+    logger.warn('Push provider not configured - Push notifications disabled');
   }
   
   if (errors.length > 0) {
@@ -71,18 +72,20 @@ export function validateConfig(config: NotificationConfig): void {
 }
 
 export function printConfigSummary(config: NotificationConfig): void {
-  console.log('Configuration:');
-  console.log(`  Port: ${config.port}`);
-  console.log(`  MongoDB: ${config.mongoUri}`);
-  console.log(`  Redis: ${config.redisUrl || 'not configured'}`);
-  console.log('');
+  logger.info('Configuration:', {
+    Port: config.port,
+    MongoDB: config.mongoUri,
+    Redis: config.redisUrl || 'not configured',
+  });
   
-  console.log('Available Channels:');
-  if (config.smtpHost) console.log('  ✓ Email (SMTP)');
-  if (config.twilioAccountSid) console.log('  ✓ SMS (Twilio)');
-  if (config.twilioWhatsAppNumber) console.log('  ✓ WhatsApp (Twilio)');
-  if (config.pushProviderApiKey) console.log('  ✓ Push Notifications');
-  console.log('  ✓ SSE (Server-Sent Events)');
-  console.log('  ✓ Socket.IO (Real-time)');
-  console.log('');
+  const availableChannels = [
+    config.smtpHost && 'Email (SMTP)',
+    config.twilioAccountSid && 'SMS (Twilio)',
+    config.twilioWhatsAppNumber && 'WhatsApp (Twilio)',
+    config.pushProviderApiKey && 'Push Notifications',
+    'SSE (Server-Sent Events)',
+    'Socket.IO (Real-time)',
+  ].filter(Boolean);
+  
+  logger.info('Available Channels:', { channels: availableChannels });
 }

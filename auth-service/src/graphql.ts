@@ -22,7 +22,7 @@ import {
   type CursorPaginationResult,
 } from 'core-service';
 import { AUTH_ERRORS } from './error-codes.js';
-import { matchAnyUrn } from 'core-service/access';
+import { matchAnyUrn, hasRole, hasAnyRole } from 'core-service/access';
 import { 
   rolesToArray, 
   normalizeUser, 
@@ -365,8 +365,8 @@ function checkSystemOrPermission(
 ): boolean {
   if (!user) return false;
   
-  // Check system role (only role with full access)
-  if (user.roles?.includes('system')) return true;
+  // Check system role (only role with full access) - use hasRole from access-engine
+  if (hasRole('system')(user)) return true;
   
   // Check permissions using access-engine's matchAnyUrn (handles wildcards properly)
   const requiredUrn = `${resource}:${action}:${target}`;
@@ -1074,8 +1074,7 @@ export function createAuthResolvers(
         
         // Check if user is admin/system (can see all operations)
         const isAdmin = checkSystemOrPermission(user, 'user', 'read', '*') || 
-                        user.roles?.includes('system') || 
-                        user.roles?.includes('admin');
+                        hasAnyRole(['system', 'admin'])(user);
         
         const redis = getRedis();
         if (!redis) {
@@ -1340,7 +1339,7 @@ export function createAuthResolvers(
         requireAuth(ctx);
         
         const user = ctx.user!;
-        const isAdmin = user.roles?.includes('system') || user.roles?.includes('admin');
+        const isAdmin = hasAnyRole(['system', 'admin'])(user);
         
         if (!isAdmin) {
           throw new GraphQLError(AUTH_ERRORS.SystemOrAdminAccessRequired, {});

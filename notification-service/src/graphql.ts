@@ -2,7 +2,7 @@
  * Notification Service GraphQL Schema & Resolvers
  */
 
-import { logger, requireAuth, getUserId, getErrorMessage, getDatabase, generateMongoId, paginateCollection, GraphQLError } from 'core-service';
+import { logger, requireAuth, getUserId, getErrorMessage, getDatabase, generateMongoId, paginateCollection, GraphQLError, hasRole } from 'core-service';
 import { NOTIFICATION_ERRORS } from './error-codes.js';
 import type { ResolverContext } from 'core-service';
 import type { NotificationService } from './notification-service.js';
@@ -159,7 +159,7 @@ export function createNotificationResolvers(notificationService: NotificationSer
       },
       
       notificationStats: async (args: any, context: ResolverContext) => {
-        if (!context.user!.roles?.includes('system')) {
+        if (!hasRole('system')(context.user!)) {
           throw new GraphQLError(NOTIFICATION_ERRORS.SystemAccessRequired, {});
         }
         

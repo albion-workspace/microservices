@@ -24,6 +24,7 @@
  */
 
 import { logger } from './logger.js';
+import { getErrorMessage } from './errors.js';
 
 export type RetryStrategy = 'exponential' | 'linear' | 'fixed';
 
@@ -185,7 +186,7 @@ export async function retry<T>(
       // Check if error is retryable
       if (!isRetryable(error)) {
         logger.debug(`${name}: Error is not retryable`, {
-          error: error instanceof Error ? error.message : String(error),
+          error: getErrorMessage(error),
           attempt,
         });
         throw error;
@@ -213,7 +214,7 @@ export async function retry<T>(
   logger.error(`${name}: All retries exhausted`, {
     maxRetries,
     totalDelay,
-    error: lastError instanceof Error ? lastError.message : String(lastError),
+    error: getErrorMessage(lastError),
   });
 
   throw lastError;
