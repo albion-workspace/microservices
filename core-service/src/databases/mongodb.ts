@@ -67,13 +67,17 @@ export async function connectDatabase(uri: string, config: Partial<MongoConfig> 
     try {
       // Verify client is actually connected using ping command (modern MongoDB driver approach)
       await client.db('admin').command({ ping: 1 });
-      // Client is connected to same server - just return database for requested dbName
+      // Client is connected to same server - return database for requested dbName
       let dbName = config.dbName || uriObj.pathname.slice(1) || 'default';
       if (dbName.includes('?')) {
         dbName = dbName.split('?')[0];
       }
       dbName = dbName.trim();
-      return client.db(dbName);
+      // IMPORTANT: Update global db to the requested database
+      // This ensures getDatabase() returns the correct db after gateway connects
+      db = client.db(dbName);
+      logger.debug('Reusing MongoDB client, switched to database', { database: dbName });
+      return db;
     } catch {
       // Client exists but not connected - fall through to reconnect
       client = null;

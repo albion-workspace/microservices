@@ -2199,7 +2199,7 @@ async function testAll() {
           console.log(`  ✅ Updated system wallet to include category: 'main'`);
         } else {
           // Create wallet if it doesn't exist
-          const { generateMongoId } = await import('../../../core-service/src/common/mongodb-utils.js');
+          const { generateMongoId } = await import('../../../core-service/src/index.js');
           const { objectId, idString } = generateMongoId();
           systemWallet = {
             _id: objectId,
