@@ -24,12 +24,14 @@ import {
   createWebhookService,
   requireAuth,
   GraphQLError,
-  createServiceError,
+  registerServiceErrorCodes,
   type IntegrationEvent,
   type ResolverContext,
 } from 'core-service';
+import { BONUS_ERRORS } from './error-codes.js';
 import { setupRecovery } from './recovery-setup.js';
 import { templatePersistence } from './services/bonus-engine/persistence.js';
+import { BONUS_ERROR_CODES } from './error-codes.js';
 
 // Import unified event dispatcher (handles both internal events + webhooks)
 import {
@@ -169,7 +171,7 @@ const userBonussCustomResolver = {
       // Get default resolver from userBonusService
       const defaultResolver = userBonusService.resolvers?.Query?.userBonuss;
       if (!defaultResolver) {
-        throw createServiceError('bonus', 'ResolverNotFound', { resolver: 'userBonuss' });
+        throw new GraphQLError(BONUS_ERRORS.ResolverNotFound, { resolver: 'userBonuss' });
       }
       
       // Check if user is system or admin
@@ -283,7 +285,7 @@ const bonusApprovalResolvers = {
     ) => {
       requireAuth(context);
       if (!context.user!.roles?.includes('system') && !context.user!.roles?.includes('admin')) {
-        throw createServiceError('bonus', 'SystemOrAdminAccessRequired', {});
+        throw new GraphQLError(BONUS_ERRORS.SystemOrAdminAccessRequired, {});
       }
       
       const { listPendingBonuses } = await import('./services/bonus-approval.js');
@@ -317,7 +319,7 @@ const bonusApprovalResolvers = {
     ) => {
       requireAuth(context);
       if (!context.user!.roles?.includes('system') && !context.user!.roles?.includes('admin')) {
-        throw createServiceError('bonus', 'SystemOrAdminAccessRequired', {});
+        throw new GraphQLError(BONUS_ERRORS.SystemOrAdminAccessRequired, {});
       }
       
       const { getPendingBonus } = await import('./services/bonus-approval.js');
@@ -331,7 +333,7 @@ const bonusApprovalResolvers = {
       const { getRedis } = await import('core-service');
       const redis = getRedis();
       if (!redis) {
-        throw createServiceError('bonus', 'RedisNotAvailable', {});
+        throw new GraphQLError(BONUS_ERRORS.RedisNotAvailable, {});
       }
       
       const key = `pending:bonus:approval:${token}`;
@@ -365,7 +367,7 @@ const bonusApprovalResolvers = {
     ) => {
       requireAuth(context);
       if (!context.user!.roles?.includes('system') && !context.user!.roles?.includes('admin')) {
-        throw createServiceError('bonus', 'SystemOrAdminAccessRequired', {});
+        throw new GraphQLError(BONUS_ERRORS.SystemOrAdminAccessRequired, {});
       }
       
       const { approvePendingBonus } = await import('./services/bonus-approval.js');
@@ -391,7 +393,7 @@ const bonusApprovalResolvers = {
     ) => {
       requireAuth(context);
       if (!context.user!.roles?.includes('system') && !context.user!.roles?.includes('admin')) {
-        throw createServiceError('bonus', 'SystemOrAdminAccessRequired', {});
+        throw new GraphQLError(BONUS_ERRORS.SystemOrAdminAccessRequired, {});
       }
       
       const { rejectPendingBonus } = await import('./services/bonus-approval.js');
@@ -892,6 +894,8 @@ function setupEventHandlers() {
 }
 
 async function main() {
+  // Register error codes
+  registerServiceErrorCodes(BONUS_ERROR_CODES);
   logger.info('╔═══════════════════════════════════════════════════════════════════╗');
   logger.info('║                       BONUS SERVICE                               ║');
   logger.info('╠═══════════════════════════════════════════════════════════════════╣');

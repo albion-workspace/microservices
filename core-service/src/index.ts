@@ -276,8 +276,16 @@ export {
   generateDeviceId,
 } from './common/utils.js';
 
-// Error Utilities
-export { getErrorMessage, normalizeError } from './common/errors.js';
+// Error Utilities (unified)
+export { 
+  getErrorMessage, 
+  normalizeError,
+  GraphQLError,
+  formatGraphQLError,
+  registerServiceErrorCodes,
+  getAllErrorCodes,
+  extractServiceFromCode,
+} from './common/errors.js';
 
 // Circuit Breaker & Retry
 export { 
@@ -316,11 +324,6 @@ export {
   createResolverBuilder,
 } from './common/resolver-builder.js';
 export type { ResolverFunction, ServiceResolvers } from './common/resolver-builder.js';
-export { 
-  GraphQLError,
-  createServiceError,
-  formatGraphQLError,
-} from './common/graphql-error.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types (from src/types/)

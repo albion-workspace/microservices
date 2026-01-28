@@ -24,6 +24,7 @@ import {
   hasRole,
   logger,
   startListening,
+  registerServiceErrorCodes,
 } from 'core-service';
 
 import { loadConfig, validateConfig, printConfigSummary } from './config.js';
@@ -31,6 +32,7 @@ import { NotificationService } from './notification-service.js';
 import { notificationGraphQLTypes, createNotificationResolvers } from './graphql.js';
 import { handlerRegistry } from './plugins/index.js';
 import type { NotificationHandlerPlugin } from './plugins/index.js';
+import { NOTIFICATION_ERROR_CODES } from './error-codes.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Configuration
@@ -95,6 +97,9 @@ const gatewayConfig = {
 // ═══════════════════════════════════════════════════════════════════
 
 async function main() {
+  // Register error codes
+  registerServiceErrorCodes(NOTIFICATION_ERROR_CODES);
+
   console.log(`
 ╔═══════════════════════════════════════════════════════════════════════╗
 ║                     NOTIFICATION SERVICE                              ║

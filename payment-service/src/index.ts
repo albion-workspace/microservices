@@ -27,7 +27,7 @@ import {
   getClient,
   extractDocumentId,
   GraphQLError,
-  createServiceError,
+  registerServiceErrorCodes,
   type IntegrationEvent,
   // Webhooks - plug-and-play service
   createWebhookService,
@@ -49,6 +49,7 @@ import {
   cleanupPaymentWebhookDeliveries,
   type PaymentWebhookEvents,
 } from './event-dispatcher.js';
+import { PAYMENT_ERROR_CODES, PAYMENT_ERRORS } from './error-codes.js';
 
 // Re-export for consumers
 export { emitPaymentEvent, type PaymentWebhookEvents };
@@ -124,7 +125,7 @@ async function getSystemUserId(tenantId?: string): Promise<string> {
     
     return systemUserId;
   } catch (error) {
-    throw createServiceError('payment', 'FailedToGetSystemUserId', { 
+    throw new GraphQLError(PAYMENT_ERRORS.FailedToGetSystemUserId, { 
       error: error instanceof Error ? error.message : String(error),
       tenantId 
     });
@@ -510,7 +511,7 @@ function setupBonusEventHandlers() {
           transferId: transfer.id,
         }, { skipInternal: true });
       } catch (transferError) {
-        throw createServiceError('payment', 'FailedToCreateBonusTransfer', { 
+        throw new GraphQLError(PAYMENT_ERRORS.FailedToCreateBonusTransfer, { 
           error: transferError instanceof Error ? transferError.message : String(transferError), 
           eventId: event.eventId,
           walletId,
@@ -518,7 +519,7 @@ function setupBonusEventHandlers() {
         });
       }
     } catch (err) {
-      throw createServiceError('payment', 'FailedToCreditBonusToWallet', {
+      throw new GraphQLError(PAYMENT_ERRORS.FailedToCreditBonusToWallet, {
         error: err instanceof Error ? err.message : String(err),
         eventId: event.eventId,
       });
@@ -598,7 +599,7 @@ function setupBonusEventHandlers() {
           transferId: transfer.id,
         }, { skipInternal: true });
       } catch (transferError) {
-        throw createServiceError('payment', 'FailedToCreateBonusConversionTransfer', { 
+        throw new GraphQLError(PAYMENT_ERRORS.FailedToCreateBonusConversionTransfer, { 
           error: transferError instanceof Error ? transferError.message : String(transferError), 
           eventId: event.eventId,
           walletId: event.data.walletId,
@@ -606,7 +607,7 @@ function setupBonusEventHandlers() {
         });
       }
     } catch (err) {
-      throw createServiceError('payment', 'FailedToConvertBonusToRealBalance', {
+      throw new GraphQLError(PAYMENT_ERRORS.FailedToConvertBonusToRealBalance, {
         error: err instanceof Error ? err.message : String(err),
         eventId: event.eventId,
       });
@@ -680,7 +681,7 @@ function setupBonusEventHandlers() {
         });
       }
     } catch (err) {
-      throw createServiceError('payment', 'FailedToForfeitBonusFromWallet', {
+      throw new GraphQLError(PAYMENT_ERRORS.FailedToForfeitBonusFromWallet, {
         error: err instanceof Error ? err.message : String(err),
         eventId: event.eventId,
       });
@@ -753,6 +754,8 @@ function setupBonusEventHandlers() {
 // ═══════════════════════════════════════════════════════════════════
 
 async function main() {
+  // Register error codes
+  registerServiceErrorCodes(PAYMENT_ERROR_CODES);
   console.log(`
 ╔═══════════════════════════════════════════════════════════════════════╗
 ║                     PAYMENT SERVICE                                   ║

@@ -16,7 +16,8 @@
  * - Exchange rates are cached for 5 minutes to reduce API calls
  */
 
-import { getDatabase, logger, CircuitBreaker, createServiceError } from 'core-service';
+import { getDatabase, logger, CircuitBreaker, GraphQLError } from 'core-service';
+import { PAYMENT_ERRORS } from '../error-codes.js';
 import { SYSTEM_CURRENCY } from '../constants.js';
 
 export interface ExchangeRate {
@@ -137,7 +138,7 @@ export async function getExchangeRate(
     }
     
     // Last resort: throw error (don't guess exchange rates!)
-    throw createServiceError('payment', 'ExchangeRateNotAvailable', {
+    throw new GraphQLError(PAYMENT_ERRORS.ExchangeRateNotAvailable, {
       fromCurrency,
       toCurrency,
       circuitBreakerState,
@@ -256,7 +257,7 @@ async function fetchExchangeRateFromAPI(
     return mockRates[fromCurrency][toCurrency];
   }
   
-  throw createServiceError('payment', 'ExchangeRateNotAvailable', {
+  throw new GraphQLError(PAYMENT_ERRORS.ExchangeRateNotAvailable, {
     fromCurrency,
     toCurrency,
     reason: 'Mock exchange rate not available',

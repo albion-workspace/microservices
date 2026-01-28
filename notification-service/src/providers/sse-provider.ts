@@ -4,7 +4,8 @@
  * Uses core-service's SSE support for real-time notifications to end users
  */
 
-import { logger, generateId, emit, createServiceError } from 'core-service';
+import { logger, generateId, emit, GraphQLError } from 'core-service';
+import { NOTIFICATION_ERRORS } from '../error-codes.js';
 import type { NotificationProvider, SseNotification, NotificationResponse } from '../types.js';
 import type { SSEBroadcast, UnifiedRealtimeProvider } from './realtime-interface.js';
 
@@ -145,7 +146,7 @@ export class SseProvider implements NotificationProvider, UnifiedRealtimeProvide
         sentAt: new Date(),
       };
     } catch (error: any) {
-      throw createServiceError('notification', 'FailedToSendSSENotification', {
+      throw new GraphQLError(NOTIFICATION_ERRORS.FailedToSendSSENotification, {
         error: error.message,
         userId: notification.userId,
       });

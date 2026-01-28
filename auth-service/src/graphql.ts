@@ -18,10 +18,10 @@ import {
   scanKeysIterator,
   createPendingOperationStore,
   GraphQLError,
-  createServiceError,
   type CursorPaginationOptions,
   type CursorPaginationResult,
 } from 'core-service';
+import { AUTH_ERRORS } from './error-codes.js';
 import { matchAnyUrn } from 'core-service/access';
 import { 
   rolesToArray, 
@@ -436,7 +436,7 @@ export function createAuthResolvers(
             requestedUserId,
             isOwnProfile
           });
-          throw createServiceError('auth', 'InsufficientPermissions', { 
+          throw new GraphQLError(AUTH_ERRORS.InsufficientPermissions, { 
             action: 'read user',
             requestedUserId 
           });
@@ -447,11 +447,11 @@ export function createAuthResolvers(
         const tenantId = (args as any).tenantId;
         
         if (!userId) {
-          throw createServiceError('auth', 'UserIdRequired', {});
+          throw new GraphQLError(AUTH_ERRORS.UserIdRequired, {});
         }
         
         if (!tenantId) {
-          throw createServiceError('auth', 'TenantIdRequired', {});
+          throw new GraphQLError(AUTH_ERRORS.TenantIdRequired, {});
         }
         
         // Use generic helper function for document lookup with automatic ObjectId handling
@@ -475,7 +475,7 @@ export function createAuthResolvers(
         // Check permissions: system or user:list permission
         if (!checkSystemOrPermission(ctx.user, 'user', 'list', '*')) {
           logger.warn('Unauthorized users query attempt', { userId: ctx.user!.userId });
-          throw createServiceError('auth', 'InsufficientPermissions', { 
+          throw new GraphQLError(AUTH_ERRORS.InsufficientPermissions, { 
             action: 'list users' 
           });
         }
@@ -519,7 +519,7 @@ export function createAuthResolvers(
             pageInfo: result.pageInfo,
           };
         } catch (error) {
-          throw createServiceError('auth', 'FailedToFetchUsers', { 
+          throw new GraphQLError(AUTH_ERRORS.FailedToFetchUsers, { 
             tenantId,
             originalError: error instanceof Error ? error.message : String(error),
           });
@@ -539,7 +539,7 @@ export function createAuthResolvers(
             userId: ctx.user!.userId,
             requestedRole: (args as any).role 
           });
-          throw createServiceError('auth', 'InsufficientPermissions', { 
+          throw new GraphQLError(AUTH_ERRORS.InsufficientPermissions, { 
             action: 'list users by role' 
           });
         }
@@ -548,7 +548,7 @@ export function createAuthResolvers(
         const { role, tenantId, first, after, last, before } = args as any;
         
         if (!role || typeof role !== 'string') {
-          throw createServiceError('auth', 'RoleRequired', {});
+          throw new GraphQLError(AUTH_ERRORS.RoleRequired, {});
         }
         
         const finalTenantId = tenantId || 'default-tenant';
@@ -598,7 +598,7 @@ export function createAuthResolvers(
             pageInfo: result.pageInfo,
           };
         } catch (error) {
-          throw createServiceError('auth', 'FailedToFetchUsersByRole', { 
+          throw new GraphQLError(AUTH_ERRORS.FailedToFetchUsersByRole, { 
             role,
             tenantId: finalTenantId,
             originalError: error instanceof Error ? error.message : String(error),
@@ -858,7 +858,7 @@ export function createAuthResolvers(
             userId: ctx.user!.userId,
             targetUserId
           });
-          throw createServiceError('auth', 'InsufficientPermissions', { 
+          throw new GraphQLError(AUTH_ERRORS.InsufficientPermissions, { 
             action: 'update user roles' 
           });
         }
@@ -867,15 +867,15 @@ export function createAuthResolvers(
         const { userId, tenantId, roles } = (args as any).input;
         
         if (!userId) {
-          throw createServiceError('auth', 'UserIdRequired', {});
+          throw new GraphQLError(AUTH_ERRORS.UserIdRequired, {});
         }
         
         if (!tenantId) {
-          throw createServiceError('auth', 'TenantIdRequired', {});
+          throw new GraphQLError(AUTH_ERRORS.TenantIdRequired, {});
         }
         
         if (!Array.isArray(roles)) {
-          throw createServiceError('auth', 'RolesMustBeArray', {});
+          throw new GraphQLError(AUTH_ERRORS.RolesMustBeArray, {});
         }
         
         try {
@@ -895,7 +895,7 @@ export function createAuthResolvers(
           
           if (!result || !result.value) {
             logger.warn('User not found for role update', { userId, tenantId });
-            throw createServiceError('auth', 'UserNotFound', { userId, tenantId });
+            throw new GraphQLError(AUTH_ERRORS.UserNotFound, { userId, tenantId });
           }
           
           logger.info('User roles updated', { 
@@ -907,7 +907,7 @@ export function createAuthResolvers(
           
           return normalizeUser(result.value);
         } catch (error) {
-          throw createServiceError('auth', 'FailedToUpdateUserRoles', { 
+          throw new GraphQLError(AUTH_ERRORS.FailedToUpdateUserRoles, { 
             userId,
             tenantId,
             originalError: error instanceof Error ? error.message : String(error),
@@ -929,7 +929,7 @@ export function createAuthResolvers(
             userId: ctx.user!.userId,
             targetUserId
           });
-          throw createServiceError('auth', 'InsufficientPermissions', { 
+          throw new GraphQLError(AUTH_ERRORS.InsufficientPermissions, { 
             action: 'update user permissions' 
           });
         }
@@ -938,15 +938,15 @@ export function createAuthResolvers(
         const { userId, tenantId, permissions } = (args as any).input;
         
         if (!userId) {
-          throw createServiceError('auth', 'UserIdRequired', {});
+          throw new GraphQLError(AUTH_ERRORS.UserIdRequired, {});
         }
         
         if (!tenantId) {
-          throw createServiceError('auth', 'TenantIdRequired', {});
+          throw new GraphQLError(AUTH_ERRORS.TenantIdRequired, {});
         }
         
         if (!Array.isArray(permissions)) {
-          throw createServiceError('auth', 'PermissionsMustBeArray', {});
+          throw new GraphQLError(AUTH_ERRORS.PermissionsMustBeArray, {});
         }
         
         try {
@@ -966,7 +966,7 @@ export function createAuthResolvers(
           
           if (!result) {
             logger.warn('User not found for permission update', { userId, tenantId });
-            throw createServiceError('auth', 'UserNotFound', { userId, tenantId });
+            throw new GraphQLError(AUTH_ERRORS.UserNotFound, { userId, tenantId });
           }
           
           logger.info('User permissions updated', { 
@@ -978,7 +978,7 @@ export function createAuthResolvers(
           
           return normalizeUser(result);
         } catch (error) {
-          throw createServiceError('auth', 'FailedToUpdateUserPermissions', { 
+          throw new GraphQLError(AUTH_ERRORS.FailedToUpdateUserPermissions, { 
             userId,
             tenantId,
             originalError: error instanceof Error ? error.message : String(error),
@@ -1040,7 +1040,7 @@ export function createAuthResolvers(
           
           if (!result) {
             logger.warn('User not found for status update', { userId, tenantId });
-            throw createServiceError('auth', 'UserNotFound', { userId, tenantId });
+            throw new GraphQLError(AUTH_ERRORS.UserNotFound, { userId, tenantId });
           }
           
           logger.info('User status updated', { 
@@ -1052,7 +1052,7 @@ export function createAuthResolvers(
           
           return normalizeUser(result);
         } catch (error) {
-          throw createServiceError('auth', 'FailedToUpdateUserStatus', { 
+          throw new GraphQLError(AUTH_ERRORS.FailedToUpdateUserStatus, { 
             userId,
             tenantId,
             status,
@@ -1212,7 +1212,7 @@ export function createAuthResolvers(
         const operationType = (args as any).operationType as string | undefined;
         
         if (!token) {
-          throw createServiceError('auth', 'TokenRequired', {});
+          throw new GraphQLError(AUTH_ERRORS.TokenRequired, {});
         }
         
         const jwtSecret = authConfig?.jwtSecret || 
@@ -1343,7 +1343,7 @@ export function createAuthResolvers(
         const isAdmin = user.roles?.includes('system') || user.roles?.includes('admin');
         
         if (!isAdmin) {
-          throw createServiceError('auth', 'SystemOrAdminAccessRequired', {});
+          throw new GraphQLError(AUTH_ERRORS.SystemOrAdminAccessRequired, {});
         }
         
         const originalToken = args.token as string;
@@ -1352,7 +1352,7 @@ export function createAuthResolvers(
         
         const redis = getRedis();
         if (!redis) {
-          throw createServiceError('auth', 'RedisNotAvailable', {});
+          throw new GraphQLError(AUTH_ERRORS.RedisNotAvailable, {});
         }
         
         // Determine if this is an approval operation

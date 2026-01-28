@@ -30,6 +30,7 @@ import {
   getDatabase,
   createWebhookService,
   setupCleanupTasks,
+  registerServiceErrorCodes,
   type IntegrationEvent,
   type ResolverContext,
 } from 'core-service';
@@ -53,6 +54,7 @@ import {
   cleanupAuthWebhookDeliveries,
   type AuthWebhookEvents,
 } from './event-dispatcher.js';
+import { AUTH_ERROR_CODES } from './error-codes.js';
 
 // Re-export for consumers
 export { emitAuthEvent, type AuthWebhookEvents };
@@ -504,6 +506,9 @@ async function main() {
 `);
 
   printConfigSummary(authConfig);
+
+  // Register error codes
+  registerServiceErrorCodes(AUTH_ERROR_CODES);
 
   // Register event handlers
   setupEventHandlers();

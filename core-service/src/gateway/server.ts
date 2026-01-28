@@ -52,7 +52,7 @@ import { connectRedis, checkRedisHealth, getRedis } from '../common/redis.js';
 import { getCacheStats } from '../common/cache.js';
 import { logger, subscribeToLogs, type LogEntry, setCorrelationId, generateCorrelationId, getCorrelationId } from '../common/logger.js';
 import { createResolverBuilder, type ServiceResolvers } from '../common/resolver-builder.js';
-import { formatGraphQLError } from '../common/graphql-error.js';
+import { formatGraphQLError, getAllErrorCodes } from '../common/errors.js'; '../common/graphql-error.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -315,6 +315,12 @@ function buildSchema(
       type: HealthType,
       resolve: async (_root: unknown, _args: unknown, ctx: GatewayContext) => {
         return resolvers.health({}, ctx);
+      },
+    },
+    errorCodes: {
+      type: new GraphQLList(new GraphQLNonNull(GraphQLString)),
+      resolve: async () => {
+        return getAllErrorCodes();
       },
     },
   };
@@ -731,6 +737,9 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
         redis: { connected: redis !== null },
         cache: getCacheStats(),
       };
+    })
+    .addQuery('errorCodes', async () => {
+      return getAllErrorCodes();
     });
 
   // Add resolvers from all services

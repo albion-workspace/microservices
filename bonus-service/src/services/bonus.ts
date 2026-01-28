@@ -7,7 +7,8 @@
  * - Transfers = User-to-user operations (creates 2 transactions)
  */
 
-import { createService, type, type Repository, type SagaContext, validateInput, getDatabase, logger, findUserIdByRole, GraphQLError, createServiceError } from 'core-service';
+import { createService, type, type Repository, type SagaContext, validateInput, getDatabase, logger, findUserIdByRole, GraphQLError } from 'core-service';
+import { BONUS_ERRORS } from '../error-codes.js';
 import type { BonusTemplate, UserBonus, BonusTransaction, BonusStatus } from '../types.js';
 import { bonusEngine } from './bonus-engine/index.js';
 import { templatePersistence } from './bonus-engine/persistence.js';
@@ -79,7 +80,7 @@ const bonusTemplateSaga = [
         };
         const updated = await repo.update(existing.id, updates);
         if (!updated) {
-          throw createServiceError('bonus', 'FailedToUpdateTemplate', {});
+          throw new GraphQLError(BONUS_ERRORS.FailedToUpdateTemplate, {});
         }
         return { ...ctx, input, data, entity: updated };
       }
@@ -237,7 +238,7 @@ const userBonusSaga = [
       // Load template by code
       const template = await templatePersistence.findByCode(input.templateCode);
       if (!template) {
-        throw createServiceError('bonus', 'TemplateNotFound', { templateCode: input.templateCode });
+        throw new GraphQLError(BONUS_ERRORS.TemplateNotFound, { templateCode: input.templateCode });
       }
       if (!template.isActive) {
         throw new Error(`Template ${input.templateCode} is not active`);
@@ -253,7 +254,7 @@ const userBonusSaga = [
     execute: async ({ input, data, ...ctx }: UserBonusCtx): Promise<UserBonusCtx> => {
       const template = data.template as BonusTemplate;
       if (!template) {
-        throw createServiceError('bonus', 'TemplateNotLoaded', {});
+        throw new GraphQLError(BONUS_ERRORS.TemplateNotLoaded, {});
       }
 
       // Get handler for this bonus type
@@ -275,7 +276,7 @@ const userBonusSaga = [
       // First, run common validators
       const commonResult = await (handler as any).runCommonValidators(template, context);
       if (!commonResult.eligible) {
-        throw createServiceError('bonus', 'UserNotEligible', { 
+        throw new GraphQLError(BONUS_ERRORS.UserNotEligible, { 
           reason: commonResult.reason || 'User is not eligible for this bonus' 
         });
       }
@@ -283,7 +284,7 @@ const userBonusSaga = [
       // Then run specific validators
       const specificResult = await (handler as any).validateSpecific(template, context);
       if (!specificResult.eligible) {
-        throw createServiceError('bonus', 'UserNotEligible', { 
+        throw new GraphQLError(BONUS_ERRORS.UserNotEligible, { 
           reason: specificResult.reason || 'User is not eligible for this bonus' 
         });
       }
@@ -297,17 +298,17 @@ const userBonusSaga = [
         // Format: "BONUS_REQUIRES_APPROVAL|PENDING_TOKEN:{token}"
         if (result.pendingToken) {
           (data as any).pendingToken = result.pendingToken;
-          throw createServiceError('bonus', 'BonusRequiresApproval', { 
+          throw new GraphQLError(BONUS_ERRORS.BonusRequiresApproval, { 
             pendingToken: result.pendingToken 
           });
         }
-        throw createServiceError('bonus', 'BonusAwardFailed', { 
+        throw new GraphQLError(BONUS_ERRORS.BonusAwardFailed, { 
           error: result.error || 'Bonus award failed' 
         });
       }
 
       if (!result.bonus) {
-        throw createServiceError('bonus', 'BonusAwardFailed', { 
+        throw new GraphQLError(BONUS_ERRORS.BonusAwardFailed, { 
           reason: 'No bonus returned' 
         });
       }
@@ -317,7 +318,7 @@ const userBonusSaga = [
         // Delete the incorrectly awarded bonus and throw error
         const repo = data._repository as Repository<UserBonus>;
         await repo.delete(result.bonus.id);
-        throw createServiceError('bonus', 'BonusWrongTemplate', {});
+        throw new GraphQLError(BONUS_ERRORS.BonusWrongTemplate, {});
       }
 
       // Store the awarded bonus
@@ -345,14 +346,14 @@ const userBonusSaga = [
       const awardedBonus = data.awardedBonus as UserBonus;
       
       if (!awardedBonus) {
-        throw createServiceError('bonus', 'BonusNotAwarded', {});
+        throw new GraphQLError(BONUS_ERRORS.BonusNotAwarded, {});
       }
 
       // Bonus was already created by the engine, just verify and return it
       const repo = data._repository as Repository<UserBonus>;
       const existing = await repo.findById(awardedBonus.id);
       if (!existing) {
-        throw createServiceError('bonus', 'AwardedBonusNotFound', {});
+        throw new GraphQLError(BONUS_ERRORS.AwardedBonusNotFound, {});
       }
 
       return { ...ctx, input, data, entity: existing };
@@ -543,7 +544,7 @@ async function getSystemUserId(tenantId?: string): Promise<string> {
     
     return systemUserId;
   } catch (error) {
-    throw createServiceError('bonus', 'FailedToGetSystemUserId', { 
+    throw new GraphQLError(BONUS_ERRORS.FailedToGetSystemUserId, { 
       error: error instanceof Error ? error.message : String(error),
       tenantId 
     });

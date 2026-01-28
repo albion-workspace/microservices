@@ -2,7 +2,8 @@
  * Notification Service GraphQL Schema & Resolvers
  */
 
-import { logger, requireAuth, getUserId, getErrorMessage, getDatabase, generateMongoId, paginateCollection, createServiceError } from 'core-service';
+import { logger, requireAuth, getUserId, getErrorMessage, getDatabase, generateMongoId, paginateCollection, GraphQLError } from 'core-service';
+import { NOTIFICATION_ERRORS } from './error-codes.js';
 import type { ResolverContext } from 'core-service';
 import type { NotificationService } from './notification-service.js';
 
@@ -159,7 +160,7 @@ export function createNotificationResolvers(notificationService: NotificationSer
       
       notificationStats: async (args: any, context: ResolverContext) => {
         if (!context.user!.roles?.includes('system')) {
-          throw createServiceError('notification', 'SystemAccessRequired', {});
+          throw new GraphQLError(NOTIFICATION_ERRORS.SystemAccessRequired, {});
         }
         
         const db = getDatabase();
@@ -239,7 +240,7 @@ export function createNotificationResolvers(notificationService: NotificationSer
         
         if (normalizedChannel === 'sse' || normalizedChannel === 'socket') {
           if (!userId) {
-            throw createServiceError('notification', 'ChannelRequiresUserId', { channel: normalizedChannel });
+            throw new GraphQLError(NOTIFICATION_ERRORS.ChannelRequiresUserId, { channel: normalizedChannel });
           }
         } else {
           if (!to) {
@@ -303,7 +304,7 @@ export function createNotificationResolvers(notificationService: NotificationSer
           };
         } catch (e: any) {
           const error = getErrorMessage(e);
-          throw createServiceError('notification', 'FailedToSendNotification', { 
+          throw new GraphQLError(NOTIFICATION_ERRORS.FailedToSendNotification, { 
             error,
             originalChannel: input.channel,
             normalizedChannel,

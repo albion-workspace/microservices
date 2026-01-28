@@ -4,7 +4,8 @@
  * Manages all notification channels and providers
  */
 
-import { logger, getDatabase, updateOneById, generateMongoId, createServiceError } from 'core-service';
+import { logger, getDatabase, updateOneById, generateMongoId, GraphQLError } from 'core-service';
+import { NOTIFICATION_ERRORS } from './error-codes.js';
 import type { 
   NotificationRequest, 
   NotificationResponse, 
@@ -56,7 +57,7 @@ export class NotificationService {
     const socketProvider = this.providers.get('socket');
     
     if (!sseProvider || !socketProvider) {
-      throw createServiceError('notification', 'RequiredProvidersFailedToInitialize', {});
+      throw new GraphQLError(NOTIFICATION_ERRORS.RequiredProvidersFailedToInitialize, {});
     }
     
     this.sseProvider = sseProvider as SseProvider;
@@ -177,7 +178,7 @@ export class NotificationService {
       const provider = this.providers.get(channel);
       
       if (!provider) {
-        throw createServiceError('notification', 'ProviderNotConfigured', { channel });
+        throw new GraphQLError(NOTIFICATION_ERRORS.ProviderNotConfigured, { channel });
       }
       
       // Update request with normalized channel
@@ -228,7 +229,7 @@ export class NotificationService {
       return result;
       
     } catch (error: any) {
-      throw createServiceError('notification', 'FailedToSendNotification', {
+      throw new GraphQLError(NOTIFICATION_ERRORS.FailedToSendNotification, {
         error: error.message,
         originalChannel: request.channel,
         normalizedChannel: channel,

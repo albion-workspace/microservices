@@ -20,7 +20,8 @@
 11. [GraphQL API](#graphql-api)
 12. [Performance](#performance)
 13. [Access Control](#access-control)
-14. [Implementation Status](#implementation-status)
+14. [Error Handling](#-error-handling)
+15. [Implementation Status](#implementation-status)
 
 ---
 
@@ -240,7 +241,7 @@ tst/
   - **Redis Utilities** - Caching, state tracking
   - **Validation Chain** - Reusable validation logic (Chain of Responsibility pattern)
   - **Resolver Builder** - Fluent API for GraphQL resolver construction (Builder pattern)
-  - **Error Handling** - Standardized error utilities
+  - **Error Handling** - Unified error handling (`core-service/src/common/errors.ts`)
 
 #### Validation Chain (Chain of Responsibility Pattern)
 
@@ -1263,13 +1264,150 @@ See [`scripts/README.md`](./scripts/README.md) for detailed script documentation
 
 ---
 
+## 🚨 Error Handling
+
+Unified error handling system across all microservices with automatic logging, type-safe error codes, and GraphQL error discovery.
+
+### Key Design Principles
+
+- **Ultra-Simple**: Single `GraphQLError` class - just throw with CapitalCamelCase message
+- **CapitalCamelCase Format**: All errors formatted consistently (e.g., `UserNotFound`, `InvalidToken`)
+- **Service Prefixes**: Optional prefixes for disambiguation (e.g., `MSAuthUserNotFound`, `MSNotificationNoRecipient`)
+- **Auto-Logging**: Errors automatically logged in constructor with correlation ID
+- **No Manual Logging**: Eliminates hundreds of `logger.error()` calls across codebase
+- **Gateway Integration**: Gateway automatically catches and formats errors
+- **i18n Ready**: Error codes in `extensions.code` for easy frontend translation
+- **GraphQL Behavior**: GraphQL returns HTTP 200 OK for application-level errors (by design)
+
+### Usage
+
+**Backend - Using Error Constants**:
+
+```typescript
+import { GraphQLError } from 'core-service';
+import { AUTH_ERRORS } from './error-codes.js';
+
+// Use constants directly - type-safe, no duplication
+if (!user) {
+  throw new GraphQLError(AUTH_ERRORS.UserNotFound, { userId: _id });
+  // Automatically logged with correlation ID and context
+}
+```
+
+**Error Code Constants Pattern**:
+
+Each service defines error codes in `error-codes.ts`:
+
+```typescript
+// auth-service/src/error-codes.ts
+export const AUTH_ERRORS = {
+  UserNotFound: 'MSAuthUserNotFound',
+  InvalidToken: 'MSAuthInvalidToken',
+  TokenExpired: 'MSAuthTokenExpired',
+  // ... all auth service errors
+} as const;
+
+// Array derived from constants - automatically synced
+export const AUTH_ERROR_CODES = Object.values(AUTH_ERRORS) as readonly string[];
+```
+
+**Service Registration**:
+
+Each service registers error codes at startup:
+
+```typescript
+import { registerServiceErrorCodes } from 'core-service';
+import { AUTH_ERROR_CODES } from './error-codes.js';
+
+async function main() {
+  // Register error codes
+  registerServiceErrorCodes(AUTH_ERROR_CODES);
+  // ... rest of initialization
+}
+```
+
+**GraphQL Error Discovery**:
+
+Query all available error codes:
+
+```graphql
+query {
+  errorCodes
+}
+```
+
+Returns a flat array of all registered error codes:
+```json
+{
+  "data": {
+    "errorCodes": [
+      "MSAuthUserNotFound",
+      "MSAuthInvalidToken",
+      "MSBonusTemplateNotFound",
+      "MSPaymentInsufficientBalance",
+      "MSNotificationNoRecipient"
+    ]
+  }
+}
+```
+
+**Frontend Usage**:
+
+```typescript
+// Error code is in extensions.code (CapitalCamelCase format)
+const errorCode = error.code || error.extensions?.code || error.message;
+
+// Translate using i18n library
+const translatedMessage = t(`error.${errorCode}`);
+
+// Check error type from code
+if (errorCode.includes('Auth') || errorCode === 'AuthenticationRequired') {
+  redirectToLogin();
+} else if (errorCode.includes('Permission')) {
+  showPermissionDeniedMessage();
+}
+```
+
+### Error Flow
+
+```
+1. Resolver throws: throw new GraphQLError(AUTH_ERRORS.UserNotFound, { userId })
+   ↓
+2. GraphQLError constructor auto-logs error (with correlation ID, code, details)
+   ↓
+3. Gateway catches error automatically
+   ↓
+4. formatGraphQLError() formats error for GraphQL response
+   ↓
+5. Error returned to client (GraphQL format with extensions.code)
+```
+
+### Benefits
+
+- ✅ **No Duplication**: Constants are source of truth, array automatically derived
+- ✅ **Type-Safe**: TypeScript autocomplete and compile-time checking
+- ✅ **Simple API**: Use `GraphQLError` directly - no helper function needed
+- ✅ **Always in Sync**: Array automatically matches constants
+- ✅ **Complete Discovery**: All error codes discoverable via GraphQL query
+- ✅ **Better DX**: IDE autocomplete for error constants
+
+### Implementation
+
+All error handling is unified in `core-service/src/common/errors.ts`:
+- Generic error utilities (`getErrorMessage`, `normalizeError`)
+- GraphQL error handling (`GraphQLError` class, `formatGraphQLError`)
+- Error code registry (`registerServiceErrorCodes`, `getAllErrorCodes`)
+
+---
+
 ## ✅ Status
 
 - ✅ Migration Complete (6 → 3 collections)
 - ✅ Recovery System Implemented and Tested
+- ✅ Error Handling System Implemented
 - ✅ All Tests Passing
 - ✅ Production Ready
 
 ---
 
-**Last Updated**: 2026-01-21
+**Last Updated**: 2026-01-28

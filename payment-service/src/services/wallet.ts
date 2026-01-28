@@ -51,7 +51,8 @@
  *    - Consistent across all entities
  */
 
-import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, getDatabase, deleteCache, deleteCachePattern, logger, validateInput, findOneById, findOneAndUpdateById, requireAuth, getUserId, getTenantId, getOrCreateWallet, paginateCollection, extractDocumentId, GraphQLError, createServiceError } from 'core-service';
+import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, getDatabase, deleteCache, deleteCachePattern, logger, validateInput, findOneById, findOneAndUpdateById, requireAuth, getUserId, getTenantId, getOrCreateWallet, paginateCollection, extractDocumentId, GraphQLError } from 'core-service';
+import { PAYMENT_ERRORS } from '../error-codes.js';
 import type { Wallet, WalletCategory } from '../types.js';
 import { SYSTEM_CURRENCY } from '../constants.js';
 import { emitPaymentEvent } from '../event-dispatcher.js';
@@ -145,7 +146,7 @@ export const walletResolvers = {
       // Use authenticated user's ID if not provided (self-service)
       const userId = (input.userId as string) || ctx.user?.userId;
       if (!userId) {
-        throw createServiceError('payment', 'UserIdRequired', {});
+        throw new GraphQLError(PAYMENT_ERRORS.UserIdRequired, {});
       }
       
       // Build query
@@ -284,7 +285,7 @@ export const walletResolvers = {
           status: (wallet as any).status || 'active',
         };
       } catch (error) {
-        throw createServiceError('payment', 'FailedToGetWalletBalance', {
+        throw new GraphQLError(PAYMENT_ERRORS.FailedToGetWalletBalance, {
           userId,
           category,
           originalError: error instanceof Error ? error.message : String(error),
@@ -337,7 +338,7 @@ export const walletResolvers = {
           balances,
         };
       } catch (error) {
-        throw createServiceError('payment', 'FailedToGetUserBalances', {
+        throw new GraphQLError(PAYMENT_ERRORS.FailedToGetUserBalances, {
           userId,
           originalError: error instanceof Error ? error.message : String(error),
         });
@@ -606,7 +607,7 @@ const walletSaga = [
       } as any);
       
       if (existing) {
-        throw createServiceError('payment', 'WalletAlreadyExists', {
+        throw new GraphQLError(PAYMENT_ERRORS.WalletAlreadyExists, {
           userId: input.userId,
           currency: input.currency,
           category,
