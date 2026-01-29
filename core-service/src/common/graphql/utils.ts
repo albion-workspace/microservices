@@ -4,7 +4,7 @@
  * Common helpers for GraphQL resolvers
  */
 
-import type { ResolverContext } from '../types/index.js';
+import type { ResolverContext } from '../../types/index.js';
 
 /**
  * Require authentication in a GraphQL resolver

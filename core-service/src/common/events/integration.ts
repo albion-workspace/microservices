@@ -14,8 +14,8 @@
  *   });
  */
 
-import { publish, subscribe } from '../databases/redis.js';
-import { logger } from './logger.js';
+import { publish, subscribe } from '../../databases/redis.js';
+import { logger } from '../logger.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types

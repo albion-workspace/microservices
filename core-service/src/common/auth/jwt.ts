@@ -4,8 +4,8 @@
 
 import jwt from 'jsonwebtoken';
 import type { SignOptions, VerifyOptions } from 'jsonwebtoken';
-import type { UserContext, JwtConfig, TokenPair } from '../types/index.js';
-import { logger } from '../index.js';
+import type { UserContext, JwtConfig, TokenPair } from '../../types/index.js';
+import { logger } from '../../index.js';
 
 // Custom payload with our fields
 interface CustomJwtPayload {

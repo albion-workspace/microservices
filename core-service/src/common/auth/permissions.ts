@@ -21,9 +21,9 @@ import {
   isOwner as isOwnerEngine,
   sameTenant as sameTenantEngine,
   type PermissionRule,
-} from '../access/index.js';
+} from '../../access/index.js';
 
-import type { UserContext } from '../types/index.js';
+import type { UserContext } from '../../types/index.js';
 
 // Re-export everything from core-service/access for consistency
 export {
@@ -62,7 +62,7 @@ export {
   rateLimit,
   custom,
   rule,
-} from '../access/index.js';
+} from '../../access/index.js';
 
 /**
  * Check if user is authenticated

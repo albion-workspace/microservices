@@ -6,8 +6,8 @@
  * Tests wallets, transfers, deposits, withdrawals through GraphQL API.
  * 
  * Usage:
- *   npx tsx typescript/payment/payment-test-api.ts        # Run all tests
- *   npx tsx typescript/payment/payment-test-api.ts all    # Run all tests
+ *   npx tsx typescript/wallet/payment-test-api.ts        # Run all tests
+ *   npx tsx typescript/wallet/payment-test-api.ts all    # Run all tests
  */
 
 import { 

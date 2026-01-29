@@ -84,13 +84,13 @@ export {
   getOrCreateWallet,
   approveTransfer,
   declineTransfer,
-} from './common/transfer-helper.js';
+} from './common/wallet/transfer.js';
 export type {
   Transfer,
   Transaction,
   CreateTransferParams,
   CreateTransferResult,
-} from './common/transfer-helper.js';
+} from './common/wallet/transfer.js';
 
 // Wallet Types and Utilities (Type-safe wallet access)
 export {
@@ -115,7 +115,7 @@ export {
   buildWalletActivityUpdate,
   buildWalletUpdate,
   withTransaction,
-} from './common/wallet-types.js';
+} from './common/wallet/wallet.js';
 export type {
   Wallet,
   BalanceType as WalletBalanceType,
@@ -126,7 +126,7 @@ export type {
   TransactionOptions,
   WalletUpdateOptions,
   CollectionName,
-} from './common/wallet-types.js';
+} from './common/wallet/wallet.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Recovery System (Generic - transfers, orders, etc.)
@@ -141,17 +141,17 @@ export {
   getRecoveryJob,
   OperationStateTracker,
   RecoveryJob,
-} from './common/recovery.js';
+} from './common/resilience/recovery.js';
 export type {
   RecoverableOperation,
   RecoveryResult,
   RecoveryHandler,
   OperationState,
-} from './common/recovery.js';
+} from './common/resilience/recovery.js';
 
 export {
   createTransferRecoveryHandler,
-} from './common/transfer-recovery.js';
+} from './common/wallet/transfer-recovery.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Account ID Management (Unified Account ID System)
@@ -161,10 +161,10 @@ export {
   getProviderAccountId,
   getUserAccountId,
   parseAccountId,
-} from './common/account-ids.js';
+} from './common/wallet/account-ids.js';
 export type {
   AccountIdOptions,
-} from './common/account-ids.js';
+} from './common/wallet/account-ids.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Authentication & JWT
@@ -182,10 +182,10 @@ export {
   getTokenExpiration,
   signGenericJWT,
   verifyGenericJWT,
-} from './common/jwt.js';
+} from './common/auth/jwt.js';
 
 // Permissions & Authorization
-export { allow, deny, isAuthenticated, hasRole, hasAnyRole, can, and, or, isOwner, sameTenant, hasPermission, isSystem } from './common/permissions.js';
+export { allow, deny, isAuthenticated, hasRole, hasAnyRole, can, and, or, isOwner, sameTenant, hasPermission, isSystem } from './common/auth/permissions.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Configuration Management
@@ -194,7 +194,7 @@ export {
   loadConfig as loadServiceConfig,
   createConfigLoader,
   type ConfigLoaderOptions,
-} from './common/config-loader.js';
+} from './common/config/loader.js';
 
 // Dynamic Configuration Store (MongoDB-based)
 export {
@@ -207,19 +207,19 @@ export {
   getConfigWithDefault,
   ensureDefaultConfigsCreated,
   ConfigStore,
-} from './common/config-store.js';
+} from './common/config/store.js';
 export type {
   ConfigEntry,
   ConfigStoreOptions,
   GetConfigOptions,
   GetAllConfigOptions,
   SetConfigOptions,
-} from './common/config-store.js';
+} from './common/config/store.js';
 
 export {
   configGraphQLTypes,
   configResolvers,
-} from './common/config-graphql.js';
+} from './common/config/graphql.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Pending Operations (Temporary data storage)
@@ -229,12 +229,12 @@ export {
   createRegistrationStore,
   createCampaignStore,
   createFormStore,
-} from './common/pending-operation.js';
+} from './common/resilience/pending-operation.js';
 export type {
   PendingOperationBackend,
   PendingOperationConfig,
   PendingOperationOptions,
-} from './common/pending-operation.js';
+} from './common/resilience/pending-operation.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Caching
@@ -291,24 +291,24 @@ export {
   CircuitBreaker, 
   createCircuitBreaker,
   CircuitBreakerOpenError,
-} from './common/circuit-breaker.js';
-export type { CircuitBreakerConfig } from './common/circuit-breaker.js';
+} from './common/resilience/circuit-breaker.js';
+export type { CircuitBreakerConfig } from './common/resilience/circuit-breaker.js';
 
 export { 
   retry, 
   createRetryFunction,
   RetryConfigs,
-} from './common/retry.js';
+} from './common/resilience/retry.js';
 export type { 
   RetryConfig, 
   RetryResult, 
   RetryStrategy,
-} from './common/retry.js';
+} from './common/resilience/retry.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Validation
 // ═══════════════════════════════════════════════════════════════════
-export { validateInput } from './common/validation.js';
+export { validateInput } from './common/validation/arktype.js';
 
 export { 
   ValidationHandler,
@@ -319,8 +319,8 @@ export {
   PermissionValidator,
   ValidationChainBuilder,
   createValidationChain,
-} from './common/validation-chain.js';
-export type { ValidationContext, ValidationResult } from './common/validation-chain.js';
+} from './common/graphql/validation-chain.js';
+export type { ValidationContext, ValidationResult } from './common/graphql/validation-chain.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Error Handling
@@ -338,12 +338,12 @@ export {
 // ═══════════════════════════════════════════════════════════════════
 // Lifecycle & Startup
 // ═══════════════════════════════════════════════════════════════════
-export { onShutdown, offShutdown, shutdown, setupGracefulShutdown, isShutdownInProgress } from './common/lifecycle.js';
-export type { ShutdownOptions } from './common/lifecycle.js';
+export { onShutdown, offShutdown, shutdown, setupGracefulShutdown, isShutdownInProgress } from './common/lifecycle/shutdown.js';
+export type { ShutdownOptions } from './common/lifecycle/shutdown.js';
 
-export { setupCleanupTask, setupCleanupTasks, setupEventListener } from './common/service-lifecycle.js';
-export { initializeService, initializeDatabase, initializeRedis, safeInitialize } from './common/startup-helpers.js';
-export type { CleanupTask, EventListenerConfig } from './common/service-lifecycle.js';
+export { setupCleanupTask, setupCleanupTasks, setupEventListener } from './common/lifecycle/tasks.js';
+export { initializeService, initializeDatabase, initializeRedis, safeInitialize } from './common/lifecycle/startup.js';
+export type { CleanupTask, EventListenerConfig } from './common/lifecycle/tasks.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Generic Utilities
@@ -380,12 +380,12 @@ export {
 // ═══════════════════════════════════════════════════════════════════
 // GraphQL Resolver Utilities
 // ═══════════════════════════════════════════════════════════════════
-export { requireAuth, getTenantId, getUserId, createObjectModelQueryResolver } from './common/resolvers.js';
+export { requireAuth, getTenantId, getUserId, createObjectModelQueryResolver } from './common/graphql/utils.js';
 export { 
   ResolverBuilder,
   createResolverBuilder,
-} from './common/resolver-builder.js';
-export type { ResolverFunction, ServiceResolvers } from './common/resolver-builder.js';
+} from './common/graphql/builder.js';
+export type { ResolverFunction, ServiceResolvers } from './common/graphql/builder.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Repository (with caching)
@@ -420,8 +420,8 @@ export {
   createEmitter,
   createHandler,
   buildEvent,
-} from './common/integration.js';
-export type { IntegrationEvent, EmitOptions, UnifiedEmitOptions } from './common/integration.js';
+} from './common/events/integration.js';
+export type { IntegrationEvent, EmitOptions, UnifiedEmitOptions } from './common/events/integration.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Webhooks
@@ -434,7 +434,7 @@ export {
   generateSignature,
   verifySignature,
   webhookGraphQLTypes,
-} from './common/webhooks.js';
+} from './common/events/webhooks.js';
 export type {
   WebhookConfig,
   WebhookDelivery,
@@ -445,7 +445,7 @@ export type {
   WebhookManagerConfig,
   WebhookTestResult,
   WebhookServiceConfig,
-} from './common/webhooks.js';
+} from './common/events/webhooks.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Access Control (RBAC/ACL)
@@ -688,7 +688,7 @@ export {
   resolveContext,
   getBrand,
   getTenantId as getTenantIdFromContext,
-} from './common/context-resolver.js';
+} from './common/config/context.js';
 
 // Core Database Name Constant
 export {

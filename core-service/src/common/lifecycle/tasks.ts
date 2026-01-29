@@ -5,7 +5,7 @@
  * Helps reduce code duplication across services.
  */
 
-import { logger } from './logger.js';
+import { logger } from '../logger.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Cleanup Task Management

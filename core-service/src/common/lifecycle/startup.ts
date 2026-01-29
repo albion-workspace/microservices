@@ -5,12 +5,12 @@
  * Uses the centralized retry() function for consistent retry logic.
  */
 
-import { logger } from './logger.js';
-import { connectDatabase, checkDatabaseHealth } from '../databases/mongodb.js';
-import { connectRedis, checkRedisHealth } from '../databases/redis.js';
-import { setupGracefulShutdown } from './lifecycle.js';
-import { getErrorMessage } from './errors.js';
-import { retry } from './retry.js';
+import { logger } from '../logger.js';
+import { connectDatabase, checkDatabaseHealth } from '../../databases/mongodb.js';
+import { connectRedis, checkRedisHealth } from '../../databases/redis.js';
+import { setupGracefulShutdown } from './shutdown.js';
+import { getErrorMessage } from '../errors.js';
+import { retry } from '../resilience/retry.js';
 
 export interface StartupOptions {
   /** Service name */

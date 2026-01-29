@@ -21,18 +21,18 @@
 import type { Collection, Document, Filter, Db } from 'mongodb';
 
 // Local imports
-import { getClient } from '../databases/mongodb.js';
-import { CORE_DATABASE_NAME } from '../databases/core-database.js';
-import { getCache, setCache, deleteCache, deleteCachePattern } from '../databases/cache.js';
-import { resolveDatabaseStrategyFromConfig } from '../databases/strategy-config.js';
-import { logger } from './logger.js';
-import { hasAnyRole } from './permissions.js';
-import { generateMongoId } from '../databases/mongodb-utils.js';
+import { getClient } from '../../databases/mongodb.js';
+import { CORE_DATABASE_NAME } from '../../databases/core-database.js';
+import { getCache, setCache, deleteCache, deleteCachePattern } from '../../databases/cache.js';
+import { resolveDatabaseStrategyFromConfig } from '../../databases/strategy-config.js';
+import { logger } from '../logger.js';
+import { hasAnyRole } from '../auth/permissions.js';
+import { generateMongoId } from '../../databases/mongodb-utils.js';
 
 // Local type imports
-import type { UserContext } from '../types/index.js';
-import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/strategy.js';
-import type { ServiceDatabaseAccessor } from '../databases/service-database.js';
+import type { UserContext } from '../../types/index.js';
+import type { DatabaseStrategyResolver, DatabaseContext } from '../../databases/strategy.js';
+import type { ServiceDatabaseAccessor } from '../../databases/service-database.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Module-level State (Config Store Caches)

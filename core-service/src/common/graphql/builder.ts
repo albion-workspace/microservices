@@ -16,8 +16,8 @@
  * ```
  */
 
-import type { ResolverContext } from '../types/index.js';
-import { logger } from './logger.js';
+import type { ResolverContext } from '../../types/index.js';
+import { logger } from '../logger.js';
 
 /**
  * Resolver function type

@@ -46,14 +46,14 @@ import {
 import { createHandler as createHttpHandler } from 'graphql-http/lib/use/http';
 import { createHandler as createSSEHandler } from 'graphql-sse/lib/use/http';
 import type { UserContext, PermissionRule, Resolvers, ResolverContext, JwtConfig, SubscriptionResolver } from '../types/index.js';
-import { extractToken, verifyToken, createToken } from '../common/jwt.js';
+import { extractToken, verifyToken, createToken } from '../common/auth/jwt.js';
 import { connectDatabase, checkDatabaseHealth } from '../databases/mongodb.js';
 import { connectRedis, checkRedisHealth, getRedis } from '../databases/redis.js';
 import { getCacheStats } from '../databases/cache.js';
 import { logger, subscribeToLogs, type LogEntry, setCorrelationId, generateCorrelationId, getCorrelationId } from '../common/logger.js';
-import { createResolverBuilder, type ServiceResolvers } from '../common/resolver-builder.js';
+import { createResolverBuilder, type ServiceResolvers } from '../common/graphql/builder.js';
 import { formatGraphQLError, getAllErrorCodes, getErrorMessage } from '../common/errors.js';
-import { configGraphQLTypes, configResolvers } from '../common/config-graphql.js';
+import { configGraphQLTypes, configResolvers } from '../common/config/graphql.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types

@@ -25,9 +25,9 @@
 
 import { readFile } from 'fs/promises';
 import { existsSync } from 'fs';
-import { logger } from './logger.js';
+import { logger } from '../logger.js';
 import path from 'path';
-import type { ConfigStore } from './config-store.js';
+import type { ConfigStore } from './store.js';
 
 export interface ConfigLoaderOptions {
   /** Service name (e.g., 'auth-service', 'payment-service') */

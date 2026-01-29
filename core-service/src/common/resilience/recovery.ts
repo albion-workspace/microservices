@@ -39,10 +39,10 @@
  */
 
 import type { ClientSession, Db, MongoClient } from 'mongodb';
-import { logger } from '../index.js';
-import { getRedis, scanKeysArray } from '../databases/redis.js';
-import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/strategy.js';
-import { DEFAULT_TRANSACTION_OPTIONS } from './wallet-types.js';
+import { logger } from '../../index.js';
+import { getRedis, scanKeysArray } from '../../databases/redis.js';
+import type { DatabaseStrategyResolver, DatabaseContext } from '../../databases/strategy.js';
+import { DEFAULT_TRANSACTION_OPTIONS } from '../wallet/wallet.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types

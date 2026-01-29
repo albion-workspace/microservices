@@ -10,7 +10,7 @@
  */
 
 import type { Db, MongoClient, ClientSession, Collection, Document } from 'mongodb';
-import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/strategy.js';
+import type { DatabaseStrategyResolver, DatabaseContext } from '../../databases/strategy.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Collection Names (Single source of truth)

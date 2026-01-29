@@ -18,7 +18,7 @@
 import type { Db } from 'mongodb';
 
 // Local imports
-import { getConfigWithDefault } from '../common/config-store.js';
+import { getConfigWithDefault } from '../common/config/store.js';
 import { 
   createDatabaseStrategy,
   createSharedDatabaseStrategy,

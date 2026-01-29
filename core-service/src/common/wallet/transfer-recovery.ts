@@ -17,12 +17,12 @@
  */
 
 import type { ClientSession, Db } from 'mongodb';
-import { logger } from '../index.js';
-import type { Transfer } from './transfer-helper.js';
-import { createTransferWithTransactions, type CreateTransferParams } from './transfer-helper.js';
-import type { RecoveryHandler, RecoverableOperation } from './recovery.js';
-import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/strategy.js';
-import { getTransfersCollection, getTransactionsCollection } from './wallet-types.js';
+import { logger } from '../../index.js';
+import type { Transfer } from './transfer.js';
+import { createTransferWithTransactions, type CreateTransferParams } from './transfer.js';
+import type { RecoveryHandler, RecoverableOperation } from '../resilience/recovery.js';
+import type { DatabaseStrategyResolver, DatabaseContext } from '../../databases/strategy.js';
+import { getTransfersCollection, getTransactionsCollection } from './wallet.js';
 
 /**
  * Create reverse transfer (opposite direction)

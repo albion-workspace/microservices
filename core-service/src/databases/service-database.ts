@@ -48,7 +48,7 @@
 import type { Db, MongoClient } from 'mongodb';
 
 import { logger } from '../common/logger.js';
-import { resolveContext } from '../common/context-resolver.js';
+import { resolveContext } from '../common/config/context.js';
 import { 
   type DatabaseStrategyResolver, 
   type DatabaseContext,

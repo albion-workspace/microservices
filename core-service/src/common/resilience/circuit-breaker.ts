@@ -27,7 +27,7 @@
  * ```
  */
 
-import { logger } from './logger.js';
+import { logger } from '../logger.js';
 
 export interface CircuitBreakerConfig {
   /** Number of failures before opening circuit (default: 5) */

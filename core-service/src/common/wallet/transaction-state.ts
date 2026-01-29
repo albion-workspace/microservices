@@ -8,8 +8,8 @@
  * - Better performance for temporary state tracking
  */
 
-import { getRedis } from '../databases/redis.js';
-import { logger } from './logger.js';
+import { getRedis } from '../../databases/redis.js';
+import { logger } from '../logger.js';
 
 /**
  * Transaction state for crash recovery tracking
@@ -248,7 +248,7 @@ export class TransactionStateManager {
 
     try {
       // Step 1: Scan keys efficiently using scanIterator
-      const { scanKeysIterator, batchGetValues } = await import('../databases/redis.js');
+      const { scanKeysIterator, batchGetValues } = await import('../../databases/redis.js');
       
       const keys: string[] = [];
       for await (const key of scanKeysIterator({

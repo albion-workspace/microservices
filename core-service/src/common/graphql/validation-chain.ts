@@ -17,11 +17,11 @@
  * ```
  */
 
-import { requireAuth, getUserId, getTenantId } from './resolvers.js';
-import type { ResolverContext } from '../types/index.js';
-import { logger } from './logger.js';
-import { getErrorMessage } from './errors.js';
-import { hasRole } from '../access/index.js';
+import { requireAuth, getUserId, getTenantId } from './utils.js';
+import type { ResolverContext } from '../../types/index.js';
+import { logger } from '../logger.js';
+import { getErrorMessage } from '../errors.js';
+import { hasRole } from '../../access/index.js';
 
 /**
  * Validation context passed through the chain

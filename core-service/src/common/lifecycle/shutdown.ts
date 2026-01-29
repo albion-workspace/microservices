@@ -4,9 +4,9 @@
  * Handles graceful shutdown and cleanup
  */
 
-import { logger } from './logger.js';
-import { closeDatabase } from '../databases/mongodb.js';
-import { closeRedis } from '../databases/redis.js';
+import { logger } from '../logger.js';
+import { closeDatabase } from '../../databases/mongodb.js';
+import { closeRedis } from '../../databases/redis.js';
 
 type CleanupHandler = () => Promise<void> | void;
 

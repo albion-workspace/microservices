@@ -41,13 +41,13 @@
  */
 
 import { createHmac, timingSafeEqual } from 'crypto';
-import { logger } from './logger.js';
-import { getErrorMessage } from './errors.js';
-import { generateMongoId, normalizeDocument } from '../databases/mongodb-utils.js';
-import { CircuitBreaker, CircuitBreakerOpenError } from './circuit-breaker.js';
-import { retry, RetryConfigs } from './retry.js';
+import { logger } from '../logger.js';
+import { getErrorMessage } from '../errors.js';
+import { generateMongoId, normalizeDocument } from '../../databases/mongodb-utils.js';
+import { CircuitBreaker, CircuitBreakerOpenError } from '../resilience/circuit-breaker.js';
+import { retry, RetryConfigs } from '../resilience/retry.js';
 import type { Db } from 'mongodb';
-import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/strategy.js';
+import type { DatabaseStrategyResolver, DatabaseContext } from '../../databases/strategy.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types

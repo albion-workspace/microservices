@@ -23,8 +23,8 @@
  * ```
  */
 
-import { logger } from './logger.js';
-import { getErrorMessage } from './errors.js';
+import { logger } from '../logger.js';
+import { getErrorMessage } from '../errors.js';
 
 export type RetryStrategy = 'exponential' | 'linear' | 'fixed';
 

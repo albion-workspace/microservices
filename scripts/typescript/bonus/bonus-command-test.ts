@@ -31,9 +31,9 @@ import {
   getOperationStateTracker,
   getRecoveryHandler,
   registerRecoveryHandler,
-} from '../../../core-service/src/common/recovery.js';
-import { createTransferRecoveryHandler } from '../../../core-service/src/common/transfer-recovery.js';
-import { createTransferWithTransactions } from '../../../core-service/src/common/transfer-helper.js';
+} from '../../../core-service/src/common/resilience/recovery.js';
+import { createTransferRecoveryHandler } from '../../../core-service/src/common/wallet/transfer-recovery.js';
+import { createTransferWithTransactions } from '../../../core-service/src/common/wallet/transfer.js';
 
 // External packages (bonus-shared)
 import { BonusEligibility } from '../../../bonus-shared/src/BonusEligibility.js';

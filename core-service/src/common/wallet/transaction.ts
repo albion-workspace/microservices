@@ -17,9 +17,9 @@
 import type { ClientSession, Db, MongoClient } from 'mongodb';
 
 // Local imports
-import { logger } from './logger.js';
-import { generateId, generateMongoId } from '../index.js';
-import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/strategy.js';
+import { logger } from '../logger.js';
+import { generateId, generateMongoId } from '../../index.js';
+import type { DatabaseStrategyResolver, DatabaseContext } from '../../databases/strategy.js';
 import {
   type Wallet,
   type BalanceType,
@@ -35,21 +35,21 @@ import {
   getWalletsCollection,
   getTransactionsCollection,
   DEFAULT_TRANSACTION_OPTIONS,
-} from './wallet-types.js';
+} from './wallet.js';
 
 // Re-export transaction state types from transaction-state.ts
 export type { TransactionState } from './transaction-state.js';
 export { getTransactionStateManager, TransactionStateManager } from './transaction-state.js';
 
 // ═══════════════════════════════════════════════════════════════════
-// Wallet Helpers (Re-exported from transfer-helper for consistency)
+// Wallet Helpers (Re-exported from transfer for consistency)
 // ═══════════════════════════════════════════════════════════════════
 
-// Import wallet helpers from transfer-helper (for internal use)
-import { getOrCreateWallet as getOrCreateWalletHelper } from './transfer-helper.js';
+// Import wallet helpers from transfer (for internal use)
+import { getOrCreateWallet as getOrCreateWalletHelper } from './transfer.js';
 
-// Re-export wallet helpers from transfer-helper (for external use)
-export { createNewWallet, getOrCreateWallet, startSession, endSession } from './transfer-helper.js';
+// Re-export wallet helpers from transfer (for external use)
+export { createNewWallet, getOrCreateWallet, startSession, endSession } from './transfer.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Transaction Types

@@ -32,10 +32,10 @@
 import type { ClientSession, Db, MongoClient } from 'mongodb';
 
 // Local imports
-import { generateId, generateMongoId, logger, deleteCachePattern } from '../index.js';
-import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/strategy.js';
-import { createTransactionDocument, type CreateTransactionParams, type Transaction } from './transaction-helper.js';
-import { getOperationStateTracker } from './recovery.js';
+import { generateId, generateMongoId, logger, deleteCachePattern } from '../../index.js';
+import type { DatabaseStrategyResolver, DatabaseContext } from '../../databases/strategy.js';
+import { createTransactionDocument, type CreateTransactionParams, type Transaction } from './transaction.js';
+import { getOperationStateTracker } from '../resilience/recovery.js';
 import {
   type Wallet,
   type BalanceType,
@@ -54,7 +54,7 @@ import {
   getTransfersCollection,
   getTransactionsCollection,
   DEFAULT_TRANSACTION_OPTIONS,
-} from './wallet-types.js';
+} from './wallet.js';
 
 
 // ═══════════════════════════════════════════════════════════════════
@@ -75,8 +75,8 @@ export interface Transfer {
   [key: string]: unknown; // Index signature for RecoverableOperation compatibility
 }
 
-// Re-export Transaction type from transaction-helper for consistency
-export type { Transaction } from './transaction-helper.js';
+// Re-export Transaction type from transaction for consistency
+export type { Transaction } from './transaction.js';
 
 export interface CreateTransferParams {
   fromUserId: string;
@@ -455,7 +455,7 @@ export async function createTransferWithTransactions(
     // This allows us to set allowNegative=true when creating system user wallets
     let isSystemUser = false;
     try {
-      const { findUserIdByRole } = await import('../databases/user-utils.js');
+      const { findUserIdByRole } = await import('../../databases/user-utils.js');
       const systemUserId = await findUserIdByRole({ 
         role: 'system', 
         tenantId, 

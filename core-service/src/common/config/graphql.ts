@@ -10,10 +10,10 @@
  * - Static imports
  */
 
-import { GraphQLError } from './errors.js';
-import { hasAnyRole } from './permissions.js';
-import { createConfigStore, type ConfigStore } from './config-store.js';
-import type { ResolverContext } from '../types/index.js';
+import { GraphQLError } from '../errors.js';
+import { hasAnyRole } from '../auth/permissions.js';
+import { createConfigStore, type ConfigStore } from './store.js';
+import type { ResolverContext } from '../../types/index.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // GraphQL Type Definitions
