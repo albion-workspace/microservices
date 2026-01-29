@@ -12,8 +12,8 @@ import {
   validateInput, 
   createTransferWithTransactions,
   type ClientSession,
-  getDatabase,
 } from 'core-service';
+import { db } from '../database.js';
 import type { Transfer as PaymentTransfer, Transaction } from '../types.js';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -61,8 +61,8 @@ const transferSaga = [
       // Get session from saga context if available (for transaction support)
       const session = (data as any)._session as ClientSession | undefined;
       
-      // Get database instance (gateway connects to payment_service database)
-      const db = getDatabase();
+      // Get database instance using service database accessor
+      const database = await db.getDb();
       
       // Use the shared helper function (handles transfer + transactions + wallets atomically)
       const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
@@ -78,7 +78,7 @@ const transferSaga = [
         // Pass any additional fields from rest
         ...rest,
       }, { 
-        database: db,
+        database,
         ...(session && { session })
       });
       

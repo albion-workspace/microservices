@@ -13,7 +13,6 @@ import {
   normalizeDocument,
   findOneAndUpdateById,
   paginateCollection,
-  getDatabase,
   getRedis,
   scanKeysIterator,
   createPendingOperationStore,
@@ -21,6 +20,7 @@ import {
   type CursorPaginationOptions,
   type CursorPaginationResult,
 } from 'core-service';
+import { db } from './database.js';
 import { AUTH_ERRORS } from './error-codes.js';
 import { matchAnyUrn, hasRole, hasAnyRole } from 'core-service/access';
 import { 
@@ -409,12 +409,12 @@ export function createAuthResolvers(
       me: async (args: Record<string, unknown>, ctx: ResolverContext) => {
         requireAuth(ctx);
         
-        const db = getDatabase();
+        const database = await db.getDb();
         const userId = getUserId(ctx);
         const tenantId = getTenantId(ctx);
         
         // Use generic helper function for document lookup with automatic ObjectId handling
-        const user = await findById(db.collection('users'), userId, { tenantId });
+        const user = await findById(database.collection('users'), userId, { tenantId });
         
         // IMPORTANT: If user has valid token but user doesn't exist in DB (e.g., deleted),
         // throw UserNotFound error so frontend can detect and clear auth
@@ -460,7 +460,7 @@ export function createAuthResolvers(
           });
         }
         
-        const db = getDatabase();
+        const database = await db.getDb();
         const userId = (args as any).id;
         const tenantId = (args as any).tenantId;
         
@@ -473,7 +473,7 @@ export function createAuthResolvers(
         }
         
         // Use generic helper function for document lookup with automatic ObjectId handling
-        const user = await findById(db.collection('users'), userId, { tenantId });
+        const user = await findById(database.collection('users'), userId, { tenantId });
         
         if (!user) {
           logger.debug('User not found', { userId, tenantId });
@@ -498,7 +498,7 @@ export function createAuthResolvers(
           });
         }
         
-        const db = getDatabase();
+        const database = await db.getDb();
         const { tenantId, first, after, last, before } = args as any;
         
         const filter: Record<string, unknown> = {};
@@ -509,7 +509,7 @@ export function createAuthResolvers(
         try {
           // Use cursor-based pagination (performance-optimized, sharding-friendly)
           const result = await paginateCollection(
-            db.collection('users'),
+            database.collection('users'),
             {
               first: first ? Math.min(Math.max(1, first), 100) : undefined, // Max 100 per page
               after,
@@ -528,7 +528,7 @@ export function createAuthResolvers(
           // If filters are present, paginateCollection may return undefined, so count manually
           let totalCount = result.totalCount;
           if (totalCount === undefined || totalCount === null) {
-            totalCount = await db.collection('users').countDocuments(filter);
+            totalCount = await database.collection('users').countDocuments(filter);
           }
           
           return {
@@ -562,7 +562,7 @@ export function createAuthResolvers(
           });
         }
         
-        const db = getDatabase();
+        const database = await db.getDb();
         const { role, tenantId, first, after, last, before } = args as any;
         
         if (!role || typeof role !== 'string') {
@@ -588,7 +588,7 @@ export function createAuthResolvers(
         try {
           // Use cursor-based pagination (performance-optimized, sharding-friendly)
           const result = await paginateCollection(
-            db.collection('users'),
+            database.collection('users'),
             {
               first: first ? Math.min(Math.max(1, first), 100) : undefined, // Max 100 per page
               after,
@@ -607,7 +607,7 @@ export function createAuthResolvers(
           // If filters are present, paginateCollection may return undefined, so count manually
           let totalCount = result.totalCount;
           if (totalCount === undefined || totalCount === null) {
-            totalCount = await db.collection('users').countDocuments(filter);
+            totalCount = await database.collection('users').countDocuments(filter);
           }
           
           return {
@@ -630,8 +630,8 @@ export function createAuthResolvers(
       mySessions: async (args: Record<string, unknown>, ctx: ResolverContext) => {
         requireAuth(ctx);
         
-        const db = getDatabase();
-        const sessions = await db.collection('sessions')
+        const database = await db.getDb();
+        const sessions = await database.collection('sessions')
           .find({
             userId: getUserId(ctx),
             tenantId: getTenantId(ctx),
@@ -881,7 +881,7 @@ export function createAuthResolvers(
           });
         }
         
-        const db = getDatabase();
+        const database = await db.getDb();
         const { userId, tenantId, roles } = (args as any).input;
         
         if (!userId) {
@@ -899,7 +899,7 @@ export function createAuthResolvers(
         try {
           // Use optimized helper function for findOneAndUpdate (performance-optimized)
           const result = await findOneAndUpdateById(
-            db.collection('users'),
+            database.collection('users'),
             userId,
             { 
               $set: { 
@@ -952,7 +952,7 @@ export function createAuthResolvers(
           });
         }
         
-        const db = getDatabase();
+        const database = await db.getDb();
         const { userId, tenantId, permissions } = (args as any).input;
         
         if (!userId) {
@@ -970,7 +970,7 @@ export function createAuthResolvers(
         try {
           // Use optimized helper function for findOneAndUpdate (performance-optimized)
           const result = await findOneAndUpdateById(
-            db.collection('users'),
+            database.collection('users'),
             userId,
             { 
               $set: { 
@@ -1021,7 +1021,7 @@ export function createAuthResolvers(
           throw new Error('Unauthorized: Insufficient permissions to update user status');
         }
         
-        const db = getDatabase();
+        const database = await db.getDb();
         const { userId, tenantId, status } = (args as any).input;
         
         if (!userId) {
@@ -1044,7 +1044,7 @@ export function createAuthResolvers(
         try {
           // Use optimized helper function for findOneAndUpdate (performance-optimized)
           const result = await findOneAndUpdateById(
-            db.collection('users'),
+            database.collection('users'),
             userId,
             { 
               $set: { 
@@ -1116,8 +1116,8 @@ export function createAuthResolvers(
         let userEmail: string | undefined;
         let userPhone: string | undefined;
         if (!isAdmin) {
-          const db = getDatabase();
-          const userDoc = await findById(db.collection('users'), userId, { tenantId });
+          const database = await db.getDb();
+          const userDoc = await findById(database.collection('users'), userId, { tenantId });
           userEmail = userDoc?.email?.toLowerCase();
           userPhone = userDoc?.phone;
         }

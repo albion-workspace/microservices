@@ -21,7 +21,6 @@ import {
   type, 
   type Repository, 
   type SagaContext, 
-  getDatabase, 
   validateInput, 
   logger,
   findOneById,
@@ -33,6 +32,7 @@ import {
 } from 'core-service';
 
 // Local imports
+import { db } from '../database.js';
 import type { Transaction, Transfer } from '../types.js';
 
 /**
@@ -72,8 +72,8 @@ async function checkDuplicateTransfer(
   externalRef: string,
   type: 'deposit' | 'withdrawal'
 ): Promise<void> {
-  const db = getDatabase();
-  const transfersCollection = db.collection('transfers');
+  const database = await db.getDb();
+  const transfersCollection = database.collection('transfers');
   
   // Check for any existing transfer with this externalRef (regardless of status)
   // This prevents duplicates even if a previous transfer was completed or failed
@@ -168,8 +168,8 @@ const depositSaga = [
       // Ensure description is always set (never null/undefined)
       const finalDescription = description || 'Deposit';
       
-      // Get database instance (gateway connects to payment_service database)
-      const db = getDatabase();
+      // Get database instance using service database accessor
+      const database = await db.getDb();
       
       const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
         fromUserId: fromUserIdValue,
@@ -185,7 +185,7 @@ const depositSaga = [
         ...rest,
         externalTransactionId,
       }, { 
-        database: db,
+        database,
         ...(session && { session })
       });
       
@@ -298,8 +298,8 @@ const withdrawalSaga = [
     execute: async ({ input, data, ...ctx }: WithdrawalCtx): Promise<WithdrawalCtx> => {
       const totalRequired = input.amount + (data.feeAmount as number);
       
-      const db = getDatabase();
-      const walletsCollection = db.collection('wallets');
+      const database = await db.getDb();
+      const walletsCollection = database.collection('wallets');
       
       const wallet = await walletsCollection.findOne({ 
         userId: input.userId, 
@@ -356,8 +356,8 @@ const withdrawalSaga = [
       // Ensure description is always set (never null/undefined)
       const finalDescription = description || 'Withdrawal';
       
-      // Get database instance (gateway connects to payment_service database)
-      const db = getDatabase();
+      // Get database instance using service database accessor
+      const database = await db.getDb();
       
       const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
         fromUserId,
@@ -373,7 +373,7 @@ const withdrawalSaga = [
         ...rest,
         externalTransactionId,
       }, { 
-        database: db,
+        database,
         ...(session && { session })
       });
       
@@ -419,8 +419,8 @@ export const withdrawalService = createService<Transaction, CreateWithdrawalInpu
 // ✅ Unified transactions query - fetches all transactions (deposits + withdrawals) together
 // Uses cursor-based pagination for O(1) performance regardless of page number
 export const transactionsQueryResolver = async (args: Record<string, unknown>) => {
-      const db = getDatabase();
-      const transactionsCollection = db.collection('transactions');
+      const database = await db.getDb();
+      const transactionsCollection = database.collection('transactions');
       
       const first = (args.first as number) || 100;
       const after = args.after as string | undefined;

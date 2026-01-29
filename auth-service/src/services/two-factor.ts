@@ -3,7 +3,8 @@
  * Handles TOTP (Time-based One-Time Password) 2FA setup and verification
  */
 
-import { getDatabase, logger, findOneById, updateOneById, extractDocumentId, normalizeDocument, findById } from 'core-service';
+import { logger, findOneById, updateOneById, extractDocumentId, normalizeDocument, findById } from 'core-service';
+import { db } from '../database.js';
 import speakeasy from 'speakeasy';
 import qrcode from 'qrcode';
 import type { Enable2FAInput, Verify2FAInput, User, TwoFactorSetupResponse } from '../types.js';
@@ -14,7 +15,7 @@ export class TwoFactorService {
    * Enable 2FA for user - generates secret and QR code
    */
   async enable2FA(input: Enable2FAInput): Promise<TwoFactorSetupResponse> {
-    const db = getDatabase();
+    const database = await db.getDb();
     
     try {
       // Validate required fields (should be provided by resolver from context)
@@ -26,7 +27,7 @@ export class TwoFactorService {
       }
       
       // Get user using findById helper (handles both _id and id fields)
-      const userDoc = await findById<User>(db.collection('users'), input.userId, { tenantId: input.tenantId });
+      const userDoc = await findById<User>(database.collection('users'), input.userId, { tenantId: input.tenantId });
       
       if (!userDoc || !userDoc._id) {
         return {
@@ -114,7 +115,7 @@ export class TwoFactorService {
         } as TwoFactorSetupResponse;
       }
       
-      const updateResult = await db.collection('users').updateOne(
+      const updateResult = await database.collection('users').updateOne(
         { _id: user._id, tenantId: input.tenantId },
         { 
           $set: { 
@@ -167,7 +168,7 @@ export class TwoFactorService {
    * Verify 2FA code and activate 2FA for user
    */
   async verify2FA(input: Verify2FAInput): Promise<{ success: boolean; message: string }> {
-    const db = getDatabase();
+    const database = await db.getDb();
     
     try {
       // Validate required fields (should be provided by resolver from context)
@@ -179,7 +180,7 @@ export class TwoFactorService {
       }
       
       // Get user using findById helper (handles both _id and id fields)
-      const userDoc = await findById<User>(db.collection('users'), input.userId, { tenantId: input.tenantId });
+      const userDoc = await findById<User>(database.collection('users'), input.userId, { tenantId: input.tenantId });
       
       if (!userDoc || !userDoc._id) {
         return {
@@ -222,7 +223,7 @@ export class TwoFactorService {
       }
       
       // Enable 2FA (activate it after verification)
-      await db.collection('users').updateOne(
+      await database.collection('users').updateOne(
         { _id: userDoc._id, tenantId: input.tenantId },
         { 
           $set: { 
@@ -256,11 +257,11 @@ export class TwoFactorService {
    * Disable 2FA for user
    */
   async disable2FA(userId: string, tenantId: string, password: string): Promise<{ success: boolean; message: string }> {
-    const db = getDatabase();
+    const database = await db.getDb();
     
     try {
       // Get user using findById helper (handles both _id and id fields)
-      const userDoc = await findById<User>(db.collection('users'), userId, { tenantId });
+      const userDoc = await findById<User>(database.collection('users'), userId, { tenantId });
       
       if (!userDoc || !userDoc._id) {
         return {
@@ -291,7 +292,7 @@ export class TwoFactorService {
       // Password verification should be done via Passport.js authentication
       
       // Disable 2FA
-      await db.collection('users').updateOne(
+      await database.collection('users').updateOne(
         { _id: userDoc._id, tenantId },
         { 
           $set: { 
@@ -308,7 +309,7 @@ export class TwoFactorService {
       const newMetadata = { ...user.metadata };
       delete newMetadata.backupCodes;
       
-      await db.collection('users').updateOne(
+      await database.collection('users').updateOne(
         { _id: userDoc._id, tenantId },
         { $set: { metadata: newMetadata } }
       );
@@ -332,11 +333,11 @@ export class TwoFactorService {
    * Verify 2FA code or backup code during login
    */
   async verify2FACode(userId: string, code: string): Promise<boolean> {
-    const db = getDatabase();
+    const database = await db.getDb();
     
     try {
       // Use optimized findOneById utility (performance-optimized)
-      const user = await findOneById<User>(db.collection('users'), userId, {});
+      const user = await findOneById<User>(database.collection('users'), userId, {});
       
       if (!user || !user.twoFactorSecret || !user.twoFactorEnabled) {
         return false;
@@ -369,7 +370,7 @@ export class TwoFactorService {
         
         // Update backup codes - user already fetched above, use _id from that
         if (user && (user as any)._id) {
-          await db.collection('users').updateOne(
+          await database.collection('users').updateOne(
             { _id: (user as any)._id },
             { 
               $set: { 
@@ -396,11 +397,11 @@ export class TwoFactorService {
    * Regenerate backup codes
    */
   async regenerateBackupCodes(userId: string, tenantId: string, password: string): Promise<{ success: boolean; backupCodes?: string[]; message?: string }> {
-    const db = getDatabase();
+    const database = await db.getDb();
     
     try {
       // Get user using findById helper (handles both _id and id fields)
-      const userDoc = await findById<User>(db.collection('users'), userId, { tenantId });
+      const userDoc = await findById<User>(database.collection('users'), userId, { tenantId });
       
       if (!userDoc || !userDoc._id) {
         return {
@@ -444,7 +445,7 @@ export class TwoFactorService {
       );
       
       // Update backup codes
-      await db.collection('users').updateOne(
+      await database.collection('users').updateOne(
         { _id: userDoc._id, tenantId },
         { 
           $set: { 

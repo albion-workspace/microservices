@@ -193,6 +193,33 @@ Some files don't follow strict import grouping (blank lines between groups).
     - Visual indicators with 🎁 emoji and orange color
     - **Files**: `app/src/pages/PaymentGateway.tsx`
 
+13. ✅ **Standardized Database Access Pattern** - COMPLETED (2026-01-29)
+    - Created `createServiceDatabaseAccess()` in core-service for consistent database access
+    - All microservices migrated to use the new pattern:
+      - `auth-service/src/database.ts` - uses 'core-service' (shared database)
+      - `payment-service/src/database.ts` - uses 'payment-service'
+      - `notification-service/src/database.ts` - uses 'notification-service'
+      - `bonus-service` - already used correct pattern via persistence-singleton
+    - Removed all direct `getDatabase()` calls from microservices (98+ usages replaced)
+    - Clear API: `db.initialize()` at startup, `await db.getDb()` for database access
+    - Works with all database strategies (shared, per-service, per-tenant, etc.)
+    - Future-proof: new services have clear pattern to follow
+    - **Files**: 
+      - `core-service/src/databases/service-database.ts` (NEW)
+      - `auth-service/src/database.ts` (NEW)
+      - `payment-service/src/database.ts` (NEW)
+      - `notification-service/src/database.ts` (NEW)
+      - Updated all service files to use `await db.getDb()` instead of `getDatabase()`
+
+14. ✅ **MongoDB Pattern Consolidation** - COMPLETED (2026-01-29)
+    - Created centralized collection constants: `COLLECTION_NAMES` (wallets, transfers, transactions)
+    - Created collection getters: `getWalletsCollection()`, `getTransfersCollection()`, `getTransactionsCollection()`
+    - Created `DEFAULT_TRANSACTION_OPTIONS` for consistent MongoDB transaction settings
+    - Created `buildWalletActivityUpdate()` and `buildWalletUpdate()` helpers
+    - Replaced hardcoded collection strings with getters across core-service
+    - Standardized import grouping across services per CODING_STANDARDS
+    - **Files**: `core-service/src/common/wallet-types.ts`, `core-service/src/common/transfer-helper.ts`, `core-service/src/common/transaction-helper.ts`
+
 ---
 
 ## 📋 Detailed Improvement Plan

@@ -4,7 +4,8 @@
  * Manages all notification channels and providers
  */
 
-import { logger, getDatabase, updateOneById, generateMongoId, GraphQLError } from 'core-service';
+import { logger, updateOneById, generateMongoId, GraphQLError } from 'core-service';
+import { db } from './database.js';
 import { NOTIFICATION_ERRORS } from './error-codes.js';
 import type { 
   NotificationRequest, 
@@ -158,7 +159,7 @@ export class NotificationService {
    * Send notification via specified channel
    */
   async send(request: NotificationRequest): Promise<NotificationResponse> {
-    const db = getDatabase();
+    const database = await db.getDb();
     
     // Validate channel is provided
     if (!request.channel) {
@@ -199,14 +200,14 @@ export class NotificationService {
         createdAt: new Date(),
       };
       
-      await db.collection('notifications').insertOne(notification as any);
+      await database.collection('notifications').insertOne(notification as any);
       
       // Send via provider
       const result = await provider.send(normalizedRequest as any);
       
       // Use optimized updateOneById utility (performance-optimized)
       await updateOneById(
-        db.collection('notifications'),
+        database.collection('notifications'),
         notification.id,
         {
           $set: {

@@ -27,20 +27,19 @@ import {
   logger,
   on,
   startListening,
-  getDatabase,
   createWebhookService,
   setupCleanupTasks,
   registerServiceErrorCodes,
   registerServiceConfigDefaults,
   ensureDefaultConfigsCreated,
   resolveContext,
-  initializeServiceDatabase,
   initializeWebhooks,
   type IntegrationEvent,
   type ResolverContext,
   type DatabaseStrategyResolver,
   type DatabaseContext,
 } from 'core-service';
+import { db } from './database.js';
 
 import { loadConfig, validateConfig, printConfigSummary } from './config.js';
 import { AUTH_CONFIG_DEFAULTS } from './config-defaults.js';
@@ -111,8 +110,8 @@ function setupEventHandlers() {
     if (!event.userId) return;
     
     try {
-      const db = getDatabase();
-      const usersCollection = db.collection('users');
+      const database = await db.getDb();
+      const usersCollection = database.collection('users');
       
       // Get current user metadata
       const user = await usersCollection.findOne(
@@ -360,16 +359,15 @@ async function main() {
   // Initialize Services
   // ═══════════════════════════════════════════════════════════════════
 
-  // Initialize database using centralized helper
+  // Initialize database using service database accessor
   // Auth-service uses core_service database (users, sessions are shared)
-  // Use 'core-service' as serviceName so per-service strategy resolves to 'core_service'
-  const { database: registrationDb, strategy: databaseStrategy, context: defaultContext } = await initializeServiceDatabase({
-    serviceName: 'core-service', // Users are in core_service database
+  // The accessor is configured with 'core-service' in database.ts
+  const { database: registrationDb, strategy: databaseStrategy, context: defaultContext } = await db.initialize({
     brand: context.brand,
     tenantId: context.tenantId,
   });
   
-  logger.info('Database initialized via initializeServiceDatabase', {
+  logger.info('Database initialized via service database accessor', {
     database: registrationDb.databaseName,
     context: defaultContext,
   });
@@ -377,7 +375,7 @@ async function main() {
   otpProviders = new OTPProviderFactory(authConfig);
   authenticationService = new AuthenticationService(authConfig);
   registrationService = new RegistrationService(authConfig, otpProviders, authenticationService, {
-    database: registrationDb, // Use core_service database directly
+    database: registrationDb,
     databaseStrategy,
     defaultContext,
   });

@@ -18,7 +18,8 @@ import { Strategy as FacebookStrategy } from 'passport-facebook';
 import { Strategy as LinkedInStrategy } from 'passport-linkedin-oauth2';
 import speakeasy from 'speakeasy';
 import type { AuthConfig, User, SocialProfile, AuthProvider } from '../types.js';
-import { logger, getDatabase } from 'core-service';
+import { logger } from 'core-service';
+import { db } from '../database.js';
 import { normalizeEmail, normalizePhone, detectIdentifierType, verifyPassword } from '../utils.js';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -46,7 +47,7 @@ export function configurePassport(config: AuthConfig) {
         passReqToCallback: true,
       },
       async (req: any, identifier: string, password: string, done: any) => {
-        const db = getDatabase();
+        const database = await db.getDb();
         const tenantId = req.body.tenantId;
         const twoFactorCode = req.body.twoFactorCode;
         
@@ -74,7 +75,7 @@ export function configurePassport(config: AuthConfig) {
           
           // CRITICAL: Query MongoDB and get user with _id
           // Use MongoDB's native _id as the primary identifier (Passport.js best practice)
-          const userDoc = await db.collection('users').findOne(query) as any;
+          const userDoc = await database.collection('users').findOne(query) as any;
           
           if (!userDoc) {
             return done(null, false, { message: 'Invalid credentials' });
@@ -142,7 +143,7 @@ export function configurePassport(config: AuthConfig) {
           
           // Success! Update last login
           // Use _id for MongoDB queries (more efficient and reliable)
-          await db.collection('users').updateOne(
+          await database.collection('users').updateOne(
             { _id: user._id },
             {
               $set: {
@@ -382,14 +383,14 @@ async function handleSocialAuth(
   refreshToken: string,
   tenantId: string | undefined
 ): Promise<User> {
-  const db = getDatabase();
+  const database = await db.getDb();
   
   if (!tenantId) {
     throw new Error('Tenant ID is required');
   }
   
   // Look for existing user with this social profile
-  let user = await db.collection('users').findOne({
+  let user = await database.collection('users').findOne({
     tenantId,
     'socialProfiles.provider': provider,
     'socialProfiles.providerId': providerId,
@@ -411,7 +412,7 @@ async function handleSocialAuth(
       return profile;
     });
     
-    await db.collection('users').updateOne(
+    await database.collection('users').updateOne(
       { id: user.id },
       { 
         $set: { 
@@ -427,7 +428,7 @@ async function handleSocialAuth(
   
   // If no user found, try to link by email
   if (email) {
-    user = await db.collection('users').findOne({
+    user = await database.collection('users').findOne({
       tenantId,
       email,
     }) as unknown as User | null;
@@ -447,7 +448,7 @@ async function handleSocialAuth(
       
       const updatedProfiles = [...(user.socialProfiles || []), newProfile];
       
-      await db.collection('users').updateOne(
+      await database.collection('users').updateOne(
         { _id: user._id },
         { 
           $set: { 
@@ -501,7 +502,7 @@ async function handleSocialAuth(
     lastLoginAt: new Date(),
   };
   
-  const result = await db.collection('users').insertOne(newUser);
+  const result = await database.collection('users').insertOne(newUser);
   
   // MongoDB generates _id automatically, use it as the id
   const createdUser = { ...newUser, _id: result.insertedId, id: result.insertedId.toString() };

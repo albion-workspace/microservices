@@ -51,7 +51,8 @@
  *    - Consistent across all entities
  */
 
-import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, resolveDatabase, getDatabase, deleteCache, deleteCachePattern, logger, validateInput, findOneById, findOneAndUpdateById, requireAuth, getUserId, getTenantId, getOrCreateWallet, paginateCollection, extractDocumentId, GraphQLError, type DatabaseResolutionOptions } from 'core-service';
+import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, resolveDatabase, deleteCache, deleteCachePattern, logger, validateInput, findOneById, findOneAndUpdateById, requireAuth, getUserId, getTenantId, getOrCreateWallet, paginateCollection, extractDocumentId, GraphQLError, type DatabaseResolutionOptions } from 'core-service';
+import { db } from '../database.js';
 import { PAYMENT_ERRORS } from '../error-codes.js';
 import type { Wallet, WalletCategory } from '../types.js';
 import { SYSTEM_CURRENCY } from '../constants.js';
@@ -137,9 +138,9 @@ export const walletResolvers = {
      * ```
      */
     userWallets: async (args: Record<string, unknown>, ctx: ResolverContext): Promise<UserWalletsResponse | null> => {
-      // GraphQL resolvers use getDatabase() as database strategies are initialized at gateway level
-      const db = getDatabase();
-      const walletsCollection = db.collection('wallets');
+      // GraphQL resolvers use service database accessor
+      const database = await db.getDb();
+      const walletsCollection = database.collection('wallets');
       
       // Handle JSON input (args.input) or direct args
       const input = (args.input as Record<string, unknown>) || args;
@@ -228,8 +229,8 @@ export const walletResolvers = {
       
       try {
         const tenantId = getTenantId(ctx) || 'default-tenant';
-        const db = getDatabase();
-        const walletsCollection = db.collection('wallets');
+        const database = await db.getDb();
+        const walletsCollection = database.collection('wallets');
         
         let wallet: any;
         
@@ -250,7 +251,7 @@ export const walletResolvers = {
           
           // If not found and category is 'main' (or default), use getOrCreateWallet
           if (!wallet && (!category || category === 'main')) {
-            wallet = await getOrCreateWallet(userId, currency, tenantId, { database: db });
+            wallet = await getOrCreateWallet(userId, currency, tenantId, { database });
           }
           
           // If still not found, return null (non-main categories must be created explicitly)
@@ -308,7 +309,7 @@ export const walletResolvers = {
       
       try {
         const tenantId = getTenantId(ctx) || 'default-tenant';
-        const db = getDatabase();
+        const database = await db.getDb();
         const balances: Array<{
           currency: string;
           balance: number;
@@ -318,7 +319,7 @@ export const walletResolvers = {
         
         for (const currency of currencies) {
           // Get or create wallet (creates if doesn't exist)
-          const wallet = await getOrCreateWallet(userId, currency, tenantId, { database: db });
+          const wallet = await getOrCreateWallet(userId, currency, tenantId, { database });
           
           const balance = (wallet as any).balance || 0;
           const lockedBalance = (wallet as any).lockedBalance || 0;
@@ -368,11 +369,11 @@ export const walletResolvers = {
       
       try {
         const tenantId = getTenantId(ctx) || 'default-tenant';
-        // GraphQL resolvers use getDatabase() as database strategies are initialized at gateway level
-        const db = getDatabase();
+        // GraphQL resolvers use service database accessor
+        const database = await db.getDb();
         
         // Fetch existing wallets in one query
-        const wallets = await db.collection('wallets').find(
+        const wallets = await database.collection('wallets').find(
           { userId: { $in: userIds }, currency, category: subtype },
           { projection: { userId: 1, id: 1, balance: 1, bonusBalance: 1, lockedBalance: 1, allowNegative: 1 } }
         ).toArray();
@@ -401,7 +402,7 @@ export const walletResolvers = {
           // Use getOrCreateWallet which handles race conditions and duplicate key errors
           if (!wallet) {
             try {
-              wallet = await getOrCreateWallet(userId, currency, tenantId, { database: db });
+              wallet = await getOrCreateWallet(userId, currency, tenantId, { database });
               // Re-fetch from map in case it was created by another concurrent call
               // This prevents duplicate key errors
               const existingWallet = walletMap.get(userId);
@@ -420,7 +421,7 @@ export const walletResolvers = {
                   tenantId,
                 });
                 // Re-fetch wallets to get the one that was just created
-                const existingWallets = await db.collection('wallets').find(
+                const existingWallets = await database.collection('wallets').find(
                   { userId: { $in: userIds }, currency, category: subtype },
                   { projection: { userId: 1, id: 1, balance: 1, bonusBalance: 1, lockedBalance: 1, allowNegative: 1 } }
                 ).toArray();
@@ -430,7 +431,7 @@ export const walletResolvers = {
                   walletMap.set(userId, wallet);
                 } else {
                   // If still not found, try one more time with getOrCreateWallet
-                  wallet = await getOrCreateWallet(userId, currency, tenantId, { database: db });
+                  wallet = await getOrCreateWallet(userId, currency, tenantId, { database });
                   walletMap.set(userId, wallet);
                 }
               } else {
@@ -477,9 +478,9 @@ export const walletResolvers = {
       ctx: ResolverContext
     ) => {
       requireAuth(ctx);
-      // GraphQL resolvers use getDatabase() as database strategies are initialized at gateway level
-      const db = getDatabase();
-      const transactionsCollection = db.collection('transactions');
+      // GraphQL resolvers use service database accessor
+      const database = await db.getDb();
+      const transactionsCollection = database.collection('transactions');
       
       const first = (args.first as number) || 100;
       const after = args.after as string | undefined;

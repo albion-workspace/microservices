@@ -39,7 +39,7 @@ import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 
 // External packages (core-service)
-import { connectRedis, getRedis, checkRedisHealth, scanKeysArray, connectDatabase, getDatabase } from '../../../core-service/src/index.js';
+import { connectRedis, getRedis, checkRedisHealth, scanKeysArray, connectDatabase } from '../../../core-service/src/index.js';
 import { 
   recoverOperation,
   recoverStuckOperations,

@@ -5,7 +5,8 @@
  * Supports context-based roles and hierarchical role inheritance.
  */
 
-import { getDatabase, logger, findOneById, updateOneById, extractDocumentId } from 'core-service';
+import { logger, findOneById, updateOneById, extractDocumentId } from 'core-service';
+import { db } from '../database.js';
 import { RoleResolver, type BaseRole as Role } from 'core-service/access';
 import type {
   UserRole,
@@ -166,7 +167,7 @@ export class RoleService {
    * Assign a role to a user (auth-service specific implementation)
    */
   async assignRole(input: AssignRoleInput): Promise<UserRole> {
-    const db = getDatabase();
+    const database = await db.getDb();
     const now = new Date();
     
     // Verify role exists in resolver
@@ -187,7 +188,7 @@ export class RoleService {
     };
     
     // Update user document
-    const usersCollection = db.collection('users');
+    const usersCollection = database.collection('users');
     const userId = input.userId;
     const tenantId = input.tenantId;
     
@@ -239,10 +240,10 @@ export class RoleService {
    * Revoke a role from a user
    */
   async revokeRole(input: RevokeRoleInput): Promise<void> {
-    const db = getDatabase();
+    const database = await db.getDb();
     const now = new Date();
     
-    const usersCollection = db.collection('users');
+    const usersCollection = database.collection('users');
     const userId = input.userId;
     const tenantId = input.tenantId;
     

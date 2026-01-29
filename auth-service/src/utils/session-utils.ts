@@ -3,7 +3,8 @@
  * Reusable functions for session operations
  */
 
-import { getDatabase, normalizeDocument, generateMongoId, extractDocumentId, findById } from 'core-service';
+import { normalizeDocument, generateMongoId, extractDocumentId, findById } from 'core-service';
+import { db } from '../database.js';
 import type { Session, DeviceInfo } from '../types.js';
 import { hashToken, generateRefreshToken, addSeconds } from '../utils.js';
 
@@ -15,10 +16,10 @@ export async function findExistingSession(
   tenantId: string,
   deviceId: string
 ): Promise<Session | null> {
-  const db = getDatabase();
+  const database = await db.getDb();
   const now = new Date();
   
-  const existingSession = await db.collection('sessions').findOne({
+  const existingSession = await database.collection('sessions').findOne({
     userId,
     tenantId,
     deviceId,
@@ -41,7 +42,7 @@ export async function createSession(
   refreshTokenExpiresIn: number,
   sessionExpiresIn: number
 ): Promise<{ sessionId: string; refreshToken: string }> {
-  const db = getDatabase();
+  const database = await db.getDb();
   const now = new Date();
   
   // Generate refresh token
@@ -66,10 +67,10 @@ export async function createSession(
     isValid: true,
   };
   
-  await db.collection('sessions').insertOne(session as any);
+  await database.collection('sessions').insertOne(session as any);
   
   // Remove plain token from database (security best practice)
-  await db.collection('sessions').updateOne(
+  await database.collection('sessions').updateOne(
     { _id: sessionObjectId },
     { $unset: { token: '' } }
   );
@@ -85,7 +86,7 @@ export async function updateSessionForReuse(
   deviceInfo: DeviceInfo,
   refreshTokenExpiresIn: number
 ): Promise<string> {
-  const db = getDatabase();
+  const database = await db.getDb();
   const now = new Date();
   
   // Generate new refresh token (rotation for security)
@@ -99,12 +100,12 @@ export async function updateSessionForReuse(
   }
   
   // Use findById helper to get the document with _id for update
-  const sessionDoc = await findById(db.collection('sessions'), sessionId);
+  const sessionDoc = await findById(database.collection('sessions'), sessionId);
   if (!sessionDoc || !(sessionDoc as any)._id) {
     throw new Error('Session document not found');
   }
   
-  await db.collection('sessions').updateOne(
+  await database.collection('sessions').updateOne(
     { _id: (sessionDoc as any)._id },
     {
       $set: {
@@ -127,10 +128,10 @@ export async function invalidateSessionByToken(
   userId: string,
   reason: string
 ): Promise<boolean> {
-  const db = getDatabase();
+  const database = await db.getDb();
   const now = new Date();
   
-  const result = await db.collection('sessions').updateOne(
+  const result = await database.collection('sessions').updateOne(
     { tokenHash, userId, isValid: true },
     { $set: { isValid: false, revokedAt: now, revokedReason: reason } }
   );
@@ -146,10 +147,10 @@ export async function invalidateAllUserSessions(
   tenantId: string,
   reason: string
 ): Promise<number> {
-  const db = getDatabase();
+  const database = await db.getDb();
   const now = new Date();
   
-  const result = await db.collection('sessions').updateMany(
+  const result = await database.collection('sessions').updateMany(
     { userId, tenantId, isValid: true },
     { $set: { isValid: false, revokedAt: now, revokedReason: reason } }
   );
@@ -161,7 +162,7 @@ export async function invalidateAllUserSessions(
  * Update session last used timestamp
  */
 export async function updateSessionLastUsed(session: Session): Promise<void> {
-  const db = getDatabase();
+  const database = await db.getDb();
   const now = new Date();
   
   const sessionId = extractDocumentId(session);
@@ -170,12 +171,12 @@ export async function updateSessionLastUsed(session: Session): Promise<void> {
   }
   
   // Use findById helper to get the document with _id for update
-  const sessionDoc = await findById(db.collection('sessions'), sessionId);
+  const sessionDoc = await findById(database.collection('sessions'), sessionId);
   if (!sessionDoc || !(sessionDoc as any)._id) {
     throw new Error('Session document not found');
   }
   
-  await db.collection('sessions').updateOne(
+  await database.collection('sessions').updateOne(
     { _id: (sessionDoc as any)._id },
     {
       $set: {
