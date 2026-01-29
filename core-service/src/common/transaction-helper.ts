@@ -17,6 +17,17 @@ import { logger } from './logger.js';
 import { generateId, generateMongoId } from '../index.js';
 import type { ClientSession, Db, MongoClient } from 'mongodb';
 import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/strategy.js';
+import {
+  type Wallet,
+  type BalanceType,
+  getWalletId,
+  getWalletBalance,
+  getWalletAllowNegative,
+  getWalletCreditLimit,
+  validateBalanceForDebit,
+  resolveDatabaseConnection,
+  getBalanceFieldName,
+} from './wallet-types.js';
 
 // Re-export transaction state types from transaction-state.ts
 export type { TransactionState } from './transaction-state.js';
@@ -138,7 +149,7 @@ export function createTransactionDocument(
       currency,
       externalRef,
       description: description || (charge === 'credit' ? 'Credit' : 'Debit'), // Always set description, never null/undefined
-      walletId: (wallet as any).id,
+      walletId: getWalletId(wallet),
       balanceType,
     },
     createdAt: new Date(),
@@ -195,18 +206,7 @@ export async function createTransaction(
     session?: ClientSession;
   }
 ): Promise<CreateTransactionResult> {
-  let db: Db;
-  let client: MongoClient;
-  
-  if (options?.database) {
-    db = options.database;
-    client = db.client;
-  } else if (options?.databaseStrategy && options?.context) {
-    db = await options.databaseStrategy.resolve(options.context);
-    client = db.client;
-  } else {
-    throw new Error('createTransaction requires either database or databaseStrategy with context');
-  }
+  const { db, client } = await resolveDatabaseConnection(options || {}, 'createTransaction');
   
   const transactionsCollection = db.collection('transactions');
   const session = options?.session;
@@ -242,29 +242,20 @@ export async function createTransaction(
         session: txSession,
       });
       
-      // Get current balance
-      const currentBalance = (wallet as any)?.[balanceField] || 0;
+      // Get current balance using wallet utility
+      const currentBalance = getWalletBalance(wallet, balanceType);
       
-      // Validate balance before debiting (check allowNegative permission and creditLimit)
+      // Validate balance before debiting using shared helper
       if (charge === 'debit') {
-        const walletAllowNegative = (wallet as any)?.allowNegative ?? false;
-        const walletCreditLimit = (wallet as any)?.creditLimit;
+        const validation = validateBalanceForDebit({
+          wallet,
+          amount,
+          balanceType,
+          isSystemUser: getWalletAllowNegative(wallet), // If allowNegative is set, treat as system user
+        });
         
-        if (!walletAllowNegative && currentBalance < amount) {
-          throw new Error(
-            `Insufficient balance. Required: ${amount}, Available: ${currentBalance}. ` +
-            `Wallet does not allow negative balance.`
-          );
-        }
-        
-        // Check credit limit if allowNegative is enabled and creditLimit is set (not null/undefined)
-        if (walletAllowNegative && walletCreditLimit != null && walletCreditLimit !== undefined) {
-          const newBalance = currentBalance - amount;
-          if (newBalance < -walletCreditLimit) {
-            throw new Error(
-              `Would exceed credit limit. New balance: ${newBalance}, Credit limit: -${walletCreditLimit}`
-            );
-          }
+        if (!validation.valid) {
+          throw new Error(validation.error);
         }
       }
       
@@ -359,18 +350,7 @@ export async function createTransactions(
     session?: ClientSession;
   }
 ): Promise<CreateTransactionResult[]> {
-  let db: Db;
-  let client: MongoClient;
-  
-  if (options?.database) {
-    db = options.database;
-    client = db.client;
-  } else if (options?.databaseStrategy && options?.context) {
-    db = await options.databaseStrategy.resolve(options.context);
-    client = db.client;
-  } else {
-    throw new Error('createTransactions requires either database or databaseStrategy with context');
-  }
+  const { db, client } = await resolveDatabaseConnection(options || {}, 'createTransactions');
   
   const transactionsCollection = db.collection('transactions');
   const session = options?.session;

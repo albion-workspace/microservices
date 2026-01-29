@@ -87,11 +87,11 @@ export function generateMongoId(): { objectId: ObjectId; idString: string } {
  * const query = buildIdQuery('507f1f77bcf86cd799439011', { tenantId: 'default-tenant' });
  * // Returns: { _id: ObjectId(...), tenantId: 'default-tenant' } or { $or: [...], tenantId: 'default-tenant' }
  */
-export function buildIdQuery(
+export function buildIdQuery<T extends Document = Document>(
   id: string | null | undefined,
   additionalFields: Record<string, unknown> = {}
-): Filter<any> {
-  const query: Filter<any> = { ...additionalFields };
+): Filter<T> {
+  const query = { ...additionalFields } as Filter<T>;
   
   if (!id) {
     return query;
@@ -100,12 +100,12 @@ export function buildIdQuery(
   // Try ObjectId first (most reliable)
   const objectId = toObjectId(id);
   if (objectId) {
-    query._id = objectId;
+    (query as Record<string, unknown>)._id = objectId;
   } else {
     // Fallback: try both id field and _id as string
-    query.$or = [
+    (query as Record<string, unknown>).$or = [
       { id },
-      { _id: id as any }, // MongoDB driver may auto-convert
+      { _id: id },
     ];
   }
   
@@ -120,11 +120,11 @@ export function buildIdQuery(
  * const query = buildIdQueryWithOr('507f1f77bcf86cd799439011', { tenantId: 'default-tenant' });
  * // Returns: { $or: [{ _id: ObjectId(...) }, { id: '507f1f77bcf86cd799439011' }], tenantId: 'default-tenant' }
  */
-export function buildIdQueryWithOr(
+export function buildIdQueryWithOr<T extends Document = Document>(
   id: string | null | undefined,
   additionalFields: Record<string, unknown> = {}
-): Filter<any> {
-  const query: Filter<any> = { ...additionalFields };
+): Filter<T> {
+  const query = { ...additionalFields } as Filter<T>;
   
   if (!id) {
     return query;
@@ -133,15 +133,15 @@ export function buildIdQueryWithOr(
   // Try ObjectId first (most reliable)
   const objectId = toObjectId(id);
   if (objectId) {
-    query.$or = [
+    (query as Record<string, unknown>).$or = [
       { _id: objectId },
       { id },
     ];
   } else {
     // Not a valid ObjectId, try id field and _id as string
-    query.$or = [
+    (query as Record<string, unknown>).$or = [
       { id },
-      { _id: id as any }, // MongoDB driver may auto-convert
+      { _id: id },
     ];
   }
   
@@ -174,7 +174,7 @@ export async function findById<T = Document>(
   // Try ObjectId first (most reliable)
   if (objectId) {
     try {
-      const query: Filter<any> = { _id: objectId, ...additionalFields };
+      const query = { _id: objectId, ...additionalFields };
       
       const doc = await collection.findOne(query);
       if (doc) {
@@ -258,19 +258,19 @@ export function normalizeDocuments<T extends { _id?: any; id?: string }>(docs: T
  * const query = buildUpdateQuery('507f1f77bcf86cd799439011', { tenantId: 'default-tenant' });
  * await collection.updateOne(query, { $set: { status: 'active' } });
  */
-export function buildUpdateQuery(
+export function buildUpdateQuery<T extends Document = Document>(
   id: string | null | undefined,
   additionalFields: Record<string, unknown> = {}
-): Filter<any> {
+): Filter<T> {
   // PERFORMANCE: Use direct ObjectId query when valid (most efficient, uses index)
   const objectId = toObjectId(id);
   
   if (objectId) {
-    return { _id: objectId, ...additionalFields };
+    return { _id: objectId, ...additionalFields } as Filter<T>;
   }
   
   // Fallback: use buildIdQuery (which also prefers direct queries when possible)
-  return buildIdQuery(id, additionalFields);
+  return buildIdQuery<T>(id, additionalFields);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -294,12 +294,12 @@ export async function findOneById<T = Document>(
   // PERFORMANCE: Use direct ObjectId query when valid (uses index, fastest)
   const objectId = toObjectId(id);
   if (objectId) {
-    const query: Filter<any> = { _id: objectId, ...additionalFields };
+    const query = { _id: objectId, ...additionalFields };
     return (await collection.findOne(query)) as T | null;
   }
   
   // Fallback: use buildIdQuery (prefers direct queries)
-  const query = buildIdQuery(id, additionalFields);
+  const query = buildIdQuery<Document>(id, additionalFields);
   return (await collection.findOne(query)) as T | null;
 }
 

@@ -33,6 +33,19 @@ import type { ClientSession, Db, MongoClient } from 'mongodb';
 import { createTransactionDocument, type CreateTransactionParams, type Transaction } from './transaction-helper.js';
 import { getOperationStateTracker } from './recovery.js';
 import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/strategy.js';
+import {
+  type Wallet,
+  type BalanceType,
+  getWalletId,
+  getWalletBalance,
+  getWalletAllowNegative,
+  getWalletCreditLimit,
+  getWalletTenantId,
+  validateBalanceForDebit,
+  resolveDatabaseConnection,
+  getBalanceFieldName,
+  buildWalletUpdate,
+} from './wallet-types.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Helper Functions
@@ -40,11 +53,10 @@ import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/str
 
 /**
  * Get the MongoDB field name for a balance type
- * @param balanceType - The balance type ('real', 'bonus', or 'locked')
- * @returns The MongoDB field name ('balance', 'bonusBalance', or 'lockedBalance')
+ * @deprecated Use getBalanceFieldName from wallet-types.ts instead
  */
 export function getBalanceField(balanceType: 'real' | 'bonus' | 'locked'): string {
-  return balanceType === 'bonus' ? 'bonusBalance' : balanceType === 'locked' ? 'lockedBalance' : 'balance';
+  return getBalanceFieldName(balanceType);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -259,12 +271,12 @@ export async function getOrCreateWallet(
       findOptions
     );
     if (walletWithoutTenant) {
-      const existingTenantId = (walletWithoutTenant as any).tenantId;
+      const existingTenantId = getWalletTenantId(walletWithoutTenant);
       logger.warn('Wallet exists but with different tenantId - using existing wallet', {
         userId,
         currency,
         requestedTenantId: tenantId,
-        existingWalletId: (walletWithoutTenant as any).id,
+        existingWalletId: getWalletId(walletWithoutTenant),
         existingTenantId,
       });
       // Use the existing wallet instead of creating a new one
@@ -284,7 +296,7 @@ export async function getOrCreateWallet(
         await walletsCollection.insertOne(newWallet, insertOptions);
         wallet = newWallet;
         logger.debug('Created new wallet in getOrCreateWallet', {
-          walletId: (wallet as any).id,
+          walletId: getWalletId(wallet),
           userId,
           currency,
           tenantId,
@@ -322,11 +334,11 @@ export async function getOrCreateWallet(
     }
   } else {
     logger.debug('Found existing wallet in getOrCreateWallet', {
-      walletId: (wallet as any).id,
+      walletId: getWalletId(wallet),
       userId,
       currency,
       tenantId,
-      balance: (wallet as any).balance,
+      balance: getWalletBalance(wallet),
     });
   }
   
@@ -376,18 +388,7 @@ export async function createTransferWithTransactions(
     session?: ClientSession;
   }
 ): Promise<CreateTransferResult> {
-  let db: Db;
-  let client: MongoClient;
-  
-  if (options?.database) {
-    db = options.database;
-    client = db.client;
-  } else if (options?.databaseStrategy && options?.context) {
-    db = await options.databaseStrategy.resolve(options.context);
-    client = db.client;
-  } else {
-    throw new Error('createTransferWithTransactions requires either database or databaseStrategy with context');
-  }
+  const { db, client } = await resolveDatabaseConnection(options || {}, 'createTransferWithTransactions');
   
   const transfersCollection = db.collection('transfers');
   const transactionsCollection = db.collection('transactions');
@@ -480,17 +481,18 @@ export async function createTransferWithTransactions(
       allowNegative: isSystemUser, // Only system users can go negative
     };
     const fromWallet = await getOrCreateWallet(fromUserId, currency, tenantId, fromWalletOptions);
-    const fromWalletId = (fromWallet as any).id;
+    const fromWalletId = getWalletId(fromWallet);
     
     // Ensure existing system wallet has allowNegative=true (in case it was created before this fix)
-    if (isSystemUser && !(fromWallet as any)?.allowNegative) {
+    if (isSystemUser && !getWalletAllowNegative(fromWallet)) {
       const walletsCollection = db.collection('wallets');
       await walletsCollection.updateOne(
         { id: fromWalletId },
         { $set: { allowNegative: true } },
         { session: txSession }
       );
-      (fromWallet as any).allowNegative = true;
+      // Update local reference
+      (fromWallet as Wallet).allowNegative = true;
     }
     
     // For same-user transfers (e.g., bonus convert), use the same wallet
@@ -500,44 +502,33 @@ export async function createTransferWithTransactions(
       session: txSession,
     };
     const toWallet = isSameUser ? fromWallet : await getOrCreateWallet(toUserId, currency, tenantId, toWalletOptions);
-    const toWalletId = (toWallet as any).id;
+    const toWalletId = getWalletId(toWallet);
     
     // Get balance fields based on balance types
-    const fromBalanceField = getBalanceField(fromBalanceType);
-    const toBalanceField = getBalanceField(toBalanceType);
+    const fromBalanceField = getBalanceFieldName(fromBalanceType);
+    const toBalanceField = getBalanceFieldName(toBalanceType);
     
     // Calculate balances after transaction
-    const fromCurrentBalance = (fromWallet as any)?.[fromBalanceField] || 0;
-    const toCurrentBalance = (toWallet as any)?.[toBalanceField] || 0;
+    const fromCurrentBalance = getWalletBalance(fromWallet, fromBalanceType);
+    const toCurrentBalance = getWalletBalance(toWallet, toBalanceType);
     
-    // Validate balance before debiting (check allowNegative permission)
-    // Security: Even if wallet has allowNegative=true, verify user has system role
-    const fromWalletAllowNegative = (fromWallet as any)?.allowNegative ?? false;
-    const fromWalletCreditLimit = (fromWallet as any)?.creditLimit;
+    // Validate balance before debiting using shared helper
+    const validation = validateBalanceForDebit({
+      wallet: fromWallet,
+      amount,
+      balanceType: fromBalanceType,
+      isSystemUser,
+    });
     
-    // Use the isSystemUser check we already did (no need to check again)
-    const userCanGoNegative = isSystemUser && fromWalletAllowNegative;
-    
-    if (!userCanGoNegative && fromCurrentBalance < amount) {
-      throw new Error(
-        `Insufficient balance. Required: ${amount}, Available: ${fromCurrentBalance}. ` +
-        `Wallet does not allow negative balance.`
-      );
-    }
-    
-    // Check credit limit if allowNegative is enabled and creditLimit is set (not null/undefined)
-    if (userCanGoNegative && fromWalletCreditLimit != null && fromWalletCreditLimit !== undefined) {
-      const newBalance = fromCurrentBalance - amount;
-      if (newBalance < -fromWalletCreditLimit) {
-        throw new Error(
-          `Would exceed credit limit. New balance: ${newBalance}, Credit limit: -${fromWalletCreditLimit}`
-        );
-      }
+    if (!validation.valid) {
+      throw new Error(validation.error);
     }
     
     // Build meta object from rest params + calculated fields
+    // Destructure accountNumber and bankAccount from rest for proper handling
+    const { accountNumber: restAccountNumber, bankAccount: restBankAccount, ...otherRest } = rest as Record<string, unknown>;
     const meta = {
-      ...rest,
+      ...otherRest,
       method,  // Payment method (e.g., 'bonus_award', 'bonus_convert', 'card', 'bank_transfer')
       feeAmount,
       netAmount,
@@ -545,7 +536,7 @@ export async function createTransferWithTransactions(
       externalRef,  // Include externalRef in transfer meta for unique index
       description,  // Include description in transfer meta for reference
       // Handle bankAccount alias
-      accountNumber: (rest as any).accountNumber || (rest as any).bankAccount,
+      accountNumber: restAccountNumber || restBankAccount,
     };
     
     const transfer: Transfer = {
@@ -638,8 +629,8 @@ export async function createTransferWithTransactions(
         $set: {
           'meta.fromTransactionId': debitTx.id,
           'meta.toTransactionId': creditTx.id,
-          'meta.fromWalletId': (fromWallet as any).id,
-          'meta.toWalletId': (toWallet as any).id,
+          'meta.fromWalletId': fromWalletId,
+          'meta.toWalletId': toWalletId,
           updatedAt: new Date(),
         },
       },
@@ -870,18 +861,7 @@ export async function approveTransfer(
     session?: ClientSession;
   }
 ): Promise<Transfer> {
-  let db: Db;
-  let client: MongoClient;
-  
-  if (options?.database) {
-    db = options.database;
-    client = db.client;
-  } else if (options?.databaseStrategy && options?.context) {
-    db = await options.databaseStrategy.resolve(options.context);
-    client = db.client;
-  } else {
-    throw new Error('approveTransfer requires either database or databaseStrategy with context');
-  }
+  const { db, client } = await resolveDatabaseConnection(options || {}, 'approveTransfer');
   
   const transfersCollection = db.collection('transfers');
   const transactionsCollection = db.collection('transactions');
@@ -1118,18 +1098,7 @@ export async function declineTransfer(
     session?: ClientSession;
   }
 ): Promise<Transfer> {
-  let db: Db;
-  let client: MongoClient;
-  
-  if (options?.database) {
-    db = options.database;
-    client = db.client;
-  } else if (options?.databaseStrategy && options?.context) {
-    db = await options.databaseStrategy.resolve(options.context);
-    client = db.client;
-  } else {
-    throw new Error('declineTransfer requires either database or databaseStrategy with context');
-  }
+  const { db, client } = await resolveDatabaseConnection(options || {}, 'declineTransfer');
   
   const transfersCollection = db.collection('transfers');
   const transactionsCollection = db.collection('transactions');

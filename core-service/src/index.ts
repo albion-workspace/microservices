@@ -48,6 +48,32 @@ export type {
   CreateTransferResult,
 } from './common/transfer-helper.js';
 
+// Wallet Types and Utilities (Type-safe wallet access, validation, helpers)
+export {
+  getWalletId,
+  getWalletBalance,
+  getWalletAllowNegative,
+  getWalletCreditLimit,
+  getWalletUserId,
+  getWalletTenantId,
+  getWalletCurrency,
+  validateBalanceForDebit,
+  resolveDatabaseConnection,
+  getBalanceFieldName,
+  buildWalletUpdate,
+  withTransaction,
+} from './common/wallet-types.js';
+export type {
+  Wallet,
+  BalanceType as WalletBalanceType,  // Aliased to avoid conflict with types/enums BalanceType
+  BalanceValidationOptions,
+  BalanceValidationResult,
+  DatabaseOptions,
+  ResolvedDatabase,
+  TransactionOptions,
+  WalletUpdateOptions,
+} from './common/wallet-types.js';
+
 // Recovery System (Generic - works with transfers, orders, etc.)
 export {
   recoverOperation,

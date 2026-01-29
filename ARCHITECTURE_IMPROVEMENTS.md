@@ -782,6 +782,16 @@ After implementing remaining improvements:
 - **Code Reuse Improvements** (2026-01-29):
   - `startup-helpers.ts`: Refactored to use centralized `retry()` function (removed ~40 lines duplication)
   - `user-utils.ts`: Consolidated `findUserIdByRole` and `findUserIdsByRole` into shared internal function (removed ~50 lines duplication)
+  - `wallet-types.ts`: NEW - Created type-safe wallet utilities:
+    - `Wallet` interface for proper typing (eliminates 20+ `as any` casts)
+    - `getWalletId()`, `getWalletBalance()`, `getWalletAllowNegative()`, etc. - type-safe accessors
+    - `validateBalanceForDebit()` - shared balance validation logic
+    - `resolveDatabaseConnection()` - extracted database resolution pattern (removed ~60 lines duplication)
+    - `buildWalletUpdate()` - standardized wallet update builders
+    - `withTransaction()` - session management wrapper
+  - `transfer-helper.ts`: Refactored to use wallet-types utilities
+  - `transaction-helper.ts`: Refactored to use wallet-types utilities
+  - `mongodb-utils.ts`: Replaced `Filter<any>` with proper generics `Filter<T extends Document>`
 - **Remaining TODOs**: 5 items in auth-service - intentional placeholders for notification provider setup
 - **Last Scan**: 2026-01-29 - Full codebase scan performed
 
