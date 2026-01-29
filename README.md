@@ -1123,6 +1123,42 @@ sh.shardCollection("payment_service.wallets", { odsi: "hashed" })
 
 ## Disaster Recovery
 
+### Saga, Transaction, and Recovery Boundaries
+
+**Critical Rule**: Each system has a distinct responsibility. Do not overlap.
+
+| System | Responsibility | When to Use |
+|--------|----------------|-------------|
+| **MongoDB Transaction** | Local atomicity | Single-service operations |
+| **Saga Engine** | Cross-step coordination | Multi-step operations |
+| **Recovery System** | Crash repair only | Stuck operations (no heartbeat) |
+
+**Never Do:**
+- ❌ Retry a saga step inside a MongoDB transaction
+- ❌ Recover something a saga already compensated
+- ❌ Use compensation mode for financial operations
+
+**Safe Patterns:**
+
+```typescript
+// ✅ Financial operations: Saga with transaction mode
+sagaOptions: { useTransaction: true }  // MongoDB handles rollback
+
+// ✅ Non-financial multi-step: Saga with compensation
+sagaOptions: { useTransaction: false } // Manual compensate functions
+
+// ✅ Standalone transfer: Self-managed transaction + recovery
+createTransferWithTransactions(params); // No external session = tracked
+
+// ✅ Transfer inside saga transaction: Uses saga's session
+createTransferWithTransactions(params, { session }); // Not tracked
+```
+
+**How Recovery Knows Not to Interfere:**
+- Recovery ONLY acts on operations with stale heartbeats (no update in 60s)
+- Operations inside saga transactions don't use state tracking
+- Successfully completed operations are marked and ignored
+
 ### Operation Recovery (Built-in)
 
 The recovery system automatically handles stuck operations:

@@ -100,8 +100,11 @@ const transferSaga = [
       };
     },
     compensate: async ({ data }: TransferCtx) => {
-      // Transfer compensation is handled automatically by MongoDB transaction rollback
-      // No manual compensation needed - the transaction will rollback all changes
+      // IMPORTANT: This empty compensate only works because useTransaction: true
+      // MongoDB transaction handles rollback automatically
+      // 
+      // WARNING: Do NOT set useTransaction: false for financial operations
+      // If you do, you must implement manual compensation here (create reverse transfer)
     },
   },
 ];
@@ -129,8 +132,10 @@ export const transferService = createService<PaymentTransfer, CreateTransferInpu
     ],
   },
   saga: transferSaga,
+  // CRITICAL: Financial operations MUST use transaction mode
+  // Recovery system relies on this - see README "Saga, Transaction, and Recovery Boundaries"
   sagaOptions: {
-    useTransaction: process.env.MONGO_TRANSACTIONS !== 'false',
+    useTransaction: process.env.MONGO_TRANSACTIONS !== 'false', // Should always be true for financial ops
     maxRetries: 3,
   },
 });

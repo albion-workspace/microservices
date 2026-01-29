@@ -6,6 +6,12 @@
  * - Orders (future - user buys something, creates financial transaction)
  * - Any operation that creates financial transactions + related documents
  * 
+ * CRITICAL - Boundary Rules (see README "Saga, Transaction, and Recovery Boundaries"):
+ * - Recovery is for CRASH REPAIR only (stuck operations with stale heartbeats)
+ * - Never recover something a saga already compensated
+ * - Operations inside saga transactions do NOT use state tracking
+ * - Only standalone operations (no external session) are tracked
+ * 
  * Architecture:
  * - Generic operation interface (RecoverableOperation)
  * - Generic recovery helper (recoverOperation)

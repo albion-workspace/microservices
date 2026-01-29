@@ -510,6 +510,48 @@ UserCache.pattern();       // 'user*'
 - When TypeScript type errors occur in resolvers
 - **Note**: After production/release, deprecation and backward compatibility policies will apply
 
+### Saga, Transaction, and Recovery Boundaries ⚠️
+
+**Critical Rule**: Each system has a distinct responsibility. Do NOT overlap.
+
+| System | Responsibility | Scope |
+|--------|----------------|-------|
+| **MongoDB Transaction** | Local atomicity | Single service, multi-document |
+| **Saga Engine** | Multi-step coordination | Cross-step operations |
+| **Recovery System** | Crash repair only | Stuck operations (stale heartbeat) |
+
+**Never Do**:
+- ❌ Retry a saga step inside a MongoDB transaction
+- ❌ Recover something a saga already compensated
+- ❌ Use compensation mode (`useTransaction: false`) for financial operations
+
+**Safe Patterns**:
+```typescript
+// ✅ Financial operations: Saga with transaction mode (REQUIRED)
+sagaOptions: { useTransaction: true }  // MongoDB handles rollback
+
+// ✅ Non-financial multi-step: Saga with compensation
+sagaOptions: { useTransaction: false } // Manual compensate functions
+
+// ✅ Standalone transfer: Self-managed transaction + recovery
+createTransferWithTransactions(params); // No session = tracked by recovery
+
+// ✅ Transfer inside saga transaction: Uses saga's session
+createTransferWithTransactions(params, { session }); // Not tracked
+```
+
+**How It Works**:
+1. When saga uses `useTransaction: true` → session passed to steps → MongoDB handles rollback
+2. When `createTransferWithTransactions` gets session → uses it directly, **NO state tracking**
+3. When `createTransferWithTransactions` has no session → creates own transaction + **state tracking enabled**
+4. Recovery job only acts on operations with **stale heartbeats** (no update in 60s)
+5. Successfully completed operations are marked and ignored by recovery
+
+**Why This Matters**:
+- If saga and recovery both try to handle the same operation → double transfer/reversal
+- If compensation runs after recovery → inconsistent state
+- Financial operations MUST use transactions for atomic rollback
+
 ---
 
 ## 🎨 Design Patterns
