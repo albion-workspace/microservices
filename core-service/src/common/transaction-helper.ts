@@ -38,7 +38,7 @@ export { getTransactionStateManager, TransactionStateManager } from './transacti
 // ═══════════════════════════════════════════════════════════════════
 
 // Import wallet helpers from transfer-helper (for internal use)
-import { getOrCreateWallet as getOrCreateWalletHelper, getBalanceField } from './transfer-helper.js';
+import { getOrCreateWallet as getOrCreateWalletHelper } from './transfer-helper.js';
 
 // Re-export wallet helpers from transfer-helper (for external use)
 export { createNewWallet, getOrCreateWallet, startSession, endSession } from './transfer-helper.js';
@@ -232,7 +232,7 @@ export async function createTransaction(
   const netAmount = amount - feeAmount;
   
   // Get balance field based on balance type
-  const balanceField = getBalanceField(balanceType);
+  const balanceField = getBalanceFieldName(balanceType);
   
   // Core transaction logic (reusable with or without external session)
   const executeTransaction = async (txSession: ClientSession): Promise<CreateTransactionResult> => {
@@ -381,7 +381,7 @@ export async function createTransactions(
         const balanceType = balanceTypeParam || 'real';
         const feeAmount = feeAmountParam || 0;
         const netAmount = amount - feeAmount;
-        const balanceField = getBalanceField(balanceType);
+        const balanceField = getBalanceFieldName(balanceType);
         
         // Get or create wallet
         const wallet = await getOrCreateWalletHelper(userId, currency, tenantId, {
@@ -396,7 +396,7 @@ export async function createTransactions(
         }
         
         const walletData = walletUpdates.get(walletKey)!;
-        const currentBalance = (walletData.wallet as any)?.[balanceField] || 0;
+        const currentBalance = getWalletBalance(walletData.wallet, balanceType);
         
         // Create transaction document using shared helper
         const transaction = createTransactionDocument(params, walletData.wallet, currentBalance);

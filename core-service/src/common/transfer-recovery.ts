@@ -36,27 +36,25 @@ async function createReverseTransfer(
     context?: DatabaseContext;
   }
 ): Promise<{ operationId: string }> {
-  const transferData = transfer as any;
-  
   // Determine balance types from original transfer
-  const fromBalanceType = transferData.meta?.toBalanceType || 'real';
-  const toBalanceType = transferData.meta?.fromBalanceType || 'real';
+  const fromBalanceType = (transfer.meta?.toBalanceType as 'real' | 'bonus' | 'locked') || 'real';
+  const toBalanceType = (transfer.meta?.fromBalanceType as 'real' | 'bonus' | 'locked') || 'real';
   
   // Create reverse transfer (swap fromUserId and toUserId)
   const reverseTransfer = await createTransferWithTransactions({
-    fromUserId: transferData.toUserId,
-    toUserId: transferData.fromUserId,
-    amount: transferData.amount,
-    currency: transferData.meta?.currency || 'EUR',
-    tenantId: transferData.tenantId,
-    feeAmount: transferData.meta?.feeAmount || 0,
-    method: `recovery_${transferData.meta?.method || 'transfer'}`,
-    description: `Recovery: Reverse transfer ${transferData.id}`,
+    fromUserId: transfer.toUserId,
+    toUserId: transfer.fromUserId,
+    amount: transfer.amount,
+    currency: (transfer.meta?.currency as string) || 'EUR',
+    tenantId: transfer.tenantId,
+    feeAmount: (transfer.meta?.feeAmount as number) || 0,
+    method: `recovery_${(transfer.meta?.method as string) || 'transfer'}`,
+    description: `Recovery: Reverse transfer ${transfer.id}`,
     // Use same balance types as original (swapped)
     fromBalanceType,
     toBalanceType,
     // Mark as recovery transfer
-    externalRef: `recovery_${transferData.id}_${Date.now()}`,
+    externalRef: `recovery_${transfer.id}_${Date.now()}`,
   }, {
     ...options,
     session,

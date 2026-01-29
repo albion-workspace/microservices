@@ -39,7 +39,6 @@ export {
   getOrCreateWallet,
   approveTransfer,
   declineTransfer,
-  getBalanceField,
 } from './common/transfer-helper.js';
 export type {
   Transfer,

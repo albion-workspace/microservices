@@ -47,17 +47,6 @@ import {
   buildWalletUpdate,
 } from './wallet-types.js';
 
-// ═══════════════════════════════════════════════════════════════════
-// Helper Functions
-// ═══════════════════════════════════════════════════════════════════
-
-/**
- * Get the MongoDB field name for a balance type
- * @deprecated Use getBalanceFieldName from wallet-types.ts instead
- */
-export function getBalanceField(balanceType: 'real' | 'bonus' | 'locked'): string {
-  return getBalanceFieldName(balanceType);
-}
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -879,7 +868,7 @@ export async function approveTransfer(
       throw new Error(`Transfer ${transferId} not found`);
     }
     
-    const transferData = transfer as any;
+    const transferData = transfer as unknown as Transfer;
     
     // Check if transfer is in pending status
     if (transferData.status !== 'pending') {
@@ -887,8 +876,8 @@ export async function approveTransfer(
     }
     
     // Get transaction IDs from transfer meta
-    const debitTxId = transferData.meta?.fromTransactionId;
-    const creditTxId = transferData.meta?.toTransactionId;
+    const debitTxId = transferData.meta?.fromTransactionId as string | undefined;
+    const creditTxId = transferData.meta?.toTransactionId as string | undefined;
     
     if (!debitTxId || !creditTxId) {
       throw new Error(`Transfer ${transferId} is missing transaction IDs`);
@@ -904,17 +893,17 @@ export async function approveTransfer(
       throw new Error(`Transactions not found for transfer ${transferId}`);
     }
     
-    const debitTxData = debitTx as any;
-    const creditTxData = creditTx as any;
+    const debitTxData = debitTx as unknown as Transaction;
+    const creditTxData = creditTx as unknown as Transaction;
     
     // Get wallet IDs and balance fields from transactions
-    const fromWalletId = debitTxData.meta?.walletId;
-    const toWalletId = creditTxData.meta?.walletId;
-    const fromBalanceType = debitTxData.meta?.balanceType || 'real';
-    const toBalanceType = creditTxData.meta?.balanceType || 'real';
+    const fromWalletId = debitTxData.meta?.walletId as string | undefined;
+    const toWalletId = creditTxData.meta?.walletId as string | undefined;
+    const fromBalanceType = (debitTxData.meta?.balanceType as BalanceType) || 'real';
+    const toBalanceType = (creditTxData.meta?.balanceType as BalanceType) || 'real';
     
-    const fromBalanceField = fromBalanceType === 'bonus' ? 'bonusBalance' : fromBalanceType === 'locked' ? 'lockedBalance' : 'balance';
-    const toBalanceField = toBalanceType === 'bonus' ? 'bonusBalance' : toBalanceType === 'locked' ? 'lockedBalance' : 'balance';
+    const fromBalanceField = getBalanceFieldName(fromBalanceType);
+    const toBalanceField = getBalanceFieldName(toBalanceType);
     
     // Get wallets by ID (from transaction metadata)
     const [fromWallet, toWallet] = await Promise.all([
@@ -926,8 +915,8 @@ export async function approveTransfer(
       throw new Error(`Wallets not found for transfer ${transferId}. FromWalletId: ${fromWalletId}, ToWalletId: ${toWalletId}`);
     }
     
-    const amount = transferData.amount;
-    const feeAmount = transferData.meta?.feeAmount || 0;
+    const { amount } = transferData;
+    const feeAmount = (transferData.meta?.feeAmount as number) || 0;
     const netAmount = amount - feeAmount;
     const currency = transferData.meta?.currency || debitTxData.meta?.currency;
     const tenantId = transferData.tenantId;
@@ -1116,7 +1105,7 @@ export async function declineTransfer(
       throw new Error(`Transfer ${transferId} not found`);
     }
     
-    const transferData = transfer as any;
+    const transferData = transfer as unknown as Transfer;
     
     // Check if transfer is in pending status
     if (transferData.status !== 'pending') {
@@ -1124,8 +1113,8 @@ export async function declineTransfer(
     }
     
     // Get transaction IDs from transfer meta
-    const debitTxId = transferData.meta?.fromTransactionId;
-    const creditTxId = transferData.meta?.toTransactionId;
+    const debitTxId = transferData.meta?.fromTransactionId as string | undefined;
+    const creditTxId = transferData.meta?.toTransactionId as string | undefined;
     
     if (!debitTxId || !creditTxId) {
       throw new Error(`Transfer ${transferId} is missing transaction IDs`);
