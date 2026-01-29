@@ -19,8 +19,6 @@
 import { 
   connectRedis, 
   checkRedisHealth, 
-  connectDatabase, 
-  getDatabase,
   getClient,
   findUserIdByRole,
   findUserIdsByRole,
@@ -61,7 +59,6 @@ import {
   loadScriptConfig,
   getDatabaseContextFromArgs,
   AUTH_SERVICE_URL,
-  PAYMENT_SERVICE_URL,
   BONUS_SERVICE_URL,
 } from '../config/scripts.js';
 
@@ -69,11 +66,9 @@ import {
 import type { BonusTemplate as ClientBonusTemplate, EligibilityContext } from '../../../bonus-shared/src/BonusEligibility.js';
 
 // ═══════════════════════════════════════════════════════════════════
-// Configuration - Loaded dynamically from MongoDB config store
-// Service URLs are imported from scripts.ts (single source of truth)
+// Configuration
 // ═══════════════════════════════════════════════════════════════════
 
-// Use BONUS_SERVICE_URL from scripts.ts
 const BONUS_URL = BONUS_SERVICE_URL;
 
 const CONFIG = {
@@ -2537,7 +2532,6 @@ async function main() {
   const args = process.argv.slice(2);
   
   // Initialize configuration from MongoDB config store
-  // This will populate AUTH_SERVICE_URL, PAYMENT_SERVICE_URL, BONUS_SERVICE_URL
   await initializeConfig();
   await loadScriptConfig();
   

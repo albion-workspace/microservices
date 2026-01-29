@@ -33,13 +33,11 @@
  */
 
 // Node built-ins
-import { randomUUID } from 'crypto';
-import { execSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 
 // External packages (core-service)
-import { connectRedis, getRedis, checkRedisHealth, scanKeysArray, connectDatabase } from '../../../core-service/src/index.js';
+import { connectRedis, getRedis, checkRedisHealth } from '../../../core-service/src/index.js';
 import { 
   recoverOperation,
   recoverStuckOperations,
@@ -71,7 +69,6 @@ import {
   getDatabaseContextFromArgs,
   AUTH_SERVICE_URL,
   PAYMENT_SERVICE_URL,
-  BONUS_SERVICE_URL,
 } from '../config/scripts.js';
 
 // Type imports
@@ -3161,7 +3158,6 @@ async function main() {
   
   try {
     // Initialize configuration from MongoDB config store
-    // This will populate AUTH_SERVICE_URL, PAYMENT_SERVICE_URL, BONUS_SERVICE_URL
     await initializeConfig();
     await loadScriptConfig();
     
