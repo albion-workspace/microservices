@@ -264,17 +264,29 @@ export type {
 // Caching
 // ═══════════════════════════════════════════════════════════════════
 export { 
+  // Core functions
   cached, 
   getCache, 
   setCache, 
   deleteCache, 
   deleteCachePattern, 
   clearCache,
+  clearMemoryCache,
+  // Batch operations
+  getCacheMany,
+  setCacheMany,
+  deleteCacheMany,
+  // Configuration & stats
+  configureCacheSettings,
   getCacheStats,
+  resetCacheStats,
+  // Cache warming
+  warmCache,
+  // Key helpers
   createCacheKeys,
   CacheKeys,
 } from './databases/cache.js';
-export { clearMemoryCache } from './databases/cache.js';
+export type { CacheConfig, CacheStatistics } from './databases/cache.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Redis
@@ -282,6 +294,8 @@ export { clearMemoryCache } from './databases/cache.js';
 export { 
   connectRedis, 
   getRedis, 
+  getRedisForRead,
+  hasReadReplica,
   publish, 
   subscribe, 
   closeRedis, 
@@ -290,8 +304,15 @@ export {
   scanKeysArray,
   scanKeysWithCallback,
   batchGetValues,
+  getRedisConnectionStats,
 } from './databases/redis/connection.js';
-export type { RedisConfig, ScanOptions } from './databases/redis/connection.js';
+export type { 
+  RedisConfig, 
+  RedisSentinelConfig,
+  RedisReplicaConfig,
+  ScanOptions,
+  RedisConnectionStats,
+} from './databases/redis/connection.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Logger
@@ -653,6 +674,7 @@ export {
   getClient,
   getDatabaseStats,
   getConnectionPoolStats,
+  getPoolHealthStatus,
   registerIndexes,
   DEFAULT_MONGO_CONFIG,
 } from './databases/mongodb/connection.js';

@@ -17,14 +17,29 @@ export * from './redis/index.js';
 
 // Cache (uses both memory and Redis)
 export {
+  // Core functions
   cached,
   getCache,
   setCache,
   deleteCache,
   deleteCachePattern,
   clearCache,
-  getCacheStats,
   clearMemoryCache,
+  // Batch operations
+  getCacheMany,
+  setCacheMany,
+  deleteCacheMany,
+  // Configuration
+  configureCacheSettings,
+  // Stats & monitoring
+  getCacheStats,
+  resetCacheStats,
+  // Cache warming
+  warmCache,
+  // Key helpers
   createCacheKeys,
   CacheKeys,
+  // Types
+  type CacheConfig,
+  type CacheStatistics,
 } from './cache.js';

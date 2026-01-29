@@ -2,11 +2,13 @@
  * MongoDB Connection - Optimized for 100K+ scale
  * 
  * Features:
- * - Connection pooling (optimized)
+ * - Connection pooling (optimized with monitoring)
  * - Read preference (read from secondaries)
  * - Write concern (configurable)
  * - Retry logic
  * - Health checks
+ * - Pool exhaustion protection (waitQueueTimeoutMS)
+ * - Detailed pool statistics
  */
 
 import { MongoClient, Db, ReadPreference, WriteConcern } from 'mongodb';
@@ -16,9 +18,36 @@ let client: MongoClient | null = null;
 let db: Db | null = null;
 
 // Connection pool tracking (using events instead of internal topology access)
-let connectionPoolStats = {
+interface ConnectionPoolStats {
+  totalConnections: number;
+  checkedOut: number;
+  availableConnections: number;
+  waitQueueSize: number;
+  maxPoolSize: number;
+  minPoolSize: number;
+  // Performance metrics
+  totalCheckouts: number;
+  totalCheckins: number;
+  connectionCreated: number;
+  connectionClosed: number;
+  // Wait queue timeouts
+  waitQueueTimeouts: number;
+  lastWaitQueueTimeout: Date | null;
+}
+
+let connectionPoolStats: ConnectionPoolStats = {
   totalConnections: 0,
   checkedOut: 0,
+  availableConnections: 0,
+  waitQueueSize: 0,
+  maxPoolSize: 100,
+  minPoolSize: 10,
+  totalCheckouts: 0,
+  totalCheckins: 0,
+  connectionCreated: 0,
+  connectionClosed: 0,
+  waitQueueTimeouts: 0,
+  lastWaitQueueTimeout: null,
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -31,6 +60,10 @@ export interface MongoConfig {
   // Pool settings
   maxPoolSize?: number;
   minPoolSize?: number;
+  maxIdleTimeMS?: number;
+  // Wait queue settings (protection against pool exhaustion)
+  waitQueueTimeoutMS?: number;
+  maxWaitingRequests?: number;
   // Timeouts
   connectTimeoutMS?: number;
   socketTimeoutMS?: number;
@@ -41,17 +74,22 @@ export interface MongoConfig {
   // Retry
   retryWrites?: boolean;
   retryReads?: boolean;
+  // Compression (optional, for bandwidth optimization)
+  compressors?: ('snappy' | 'zlib' | 'zstd')[];
 }
 
 /** Default MongoDB configuration - can be used as base for customization */
-export const DEFAULT_MONGO_CONFIG: Omit<Required<MongoConfig>, 'uri' | 'dbName'> = {
-  maxPoolSize: 100,          // Max connections per node
-  minPoolSize: 10,           // Keep warm connections
-  connectTimeoutMS: 10000,   // 10s connect timeout
-  socketTimeoutMS: 45000,    // 45s socket timeout
+export const DEFAULT_MONGO_CONFIG: Omit<Required<MongoConfig>, 'uri' | 'dbName' | 'compressors'> = {
+  maxPoolSize: 100,              // Max connections per node
+  minPoolSize: 10,               // Keep warm connections
+  maxIdleTimeMS: 30000,          // Close idle connections after 30s
+  waitQueueTimeoutMS: 10000,     // Fail fast if pool exhausted (10s max wait)
+  maxWaitingRequests: 500,       // Max requests waiting for connection
+  connectTimeoutMS: 10000,       // 10s connect timeout
+  socketTimeoutMS: 45000,        // 45s socket timeout
   serverSelectionTimeoutMS: 30000,
-  readPreference: 'nearest', // Read from closest node (reduces latency)
-  writeConcern: 'majority',  // Ensure writes are durable
+  readPreference: 'nearest',     // Read from closest node (reduces latency)
+  writeConcern: 'majority',      // Ensure writes are durable
   retryWrites: true,
   retryReads: true,
 };
@@ -103,20 +141,32 @@ export async function connectDatabase(uri: string, config: Partial<MongoConfig> 
   // Parse URI to check if we're connecting to localhost
   const isLocalhost = uriObj.hostname === 'localhost' || uriObj.hostname === '127.0.0.1';
   
-  // When connecting from localhost to a Docker container, we need directConnection
-  // to avoid replica set member discovery (which would try to resolve Docker hostnames like ms-mongo)
-  // Even if MongoDB is configured as a replica set inside Docker, we connect directly from outside
+  // Build client options with pool protection settings
   const clientOptions: any = {
+    // Pool settings
     maxPoolSize: cfg.maxPoolSize,
     minPoolSize: cfg.minPoolSize,
+    maxIdleTimeMS: cfg.maxIdleTimeMS,
+    // Wait queue protection (fail fast if pool exhausted)
+    waitQueueTimeoutMS: cfg.waitQueueTimeoutMS,
+    // Timeouts
     connectTimeoutMS: cfg.connectTimeoutMS,
     socketTimeoutMS: cfg.socketTimeoutMS,
     serverSelectionTimeoutMS: cfg.serverSelectionTimeoutMS,
+    // Read/Write settings
     readPreference: readPrefMap[cfg.readPreference || 'nearest'],
     writeConcern: new WriteConcern(cfg.writeConcern || 'majority'),
+    // Retry settings
     retryWrites: cfg.retryWrites,
     retryReads: cfg.retryReads,
+    // Monitoring (required for detailed pool stats)
+    monitorCommands: false, // Set to true for command monitoring (verbose)
   };
+  
+  // Add compression if specified
+  if (config.compressors && config.compressors.length > 0) {
+    clientOptions.compressors = config.compressors;
+  }
   
   // Always force direct connection when connecting from localhost (services outside Docker)
   // This prevents MongoDB driver from trying to discover replica set members (ms-mongo, etc.)
@@ -142,26 +192,64 @@ export async function connectDatabase(uri: string, config: Partial<MongoConfig> 
   baseUri = currentBaseUri;
   client = new MongoClient(clientUri, clientOptions);
 
+  // Update pool config in stats
+  connectionPoolStats.maxPoolSize = cfg.maxPoolSize;
+  connectionPoolStats.minPoolSize = cfg.minPoolSize;
+
   // Connection pool monitoring using official events (MongoDB 7.x best practice)
   // This replaces internal topology access which is not a public API
-  client.on('connectionPoolCreated', () => {
-    logger.debug('MongoDB pool created');
+  client.on('connectionPoolCreated', (event) => {
+    logger.debug('MongoDB pool created', { 
+      maxPoolSize: event.options?.maxPoolSize,
+      minPoolSize: event.options?.minPoolSize,
+    });
   });
+  
   client.on('connectionPoolClosed', () => {
     logger.debug('MongoDB pool closed');
-    connectionPoolStats = { totalConnections: 0, checkedOut: 0 };
+    resetPoolStats();
   });
+  
   client.on('connectionCreated', () => {
     connectionPoolStats.totalConnections++;
+    connectionPoolStats.connectionCreated++;
+    connectionPoolStats.availableConnections = connectionPoolStats.totalConnections - connectionPoolStats.checkedOut;
   });
+  
   client.on('connectionClosed', () => {
     connectionPoolStats.totalConnections = Math.max(0, connectionPoolStats.totalConnections - 1);
+    connectionPoolStats.connectionClosed++;
+    connectionPoolStats.availableConnections = connectionPoolStats.totalConnections - connectionPoolStats.checkedOut;
   });
+  
   client.on('connectionCheckedOut', () => {
     connectionPoolStats.checkedOut++;
+    connectionPoolStats.totalCheckouts++;
+    connectionPoolStats.availableConnections = connectionPoolStats.totalConnections - connectionPoolStats.checkedOut;
+    connectionPoolStats.waitQueueSize = Math.max(0, connectionPoolStats.waitQueueSize - 1);
   });
+  
   client.on('connectionCheckedIn', () => {
     connectionPoolStats.checkedOut = Math.max(0, connectionPoolStats.checkedOut - 1);
+    connectionPoolStats.totalCheckins++;
+    connectionPoolStats.availableConnections = connectionPoolStats.totalConnections - connectionPoolStats.checkedOut;
+  });
+  
+  client.on('connectionCheckOutStarted', () => {
+    connectionPoolStats.waitQueueSize++;
+  });
+  
+  client.on('connectionCheckOutFailed', (event) => {
+    connectionPoolStats.waitQueueSize = Math.max(0, connectionPoolStats.waitQueueSize - 1);
+    if (event.reason === 'timeout') {
+      connectionPoolStats.waitQueueTimeouts++;
+      connectionPoolStats.lastWaitQueueTimeout = new Date();
+      logger.warn('MongoDB connection pool exhausted - checkout timeout', {
+        checkedOut: connectionPoolStats.checkedOut,
+        maxPoolSize: connectionPoolStats.maxPoolSize,
+        waitQueueSize: connectionPoolStats.waitQueueSize,
+      });
+    }
   });
   
   await client.connect();
@@ -180,10 +268,32 @@ export async function connectDatabase(uri: string, config: Partial<MongoConfig> 
   logger.info('Connected to MongoDB', { 
     database: dbName,
     maxPoolSize: cfg.maxPoolSize,
+    minPoolSize: cfg.minPoolSize,
+    waitQueueTimeoutMS: cfg.waitQueueTimeoutMS,
     readPreference: cfg.readPreference,
   });
   
   return db;
+}
+
+/**
+ * Reset pool statistics (internal)
+ */
+function resetPoolStats(): void {
+  connectionPoolStats = {
+    totalConnections: 0,
+    checkedOut: 0,
+    availableConnections: 0,
+    waitQueueSize: 0,
+    maxPoolSize: connectionPoolStats.maxPoolSize,
+    minPoolSize: connectionPoolStats.minPoolSize,
+    totalCheckouts: 0,
+    totalCheckins: 0,
+    connectionCreated: 0,
+    connectionClosed: 0,
+    waitQueueTimeouts: 0,
+    lastWaitQueueTimeout: null,
+  };
 }
 
 export function getDatabase(): Db {
@@ -202,7 +312,7 @@ export async function closeDatabase(): Promise<void> {
     client = null;
     db = null;
     baseUri = null;
-    connectionPoolStats = { totalConnections: 0, checkedOut: 0 };
+    resetPoolStats();
     logger.info('MongoDB disconnected');
   }
 }
@@ -211,8 +321,53 @@ export async function closeDatabase(): Promise<void> {
  * Get current connection pool statistics.
  * Uses event-based tracking (MongoDB 7.x best practice).
  */
-export function getConnectionPoolStats(): { totalConnections: number; checkedOut: number } {
-  return { ...connectionPoolStats };
+export function getConnectionPoolStats(): ConnectionPoolStats {
+  return { 
+    ...connectionPoolStats,
+    availableConnections: connectionPoolStats.totalConnections - connectionPoolStats.checkedOut,
+  };
+}
+
+/**
+ * Check if connection pool is healthy.
+ * Returns warning if utilization is high or timeouts occurred.
+ */
+export function getPoolHealthStatus(): {
+  status: 'healthy' | 'warning' | 'critical';
+  utilizationPercent: number;
+  message: string;
+} {
+  const utilization = connectionPoolStats.maxPoolSize > 0
+    ? (connectionPoolStats.checkedOut / connectionPoolStats.maxPoolSize) * 100
+    : 0;
+  
+  // Check for recent timeouts
+  const recentTimeout = connectionPoolStats.lastWaitQueueTimeout && 
+    (Date.now() - connectionPoolStats.lastWaitQueueTimeout.getTime()) < 60000; // Within last minute
+  
+  if (recentTimeout || utilization >= 95) {
+    return {
+      status: 'critical',
+      utilizationPercent: Math.round(utilization),
+      message: recentTimeout 
+        ? `Pool exhausted - ${connectionPoolStats.waitQueueTimeouts} timeout(s)` 
+        : 'Pool nearly exhausted (>95%)',
+    };
+  }
+  
+  if (utilization >= 80) {
+    return {
+      status: 'warning',
+      utilizationPercent: Math.round(utilization),
+      message: 'High pool utilization (>80%)',
+    };
+  }
+  
+  return {
+    status: 'healthy',
+    utilizationPercent: Math.round(utilization),
+    message: 'Pool healthy',
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════════

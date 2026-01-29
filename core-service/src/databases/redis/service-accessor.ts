@@ -70,13 +70,21 @@ async function connectToRedis(url: string, label: string): Promise<RedisClientTy
     password = process.env.REDIS_PASSWORD;
   }
 
+  // node-redis v5 best practices
   const clientOptions: any = {
     url: redisUrl,
+    name: label, // Client name for debugging (visible in CLIENT LIST)
     socket: {
       connectTimeout: 5000,
+      keepAlive: true,
+      keepAliveInitialDelay: 5000,
+      noDelay: true, // Disable Nagle's algorithm for lower latency
+      // Exponential backoff with jitter
       reconnectStrategy: (retries: number) => {
         if (retries > 10) return new Error('Max reconnect attempts');
-        return 1000;
+        const jitter = Math.floor(Math.random() * 200);
+        const delay = Math.min(Math.pow(2, retries) * 50, 2000);
+        return delay + jitter;
       },
     },
   };
@@ -85,6 +93,7 @@ async function connectToRedis(url: string, label: string): Promise<RedisClientTy
 
   const client = createClient(clientOptions);
   client.on('error', (err) => logger.error(`Redis [${label}] error`, { error: err.message }));
+  client.on('reconnecting', () => logger.warn(`Redis [${label}] reconnecting...`));
   await client.connect();
   logger.info(`Connected to Redis [${label}]`);
   return client as RedisClientType;

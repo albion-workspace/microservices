@@ -6,6 +6,8 @@
 export {
   connectRedis,
   getRedis,
+  getRedisForRead,
+  hasReadReplica,
   closeRedis,
   checkRedisHealth,
   publish,
@@ -14,8 +16,12 @@ export {
   scanKeysIterator,
   scanKeysWithCallback,
   batchGetValues,
+  getRedisConnectionStats,
   type RedisConfig,
+  type RedisSentinelConfig,
+  type RedisReplicaConfig,
   type ScanOptions,
+  type RedisConnectionStats,
 } from './connection.js';
 
 // Service Accessor
