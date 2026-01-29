@@ -261,10 +261,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             
             if (user && result.tokens) {
               console.log('[Auth] ✅ Saving refreshed auth state');
-              // Store expiration time
+              // Store expiration time and lifetime for proactive refresh
               const expiresIn = result.tokens.expiresIn || 3600;
               const expiresAt = Date.now() + (expiresIn * 1000);
               localStorage.setItem('auth_token_expires_at', expiresAt.toString());
+              localStorage.setItem('auth_token_lifetime', expiresIn.toString());
               
               // Save auth state
               localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN, result.tokens.accessToken);
@@ -363,29 +364,37 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
           if (data.me) {
             console.log('[Auth] ✅ Token valid, user authenticated:', { id: data.me.id, email: data.me.email });
-            // Store expiration time (default 1 hour if not provided)
-            const expiresAt = Date.now() + (3600 * 1000);
+            
+            // Calculate expiration from JWT if available, otherwise use existing or default
+            const tokenPayload = decodeJWT(accessToken);
+            let expiresIn = 3600; // Default 1 hour
+            let expiresAt: number;
+            
+            if (tokenPayload?.exp) {
+              // Use actual expiration from JWT
+              expiresAt = tokenPayload.exp * 1000;
+              // Calculate remaining time as expiresIn
+              expiresIn = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
+            } else {
+              // Fallback to default
+              expiresAt = Date.now() + (expiresIn * 1000);
+            }
+            
             localStorage.setItem('auth_token_expires_at', expiresAt.toString());
+            // Preserve existing token lifetime or use calculated one
+            const existingLifetime = localStorage.getItem('auth_token_lifetime');
+            if (!existingLifetime) {
+              localStorage.setItem('auth_token_lifetime', expiresIn.toString());
+            }
             
             setState({
               user: data.me,
-              tokens: { accessToken, refreshToken, expiresIn: 3600 },
+              tokens: { accessToken, refreshToken, expiresIn },
               isAuthenticated: true,
               isLoading: false,
             });
             localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(data.me));
             return;
-          } else {
-            // me query returned null - token is likely invalid/expired
-            console.warn('[Auth] ⚠️ me query returned no user (token likely invalid/expired), attempting refresh...');
-            const refreshed = await tryRefreshToken(refreshToken);
-            if (refreshed) {
-              console.log('[Auth] ✅ Token refreshed successfully after null me response');
-              return; // tryRefreshToken will update state
-            } else {
-              console.warn('[Auth] ❌ Token refresh failed after null me response');
-              // Fall through to clear auth
-            }
           }
         } catch (error: any) {
           console.warn('[Auth] ❌ Auth validation error:', error.message, { status: error.status });
@@ -394,6 +403,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           const httpStatus = error.status || error.message?.match(/status: (\d+)/)?.[1];
           const isHttp401 = httpStatus === 401 || httpStatus === '401';
           const isHttp403 = httpStatus === 403 || httpStatus === '403';
+          
+          // Distinguish between auth errors and permission errors using error codes
+          // Use error code from extensions if available (CapitalCamelCase format)
+          const errorCode = error.code || error.extensions?.code || error.message || '';
+          
+          // User not found error - user was deleted while token is still valid
+          // This should NOT try to refresh - just clear auth immediately
+          const isUserNotFoundError = errorCode.includes('UserNotFound') || 
+                                      errorCode.includes('MSAuthUserNotFound');
+          
+          if (isUserNotFoundError) {
+            console.warn('[Auth] ⚠️ User not found in database - user may have been deleted, clearing auth...');
+            setState({
+              user: null,
+              tokens: null,
+              isAuthenticated: false,
+              isLoading: false,
+            });
+            localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN);
+            localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN);
+            localStorage.removeItem(STORAGE_KEYS.USER);
+            localStorage.removeItem('auth_token_expires_at');
+            return;
+          }
           
           // Network errors (no response) - keep cached user
           if (!httpStatus && (error.message?.includes('Failed to fetch') || error.message?.includes('NetworkError'))) {
@@ -407,9 +440,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             return;
           }
           
-          // Distinguish between auth errors and permission errors using error codes
-          // Use error code from extensions if available (CapitalCamelCase format)
-          const errorCode = error.code || error.extensions?.code || error.message
           const isAuthError = isHttp401 || 
                              errorCode.includes('AuthenticationRequired') ||
                              errorCode.includes('InvalidToken') ||
@@ -509,6 +539,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // Calculate expiration: current time + expiresIn seconds
     const expiresAt = Date.now() + (tokens.expiresIn * 1000);
     localStorage.setItem('auth_token_expires_at', expiresAt.toString());
+    // Store token lifetime for dynamic refresh buffer calculation
+    localStorage.setItem('auth_token_lifetime', tokens.expiresIn.toString());
 
     setState({
       user,
@@ -524,6 +556,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN);
     localStorage.removeItem(STORAGE_KEYS.USER);
     localStorage.removeItem('auth_token_expires_at');
+    localStorage.removeItem('auth_token_lifetime');
 
     setState({
       user: null,
@@ -931,12 +964,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     }
     
-    // Refresh token if it expires in less than 5 minutes (300000ms)
+    // Refresh token if it expires in less than REFRESH_BUFFER_MS
+    // Dynamically calculate buffer based on token lifetime:
+    // - For short-lived tokens (< 5 min): refresh 30 seconds before expiration
+    // - For longer tokens (>= 5 min): refresh 5 minutes before expiration
+    const tokenLifetimeMs = parseInt(localStorage.getItem('auth_token_lifetime') || '3600') * 1000;
+    const REFRESH_BUFFER_MS = tokenLifetimeMs < 5 * 60 * 1000 
+      ? 30 * 1000    // 30 seconds for short-lived tokens (< 5 min)
+      : 5 * 60 * 1000; // 5 minutes for longer tokens
+    
     // or if it's already expired (but not more than 1 minute ago)
-    const shouldRefresh = timeUntilExpiry < 5 * 60 * 1000 && timeUntilExpiry > -60 * 1000;
+    const shouldRefresh = timeUntilExpiry < REFRESH_BUFFER_MS && timeUntilExpiry > -60 * 1000;
     
     if (shouldRefresh) {
-      console.log('[Auth] 🔄 Proactively refreshing token (expires soon)');
+      console.log(`[Auth] 🔄 Proactively refreshing token (expires in ${Math.round(timeUntilExpiry / 1000)}s, buffer: ${Math.round(REFRESH_BUFFER_MS / 1000)}s)`);
       refreshTokenFn().catch((error) => {
         console.warn('[Auth] ⚠️ Proactive token refresh failed:', error.message);
         // If refresh fails, check if refresh token might be expired using error code
@@ -946,9 +987,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           clearAuth();
         }
       });
-    } else if (timeUntilExpiry > 5 * 60 * 1000) {
-      // Schedule refresh 5 minutes before expiration
-      const refreshDelay = timeUntilExpiry - (5 * 60 * 1000);
+    } else if (timeUntilExpiry > REFRESH_BUFFER_MS) {
+      // Schedule refresh REFRESH_BUFFER_MS before expiration
+      const refreshDelay = timeUntilExpiry - REFRESH_BUFFER_MS;
       console.log(`[Auth] ⏰ Scheduling token refresh in ${Math.round(refreshDelay / 1000 / 60)} minutes`);
       scheduledRefreshRef.current = setTimeout(() => {
         console.log('[Auth] 🔄 Executing scheduled token refresh');
@@ -990,6 +1031,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const refreshCallbackRef = React.useRef(getRefreshedToken);
   refreshCallbackRef.current = getRefreshedToken;
   
+  // Use ref for clearAuth to avoid dependency issues
+  const clearAuthRef = React.useRef(clearAuth);
+  clearAuthRef.current = clearAuth;
+  
   useEffect(() => {
     // Import dynamically to avoid circular dependency
     import('./graphql-utils.js').then((module) => {
@@ -1000,8 +1045,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         });
         console.log('[Auth] ✅ Token refresh callback registered with graphql-utils');
       }
+      
+      // Register user not found callback - clears auth when user is deleted
+      // This handles the case where user has valid token but user no longer exists in DB
+      if (module.setUserNotFoundCallback) {
+        module.setUserNotFoundCallback(() => {
+          console.warn('[Auth] ⚠️ User not found in database - user may have been deleted, clearing auth...');
+          clearAuthRef.current();
+        });
+        console.log('[Auth] ✅ User not found callback registered with graphql-utils');
+      }
     }).catch((error) => {
-      console.warn('[Auth] ⚠️ Failed to register token refresh callback:', error);
+      console.warn('[Auth] ⚠️ Failed to register graphql-utils callbacks:', error);
     });
   }, []); // Only run once on mount
 

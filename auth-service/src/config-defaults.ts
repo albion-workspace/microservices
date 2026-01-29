@@ -66,9 +66,11 @@ export const AUTH_CONFIG_DEFAULTS = {
   },
   
   // JWT Configuration
+  // NOTE: For testing token refresh, set expiresIn to '2m' (2 minutes)
+  // For production, use '1h' (1 hour) or appropriate value
   jwt: {
     value: {
-      expiresIn: '1h',
+      expiresIn: '2m', // TESTING: 2 minutes for token refresh testing (change to '1h' for production)
       refreshExpiresIn: '7d',
       secret: '', // Will be set via env var or admin
       refreshSecret: '', // Will be set via env var or admin

@@ -124,11 +124,105 @@ Session behavior is controlled by `AuthConfig`:
 
 ```typescript
 {
-  jwtExpiresIn: '1h',              // Access token expiration
+  jwtExpiresIn: '1h',              // Access token expiration (use '2m' for testing)
   jwtRefreshExpiresIn: '7d',       // Refresh token expiration
   sessionMaxAge: 30,               // Session max age in days
 }
 ```
+
+Override via environment variables:
+```bash
+JWT_EXPIRES_IN=1h          # Access token expiration
+JWT_REFRESH_EXPIRES_IN=7d  # Refresh token expiration
+```
+
+## Token Refresh Mechanism
+
+The system implements automatic token refresh at both frontend and backend levels.
+
+### Frontend Token Refresh (`app/src/lib`)
+
+**Components:**
+
+1. **`graphql-utils.ts`** - Automatic refresh interceptor
+   - Detects 401 errors and auth-related GraphQL errors
+   - Automatically retries requests after token refresh
+   - Detects `UserNotFound` errors (user deleted) and clears auth
+
+2. **`auth-context.tsx`** - Proactive refresh and state management
+   - Tracks token expiration in localStorage
+   - Proactively refreshes tokens before expiration
+   - Dynamic refresh buffer (30s for short tokens, 5min for long tokens)
+
+### Refresh Flow
+
+```
+Request fails with 401 or auth error
+    ↓
+graphql-utils calls tokenRefreshCallback
+    ↓
+auth-context refreshes via GraphQL mutation
+    ↓
+New tokens saved to localStorage + state
+    ↓
+Original request retried with new token
+```
+
+### Proactive Refresh Flow
+
+```
+Token saved with expiration time
+    ↓
+useEffect monitors expiration
+    ↓
+Token expires soon? (< buffer time)
+    ↓ YES
+Refresh immediately
+    ↓ NO
+Schedule refresh (buffer time before expiration)
+```
+
+### User Deletion Handling
+
+When a user is deleted while having a valid token:
+
+1. **Backend**: `me` query throws `MSAuthUserNotFound` error
+2. **Frontend**: `graphql-utils.ts` detects the error code
+3. **Frontend**: Calls `userNotFoundCallback` to clear auth
+4. **Result**: User redirected to login
+
+### Scenarios Covered
+
+| Scenario | Handling |
+|----------|----------|
+| Token expired (401) | Auto-refresh and retry |
+| Token near expiration | Proactive refresh |
+| Refresh token expired | Clear auth, redirect to login |
+| User deleted | Detect `UserNotFound`, clear auth |
+| Network error | Keep cached user (offline support) |
+| Permission error | Don't refresh (user is authenticated) |
+| Multiple concurrent requests | Refresh lock prevents duplicate refreshes |
+
+### Testing Token Refresh
+
+Set short token expiration for testing:
+
+```typescript
+// config-defaults.ts
+jwt: {
+  expiresIn: '2m', // 2 minutes for testing
+  refreshExpiresIn: '7d',
+}
+```
+
+Or via environment:
+```bash
+JWT_EXPIRES_IN=2m
+```
+
+The frontend automatically adjusts refresh timing:
+- **< 5 min tokens**: Refresh 30 seconds before expiration
+- **>= 5 min tokens**: Refresh 5 minutes before expiration
 
 ### Security Features
 

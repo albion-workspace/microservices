@@ -14,6 +14,8 @@ interface GraphQLLogOptions {
 
 // Token refresh callback - will be set by auth context
 let tokenRefreshCallback: (() => Promise<string | null>) | null = null
+// User not found callback - will be set by auth context to clear auth when user is deleted
+let userNotFoundCallback: (() => void) | null = null
 // Track retry count per request to prevent infinite loops
 const retryCountMap = new Map<string, number>()
 
@@ -22,6 +24,15 @@ const retryCountMap = new Map<string, number>()
  */
 export function setTokenRefreshCallback(callback: () => Promise<string | null>) {
   tokenRefreshCallback = callback
+}
+
+/**
+ * Set the user not found callback (called by auth context)
+ * This callback is invoked when a GraphQL request returns a UserNotFound error,
+ * indicating the user was deleted while having a valid token.
+ */
+export function setUserNotFoundCallback(callback: () => void) {
+  userNotFoundCallback = callback
 }
 
 /**
@@ -152,7 +163,28 @@ export async function graphql<T = any>(
                                 errorCode.includes('InsufficientPermissions') ||
                                 errorCode.includes('SystemOrAdminAccessRequired')
       
+      // User not found error - user was deleted while token is still valid
+      // This should clear auth and redirect to login
+      const isUserNotFoundError = errorCode.includes('UserNotFound') || 
+                                  errorCode.includes('MSAuthUserNotFound')
+      
       console.error('GraphQL Errors:', data.errors, { code: errorCode, extensions: errorExtensions })
+      
+      // Handle user not found (user deleted while having valid token)
+      // Call the callback to clear auth and redirect to login
+      if (isUserNotFoundError && userNotFoundCallback) {
+        console.warn('[GraphQL] ⚠️ User not found error detected - user may have been deleted, clearing auth...')
+        userNotFoundCallback()
+        // Don't retry, throw the error immediately
+        console.groupEnd()
+        retryCountMap.delete(retryKey);
+        const errorObj = new Error(errorMessage)
+        ;(errorObj as any).code = errorCode
+        ;(errorObj as any).extensions = errorExtensions
+        ;(errorObj as any).errors = data.errors
+        ;(errorObj as any).isUserDeleted = true
+        throw errorObj
+      }
       
       // Only refresh on authentication errors, NOT permission errors, and only once
       if (isAuthError && !isPermissionError && retryOn401 && !isRetry && currentToken && tokenRefreshCallback) {

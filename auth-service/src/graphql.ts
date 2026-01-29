@@ -401,6 +401,10 @@ export function createAuthResolvers(
     Query: {
       /**
        * Get current authenticated user
+       * 
+       * NOTE: This query MUST throw UserNotFound error if the user no longer exists in DB
+       * (e.g., user was deleted while token is still valid). This allows the frontend
+       * to detect the scenario and clear auth state, forcing re-login.
        */
       me: async (args: Record<string, unknown>, ctx: ResolverContext) => {
         requireAuth(ctx);
@@ -411,6 +415,20 @@ export function createAuthResolvers(
         
         // Use generic helper function for document lookup with automatic ObjectId handling
         const user = await findById(db.collection('users'), userId, { tenantId });
+        
+        // IMPORTANT: If user has valid token but user doesn't exist in DB (e.g., deleted),
+        // throw UserNotFound error so frontend can detect and clear auth
+        if (!user) {
+          logger.warn('Authenticated user not found in database (may have been deleted)', { 
+            userId, 
+            tenantId 
+          });
+          throw new GraphQLError(AUTH_ERRORS.UserNotFound, { 
+            userId, 
+            tenantId,
+            reason: 'User authenticated but not found in database - user may have been deleted'
+          });
+        }
         
         return normalizeUser(user);
       },
