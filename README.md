@@ -1182,6 +1182,35 @@ The recovery system automatically handles stuck operations:
 
 ## Roadmap
 
+### TODO - Notification Service Resilience ⚠️
+
+The notification service has fan-out risk (Email + SMS + WhatsApp + SSE + Socket.IO). Missing protections:
+
+- [ ] **Provider Circuit Breakers** - Add `CircuitBreaker` to Email, SMS, WhatsApp providers
+- [ ] **Per-Channel Retry Policies** - Implement retry with backoff per provider type
+- [ ] **Internal Event Queue** - Use Redis Streams or BullMQ for async processing
+- [ ] **Backpressure Handling** - Add concurrency limits to `sendMultiChannel`
+
+**Risk if not addressed**: Provider outages can cause retry storms and become system-wide latency amplifiers.
+
+**Implementation Pattern**:
+```typescript
+// In provider constructor
+this.circuitBreaker = new CircuitBreaker({
+  failureThreshold: 5,
+  resetTimeout: 30000,
+  name: 'email-provider',
+});
+
+// In send method
+return await this.circuitBreaker.execute(async () => {
+  return await retry(() => this.transporter.sendMail(options), {
+    maxAttempts: 3,
+    baseDelay: 1000,
+  });
+});
+```
+
 ### TODO - Observability
 
 - [ ] **Distributed Tracing (OpenTelemetry)** - Integrate OpenTelemetry SDK, add tracing spans

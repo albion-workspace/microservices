@@ -875,6 +875,30 @@ createTransferWithTransactions(params, { session }); // Not tracked
 - ✅ **Right**: Review design patterns section and reference repository before implementing
 - ✅ **Right**: Search codebase for existing pattern usage before creating new implementations
 
+### 12. External Provider Calls Without Protection ⚠️
+- ❌ **Wrong**: Calling external APIs (Twilio, SMTP, etc.) directly without circuit breaker
+- ❌ **Wrong**: Fan-out to multiple channels without backpressure
+- ✅ **Right**: Wrap external calls with `CircuitBreaker` from core-service
+- ✅ **Right**: Use `retry()` with per-provider policies
+- ✅ **Right**: Implement queue for async processing with concurrency limits
+- **Risk**: Provider outages cause retry storms → system-wide latency amplifier
+
+```typescript
+// ✅ Correct: Protected external call
+import { CircuitBreaker, retry } from 'core-service';
+
+this.circuitBreaker = new CircuitBreaker({ 
+  failureThreshold: 5, 
+  resetTimeout: 30000 
+});
+
+async send(notification) {
+  return this.circuitBreaker.execute(() => 
+    retry(() => this.provider.send(notification), { maxAttempts: 3 })
+  );
+}
+```
+
 ---
 
 ## 📝 File-Specific Guidelines
