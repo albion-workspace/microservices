@@ -10,7 +10,7 @@ import type { Collection, Db } from 'mongodb';
 import { RoleResolver, type ResolvedPermissions, type Role as BaseRole } from 'access-engine';
 
 // Internal imports
-import { generateMongoId } from '../databases/mongodb-utils.js';
+import { generateMongoId } from '../databases/mongodb/utils.js';
 import type {
   Role,
   Policy,
@@ -22,7 +22,7 @@ import type {
   CreateACLGrantInput,
   ResolvedAccessConfig,
 } from './types-ext.js';
-import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/strategy.js';
+import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/mongodb/strategy.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Access Store

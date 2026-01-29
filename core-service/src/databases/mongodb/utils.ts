@@ -9,7 +9,7 @@
  */
 
 import { ObjectId, type Collection, type Filter, type Document } from 'mongodb';
-import { logger } from '../common/logger.js';
+import { logger } from '../../common/logger.js';
 
 // Re-export MongoDB types for convenience
 // This allows microservices to use MongoDB types without depending on mongodb package directly

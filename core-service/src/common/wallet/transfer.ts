@@ -33,7 +33,7 @@ import type { ClientSession, Db, MongoClient } from 'mongodb';
 
 // Local imports
 import { generateId, generateMongoId, logger, deleteCachePattern } from '../../index.js';
-import type { DatabaseStrategyResolver, DatabaseContext } from '../../databases/strategy.js';
+import type { DatabaseStrategyResolver, DatabaseContext } from '../../databases/mongodb/strategy.js';
 import { createTransactionDocument, type CreateTransactionParams, type Transaction } from './transaction.js';
 import { getOperationStateTracker } from '../resilience/recovery.js';
 import {
@@ -455,7 +455,7 @@ export async function createTransferWithTransactions(
     // This allows us to set allowNegative=true when creating system user wallets
     let isSystemUser = false;
     try {
-      const { findUserIdByRole } = await import('../../databases/user-utils.js');
+      const { findUserIdByRole } = await import('../../databases/mongodb/user-utils.js');
       const systemUserId = await findUserIdByRole({ 
         role: 'system', 
         tenantId, 

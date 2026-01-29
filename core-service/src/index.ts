@@ -41,13 +41,13 @@
 //
 export {
   createServiceDatabaseAccess,
-} from './databases/service-database.js';
+} from './databases/mongodb/service-accessor.js';
 export type {
   ServiceDatabaseAccessor,
   DatabaseIndexConfig,
   HealthCheckResult,
   DatabaseStats,
-} from './databases/service-database.js';
+} from './databases/mongodb/service-accessor.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Service Redis Access (RECOMMENDED - use this in microservices)
@@ -64,14 +64,14 @@ export {
   createServiceRedisAccess,
   configureRedisStrategy,
   closeAllRedisConnections,
-} from './databases/service-redis.js';
+} from './databases/redis/service-accessor.js';
 export type {
   ServiceRedisAccessor,
   RedisStrategyConfig,
   ServiceRedisOptions,
   RedisHealthResult,
   RedisStats,
-} from './databases/service-redis.js';
+} from './databases/redis/service-accessor.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Saga Pattern (Business Logic)
@@ -274,6 +274,7 @@ export {
   createCacheKeys,
   CacheKeys,
 } from './databases/cache.js';
+export { clearMemoryCache } from './databases/cache.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Redis
@@ -289,8 +290,8 @@ export {
   scanKeysArray,
   scanKeysWithCallback,
   batchGetValues,
-} from './databases/redis.js';
-export type { RedisConfig, ScanOptions } from './databases/redis.js';
+} from './databases/redis/connection.js';
+export type { RedisConfig, ScanOptions } from './databases/redis/connection.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Logger
@@ -414,7 +415,7 @@ export type { ResolverFunction, ServiceResolvers } from './common/graphql/builde
 // ═══════════════════════════════════════════════════════════════════
 // Repository (with caching)
 // ═══════════════════════════════════════════════════════════════════
-export { createRepository, generateId as generateUUID, bulkInsert, bulkUpdate } from './databases/repository.js';
+export { createRepository, generateId as generateUUID, bulkInsert, bulkUpdate } from './databases/mongodb/repository.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Pagination (cursor-based, sharding-optimized)
@@ -424,7 +425,7 @@ export {
   convertOffsetToCursor,
   type CursorPaginationOptions,
   type CursorPaginationResult,
-} from './databases/pagination.js';
+} from './databases/mongodb/pagination.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Cross-Service Integration (Event-driven)
@@ -627,7 +628,7 @@ export { successResponse, errorResponse } from './types/index.js';
 export type {
   Brand,
   Tenant,
-} from './databases/brand-tenant-store.js';
+} from './databases/mongodb/brand-tenant-store.js';
 
 
 // ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -654,8 +655,8 @@ export {
   getConnectionPoolStats,
   registerIndexes,
   DEFAULT_MONGO_CONFIG,
-} from './databases/mongodb.js';
-export type { MongoConfig } from './databases/mongodb.js';
+} from './databases/mongodb/connection.js';
+export type { MongoConfig } from './databases/mongodb/connection.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // MongoDB Utilities (for direct collection operations)
@@ -677,7 +678,7 @@ export {
   updateOneById,
   deleteOneById,
   findOneAndUpdateById,
-} from './databases/mongodb-utils.js';
+} from './databases/mongodb/utils.js';
 
 export type {
   Collection,
@@ -686,7 +687,7 @@ export type {
   ClientSession,
   Db,
   MongoClient,
-} from './databases/mongodb-utils.js';
+} from './databases/mongodb/utils.js';
 
 // MongoDB Error Handling
 export {
@@ -694,7 +695,7 @@ export {
   handleDuplicateKeyError,
   executeWithDuplicateHandling,
   type DuplicateKeyErrorOptions,
-} from './databases/mongodb-errors.js';
+} from './databases/mongodb/errors.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // User Utilities (INTERNAL - for scripts/admin operations)
@@ -702,8 +703,8 @@ export {
 export {
   findUserIdByRole,
   findUserIdsByRole,
-} from './databases/user-utils.js';
-export type { FindUserByRoleOptions } from './databases/user-utils.js';
+} from './databases/mongodb/user-utils.js';
+export type { FindUserByRoleOptions } from './databases/mongodb/user-utils.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Context Resolution (INTERNAL - for gateway/middleware)
@@ -717,7 +718,7 @@ export {
 // Core Database Name Constant
 export {
   CORE_DATABASE_NAME,
-} from './databases/core-database.js';
+} from './databases/mongodb/constants.js';
 
 // Brand & Tenant Store (INTERNAL - for gateway/admin)
 export {
@@ -730,7 +731,7 @@ export {
   getTenantsByBrand,
   getAllTenants,
   invalidateTenantCache,
-} from './databases/brand-tenant-store.js';
+} from './databases/mongodb/brand-tenant-store.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Database Strategy Pattern (ADVANCED - for special multi-tenant cases)
@@ -753,14 +754,14 @@ export {
   createPerShardDatabaseStrategy,
   DatabaseStrategyResolver,
   resolveDatabase,
-} from './databases/strategy.js';
+} from './databases/mongodb/strategy.js';
 export type {
   DatabaseStrategy,
   DatabaseResolver,
   DatabaseContext,
   DatabaseStrategyConfig,
   DatabaseResolutionOptions,
-} from './databases/strategy.js';
+} from './databases/mongodb/strategy.js';
 
 export {
   resolveDatabaseStrategyFromConfig,
@@ -773,4 +774,4 @@ export {
   clearDatabaseCaches,
   type DatabaseConfig,
   type ServiceDatabaseOptions,
-} from './databases/strategy-config.js';
+} from './databases/mongodb/strategy-config.js';

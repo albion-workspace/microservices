@@ -12,7 +12,7 @@
  * - Static imports
  */
 
-import { getBrandByCode, getTenantByCode } from '../../databases/brand-tenant-store.js';
+import { getBrandByCode, getTenantByCode } from '../../databases/mongodb/brand-tenant-store.js';
 import { getConfigWithDefault } from './store.js';
 import { logger } from '../logger.js';
 import type { UserContext } from '../../types/index.js';

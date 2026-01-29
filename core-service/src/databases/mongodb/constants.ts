@@ -1,8 +1,7 @@
 /**
- * Core Database Configuration
+ * MongoDB Constants
  * 
- * Central definition for the core database name.
- * This is the database that stores users and other core entities.
+ * Central definition for database-related constants.
  * 
  * Following CODING_STANDARDS.md:
  * - Single source of truth

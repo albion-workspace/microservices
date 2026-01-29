@@ -6,11 +6,11 @@
 import { randomUUID } from 'node:crypto';
 import type { ServiceConfig, SagaContext, SagaOptions } from './types.js';
 import type { Repository, Resolvers, ResolverContext } from '../types/index.js';
-import { createRepository, generateId } from '../databases/repository.js';
-import { publish } from '../databases/redis.js';
+import { createRepository, generateId } from '../databases/mongodb/repository.js';
+import { publish } from '../databases/redis/connection.js';
 import { executeSaga } from './engine.js';
 import { logger } from '../common/logger.js';
-import { getClient } from '../databases/mongodb.js';
+import { getClient } from '../databases/mongodb/connection.js';
 
 export function createService<TEntity extends { id: string }, TInput>(
   config: ServiceConfig<TEntity, TInput>

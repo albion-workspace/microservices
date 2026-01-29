@@ -14,7 +14,7 @@
  *   });
  */
 
-import { publish, subscribe } from '../../databases/redis.js';
+import { publish, subscribe } from '../../databases/redis/connection.js';
 import { logger } from '../logger.js';
 
 // ═══════════════════════════════════════════════════════════════════

@@ -10,7 +10,7 @@ import type { ClientSession, MongoClient } from 'mongodb';
 import { logger } from '../common/logger.js';
 import { getErrorMessage } from '../common/errors.js';
 import type { SagaStep, SagaContext, SagaResult, SagaOptions } from './types.js';
-import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/strategy.js';
+import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/mongodb/strategy.js';
 import { DEFAULT_TRANSACTION_OPTIONS } from '../common/wallet/wallet.js';
 
 export interface ExecuteSagaOptions {

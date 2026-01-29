@@ -551,7 +551,7 @@ mutation { setConfig(service: "auth-service", key: "otpLength", value: 8) { key,
 | **Factory Method** | `notification-service/provider-factory.ts` | Provider creation based on configuration |
 | **Chain of Responsibility** | `core-service/validation-chain.ts` | Composable validation logic |
 | **Builder** | `core-service/resolver-builder.ts` | Fluent GraphQL resolver construction |
-| **Strategy** | `core-service/databases/strategy.ts` | Database selection per brand/tenant |
+| **Strategy** | `core-service/databases/mongodb/strategy.ts` | Database selection per brand/tenant |
 
 #### Validation Chain (Chain of Responsibility Pattern)
 

@@ -33,8 +33,8 @@
 | `core-service/src/types/events.ts` | **DELETED** - Domain-specific types don't belong in core-service |
 | `core-service/src/types/references.ts` | Removed `WalletReference`, `BonusReference`, `WalletBalanceSnapshot`, `WalletBonusSummary`, `TransactionReference` (kept generic `UserReference`, `ServiceResponse`) |
 | `core-service/src/common/integration.ts` | Removed `publishEvent`, `subscribeToEvents`, `startEventListener` aliases |
-| `core-service/src/databases/mongodb-utils.ts` | Removed `findUserById()` |
-| `core-service/src/databases/redis.ts` | Removed `scanKeys()` (use `scanKeysIterator` or `scanKeysArray`) |
+| `core-service/src/databases/mongodb/utils.ts` | Removed `findUserById()` |
+| `core-service/src/databases/redis/connection.ts` | Removed `scanKeys()` (use `scanKeysIterator` or `scanKeysArray`) |
 | `core-service/src/index.ts` | Updated exports, removed domain-specific types |
 | `core-service/src/types/index.ts` | Updated exports |
 
@@ -58,7 +58,7 @@
 | File | Change |
 |------|--------|
 | `core-service/src/types/repository.ts` | Removed `skip?: number` from `FindManyOptions` |
-| `core-service/src/databases/repository.ts` | Removed `.skip()` from `findMany()` |
+| `core-service/src/databases/mongodb/repository.ts` | Removed `.skip()` from `findMany()` |
 
 **Note**: Use `paginateCollection()` for cursor-based pagination instead.
 
@@ -204,7 +204,7 @@ Some files don't follow strict import grouping (blank lines between groups).
     - Works with all database strategies (shared, per-service, per-tenant, etc.)
     - Future-proof: new services have clear pattern to follow
     - **Files**: 
-      - `core-service/src/databases/service-database.ts` (NEW)
+      - `core-service/src/databases/mongodb/service-accessor.ts` (NEW)
       - `auth-service/src/database.ts` (NEW)
       - `payment-service/src/database.ts` (NEW)
       - `notification-service/src/database.ts` (NEW)
@@ -232,7 +232,7 @@ Some files don't follow strict import grouping (blank lines between groups).
     - Services use `db.getClient()` for cross-service database access (e.g., accessing core_service from payment-service)
     - Organized core-service exports into PUBLIC vs INTERNAL/ADVANCED sections in `index.ts`
     - **Files**:
-      - `core-service/src/databases/service-database.ts` (UPDATED)
+      - `core-service/src/databases/mongodb/service-accessor.ts` (UPDATED)
       - `core-service/src/common/config-store.ts` (UPDATED)
       - `core-service/src/index.ts` (UPDATED exports)
       - `payment-service/src/common/reference-resolver.ts` (migrated to accessor)
@@ -293,13 +293,41 @@ Some files don't follow strict import grouping (blank lines between groups).
 - ✅ **@deprecated code + domain types removed** (2026-01-29):
   - `core-service/src/types/events.ts` - **DELETED** (domain-specific types belong in services)
   - `core-service/src/common/integration.ts` - Removed deprecated aliases
-  - `core-service/src/databases/mongodb-utils.ts` - Removed `findUserById()`
-  - `core-service/src/databases/redis.ts` - Removed `scanKeys()`
+  - `core-service/src/databases/mongodb/utils.ts` - Removed `findUserById()`
+  - `core-service/src/databases/redis/connection.ts` - Removed `scanKeys()`
 - ✅ **Redis Strategy Pattern implemented** (2026-01-29):
-  - `core-service/src/databases/service-redis.ts` - ServiceRedisAccessor with auto-prefixing
+  - `core-service/src/databases/redis/service-accessor.ts` - ServiceRedisAccessor with auto-prefixing
   - Per-service accessors: `bonus-service/src/redis.ts`, `auth-service/src/redis.ts`
   - Key prefixing: `{brand}:{service}:{key}` for multi-tenant isolation
   - Full API: get/set/del, mget/mset, scan, publish/subscribe, checkHealth, getStats
+- ✅ **Database folder reorganization** (2026-01-29):
+  - Reorganized `core-service/src/databases/` into `mongodb/` and `redis/` subfolders
+  - Normalized file names: `connection.ts`, `service-accessor.ts`, `utils.ts`, `errors.ts`, etc.
+  - New structure:
+    ```
+    databases/
+    ├── mongodb/
+    │   ├── connection.ts      (MongoDB client, health, indexes)
+    │   ├── service-accessor.ts (ServiceDatabaseAccessor)
+    │   ├── repository.ts      (CRUD operations)
+    │   ├── pagination.ts      (Cursor-based pagination)
+    │   ├── strategy.ts        (Database strategy resolver)
+    │   ├── strategy-config.ts (Config-based strategy)
+    │   ├── utils.ts           (ObjectId helpers)
+    │   ├── errors.ts          (Duplicate key handling)
+    │   ├── constants.ts       (CORE_DATABASE_NAME)
+    │   ├── brand-tenant-store.ts
+    │   ├── user-utils.ts
+    │   └── index.ts           (re-exports)
+    ├── redis/
+    │   ├── connection.ts      (Redis client, health, pub/sub)
+    │   ├── service-accessor.ts (ServiceRedisAccessor)
+    │   └── index.ts           (re-exports)
+    ├── cache.ts               (Hybrid memory + Redis cache)
+    └── index.ts               (re-exports mongodb/, redis/, cache)
+    ```
+  - All internal imports updated across core-service
+  - External API unchanged (exports from `core-service/src/index.ts` remain same)
 
 ### 2.2 Clean Up TODOs ⚠️ PARTIALLY COMPLETE
 
@@ -368,7 +396,7 @@ Some files don't follow strict import grouping (blank lines between groups).
 - ✅ `auth-service/src/repositories/user-repository.ts` - Uses `paginateCollection()`
 - ✅ **Core types cleaned** (2026-01-29):
   - Removed `skip` from `FindManyOptions` in `core-service/src/types/repository.ts`
-  - Removed `.skip()` from `findMany()` in `core-service/src/databases/repository.ts`
+  - Removed `.skip()` from `findMany()` in `core-service/src/databases/mongodb/repository.ts`
 - ✅ `auth-service/ARCHITECTURE.md` - Updated pagination example to cursor-based
 
 **Performance Impact**: O(1) performance for pagination regardless of page number (vs O(n) with offset)

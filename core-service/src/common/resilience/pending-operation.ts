@@ -19,7 +19,7 @@
  */
 
 import crypto from 'crypto';
-import { getRedis, scanKeysIterator } from '../../databases/redis.js';
+import { getRedis, scanKeysIterator } from '../../databases/redis/connection.js';
 import { logger } from '../logger.js';
 import { signGenericJWT, verifyGenericJWT } from '../auth/jwt.js';
 

@@ -21,7 +21,7 @@ import { logger } from '../../index.js';
 import type { Transfer } from './transfer.js';
 import { createTransferWithTransactions, type CreateTransferParams } from './transfer.js';
 import type { RecoveryHandler, RecoverableOperation } from '../resilience/recovery.js';
-import type { DatabaseStrategyResolver, DatabaseContext } from '../../databases/strategy.js';
+import type { DatabaseStrategyResolver, DatabaseContext } from '../../databases/mongodb/strategy.js';
 import { getTransfersCollection, getTransactionsCollection } from './wallet.js';
 
 /**

@@ -5,10 +5,11 @@
 
 import { Collection, Document, Filter, FindOptions, ClientSession, Db } from 'mongodb';
 import { randomUUID } from 'node:crypto';
-import { getDatabase } from './mongodb.js';
-import { cached, deleteCache, deleteCachePattern } from './cache.js';
-import { logger } from '../common/logger.js';
-import { normalizeDocument, generateMongoId } from './mongodb-utils.js';
+
+import { getDatabase } from './connection.js';
+import { cached, deleteCache, deleteCachePattern } from '../cache.js';
+import { logger } from '../../common/logger.js';
+import { normalizeDocument, generateMongoId } from './utils.js';
 import type { 
   Repository, 
   FindManyOptions, 
@@ -19,12 +20,12 @@ import type {
   CacheTTLConfig,
   RepositoryOptions,
   TimestampConfig,
-} from '../types/index.js';
+} from '../../types/index.js';
 import type { DatabaseStrategyResolver, DatabaseContext } from './strategy.js';
 
 export const generateId = () => randomUUID();
 
-// Re-export types for backward compatibility
+// Re-export types
 export type { CacheTTLConfig, RepositoryOptions };
 
 const DEFAULT_CACHE_TTL: Required<CacheTTLConfig> = {

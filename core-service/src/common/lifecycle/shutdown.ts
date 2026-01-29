@@ -5,8 +5,8 @@
  */
 
 import { logger } from '../logger.js';
-import { closeDatabase } from '../../databases/mongodb.js';
-import { closeRedis } from '../../databases/redis.js';
+import { closeDatabase } from '../../databases/mongodb/connection.js';
+import { closeRedis } from '../../databases/redis/connection.js';
 
 type CleanupHandler = () => Promise<void> | void;
 

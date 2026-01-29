@@ -19,7 +19,7 @@ import type { ClientSession, Db, MongoClient } from 'mongodb';
 // Local imports
 import { logger } from '../logger.js';
 import { generateId, generateMongoId } from '../../index.js';
-import type { DatabaseStrategyResolver, DatabaseContext } from '../../databases/strategy.js';
+import type { DatabaseStrategyResolver, DatabaseContext } from '../../databases/mongodb/strategy.js';
 import {
   type Wallet,
   type BalanceType,

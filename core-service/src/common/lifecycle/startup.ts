@@ -6,8 +6,8 @@
  */
 
 import { logger } from '../logger.js';
-import { connectDatabase, checkDatabaseHealth } from '../../databases/mongodb.js';
-import { connectRedis, checkRedisHealth } from '../../databases/redis.js';
+import { connectDatabase, checkDatabaseHealth } from '../../databases/mongodb/connection.js';
+import { connectRedis, checkRedisHealth } from '../../databases/redis/connection.js';
 import { setupGracefulShutdown } from './shutdown.js';
 import { getErrorMessage } from '../errors.js';
 import { retry } from '../resilience/retry.js';

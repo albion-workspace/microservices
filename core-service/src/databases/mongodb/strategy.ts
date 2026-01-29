@@ -16,11 +16,11 @@
  * - Static imports
  */
 
-import { getDatabase, getClient } from './mongodb.js';
-import { logger } from '../common/logger.js';
+import { getDatabase, getClient } from './connection.js';
+import { logger } from '../../common/logger.js';
 import { createHash } from 'node:crypto';
 import type { Db, MongoClient } from 'mongodb';
-import type { MongoConfig } from './mongodb.js';
+import type { MongoConfig } from './connection.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -483,7 +483,7 @@ export class DatabaseStrategyResolver {
    */
   private async connectToDatabase(uri: string, dbName: string, cacheKey: string, context?: DatabaseContext): Promise<Db> {
     // Import dynamically to avoid circular dependency
-    const { connectDatabase, getClient } = await import('./mongodb.js');
+    const { connectDatabase, getClient } = await import('./connection.js');
     
     // For per-service strategy (and other multi-database strategies), we need to:
     // 1. Connect the client once (if not already connected) - this establishes the connection pool
@@ -537,39 +537,6 @@ export class DatabaseStrategyResolver {
 
 /**
  * Create a database strategy resolver
- * 
- * @example
- * // Shared database (all services)
- * const resolver = createDatabaseStrategy({
- *   strategy: 'shared',
- * });
- * 
- * @example
- * // Per-service database
- * const resolver = createDatabaseStrategy({
- *   strategy: 'per-service',
- *   dbNameTemplate: '{service}_db',
- * });
- * 
- * @example
- * // Per-brand database
- * const resolver = createDatabaseStrategy({
- *   strategy: 'per-brand',
- *   dbNameTemplate: 'brand_{brand}',
- *   uriTemplate: 'mongodb://localhost:27017/{brand}',
- * });
- * 
- * @example
- * // Hybrid (custom resolver)
- * const resolver = createDatabaseStrategy({
- *   strategy: 'hybrid',
- *   resolver: async (ctx) => {
- *     if (ctx.service === 'auth-service') {
- *       return getAuthDatabase();
- *     }
- *     return getDefaultDatabase();
- *   },
- * });
  */
 export function createDatabaseStrategy(config: DatabaseStrategyConfig): DatabaseStrategyResolver {
   return new DatabaseStrategyResolver(config);
@@ -578,11 +545,6 @@ export function createDatabaseStrategy(config: DatabaseStrategyConfig): Database
 /**
  * Get database using strategy resolver
  * Convenience function for common use cases
- * 
- * @example
- * const db = await getDatabaseByStrategy('per-service', {
- *   service: 'auth-service',
- * });
  */
 export async function getDatabaseByStrategy(
   strategy: DatabaseStrategy,
@@ -612,33 +574,6 @@ export interface DatabaseResolutionOptions {
 
 /**
  * Resolve database instance from options
- * 
- * Generic utility function for resolving database instances from strategy options.
- * This eliminates code duplication across services and repositories.
- * 
- * @param options - Database resolution options
- * @param serviceName - Service name (e.g., 'auth-service', 'payment-service')
- * @param tenantId - Optional tenant ID for context
- * @returns Resolved database instance
- * @throws Error if neither database nor databaseStrategy with context is provided
- * 
- * @example
- * ```typescript
- * // In a service constructor
- * constructor(options?: { database?: Db; databaseStrategy?: DatabaseStrategyResolver; defaultContext?: DatabaseContext }) {
- *   // Store options
- * }
- * 
- * // In a method
- * async someMethod(tenantId?: string) {
- *   const db = await resolveDatabase(
- *     { database: this.db, databaseStrategy: this.databaseStrategy, defaultContext: this.defaultContext },
- *     'auth-service',
- *     tenantId
- *   );
- *   // Use db...
- * }
- * ```
  */
 export async function resolveDatabase(
   options: DatabaseResolutionOptions,
@@ -673,9 +608,6 @@ export async function resolveDatabase(
 // Pre-configured Strategies
 // ═══════════════════════════════════════════════════════════════════
 
-/**
- * Shared database strategy (single database for all services)
- */
 export function createSharedDatabaseStrategy(defaultDatabase?: Db): DatabaseStrategyResolver {
   return createDatabaseStrategy({
     strategy: 'shared',
@@ -683,15 +615,6 @@ export function createSharedDatabaseStrategy(defaultDatabase?: Db): DatabaseStra
   });
 }
 
-/**
- * Per-service database strategy
- * Each service has its own database (no brand separation)
- * 
- * @example
- * const strategy = createPerServiceDatabaseStrategy();
- * // Results in: auth_service, payment_service, etc.
- * // Each service has its own database (brands share within service)
- */
 export function createPerServiceDatabaseStrategy(
   dbNameTemplate?: string,
   uriTemplate?: string
@@ -703,14 +626,6 @@ export function createPerServiceDatabaseStrategy(
   });
 }
 
-/**
- * Per-brand database strategy
- * Each brand has its own database (all services share within brand)
- * 
- * @example
- * const strategy = createPerBrandDatabaseStrategy();
- * // Results in: brand_brand-a (all services share this database)
- */
 export function createPerBrandDatabaseStrategy(
   dbNameTemplate?: string,
   uriTemplate?: string
@@ -722,15 +637,6 @@ export function createPerBrandDatabaseStrategy(
   });
 }
 
-/**
- * Per-brand-service database strategy
- * Each brand+service combination has its own database (max isolation)
- * 
- * @example
- * const strategy = createPerBrandServiceDatabaseStrategy();
- * // Results in: brand_brand-a_auth_service, brand_brand-a_payment_service, etc.
- * // Each service within each brand has its own database
- */
 export function createPerBrandServiceDatabaseStrategy(
   dbNameTemplate?: string,
   uriTemplate?: string
@@ -742,15 +648,6 @@ export function createPerBrandServiceDatabaseStrategy(
   });
 }
 
-/**
- * Per-tenant database strategy
- * Each tenant has its own database (all services share within tenant)
- * Follows same pattern as per-brand - tenants are like brands for isolation
- * 
- * @example
- * const strategy = createPerTenantDatabaseStrategy();
- * // Results in: tenant_tenant-123 (all services share this database)
- */
 export function createPerTenantDatabaseStrategy(
   dbNameTemplate?: string,
   uriTemplate?: string
@@ -762,16 +659,6 @@ export function createPerTenantDatabaseStrategy(
   });
 }
 
-/**
- * Per-tenant-service database strategy
- * Each tenant+service combination has its own database (max isolation)
- * Follows same pattern as per-brand-service - tenants are like brands
- * 
- * @example
- * const strategy = createPerTenantServiceDatabaseStrategy();
- * // Results in: tenant_tenant-123_auth_service, tenant_tenant-123_payment_service, etc.
- * // Each service within each tenant has its own database
- */
 export function createPerTenantServiceDatabaseStrategy(
   dbNameTemplate?: string,
   uriTemplate?: string
@@ -783,43 +670,6 @@ export function createPerTenantServiceDatabaseStrategy(
   });
 }
 
-/**
- * Per-shard database strategy
- * Horizontal partitioning/sharding for scalability
- * 
- * Supports hash-based sharding (default) or custom shard function
- * 
- * @example
- * // Hash-based sharding (default)
- * const strategy = createPerShardDatabaseStrategy({
- *   numShards: 8, // 8 shards
- * });
- * 
- * // Usage
- * const db = await strategy.resolve({
- *   service: 'auth-service',
- *   shardKey: 'user-123', // Will hash and route to one of 8 shards
- * });
- * // → shard_3 (or shard_0-7 based on hash)
- * 
- * @example
- * // Range-based sharding (custom function)
- * const strategy = createPerShardDatabaseStrategy({
- *   numShards: 4,
- *   shardFunction: (key, numShards) => {
- *     // Simple modulo for numeric keys
- *     return Number(key) % numShards;
- *   },
- * });
- * 
- * @example
- * // Shard per service
- * const strategy = createPerShardDatabaseStrategy({
- *   numShards: 4,
- *   dbNameTemplate: 'shard_{shard}_{service}',
- * });
- * // → shard_0_auth_service, shard_1_auth_service, etc.
- */
 export function createPerShardDatabaseStrategy(
   options?: {
     numShards?: number;

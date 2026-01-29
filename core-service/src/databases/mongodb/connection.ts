@@ -10,7 +10,7 @@
  */
 
 import { MongoClient, Db, ReadPreference, WriteConcern } from 'mongodb';
-import { logger } from '../common/logger.js';
+import { logger } from '../../common/logger.js';
 
 let client: MongoClient | null = null;
 let db: Db | null = null;

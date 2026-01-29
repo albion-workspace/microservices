@@ -6,7 +6,7 @@
  */
 
 import type { Collection, Filter, Document, FindOptions } from 'mongodb';
-import { logger } from '../common/logger.js';
+import { logger } from '../../common/logger.js';
 
 export interface CursorPaginationOptions {
   /** Number of items to return (default: 20) */

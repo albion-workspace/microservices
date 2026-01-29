@@ -9,7 +9,7 @@
  * - Stale-while-revalidate pattern
  */
 
-import { getRedis } from './redis.js';
+import { getRedis } from './redis/connection.js';
 import { logger } from '../common/logger.js';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -175,6 +175,13 @@ export async function clearCache(): Promise<void> {
     }
   }
   
+  memoryCache.clear();
+}
+
+/**
+ * Clear only memory cache (does not affect Redis)
+ */
+export function clearMemoryCache(): void {
   memoryCache.clear();
 }
 
