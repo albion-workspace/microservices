@@ -189,6 +189,66 @@ await db.ensureIndexes();
 | `getStats()` | Database statistics |
 | `registerIndexes(collection, indexes)` | Register indexes |
 | `ensureIndexes()` | Create registered indexes |
+| `getConnectionPoolStats()` | Get pool stats (total/checked-out connections) |
+
+### MongoDB 7.x Best Practices
+
+This project uses **MongoDB Node.js Driver 7.x** with the following best practices:
+
+**Connection Pool Monitoring** (event-based, not internal API):
+```typescript
+// ✅ Correct: Use event-based tracking or accessor method
+const stats = db.getConnectionPoolStats(); // { totalConnections, checkedOut }
+const health = await db.checkHealth();     // includes connections & checkedOut
+
+// ❌ Wrong: Never access internal topology
+// client.topology?.s?.pool?.totalConnectionCount  // Internal API, can break
+```
+
+**Index Creation** (no deprecated options):
+```typescript
+// ✅ Correct: MongoDB 4.2+ uses optimized builds by default
+db.registerIndexes('wallets', [
+  { key: { userId: 1 } },
+  { key: { id: 1 }, unique: true },
+  { key: { createdAt: -1 }, sparse: true },
+]);
+
+// ❌ Wrong: 'background' option is deprecated
+// { key: { userId: 1 }, background: true }  // Deprecated in MongoDB 4.2+
+```
+
+**Transactions** (use `withTransaction`):
+```typescript
+// ✅ Correct: Use withTransaction helper
+import { withTransaction } from 'core-service';
+
+const result = await withTransaction({
+  client: db.getClient(),
+  fn: async (session) => {
+    await collection1.updateOne({...}, {...}, { session });
+    await collection2.insertOne({...}, { session });
+    return { success: true };
+  },
+});
+
+// ✅ Also correct: session.withTransaction
+const session = db.getClient().startSession();
+try {
+  await session.withTransaction(async () => {
+    // ... operations with { session }
+  });
+} finally {
+  await session.endSession();
+}
+```
+
+**Removed/Deprecated Options** (don't use):
+- `useNewUrlParser` - Removed in driver 4.0+
+- `useUnifiedTopology` - Removed in driver 4.0+
+- `useFindAndModify` - Removed in driver 4.0+
+- `useCreateIndex` - Removed in driver 4.0+
+- `background` (index option) - Deprecated in MongoDB 4.2+
 
 **Lower-level API** (for internal/advanced use):
 

@@ -269,6 +269,65 @@ import type { RegisterInput } from './types.js';
   - Include their own business logic implementations
   - Define their own domain-specific types and schemas
 
+### MongoDB Best Practices (Driver 7.x)
+
+This project uses **MongoDB Node.js Driver 7.x**. Follow these practices:
+
+**Database Access Pattern**:
+```typescript
+// ✅ Correct: Use ServiceDatabaseAccessor
+import { createServiceDatabaseAccess } from 'core-service';
+export const db = createServiceDatabaseAccess('payment-service');
+
+// Initialize once at startup
+await db.initialize({ brand, tenantId });
+
+// Use in service code
+const database = await db.getDb();
+const collection = database.collection('wallets');
+```
+
+**Connection Pool Monitoring** - Use event-based tracking:
+```typescript
+// ✅ Correct: Event-based stats via accessor
+const stats = getConnectionPoolStats();  // { totalConnections, checkedOut }
+const health = await db.checkHealth();   // includes connections & latency
+
+// ❌ Wrong: Never access internal topology (not a public API)
+// client.topology?.s?.pool?.totalConnectionCount
+```
+
+**Index Creation** - No deprecated options:
+```typescript
+// ✅ Correct: Modern options only
+db.registerIndexes('collection', [
+  { key: { field: 1 }, unique: true },
+  { key: { field: -1 }, sparse: true },
+]);
+
+// ❌ Wrong: 'background' is deprecated in MongoDB 4.2+
+// { key: { field: 1 }, background: true }
+```
+
+**Transactions** - Use `withTransaction`:
+```typescript
+// ✅ Correct: withTransaction helper or session.withTransaction
+import { withTransaction } from 'core-service';
+
+await withTransaction({
+  client: db.getClient(),
+  fn: async (session) => {
+    await col1.updateOne({...}, {...}, { session });
+    await col2.insertOne({...}, { session });
+  },
+});
+```
+
+**Deprecated/Removed Options** - Never use:
+- `useNewUrlParser`, `useUnifiedTopology`, `useFindAndModify`, `useCreateIndex` - Removed in driver 4.0+
+- `background` (index option) - Deprecated in MongoDB 4.2+
+- Internal topology access (`client.topology?.s?.pool`) - Not a public API
+
 ### GraphQL
 - **Always**: Keep GraphQL schemas and TypeScript types in sync
 - **Always**: Use cursor-based pagination (not offset)
