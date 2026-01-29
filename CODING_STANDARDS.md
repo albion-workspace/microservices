@@ -328,6 +328,76 @@ await withTransaction({
 - `background` (index option) - Deprecated in MongoDB 4.2+
 - Internal topology access (`client.topology?.s?.pool`) - Not a public API
 
+### Redis Best Practices (node-redis v5)
+
+This project uses **node-redis v5.10.0+**. Follow these practices:
+
+**Service Redis Accessor Pattern**:
+```typescript
+// ✅ Correct: Use ServiceRedisAccessor
+import { createServiceRedisAccess } from 'core-service';
+export const redis = createServiceRedisAccess('payment-service');
+
+// Initialize with brand context
+await redis.initialize({ brand: 'acme' });
+
+// Keys are auto-prefixed: {brand}:{service}:{key}
+await redis.set('tx:123', { status: 'pending' }, 300);
+const value = await redis.get<T>('tx:123');
+```
+
+**Key Scanning** - Use SCAN iterator, NOT KEYS:
+```typescript
+// ✅ Correct: SCAN iterator (non-blocking, production-safe)
+import { scanKeysIterator, scanKeysArray } from 'core-service';
+const keys = await scanKeysArray({ pattern: 'user:*', maxKeys: 1000 });
+
+// Or use accessor's pattern methods
+const keys = await redis.keys('tx:*');  // Uses SCAN internally
+await redis.deletePattern('expired:*'); // Uses SCAN internally
+
+// ❌ Wrong: KEYS command blocks entire Redis server
+// await client.keys('user:*');  // DO NOT USE - blocks Redis!
+```
+
+**Pattern Deletion** - Use SCAN-based deletion:
+```typescript
+// ✅ Correct: Uses SCAN internally (non-blocking)
+import { deleteCachePattern } from 'core-service';
+await deleteCachePattern('user:*');
+
+// ❌ Wrong: KEYS + DEL blocks Redis
+// const keys = await client.keys('user:*');
+// await client.del(keys);
+```
+
+**Read/Write Splitting** (when infrastructure supports):
+```typescript
+// ✅ Correct: Use dedicated functions
+import { getRedis, getRedisForRead, hasReadReplica } from 'core-service';
+
+const master = getRedis();        // Always use for writes
+const reader = getRedisForRead(); // Use for reads (replica or master fallback)
+
+// Check if replica available
+if (hasReadReplica()) {
+  // Read from replica
+}
+```
+
+**Connection Features** (node-redis v5.10.0+):
+- `keepAlive: true` - TCP keep-alive enabled by default
+- `noDelay: true` - Nagle's algorithm disabled for lower latency
+- Exponential backoff with jitter for reconnection
+- `clientName` - Visible in `CLIENT LIST` for debugging
+- `pingInterval` - Keep-alive for Azure Cache and similar
+
+**Anti-Patterns to Avoid**:
+- ❌ `KEYS *` - Blocks entire Redis server
+- ❌ Large batch operations without pipelining
+- ❌ Storing large values (>100KB) without compression
+- ❌ Using Redis as primary database (use for cache/state only)
+
 ### GraphQL
 - **Always**: Keep GraphQL schemas and TypeScript types in sync
 - **Always**: Use cursor-based pagination (not offset)
@@ -768,8 +838,7 @@ Before considering work complete:
 
 ## 📚 Additional Resources
 
-- `README.md` - Project overview, architecture, database strategy, dynamic configuration, and future roadmap
-- `ARCHITECTURE_IMPROVEMENTS.md` - Detailed architectural improvements tracking and priorities
+- `README.md` - Project overview, architecture, database layer, caching, Redis, GraphQL gateway, access control, resilience patterns, event system, error handling, configuration, testing, sharding guide, disaster recovery, and roadmap
 
 ---
 
