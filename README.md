@@ -1182,6 +1182,241 @@ The recovery system automatically handles stuck operations:
 
 ## Roadmap
 
+### TODO - MongoDB Hot Path Scaling ⚠️ CRITICAL
+
+At 10M+ users, MongoDB becomes the first bottleneck. Current architecture uses MongoDB as ledger + query engine + consistency engine simultaneously.
+
+**Symptoms you'll see:**
+- P95 latency spikes on `createTransferWithTransactions`, balance reads
+- MongoDB CPU fine, but lock wait time rises
+- "Everything is indexed" but still slow
+
+**Current Hot Paths (all hit MongoDB directly):**
+- `getOrCreateWallet()` - findOne per call, no caching
+- `createTransferWithTransactions()` - 2 wallet reads + writes per transfer
+- `userWallets` query - direct collection scan
+- Balance validation - reads wallet document every time
+
+**Phase 1 - Immediate (no infra change):**
+- [ ] **Write-through cache for balances** - Cache wallet.balance in Redis on write
+- [ ] **Balance reads from Redis** - Fast path for balance checks
+- [ ] **Read replicas for queries** - Route `userWallets` to secondaries
+
+```typescript
+// Example: Write-through pattern for balances
+async function updateWalletBalance(walletId: string, newBalance: number, session: ClientSession) {
+  // 1. Write to MongoDB (source of truth)
+  await walletsCollection.updateOne({ id: walletId }, { $set: { balance: newBalance } }, { session });
+  
+  // 2. Write-through to Redis (after transaction commits)
+  await setCache(`wallet:balance:${walletId}`, newBalance, 300); // 5min TTL
+}
+
+async function getWalletBalance(walletId: string): Promise<number> {
+  // Fast path: Redis
+  const cached = await getCache<number>(`wallet:balance:${walletId}`);
+  if (cached !== null) return cached;
+  
+  // Slow path: MongoDB + populate cache
+  const wallet = await walletsCollection.findOne({ id: walletId });
+  await setCache(`wallet:balance:${walletId}`, wallet.balance, 300);
+  return wallet.balance;
+}
+```
+
+**Phase 2 - Next step (still MongoDB):**
+- [ ] **Append-only transaction log** - Transactions are immutable events
+- [ ] **Periodic balance reconciliation** - Job that rebuilds wallet.balance from transactions
+- [ ] **Wallet document as derived state** - Balance = SUM(transactions), not source of truth
+
+This buys ~5-10x headroom before needing infrastructure changes.
+
+### TODO - Redis Segmentation by Purpose ⚠️
+
+At scale, mixed workloads on same Redis can cause issues. Purpose-based segmentation isolates workloads.
+
+**Current Architecture:**
+- ✅ **Master-slave / Sentinel / Read replicas** - Already supported for HA + read scaling
+- ⚠️ **Purpose segmentation** - All workloads share same logical Redis
+
+**Mixed Usage (all purposes on same Redis):**
+| Purpose | Key Prefix | Risk at Scale |
+|---------|-----------|---------------|
+| Cache | `{collection}:*` | High churn, eviction pressure |
+| Recovery state | `operation_state:*` | Periodic scans by recovery job |
+| Pending ops | `pending:*` | Pattern scans for token lookup |
+| Sessions | Service-specific | Hot keys (VIP users) |
+| Pub/Sub | Channels | Subscriber load |
+
+**Why segmentation helps (when needed):**
+- Cache eviction won't affect sessions
+- Recovery job scans isolated from cache
+- Pub/Sub load doesn't affect query cache
+- Different eviction policies per workload
+
+**Future Segmentation (if needed at scale):**
+| Redis Instance | Purpose |
+|----------------|---------|
+| `redis-core` | Sessions, auth tokens |
+| `redis-state` | Recovery, pending ops |
+| `redis-cache` | Wallet & query cache |
+| `redis-pub` | Pub/Sub, SSE, Socket.IO |
+
+**Implementation:**
+- [ ] Support multiple Redis URLs: `REDIS_CACHE_URL`, `REDIS_STATE_URL`, etc.
+- [ ] Route operations to appropriate Redis instance by key prefix
+
+**Already implemented:**
+- ✅ SCAN used instead of KEYS (no blocking)
+- ✅ TTLs set on all keys
+- ✅ Master-slave / Sentinel / Read replica support
+- ✅ Key prefixing via service accessor
+- ✅ Per-brand Redis instances (optional)
+
+### TODO - Event-Driven Recovery (Scale Optimization) ⚠️
+
+Current recovery job uses **scan-based** approach - O(total) complexity:
+
+```typescript
+// Current: Scans ALL operation_state:transfer:* keys every 5 minutes
+const keys = await scanKeysArray({ pattern: 'operation_state:transfer:*' });
+for (const key of keys) {
+  const data = await redis.get(key);  // N GETs
+  if (isStuck(data)) recover(key);
+}
+```
+
+**At scale (10M users):** Thousands of concurrent transfers = Redis pressure every 5 min.
+
+**Mitigating factors already in place:**
+- ✅ TTLs bound key count (60s in-progress, 300s completed)
+- ✅ SCAN not KEYS (non-blocking)
+- ✅ `maxKeys: 1000` safeguard
+
+**Recommended: Event-driven recovery (O(stuck) complexity):**
+```typescript
+// Instead of scanning all keys, each operation schedules its own recovery
+async function startOperation(operationId: string) {
+  await stateTracker.setState(operationId, 'transfer', { status: 'in_progress' });
+  
+  // Schedule delayed recovery check (Redis Streams or Sorted Set)
+  await scheduleRecoveryCheck(operationId, 'transfer', 60); // 60s timeout
+}
+
+// Recovery worker processes only scheduled checks (not all keys)
+async function processRecoveryQueue() {
+  // Only processes operations that scheduled a check AND didn't complete
+  const due = await redis.zRangeByScore('recovery:scheduled', 0, Date.now());
+  for (const operationId of due) {
+    const state = await stateTracker.getState(operationId, 'transfer');
+    if (state?.status === 'in_progress') {
+      await recoverOperation(operationId);
+    }
+    await redis.zRem('recovery:scheduled', operationId);
+  }
+}
+```
+
+**Implementation options:**
+- [ ] Redis Sorted Sets (ZADD with timestamp, ZRANGEBYSCORE for due items)
+- [ ] Redis Streams (XADD with delay, consumer groups)
+- [ ] BullMQ delayed jobs
+
+**Benefit:** Recovery becomes O(stuck) not O(total) - only checks operations that:
+1. Scheduled a recovery check AND
+2. Didn't complete/cancel the check
+
+**Note:** Current implementation works fine up to ~10K concurrent operations. Optimize when needed.
+
+### TODO - Real-Time Connection Scaling (SSE + Socket.IO) ⚠️
+
+At scale, SSE and Socket.IO connections become a horizontal scaling bottleneck.
+
+**Current Architecture:**
+```typescript
+// Gateway manages connection state in memory
+const sseConnections = new Map<string, SSEConnection>();  // Per gateway instance
+activeSubscriptions.set(socketId, new Map());             // Per gateway instance
+```
+
+**Issues at scale (10M users):**
+- SSE = long-lived connections, memory per node grows
+- Socket.IO = stateful, needs sticky sessions or Redis adapter
+- Horizontal scaling doesn't help without session affinity
+
+**What's already good:**
+- ✅ Redis pub/sub fallback for cross-instance events
+- ✅ Notification service delegates to gateway (doesn't manage connections)
+- ✅ Socket.IO supports Redis adapter (not yet configured)
+
+**Phase 1 - Enable Socket.IO Redis Adapter:**
+```typescript
+import { createAdapter } from '@socket.io/redis-adapter';
+
+const io = new SocketIOServer(server, {
+  adapter: createAdapter(pubClient, subClient),  // Add this
+});
+```
+
+**Phase 2 - Dedicated Real-Time Edge Layer (if needed):**
+| Current | Recommended at Scale |
+|---------|---------------------|
+| Gateway handles connections | Dedicated edge service |
+| Notification-service pushes | Notification-service = producer only |
+| Stateful per node | Stateless business services |
+
+**Core Rule:** Business services should not manage connection state. Push delivery to dedicated edge layer.
+
+**Implementation options:**
+- [ ] Socket.IO Redis adapter for clustering
+- [ ] Dedicated WebSocket gateway (e.g., Centrifugo, Pusher)
+- [ ] Managed service (AWS API Gateway WebSocket, Azure SignalR)
+
+### TODO - Auth Service Scaling ⚠️
+
+Auth-service handles: login, sessions, OTP, social login, pending operations.
+
+**What's already optimized ✅:**
+- JWT contains roles/permissions (no DB lookup per request)
+- Token verification at gateway (no auth-service call per request)
+- Permission caching with multi-level cache (Memory → Redis)
+- Cross-instance invalidation via Redis pub/sub
+
+**Remaining concerns at scale:**
+| Issue | Impact |
+|-------|--------|
+| Sessions in MongoDB | Token refresh requires DB lookup |
+| Login/logout hits DB | Login storms → DB pressure |
+| Admin queries | Can scan large datasets |
+
+**Phase 1 - Session caching (recommended):**
+```typescript
+// Cache session validation in Redis
+async function validateRefreshToken(token: string): Promise<Session | null> {
+  const tokenHash = await hashToken(token);
+  
+  // Fast path: Redis cache
+  const cached = await getCache<Session>(`session:${tokenHash}`);
+  if (cached) return cached;
+  
+  // Slow path: MongoDB + populate cache
+  const session = await db.collection('sessions').findOne({ tokenHash });
+  if (session) await setCache(`session:${tokenHash}`, session, 300);
+  return session;
+}
+```
+
+**Phase 2 - Split auth (if needed at scale):**
+| Service | Responsibility |
+|---------|----------------|
+| `identity-service` | Login, tokens, sessions |
+| `authorization-service` | Access-engine, permissions |
+
+**Already implemented:**
+- ✅ Gateway handles token verification (stateless)
+- ✅ Permissions embedded in JWT (no lookup per request)
+- ✅ Access-engine caches compiled permissions
+
 ### TODO - Notification Service Resilience ⚠️
 
 The notification service has fan-out risk (Email + SMS + WhatsApp + SSE + Socket.IO). Missing protections:
@@ -1219,6 +1454,62 @@ return await this.circuitBreaker.execute(async () => {
 ### Rate Limiting Note
 
 > Implement rate limiting at infrastructure level (nginx, Cloudflare, AWS WAF) for better performance and DDoS protection.
+
+### TODO - Testing Infrastructure ⚠️
+
+Current tests have operational friction that blocks CI/CD scaling.
+
+**Current Issues:**
+| Issue | Evidence | Impact |
+|-------|----------|--------|
+| **Order-dependent** | "Make sure payment tests have run first" | Can't parallelize |
+| **Drop databases** | `dropAllDatabases()` in payment tests | Slow CI, data loss |
+| **Cross-service coupling** | Bonus tests depend on payment-created users | Fragile pipelines |
+| **Shared mutable state** | Tests modify same users/wallets | Race conditions |
+
+**Current test flow (problematic):**
+```
+Payment tests (drops DBs, creates users) → Bonus tests (uses payment users) → Auth tests
+                    ↑                                    ↑
+                 ORDER MATTERS                    COUPLING
+```
+
+**Recommended fixes:**
+
+**Phase 1 - Immutable fixtures:**
+```typescript
+// Each test creates its own isolated data
+async function withTestUser(testFn: (user: TestUser) => Promise<void>) {
+  const user = await createIsolatedTestUser();  // Unique per test
+  try {
+    await testFn(user);
+  } finally {
+    await cleanupTestUser(user);  // Cleanup only own data
+  }
+}
+```
+
+**Phase 2 - Contract tests per service:**
+```typescript
+// Each service has independent tests with mocked dependencies
+describe('payment-service', () => {
+  beforeAll(() => mockAuthService());  // Mock, don't depend
+  it('creates transfer', () => { ... });
+});
+```
+
+**Phase 3 - Seeded test environments:**
+```typescript
+// Pre-seeded database snapshots for consistent state
+await loadTestFixture('baseline-users');  // Immutable snapshot
+// Tests run against snapshot, don't modify
+```
+
+**Benefits:**
+- ✅ Parallel test execution
+- ✅ Faster CI (no DB drops)
+- ✅ Reproducible failures
+- ✅ Independent service testing
 
 ### Completed
 

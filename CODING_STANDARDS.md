@@ -393,10 +393,44 @@ if (hasReadReplica()) {
 - `pingInterval` - Keep-alive for Azure Cache and similar
 
 **Anti-Patterns to Avoid**:
-- ❌ `KEYS *` - Blocks entire Redis server
+- ❌ `KEYS *` - Blocks entire Redis server (use `scanKeysArray` instead)
 - ❌ Large batch operations without pipelining
 - ❌ Storing large values (>100KB) without compression
 - ❌ Using Redis as primary database (use for cache/state only)
+
+**Already Supported (HA + Read Scaling)**:
+```typescript
+// Master-slave with Sentinel (auto-failover)
+await connectRedis({
+  sentinel: { hosts: [{ host: 'sentinel1', port: 26379 }], name: 'mymaster' }
+});
+
+// Read replicas (read/write splitting)
+await connectRedis({
+  url: 'redis://master:6379',
+  readReplicas: { enabled: true, urls: ['redis://replica1:6379'] }
+});
+
+// Per-brand Redis instances
+await configureRedisStrategy({
+  strategy: 'per-brand',
+  defaultUrl: 'redis://default:6379',
+  brandUrls: { 'brand-a': 'redis://brand-a:6379' }
+});
+```
+
+**Future: Purpose-Based Segmentation (if needed at scale)**:
+```typescript
+// Segment by workload type (not yet implemented)
+// REDIS_CACHE_URL=redis://cache:6379    // High churn, evictable
+// REDIS_STATE_URL=redis://state:6379    // Recovery, pending ops
+// REDIS_SESSION_URL=redis://session:6379 // Auth sessions
+
+// Key prefix convention (already in use):
+// {service}:{category}:{key}
+// payment-service:cache:wallet:123
+// auth-service:session:user:456
+```
 
 ### Caching Best Practices (Multi-Level Cache)
 
@@ -461,6 +495,39 @@ UserCache.pattern();       // 'user*'
 - ❌ Very long TTLs without invalidation strategy
 - ❌ Caching user-specific data without proper key namespacing
 - ❌ Forgetting to invalidate cache after data changes
+
+**Hot Path Caching (Balance Reads) ⚠️**:
+
+Balance reads are the #1 hot path at scale. Use write-through caching:
+
+```typescript
+// ✅ Correct: Write-through for balances
+async function updateWalletBalance(walletId: string, newBalance: number) {
+  // 1. Write to MongoDB (source of truth)
+  await walletsCollection.updateOne({ id: walletId }, { $set: { balance: newBalance } });
+  
+  // 2. Write-through to Redis (non-blocking, outside transaction)
+  setCache(`wallet:balance:${walletId}`, newBalance, 300).catch(() => {});
+}
+
+// ✅ Correct: Fast balance read
+async function getWalletBalance(walletId: string): Promise<number> {
+  // Fast path: Redis
+  const cached = await getCache<number>(`wallet:balance:${walletId}`);
+  if (cached !== null) return cached;
+  
+  // Slow path: MongoDB (populate cache on miss)
+  const wallet = await findOneById(walletsCollection, walletId);
+  if (wallet) await setCache(`wallet:balance:${walletId}`, wallet.balance, 300);
+  return wallet?.balance ?? 0;
+}
+
+// ❌ Wrong: Always hitting MongoDB for balance
+const wallet = await walletsCollection.findOne({ id: walletId });  // No cache!
+return wallet.balance;
+```
+
+**Note**: This pattern is not yet implemented in core-service. See README "TODO - MongoDB Hot Path Scaling" for migration plan.
 
 ### GraphQL
 - **Always**: Keep GraphQL schemas and TypeScript types in sync
@@ -551,6 +618,21 @@ createTransferWithTransactions(params, { session }); // Not tracked
 - If saga and recovery both try to handle the same operation → double transfer/reversal
 - If compensation runs after recovery → inconsistent state
 - Financial operations MUST use transactions for atomic rollback
+
+**Recovery Job Scaling Note**:
+
+Current recovery uses scan-based approach (O(total)):
+```typescript
+// Every 5 minutes, scans ALL operation_state:transfer:* keys
+const keys = await scanKeysArray({ pattern: 'operation_state:transfer:*' });
+for (const key of keys) { /* check if stuck */ }
+```
+
+**Mitigating factors:**
+- ✅ TTLs bound key count (60s in-progress, 300s completed)
+- ✅ SCAN not KEYS (non-blocking)
+
+**At scale (10M users):** Consider event-driven recovery (O(stuck)) using Redis Sorted Sets or Streams. See README "TODO - Event-Driven Recovery" for implementation pattern.
 
 ---
 
@@ -923,6 +1005,24 @@ async send(notification) {
 - **Always**: Update test scripts when APIs change
 - **Always**: Verify test scripts use latest patterns
 - **Always**: Check for dynamic imports and their necessity
+
+**Current Test Limitations (Technical Debt):**
+```
+⚠️ Tests are currently order-dependent and coupled:
+   - Payment tests must run first (creates users, drops DBs)
+   - Bonus tests depend on payment-created users
+   - Auth tests depend on registered users
+```
+
+**Best Practices (future improvements):**
+- ❌ **Avoid**: Tests that depend on other test suites running first
+- ❌ **Avoid**: Dropping entire databases in tests
+- ❌ **Avoid**: Shared mutable state between test suites
+- ✅ **Prefer**: Isolated test data created per test/suite
+- ✅ **Prefer**: Contract tests with mocked dependencies
+- ✅ **Prefer**: Immutable fixtures loaded from snapshots
+
+See README "TODO - Testing Infrastructure" for migration plan.
 
 ---
 
