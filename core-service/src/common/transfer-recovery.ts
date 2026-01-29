@@ -22,6 +22,7 @@ import type { Transfer } from './transfer-helper.js';
 import { createTransferWithTransactions, type CreateTransferParams } from './transfer-helper.js';
 import type { RecoveryHandler, RecoverableOperation } from './recovery.js';
 import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/strategy.js';
+import { getTransfersCollection, getTransactionsCollection } from './wallet-types.js';
 
 /**
  * Create reverse transfer (opposite direction)
@@ -91,7 +92,7 @@ export function createTransferRecoveryHandler(options?: {
      */
     findOperation: async (id: string, session?: ClientSession): Promise<Transfer | null> => {
       const database = await getDb();
-      const transfersCollection = database.collection('transfers');
+      const transfersCollection = getTransfersCollection(database);
       const transfer = await transfersCollection.findOne(
         { id },
         { session }
@@ -104,7 +105,7 @@ export function createTransferRecoveryHandler(options?: {
      */
     findRelatedTransactions: async (id: string, session?: ClientSession): Promise<unknown[]> => {
       const database = await getDb();
-      const transactionsCollection = database.collection('transactions');
+      const transactionsCollection = getTransactionsCollection(database);
       const transactions = await transactionsCollection
         .find(
           {
@@ -129,7 +130,7 @@ export function createTransferRecoveryHandler(options?: {
      */
     deleteOperation: async (id: string, session: ClientSession): Promise<void> => {
       const database = await getDb();
-      const transfersCollection = database.collection('transfers');
+      const transfersCollection = getTransfersCollection(database);
       await transfersCollection.deleteOne({ id }, { session });
     },
 
@@ -143,7 +144,7 @@ export function createTransferRecoveryHandler(options?: {
       session: ClientSession
     ): Promise<void> => {
       const database = await getDb();
-      const transfersCollection = database.collection('transfers');
+      const transfersCollection = getTransfersCollection(database);
       await transfersCollection.updateOne(
         { id },
         {

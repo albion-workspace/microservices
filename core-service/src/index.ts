@@ -49,6 +49,12 @@ export type {
 
 // Wallet Types and Utilities (Type-safe wallet access, validation, helpers)
 export {
+  // Collection constants and getters
+  COLLECTION_NAMES,
+  getWalletsCollection,
+  getTransfersCollection,
+  getTransactionsCollection,
+  // Wallet utilities
   getWalletId,
   getWalletBalance,
   getWalletAllowNegative,
@@ -71,6 +77,7 @@ export type {
   ResolvedDatabase,
   TransactionOptions,
   WalletUpdateOptions,
+  CollectionName,
 } from './common/wallet-types.js';
 
 // Recovery System (Generic - works with transfers, orders, etc.)

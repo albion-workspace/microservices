@@ -4,7 +4,7 @@
 
 **Project Status**: Pre-Production - This project has not yet been released to production. Code cleanup rules are simplified (no backward compatibility concerns). After production/release, these rules will be updated to include backward compatibility and legacy code management.
 
-**Last Updated**: 2026-01-28
+**Last Updated**: 2026-01-29
 
 ---
 
@@ -201,12 +201,12 @@ import type { RegisterInput } from './types.js';
 ## 🏗️ Architecture Patterns
 
 ### Core-Service Architecture
-- **Core-Service is Generic Only**: Contains only shared, generic utilities and patterns
+- **Core-Service is the Single Source of Truth**: Provides shared database abstractions, utilities, and patterns
 - **Microservices Extend Core-Service**: Each microservice adds specialized functionality on top
 - **Never**: Add service-specific logic to `core-service`
-- **Never**: Include infrastructure dependencies (MongoDB, Redis) in `core-service` - these belong in microservices
-- **Always**: Keep `core-service` dependency-free from databases and caches
-- **Pattern**: `core-service` provides abstractions (e.g., `createService`, `emit`, `on`), microservices implement specifics
+- **Never**: Import `mongodb` or `redis` directly in microservices - always use `core-service` exports
+- **Always**: Use database types from `core-service` (`Db`, `ClientSession`, `Collection`, etc.)
+- **Pattern**: `core-service` provides database abstractions and utilities, microservices use them for business logic
 
 ### Microservices
 - **Always**: Build services in dependency order
@@ -247,25 +247,27 @@ import type { RegisterInput } from './types.js';
   ```
 - **Event Format**: Follow `IntegrationEvent<T>` structure (eventId, eventType, timestamp, tenantId, userId, data)
 - **Never**: Use direct HTTP calls between services - use events instead
-- **Never**: Include MongoDB or Redis clients in `core-service` - event system uses Redis but is abstracted
 - **Always**: Services define their own event types - `core-service` provides generic pub/sub infrastructure
 
 ### Dependencies & Infrastructure
+- **Core-Service**: Provides (single source of truth):
+  - Database abstractions (`getDatabase`, `getClient`, `connectDatabase`)
+  - Database utilities (`findOneById`, `paginateCollection`, `buildIdQuery`)
+  - Database types (`Db`, `ClientSession`, `Collection`, `Filter`, `MongoClient`)
+  - Redis abstractions (`getRedis`, `connectRedis`)
+  - Generic utilities (logging, retry, circuit breaker)
+  - Generic patterns (saga, gateway, event system)
+  - Type definitions and interfaces
+  - Shared helpers (pagination, validation, wallet operations)
 - **Core-Service**: Must NOT include:
-  - MongoDB client dependencies
-  - Redis client dependencies
   - Service-specific database schemas
   - Service-specific business logic
-- **Core-Service**: SHOULD include:
-  - Generic utilities (logging, retry, circuit breaker)
-  - Generic patterns (saga, gateway, event system abstractions)
-  - Type definitions and interfaces
-  - Shared helpers (pagination, validation)
-- **Microservices**: Include their own:
-  - MongoDB connections and models
-  - Redis connections (if needed)
-  - Database-specific schemas
-  - Business logic implementations
+  - Domain-specific types (these belong in services)
+- **Microservices**: 
+  - **Always**: Import database types from `core-service`, never from `mongodb` directly
+  - **Always**: Use `core-service` utilities for database operations
+  - Include their own business logic implementations
+  - Define their own domain-specific types and schemas
 
 ### GraphQL
 - **Always**: Keep GraphQL schemas and TypeScript types in sync

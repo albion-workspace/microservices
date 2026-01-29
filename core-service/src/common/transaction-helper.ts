@@ -30,6 +30,9 @@ import {
   validateBalanceForDebit,
   resolveDatabaseConnection,
   getBalanceFieldName,
+  withTransaction,
+  getWalletsCollection,
+  getTransactionsCollection,
 } from './wallet-types.js';
 
 // Re-export transaction state types from transaction-state.ts
@@ -211,7 +214,7 @@ export async function createTransaction(
 ): Promise<CreateTransactionResult> {
   const { db, client } = await resolveDatabaseConnection(options || {}, 'createTransaction');
   
-  const transactionsCollection = db.collection('transactions');
+  const transactionsCollection = getTransactionsCollection(db);
   const session = options?.session;
   
   const {
@@ -269,7 +272,7 @@ export async function createTransaction(
       await transactionsCollection.insertOne(transaction, { session: txSession });
       
       // Update wallet atomically (within transaction)
-      const walletsCollection = db.collection('wallets');
+      const walletsCollection = getWalletsCollection(db);
       const update: Record<string, any> = {
         $inc: { [balanceField]: charge === 'credit' ? netAmount : -amount },
         $set: { lastActivityAt: new Date(), updatedAt: new Date() }
@@ -355,7 +358,7 @@ export async function createTransactions(
 ): Promise<CreateTransactionResult[]> {
   const { db, client } = await resolveDatabaseConnection(options || {}, 'createTransactions');
   
-  const transactionsCollection = db.collection('transactions');
+  const transactionsCollection = getTransactionsCollection(db);
   const session = options?.session;
   
   // Core transaction logic (reusable with or without external session)
@@ -438,7 +441,7 @@ export async function createTransactions(
       }
       
       // Update all wallets
-      const walletsCollection = db.collection('wallets');
+      const walletsCollection = getWalletsCollection(db);
       for (const [walletKey, { wallet, updates }] of walletUpdates) {
         await walletsCollection.updateOne(
           { userId: wallet.userId, currency: wallet.currency, tenantId: wallet.tenantId },

@@ -48,6 +48,10 @@ import {
   resolveDatabaseConnection,
   getBalanceFieldName,
   buildWalletUpdate,
+  withTransaction,
+  getWalletsCollection,
+  getTransfersCollection,
+  getTransactionsCollection,
 } from './wallet-types.js';
 
 
@@ -245,7 +249,7 @@ export async function getOrCreateWallet(
     throw new Error('getOrCreateWallet requires either database or databaseStrategy with context');
   }
   
-  const walletsCollection = db.collection('wallets');
+  const walletsCollection = getWalletsCollection(db);
   const session = options?.session;
   
   // Try to find existing wallet
@@ -382,8 +386,8 @@ export async function createTransferWithTransactions(
 ): Promise<CreateTransferResult> {
   const { db, client } = await resolveDatabaseConnection(options || {}, 'createTransferWithTransactions');
   
-  const transfersCollection = db.collection('transfers');
-  const transactionsCollection = db.collection('transactions');
+  const transfersCollection = getTransfersCollection(db);
+  const transactionsCollection = getTransactionsCollection(db);
   const session = options?.session;
   
   // Destructure params for cleaner code
@@ -477,7 +481,7 @@ export async function createTransferWithTransactions(
     
     // Ensure existing system wallet has allowNegative=true (in case it was created before this fix)
     if (isSystemUser && !getWalletAllowNegative(fromWallet)) {
-      const walletsCollection = db.collection('wallets');
+      const walletsCollection = getWalletsCollection(db);
       await walletsCollection.updateOne(
         { id: fromWalletId },
         { $set: { allowNegative: true } },
@@ -644,7 +648,7 @@ export async function createTransferWithTransactions(
       );
       
       // Update wallets atomically (within transaction)
-      const walletsCollection = db.collection('wallets');
+      const walletsCollection = getWalletsCollection(db);
       const fromUpdate: Record<string, any> = {
         $inc: { [fromBalanceField]: -amount },
         $set: { lastActivityAt: new Date(), updatedAt: new Date() }
@@ -855,9 +859,9 @@ export async function approveTransfer(
 ): Promise<Transfer> {
   const { db, client } = await resolveDatabaseConnection(options || {}, 'approveTransfer');
   
-  const transfersCollection = db.collection('transfers');
-  const transactionsCollection = db.collection('transactions');
-  const walletsCollection = db.collection('wallets');
+  const transfersCollection = getTransfersCollection(db);
+  const transactionsCollection = getTransactionsCollection(db);
+  const walletsCollection = getWalletsCollection(db);
   const session = options?.session;
   
   const executeApproval = async (txSession: ClientSession): Promise<Transfer> => {
@@ -1092,8 +1096,8 @@ export async function declineTransfer(
 ): Promise<Transfer> {
   const { db, client } = await resolveDatabaseConnection(options || {}, 'declineTransfer');
   
-  const transfersCollection = db.collection('transfers');
-  const transactionsCollection = db.collection('transactions');
+  const transfersCollection = getTransfersCollection(db);
+  const transactionsCollection = getTransactionsCollection(db);
   const reason = options?.reason;
   const session = options?.session;
   

@@ -9,8 +9,45 @@
  * - Database resolution helpers
  */
 
-import type { Db, MongoClient, ClientSession } from 'mongodb';
+import type { Db, MongoClient, ClientSession, Collection, Document } from 'mongodb';
 import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/strategy.js';
+
+// ═══════════════════════════════════════════════════════════════════
+// Collection Names (Single source of truth)
+// ═══════════════════════════════════════════════════════════════════
+
+export const COLLECTION_NAMES = {
+  WALLETS: 'wallets',
+  TRANSFERS: 'transfers',
+  TRANSACTIONS: 'transactions',
+} as const;
+
+export type CollectionName = typeof COLLECTION_NAMES[keyof typeof COLLECTION_NAMES];
+
+// ═══════════════════════════════════════════════════════════════════
+// Collection Getters (Centralized collection access)
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Get the wallets collection from a database
+ */
+export function getWalletsCollection<T extends Document = Document>(db: Db): Collection<T> {
+  return db.collection<T>(COLLECTION_NAMES.WALLETS);
+}
+
+/**
+ * Get the transfers collection from a database
+ */
+export function getTransfersCollection<T extends Document = Document>(db: Db): Collection<T> {
+  return db.collection<T>(COLLECTION_NAMES.TRANSFERS);
+}
+
+/**
+ * Get the transactions collection from a database
+ */
+export function getTransactionsCollection<T extends Document = Document>(db: Db): Collection<T> {
+  return db.collection<T>(COLLECTION_NAMES.TRANSACTIONS);
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // Wallet Type Definition

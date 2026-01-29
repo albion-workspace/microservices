@@ -805,6 +805,20 @@ After implementing remaining improvements:
     - `payment-service/src/index.ts` - merged duplicate core-service imports, consolidated local imports
     - `payment-service/src/services/transaction.ts` - moved Node built-in (crypto) to top
     - `bonus-service/src/index.ts` - grouped core-service/access with core-service imports
+
+- **MongoDB Collection Consolidation** (2026-01-29):
+  - Created `COLLECTION_NAMES` constants in `wallet-types.ts` (single source of truth)
+  - Created collection getter helpers: `getWalletsCollection()`, `getTransfersCollection()`, `getTransactionsCollection()`
+  - Replaced 18 hardcoded collection string literals across:
+    - `transfer-helper.ts` - 6 occurrences
+    - `transaction-helper.ts` - 4 occurrences
+    - `transfer-recovery.ts` - 4 occurrences
+  - Benefits: Type-safe collection access, single source of truth for collection names, easier refactoring
+
+- **CODING_STANDARDS Documentation Update** (2026-01-29):
+  - Updated to reflect actual architecture where core-service provides database abstractions
+  - Changed from "Never include MongoDB in core-service" to "core-service is single source of truth for database operations"
+  - Added rule: "Never import `mongodb` directly in microservices - always use `core-service` exports"
 - **Remaining TODOs**: 5 items in auth-service - intentional placeholders for notification provider setup
 - **Last Scan**: 2026-01-29 - Full codebase scan performed
 
