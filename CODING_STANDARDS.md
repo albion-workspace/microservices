@@ -251,10 +251,10 @@ import type { RegisterInput } from './types.js';
 
 ### Dependencies & Infrastructure
 - **Core-Service**: Provides (single source of truth):
-  - Database abstractions (`getDatabase`, `getClient`, `connectDatabase`)
+  - Database abstractions (`getDatabase`, `getClient`, `connectDatabase`, `createServiceDatabaseAccess`)
   - Database utilities (`findOneById`, `paginateCollection`, `buildIdQuery`)
   - Database types (`Db`, `ClientSession`, `Collection`, `Filter`, `MongoClient`)
-  - Redis abstractions (`getRedis`, `connectRedis`)
+  - Redis abstractions (`createServiceRedisAccess`, `configureRedisStrategy`)
   - Generic utilities (logging, retry, circuit breaker)
   - Generic patterns (saga, gateway, event system)
   - Type definitions and interfaces

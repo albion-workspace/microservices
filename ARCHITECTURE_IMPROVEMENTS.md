@@ -295,6 +295,11 @@ Some files don't follow strict import grouping (blank lines between groups).
   - `core-service/src/common/integration.ts` - Removed deprecated aliases
   - `core-service/src/databases/mongodb-utils.ts` - Removed `findUserById()`
   - `core-service/src/databases/redis.ts` - Removed `scanKeys()`
+- ✅ **Redis Strategy Pattern implemented** (2026-01-29):
+  - `core-service/src/databases/service-redis.ts` - ServiceRedisAccessor with auto-prefixing
+  - Per-service accessors: `bonus-service/src/redis.ts`, `auth-service/src/redis.ts`
+  - Key prefixing: `{brand}:{service}:{key}` for multi-tenant isolation
+  - Full API: get/set/del, mget/mset, scan, publish/subscribe, checkHealth, getStats
 
 ### 2.2 Clean Up TODOs ⚠️ PARTIALLY COMPLETE
 
@@ -760,7 +765,7 @@ After refactoring access control to use `RoleResolver` from `access-engine`, the
 - ✅ Fix auth-service/ARCHITECTURE.md pagination example
 - 🟡 auth-service TODO comments (5 items - documented as intentional placeholders)
 
-### ✅ Completed (14 items)
+### ✅ Completed (15 items)
 - Remove legacy code (ledger.ts deleted, extractDocumentId helper created)
 - Remove @deprecated code (events.ts, integration.ts, mongodb-utils.ts, redis.ts)
 - Add core-service versioning
@@ -775,6 +780,7 @@ After refactoring access control to use `RoleResolver` from `access-engine`, the
 - Comprehensive documentation
 - React app enhancements
 - Documentation fixes (ARCHITECTURE.md pagination)
+- Redis Strategy Pattern (ServiceRedisAccessor with multi-tenant key prefixing)
 
 ### ⏳ In Progress / Next Priority (6 items)
 - Distributed tracing (OpenTelemetry)

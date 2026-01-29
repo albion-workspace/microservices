@@ -268,6 +268,91 @@ const db = await getServiceDatabase('bonus-service', { brand, tenantId });
 const bonuses = db.collection('user_bonuses');
 ```
 
+### Redis Strategy Pattern
+
+Similar to MongoDB, Redis supports multi-brand isolation with automatic key prefixing.
+
+**Recommended: Service Redis Accessor**:
+
+```typescript
+// redis.ts - Create ONE accessor per service
+import { createServiceRedisAccess, configureRedisStrategy } from 'core-service';
+
+// Configure strategy at app startup (once)
+await configureRedisStrategy({
+  strategy: 'shared',           // 'shared' or 'per-brand'
+  defaultUrl: 'redis://localhost:6379',
+  // Optional: per-brand URLs (used when strategy is 'per-brand')
+  brandUrls: {
+    'brand_a': 'redis://redis-a.example.com:6379',
+    'brand_b': 'redis://redis-b.example.com:6379',
+  },
+});
+
+// Create accessor for your service
+export const redis = createServiceRedisAccess('payment-service');
+
+// Initialize with brand context
+await redis.initialize({ brand: 'acme' });
+
+// Use - keys are automatically prefixed as {brand}:{service}:{key}
+await redis.set('tx:state:123', { status: 'pending' }, 300);
+// Actually stores: acme:payment:tx:state:123
+
+const value = await redis.get<{ status: string }>('tx:state:123');
+
+// Batch operations
+const values = await redis.mget(['key1', 'key2']);
+await redis.mset([
+  { key: 'a', value: 1, ttl: 60 },
+  { key: 'b', value: 2 },
+]);
+
+// Scan & delete pattern
+const keys = await redis.keys('tx:*');
+await redis.deletePattern('expired:*');
+
+// Pub/sub (channels also prefixed)
+await redis.publish('events', { type: 'transfer.completed' });
+const unsubscribe = await redis.subscribe('events', (msg) => console.log(msg));
+
+// Health & stats
+const health = await redis.checkHealth();
+const stats = await redis.getStats();
+```
+
+**ServiceRedisAccessor API**:
+
+| Method | Description |
+|--------|-------------|
+| `initialize(options?)` | Initialize with brand context |
+| `getClient()` | Get raw Redis client |
+| `buildKey(key)` | Build prefixed key |
+| `get<T>(key)` | Get value (auto-parsed JSON) |
+| `set(key, value, ttl?)` | Set value with optional TTL |
+| `del(key)` | Delete key |
+| `exists(key)` | Check key exists |
+| `expire(key, ttl)` | Set TTL on existing key |
+| `mget<T>(keys)` | Get multiple values |
+| `mset(entries)` | Set multiple values |
+| `keys(pattern)` | Get keys matching pattern |
+| `deletePattern(pattern)` | Delete matching keys |
+| `publish(channel, message)` | Publish to channel |
+| `subscribe(channel, handler)` | Subscribe to channel |
+| `checkHealth()` | Health check with latency |
+| `getStats()` | Redis statistics |
+
+**Key Prefix Strategy**:
+```
+{brand}:{service}:{category}:{key}
+
+Examples:
+  acme:payment:tx:state:123       → Transaction state
+  acme:payment:cache:wallet:456   → Wallet cache
+  acme:auth:session:user:789      → User session
+  acme:bonus:pending:approval:abc → Pending approval
+```
+
 **Database Architecture**:
 
 ```

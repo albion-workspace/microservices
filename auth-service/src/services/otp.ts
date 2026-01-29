@@ -4,7 +4,7 @@
  * Uses PendingOperationStore (JWT-based) for unified OTP storage pattern
  */
 
-import { logger, createPendingOperationStore, getRedis } from 'core-service';
+import { logger, createPendingOperationStore } from 'core-service';
 import { db } from '../database.js';
 import type { SendOTPInput, VerifyOTPInput, OTPResponse, OTPChannel, OTPPurpose } from '../types.js';
 import { generateOTP, hashToken } from '../utils.js';

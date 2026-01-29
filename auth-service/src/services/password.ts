@@ -6,7 +6,7 @@
  * This eliminates database writes for temporary reset operations
  */
 
-import { logger, normalizeDocument, findById, createPendingOperationStore, getRedis } from 'core-service';
+import { logger, normalizeDocument, findById, createPendingOperationStore } from 'core-service';
 import { db } from '../database.js';
 import type { 
   ForgotPasswordInput, 

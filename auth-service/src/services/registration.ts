@@ -3,7 +3,7 @@
  * Handles user registration with flexible identifiers (username/email/phone)
  */
 
-import { logger, generateMongoId, createRegistrationStore, getRedis, createPendingOperationStore, resolveDatabase, type DatabaseStrategyResolver, type DatabaseContext, type Db } from 'core-service';
+import { logger, generateMongoId, createRegistrationStore, createPendingOperationStore, resolveDatabase, type DatabaseStrategyResolver, type DatabaseContext, type Db } from 'core-service';
 import type { RegisterInput, User, AuthResponse, OTPChannel, DeviceInfo } from '../types.js';
 import { 
   validatePassword, 

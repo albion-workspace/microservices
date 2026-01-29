@@ -50,6 +50,30 @@ export type {
 } from './databases/service-database.js';
 
 // ═══════════════════════════════════════════════════════════════════
+// Service Redis Access (RECOMMENDED - use this in microservices)
+// ═══════════════════════════════════════════════════════════════════
+// 
+// Standard pattern for all microservices:
+//   1. Create accessor: export const redis = createServiceRedisAccess('my-service');
+//   2. Initialize at startup: await redis.initialize({ brand });
+//   3. Use anywhere: await redis.set('key', value, ttl);
+//
+// Keys are automatically prefixed: {brand}:{service}:{key}
+//
+export {
+  createServiceRedisAccess,
+  configureRedisStrategy,
+  closeAllRedisConnections,
+} from './databases/service-redis.js';
+export type {
+  ServiceRedisAccessor,
+  RedisStrategyConfig,
+  ServiceRedisOptions,
+  RedisHealthResult,
+  RedisStats,
+} from './databases/service-redis.js';
+
+// ═══════════════════════════════════════════════════════════════════
 // Saga Pattern (Business Logic)
 // ═══════════════════════════════════════════════════════════════════
 export { createService, generateId, executeSaga } from './saga/index.js';

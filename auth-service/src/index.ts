@@ -34,12 +34,14 @@ import {
   ensureDefaultConfigsCreated,
   resolveContext,
   initializeWebhooks,
+  configureRedisStrategy,
   type IntegrationEvent,
   type ResolverContext,
   type DatabaseStrategyResolver,
   type DatabaseContext,
 } from 'core-service';
 import { db } from './database.js';
+import { redis } from './redis.js';
 
 import { loadConfig, validateConfig, printConfigSummary } from './config.js';
 import { AUTH_CONFIG_DEFAULTS } from './config-defaults.js';
@@ -533,6 +535,20 @@ async function main() {
   await createGateway({
     ...config,
   });
+
+  // Initialize Redis accessor (after gateway connects to Redis)
+  if (process.env.REDIS_URL) {
+    try {
+      await configureRedisStrategy({
+        strategy: 'shared',
+        defaultUrl: process.env.REDIS_URL,
+      });
+      await redis.initialize({ brand: context.brand });
+      logger.info('Redis accessor initialized', { brand: context.brand });
+    } catch (err) {
+      logger.warn('Could not initialize Redis accessor', { error: (err as Error).message });
+    }
+  }
 
   // Ensure all registered default configs are created in database
   // This happens after database connection is established
