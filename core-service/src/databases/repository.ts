@@ -142,8 +142,8 @@ export function createRepository<T extends { id: string }>(
     },
 
     async findMany(opts: FindManyOptions): Promise<{ items: T[]; total: number }> {
-      const { filter = {}, skip = 0, take = 20, sort, fields } = opts;
-      const cacheKey = `${cachePrefix}:list:${JSON.stringify({ filter, skip, take, sort, fields })}`;
+      const { filter = {}, take = 20, sort, fields } = opts;
+      const cacheKey = `${cachePrefix}:list:${JSON.stringify({ filter, take, sort, fields })}`;
 
       return withCache(cacheKey, ttl?.list ?? 60, async () => {
         const col = await getCollection(opts.context);
@@ -158,10 +158,10 @@ export function createRepository<T extends { id: string }>(
         };
 
         // Use Promise.all for parallel execution
+        // Note: For pagination, use cursor-based pagination (paginateCollection) instead
         const [items, total] = await Promise.all([
           col.find(mongoFilter, findOptions)
             .sort(sort || { createdAt: -1 })
-            .skip(skip)
             .limit(take)
             .toArray(),
           // Use estimatedDocumentCount when no filter (much faster)

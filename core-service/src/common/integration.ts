@@ -510,15 +510,3 @@ export function createTypedUnifiedEmitter<TEvent extends string, TData>(
   };
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// Backward Compatibility (deprecated - will be removed in v2)
-// ═══════════════════════════════════════════════════════════════════
-
-/** @deprecated Use emit() instead */
-export const publishEvent = emitEvent;
-
-/** @deprecated Use on() instead */
-export const subscribeToEvents = on;
-
-/** @deprecated Use startListening() instead */
-export const startEventListener = startListening;

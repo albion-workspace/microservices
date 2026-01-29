@@ -182,24 +182,6 @@ export interface ScanOptions {
 }
 
 /**
- * General-purpose Redis key scanner (legacy - use scanKeysIterator for better performance)
- * Uses scanKeysIterator internally for consistency
- * 
- * @deprecated Use scanKeysIterator() directly for better performance
- * @example
- * ```typescript
- * const keys = [];
- * for await (const key of scanKeys({ pattern: 'tx:state:*', maxKeys: 1000 })) {
- *   keys.push(key);
- * }
- * ```
- */
-export async function* scanKeys(options: ScanOptions = {}): AsyncGenerator<string, void, unknown> {
-  // Delegate to scanKeysIterator for consistency
-  yield* scanKeysIterator(options);
-}
-
-/**
  * Scan Redis keys and return all matching keys as an array
  * Useful for small result sets or when you need all keys at once
  * 

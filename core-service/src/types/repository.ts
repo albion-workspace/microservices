@@ -52,7 +52,7 @@ export interface Repository<T> {
 
 export interface FindManyOptions {
   filter?: Record<string, unknown>;
-  skip?: number;
+  /** Number of items to return */
   take?: number;
   sort?: Record<string, 1 | -1>;
   /** Select specific fields only (projection) */

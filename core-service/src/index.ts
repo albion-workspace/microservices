@@ -282,7 +282,6 @@ export {
   subscribe, 
   closeRedis, 
   checkRedisHealth,
-  scanKeys,
   scanKeysIterator,
   scanKeysArray,
   scanKeysWithCallback,
@@ -550,8 +549,6 @@ export {
   createEmitter,
   createHandler,
   buildEvent,
-  subscribeToEvents,
-  startEventListener,
 } from './common/integration.js';
 export type { IntegrationEvent, EmitOptions, UnifiedEmitOptions } from './common/integration.js';
 

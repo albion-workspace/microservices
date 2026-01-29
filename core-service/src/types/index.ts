@@ -102,37 +102,21 @@ export {
 
 // ═══════════════════════════════════════════════════════════════════
 // Events (cross-service communication)
+// Use these with IntegrationEvent<T> from integration.ts
 // ═══════════════════════════════════════════════════════════════════
 
-// Example event data types (services can define their own)
 export type {
   DepositCompletedData,
   WithdrawalCompletedData,
+  WithdrawalRequestedData,
   BonusCreditedData,
   BonusConvertedData,
   BonusForfeitedData,
+  TurnoverCompletedData,
+  TurnoverProgressData,
   UserRegisteredData,
   UserVerifiedData,
 } from './events.js';
-
-// Legacy event types (deprecated - use emit<T>() with IntegrationEvent<T>)
-export type {
-  BaseEvent,
-  IntegrationEvent,
-  DepositCompletedEvent,
-  WithdrawalCompletedEvent,
-  WithdrawalRequestedEvent,
-  BonusCreditedEvent,
-  BonusConvertedEvent,
-  BonusForfeitedEvent,
-  TurnoverCompletedEvent,
-  TurnoverProgressEvent,
-  WageringCompletedEvent,
-  WageringProgressEvent,
-  UserRegisteredEvent,
-  UserVerifiedEvent,
-} from './events.js';
-export { createEvent } from './events.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // References (cross-service linking)

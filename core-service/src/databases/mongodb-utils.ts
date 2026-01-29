@@ -198,19 +198,6 @@ export async function findById<T = Document>(
 }
 
 /**
- * Find a document by ID (alias for findById for backward compatibility)
- * @deprecated Use findById instead
- */
-export async function findUserById<T = any>(
-  collection: Collection,
-  userId: string | null | undefined,
-  tenantId?: string
-): Promise<T | null> {
-  const additionalFields = tenantId ? { tenantId } : {};
-  return findById<T>(collection, userId, additionalFields);
-}
-
-/**
  * Extract document ID from a MongoDB document
  * Returns id field if present, otherwise converts _id to string
  * Returns null if neither id nor _id is present
