@@ -147,7 +147,50 @@ A flexible database architecture that supports multiple strategies:
 | `per-tenant` | `createPerTenantDatabaseStrategy()` | `tenant_{tenantId}` | Multi-tenant SaaS |
 | `per-shard` | `createPerShardDatabaseStrategy()` | `shard_0`, `shard_1` | Horizontal partitioning |
 
-**Centralized Database Access API**:
+**Recommended: Service Database Accessor**:
+
+```typescript
+// database.ts - Create ONE accessor per service
+import { createServiceDatabaseAccess } from 'core-service';
+export const db = createServiceDatabaseAccess('payment-service');
+
+// index.ts - Initialize at startup
+await db.initialize({ brand, tenantId });
+
+// service files - Use the accessor
+const database = await db.getDb();
+const wallets = database.collection('wallets');
+
+// Cross-service access (e.g., accessing core_service from payment-service)
+const client = db.getClient();
+const coreDb = client.db(CORE_DATABASE_NAME);
+const users = coreDb.collection('users');
+
+// Health & monitoring
+const health = await db.checkHealth();
+const stats = await db.getStats();
+
+// Index management
+db.registerIndexes('wallets', [{ key: { userId: 1 } }, { key: { id: 1 }, unique: true }]);
+await db.ensureIndexes();
+```
+
+**ServiceDatabaseAccessor API**:
+
+| Method | Description |
+|--------|-------------|
+| `initialize(options?)` | Initialize database with brand/tenant context |
+| `getDb(tenantId?)` | Get database instance |
+| `getClient()` | Get MongoDB client (for sessions/transactions/cross-service) |
+| `getStrategy()` | Get database strategy resolver |
+| `getContext()` | Get database context (brand, tenant) |
+| `isInitialized()` | Check if initialized |
+| `checkHealth()` | Health check with latency & connections |
+| `getStats()` | Database statistics |
+| `registerIndexes(collection, indexes)` | Register indexes |
+| `ensureIndexes()` | Create registered indexes |
+
+**Lower-level API** (for internal/advanced use):
 
 ```typescript
 import { 
@@ -163,13 +206,6 @@ const users = coreDb.collection('users');
 // Service database (strategy-based, for business data)
 const db = await getServiceDatabase('bonus-service', { brand, tenantId });
 const bonuses = db.collection('user_bonuses');
-
-// Full initialization (for service startup)
-const { database, strategy, context } = await initializeServiceDatabase({
-  serviceName: 'bonus-service',
-  brand: process.env.BRAND,
-  tenantId: process.env.TENANT_ID,
-});
 ```
 
 **Database Architecture**:

@@ -38,7 +38,7 @@ The user structure supports flexible metadata for different use cases:
 auth-service/src/types/
 ├── user-types.ts      # User-related types
 ├── role-types.ts      # Role and permission types
-└── types.ts           # Re-exports and legacy compatibility
+└── types.ts           # Re-exports for external consumers
 ```
 
 ### Services

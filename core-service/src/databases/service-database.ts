@@ -56,6 +56,7 @@ import {
   type DatabaseResolutionOptions,
 } from './strategy.js';
 import { initializeServiceDatabase } from './strategy-config.js';
+import { getConnectionPoolStats } from './mongodb.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -65,14 +66,16 @@ export interface DatabaseIndexConfig {
   key: Record<string, 1 | -1>;
   unique?: boolean;
   sparse?: boolean;
-  background?: boolean;
   name?: string;
+  // Note: 'background' option is deprecated in MongoDB 4.2+
+  // Indexes now use an optimized build process by default
 }
 
 export interface HealthCheckResult {
   healthy: boolean;
   latencyMs: number;
   connections: number;
+  checkedOut: number;
   database: string;
   service: string;
 }
@@ -332,6 +335,7 @@ export function createServiceDatabaseAccess(serviceName: string): ServiceDatabas
           healthy: false,
           latencyMs: -1,
           connections: 0,
+          checkedOut: 0,
           database: '',
           service: serviceName,
         };
@@ -342,19 +346,14 @@ export function createServiceDatabaseAccess(serviceName: string): ServiceDatabas
         await defaultDb.command({ ping: 1 });
         const latencyMs = Date.now() - start;
         
-        // Get connection pool stats (access internal topology)
-        let connections = 0;
-        try {
-          // @ts-ignore - accessing internal for monitoring
-          connections = client.topology?.s?.pool?.totalConnectionCount || 0;
-        } catch {
-          // Ignore if we can't get connection count
-        }
+        // Use event-based connection pool stats (MongoDB 7.x best practice)
+        const poolStats = getConnectionPoolStats();
         
         return {
           healthy: true,
           latencyMs,
-          connections,
+          connections: poolStats.totalConnections,
+          checkedOut: poolStats.checkedOut,
           database: defaultDb.databaseName,
           service: serviceName,
         };
@@ -364,6 +363,7 @@ export function createServiceDatabaseAccess(serviceName: string): ServiceDatabas
           healthy: false,
           latencyMs: -1,
           connections: 0,
+          checkedOut: 0,
           database: defaultDb?.databaseName || '',
           service: serviceName,
         };
@@ -426,13 +426,12 @@ export function createServiceDatabaseAccess(serviceName: string): ServiceDatabas
             logger.debug('Created collection for indexes', { service: serviceName, collection: collName });
           }
           
-          // Create indexes
+          // Create indexes (MongoDB 4.2+ uses optimized build process by default)
           const collection = defaultDb!.collection(collName);
           await collection.createIndexes(indexes.map(idx => ({
             key: idx.key,
             unique: idx.unique,
             sparse: idx.sparse,
-            background: idx.background ?? true,
             name: idx.name,
           })));
           

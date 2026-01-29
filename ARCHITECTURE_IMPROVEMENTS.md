@@ -199,8 +199,7 @@ Some files don't follow strict import grouping (blank lines between groups).
       - `auth-service/src/database.ts` - uses 'core-service' (shared database)
       - `payment-service/src/database.ts` - uses 'payment-service'
       - `notification-service/src/database.ts` - uses 'notification-service'
-      - `bonus-service` - already used correct pattern via persistence-singleton
-    - Removed all direct `getDatabase()` calls from microservices (98+ usages replaced)
+      - `bonus-service/src/database.ts` - uses 'bonus-service'
     - Clear API: `db.initialize()` at startup, `await db.getDb()` for database access
     - Works with all database strategies (shared, per-service, per-tenant, etc.)
     - Future-proof: new services have clear pattern to follow
@@ -209,7 +208,7 @@ Some files don't follow strict import grouping (blank lines between groups).
       - `auth-service/src/database.ts` (NEW)
       - `payment-service/src/database.ts` (NEW)
       - `notification-service/src/database.ts` (NEW)
-      - Updated all service files to use `await db.getDb()` instead of `getDatabase()`
+      - `bonus-service/src/database.ts` (NEW)
 
 14. ✅ **MongoDB Pattern Consolidation** - COMPLETED (2026-01-29)
     - Created centralized collection constants: `COLLECTION_NAMES` (wallets, transfers, transactions)
@@ -219,6 +218,25 @@ Some files don't follow strict import grouping (blank lines between groups).
     - Replaced hardcoded collection strings with getters across core-service
     - Standardized import grouping across services per CODING_STANDARDS
     - **Files**: `core-service/src/common/wallet-types.ts`, `core-service/src/common/transfer-helper.ts`, `core-service/src/common/transaction-helper.ts`
+
+15. ✅ **ServiceDatabaseAccessor Enhanced API** - COMPLETED (2026-01-29)
+    - Extended `ServiceDatabaseAccessor` with full database management capabilities:
+      - `getClient()` - Get MongoDB client for sessions/transactions and cross-service database access
+      - `checkHealth()` - Database health check with latency & connection info
+      - `getStats()` - Database statistics (collections, data size, indexes)
+      - `registerIndexes(collection, indexes)` - Register indexes for a collection
+      - `ensureIndexes()` - Create all registered indexes
+      - `getRegisteredIndexes()` - Get all registered indexes
+    - Added typed interfaces: `DatabaseIndexConfig`, `HealthCheckResult`, `DatabaseStats`
+    - Updated `ConfigStore` to accept `ServiceDatabaseAccessor` via `accessor` option
+    - Services use `db.getClient()` for cross-service database access (e.g., accessing core_service from payment-service)
+    - Organized core-service exports into PUBLIC vs INTERNAL/ADVANCED sections in `index.ts`
+    - **Files**:
+      - `core-service/src/databases/service-database.ts` (UPDATED)
+      - `core-service/src/common/config-store.ts` (UPDATED)
+      - `core-service/src/index.ts` (UPDATED exports)
+      - `payment-service/src/common/reference-resolver.ts` (migrated to accessor)
+      - `bonus-service/src/services/bonus-engine/user-status.ts` (migrated to accessor)
 
 ---
 

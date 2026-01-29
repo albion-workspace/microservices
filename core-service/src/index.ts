@@ -627,6 +627,7 @@ export {
   checkDatabaseHealth,
   getClient,
   getDatabaseStats,
+  getConnectionPoolStats,
   registerIndexes,
   DEFAULT_MONGO_CONFIG,
 } from './databases/mongodb.js';

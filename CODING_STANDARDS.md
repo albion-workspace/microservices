@@ -89,7 +89,7 @@ Before making any changes, follow this checklist:
 
 3. **Internal Packages** (core-service, core-service/access, etc.)
    ```typescript
-   import { logger, getDatabase } from 'core-service';
+   import { logger, createServiceDatabaseAccess } from 'core-service';
    import { matchAnyUrn } from 'core-service/access';
    ```
 
@@ -124,7 +124,7 @@ import { Server as SocketIOServer } from 'socket.io';
 import { GraphQLSchema, GraphQLObjectType } from 'graphql';
 
 // Internal packages
-import { logger, getDatabase } from 'core-service';
+import { logger, createServiceDatabaseAccess } from 'core-service';
 import { matchAnyUrn } from 'core-service/access';
 
 // Local imports

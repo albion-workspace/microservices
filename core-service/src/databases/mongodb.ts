@@ -15,6 +15,12 @@ import { logger } from '../common/logger.js';
 let client: MongoClient | null = null;
 let db: Db | null = null;
 
+// Connection pool tracking (using events instead of internal topology access)
+let connectionPoolStats = {
+  totalConnections: 0,
+  checkedOut: 0,
+};
+
 // ═══════════════════════════════════════════════════════════════════
 // Configuration
 // ═══════════════════════════════════════════════════════════════════
@@ -136,10 +142,27 @@ export async function connectDatabase(uri: string, config: Partial<MongoConfig> 
   baseUri = currentBaseUri;
   client = new MongoClient(clientUri, clientOptions);
 
-  // Connection events
-  client.on('connectionPoolCreated', () => logger.debug('MongoDB pool created'));
-  client.on('connectionPoolClosed', () => logger.debug('MongoDB pool closed'));
-  client.on('connectionCheckedOut', () => logger.debug('MongoDB connection checked out'));
+  // Connection pool monitoring using official events (MongoDB 7.x best practice)
+  // This replaces internal topology access which is not a public API
+  client.on('connectionPoolCreated', () => {
+    logger.debug('MongoDB pool created');
+  });
+  client.on('connectionPoolClosed', () => {
+    logger.debug('MongoDB pool closed');
+    connectionPoolStats = { totalConnections: 0, checkedOut: 0 };
+  });
+  client.on('connectionCreated', () => {
+    connectionPoolStats.totalConnections++;
+  });
+  client.on('connectionClosed', () => {
+    connectionPoolStats.totalConnections = Math.max(0, connectionPoolStats.totalConnections - 1);
+  });
+  client.on('connectionCheckedOut', () => {
+    connectionPoolStats.checkedOut++;
+  });
+  client.on('connectionCheckedIn', () => {
+    connectionPoolStats.checkedOut = Math.max(0, connectionPoolStats.checkedOut - 1);
+  });
   
   await client.connect();
   
@@ -179,17 +202,31 @@ export async function closeDatabase(): Promise<void> {
     client = null;
     db = null;
     baseUri = null;
+    connectionPoolStats = { totalConnections: 0, checkedOut: 0 };
     logger.info('MongoDB disconnected');
   }
+}
+
+/**
+ * Get current connection pool statistics.
+ * Uses event-based tracking (MongoDB 7.x best practice).
+ */
+export function getConnectionPoolStats(): { totalConnections: number; checkedOut: number } {
+  return { ...connectionPoolStats };
 }
 
 // ═══════════════════════════════════════════════════════════════════
 // Health Check
 // ═══════════════════════════════════════════════════════════════════
 
-export async function checkDatabaseHealth(): Promise<{ healthy: boolean; latencyMs: number; connections: number }> {
+export async function checkDatabaseHealth(): Promise<{ 
+  healthy: boolean; 
+  latencyMs: number; 
+  connections: number;
+  checkedOut: number;
+}> {
   if (!db || !client) {
-    return { healthy: false, latencyMs: -1, connections: 0 };
+    return { healthy: false, latencyMs: -1, connections: 0, checkedOut: 0 };
   }
 
   const start = Date.now();
@@ -197,17 +234,15 @@ export async function checkDatabaseHealth(): Promise<{ healthy: boolean; latency
     await db.command({ ping: 1 });
     const latencyMs = Date.now() - start;
     
-    // Get connection pool stats
-    // @ts-ignore - accessing internal for monitoring
-    const poolSize = client.topology?.s?.pool?.totalConnectionCount || 0;
-    
+    // Use event-tracked connection pool stats (MongoDB 7.x best practice)
     return { 
       healthy: true, 
       latencyMs,
-      connections: poolSize,
+      connections: connectionPoolStats.totalConnections,
+      checkedOut: connectionPoolStats.checkedOut,
     };
   } catch {
-    return { healthy: false, latencyMs: -1, connections: 0 };
+    return { healthy: false, latencyMs: -1, connections: 0, checkedOut: 0 };
   }
 }
 
