@@ -1364,6 +1364,10 @@ async function runAllTests() {
     console.log('   ✅ Socket.IO (websocket transport) - Available via upgrade');
     console.log('   ✅ Webhooks - Works\n');
 
+    // Cleanup and exit on success
+    stopWebhookReceiver();
+    process.exit(0);
+
   } catch (err) {
     console.error('\n❌ Test suite failed:', err);
     stopWebhookReceiver();
