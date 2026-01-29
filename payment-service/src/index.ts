@@ -12,15 +12,14 @@
  * It only knows about users, amounts, currencies, and permissions.
  */
 
+// Internal packages
 import {
   createGateway,
-  // Permission helpers (native, no graphql-shield)
   hasRole,
   hasAnyRole,
   isAuthenticated,
   allow,
   logger,
-  // Cross-service integration
   on,
   startListening,
   getDatabase,
@@ -33,22 +32,20 @@ import {
   resolveContext,
   initializeServiceDatabase,
   initializeWebhooks,
-  // Webhooks - plug-and-play service
   createWebhookService,
   findOneById,
   generateMongoId,
   isDuplicateKeyError,
   createObjectModelQueryResolver,
   findUserIdByRole,
+  createTransferWithTransactions,
   type IntegrationEvent,
   type ResolverContext,
   type DatabaseStrategyResolver,
   type DatabaseContext,
 } from 'core-service';
-// Ledger service imports removed - wallets are updated atomically via createTransferWithTransactions
-import { createTransferWithTransactions } from 'core-service';
 
-// Import unified event dispatcher (handles both internal events + webhooks)
+// Local imports
 import {
   paymentWebhooks,
   emitPaymentEvent,
@@ -56,8 +53,6 @@ import {
   type PaymentWebhookEvents,
 } from './event-dispatcher.js';
 import { PAYMENT_ERROR_CODES, PAYMENT_ERRORS } from './error-codes.js';
-
-// Import configuration
 import { loadConfig, validateConfig, printConfigSummary, type PaymentConfig } from './config.js';
 import { PAYMENT_CONFIG_DEFAULTS } from './config-defaults.js';
 
@@ -91,22 +86,18 @@ import {
   transactionsQueryResolver,
 } from './services/transaction.js';
 import { transferApprovalResolvers } from './services/transfer-approval.js';
-
 import { transferService } from './services/transfer.js';
 import { setupRecovery } from './recovery-setup.js';
-
-
 import {
   walletService,
   walletResolvers,
   walletTypes,
 } from './services/wallet.js';
+import { SYSTEM_ROLE, SYSTEM_CURRENCY } from './constants.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Configuration
 // ═══════════════════════════════════════════════════════════════════
-
-import { SYSTEM_ROLE, SYSTEM_CURRENCY } from './constants.js';
 export { SYSTEM_ROLE };
 
 /**

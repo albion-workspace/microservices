@@ -11,6 +11,7 @@
  * - Multi-tenant support
  */
 
+// Internal packages
 import {
   createGateway,
   hasRole,
@@ -34,13 +35,13 @@ import {
   type ResolverContext,
 } from 'core-service';
 import { hasAnyRole as hasAnyRoleAccess } from 'core-service/access';
+
+// Local imports
 import { BONUS_ERRORS, BONUS_ERROR_CODES } from './error-codes.js';
 import { setupRecovery } from './recovery-setup.js';
 import { createBonusEngine, type BonusEngineOptions } from './services/bonus-engine/index.js';
 import { loadConfig, validateConfig, printConfigSummary, type BonusConfig } from './config.js';
 import { BONUS_CONFIG_DEFAULTS } from './config-defaults.js';
-
-// Import unified event dispatcher (handles both internal events + webhooks)
 import {
   bonusWebhooks,
   emitBonusEvent,

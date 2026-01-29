@@ -783,15 +783,28 @@ After implementing remaining improvements:
   - `startup-helpers.ts`: Refactored to use centralized `retry()` function (removed ~40 lines duplication)
   - `user-utils.ts`: Consolidated `findUserIdByRole` and `findUserIdsByRole` into shared internal function (removed ~50 lines duplication)
   - `wallet-types.ts`: NEW - Created type-safe wallet utilities:
-    - `Wallet` interface for proper typing (eliminates 20+ `as any` casts)
+    - `Wallet` interface for proper typing
     - `getWalletId()`, `getWalletBalance()`, `getWalletAllowNegative()`, etc. - type-safe accessors
     - `validateBalanceForDebit()` - shared balance validation logic
     - `resolveDatabaseConnection()` - extracted database resolution pattern (removed ~60 lines duplication)
     - `buildWalletUpdate()` - standardized wallet update builders
     - `withTransaction()` - session management wrapper
-  - `transfer-helper.ts`: Refactored to use wallet-types utilities
+    - `getBalanceFieldName()` - single source of truth for balance field names
+  - `transfer-helper.ts`: Refactored to use wallet-types utilities, proper types instead of `as any`
   - `transaction-helper.ts`: Refactored to use wallet-types utilities
+  - `transfer-recovery.ts`: Removed unnecessary `as any` cast (already typed parameter)
   - `mongodb-utils.ts`: Replaced `Filter<any>` with proper generics `Filter<T extends Document>`
+  - Removed deprecated `getBalanceField()` - replaced all usages with `getBalanceFieldName()`
+
+- **Import Grouping Standardization** (2026-01-29):
+  - Applied standard import order across all services (Node built-ins → External packages → Internal packages → Local imports)
+  - Fixed files:
+    - `core-service/src/common/transfer-helper.ts`
+    - `core-service/src/common/transaction-helper.ts`
+    - `auth-service/src/utils.ts` - moved imports from middle of file to top
+    - `payment-service/src/index.ts` - merged duplicate core-service imports, consolidated local imports
+    - `payment-service/src/services/transaction.ts` - moved Node built-in (crypto) to top
+    - `bonus-service/src/index.ts` - grouped core-service/access with core-service imports
 - **Remaining TODOs**: 5 items in auth-service - intentional placeholders for notification provider setup
 - **Last Scan**: 2026-01-29 - Full codebase scan performed
 

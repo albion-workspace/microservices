@@ -11,6 +11,10 @@
  * It only knows about users, amounts, currencies, and permissions.
  */
 
+// Node.js built-ins
+import crypto from 'crypto';
+
+// Internal packages
 import { 
   createService, 
   generateId, 
@@ -24,10 +28,12 @@ import {
   updateOneById,
   paginateCollection,
   extractDocumentId,
+  createTransferWithTransactions,
+  type ClientSession,
 } from 'core-service';
+
+// Local imports
 import type { Transaction, Transfer } from '../types.js';
-import { createTransferWithTransactions, type ClientSession } from 'core-service';
-import crypto from 'crypto';
 
 /**
  * Helper function to generate externalRef for idempotency

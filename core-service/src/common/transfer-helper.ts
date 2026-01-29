@@ -28,11 +28,14 @@
  * ```
  */
 
-import { generateId, generateMongoId, logger, deleteCachePattern } from '../index.js';
+// External packages
 import type { ClientSession, Db, MongoClient } from 'mongodb';
+
+// Local imports
+import { generateId, generateMongoId, logger, deleteCachePattern } from '../index.js';
+import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/strategy.js';
 import { createTransactionDocument, type CreateTransactionParams, type Transaction } from './transaction-helper.js';
 import { getOperationStateTracker } from './recovery.js';
-import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/strategy.js';
 import {
   type Wallet,
   type BalanceType,
