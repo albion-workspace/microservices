@@ -779,6 +779,9 @@ After implementing remaining improvements:
 - **Next Focus**: Distributed tracing, performance metrics, caching, and batch operations
 - **Code Cleanup**: ✅ Complete - All @deprecated code removed, offset pagination removed
 - **Code Quality**: TypeScript `any` usage reviewed (409 occurrences, most documented as acceptable)
+- **Code Reuse Improvements** (2026-01-29):
+  - `startup-helpers.ts`: Refactored to use centralized `retry()` function (removed ~40 lines duplication)
+  - `user-utils.ts`: Consolidated `findUserIdByRole` and `findUserIdsByRole` into shared internal function (removed ~50 lines duplication)
 - **Remaining TODOs**: 5 items in auth-service - intentional placeholders for notification provider setup
 - **Last Scan**: 2026-01-29 - Full codebase scan performed
 

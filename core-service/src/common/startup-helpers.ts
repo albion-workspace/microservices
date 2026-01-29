@@ -1,14 +1,16 @@
 /**
  * Service Startup Helpers
  * 
- * Provides robust error handling for service initialization
+ * Provides robust error handling for service initialization.
+ * Uses the centralized retry() function for consistent retry logic.
  */
 
 import { logger } from './logger.js';
 import { connectDatabase, checkDatabaseHealth } from '../databases/mongodb.js';
-import { connectRedis, getRedis, checkRedisHealth } from '../databases/redis.js';
+import { connectRedis, checkRedisHealth } from '../databases/redis.js';
 import { setupGracefulShutdown } from './lifecycle.js';
 import { getErrorMessage } from './errors.js';
+import { retry } from './retry.js';
 
 export interface StartupOptions {
   /** Service name */
@@ -21,7 +23,7 @@ export interface StartupOptions {
   requireMongo?: boolean;
   /** Whether Redis is required (default: false) */
   requireRedis?: boolean;
-  /** Max retries for database connection (default: 3) */
+  /** Number of retries after initial attempt (default: 2, total 3 attempts) */
   maxRetries?: number;
   /** Retry delay in ms (default: 2000) */
   retryDelay?: number;
@@ -36,34 +38,26 @@ export async function initializeDatabase(
   uri: string,
   options: { maxRetries?: number; retryDelay?: number } = {}
 ): Promise<void> {
-  const { maxRetries = 3, retryDelay = 2000 } = options;
-  let lastError: Error | null = null;
+  const { maxRetries = 2, retryDelay = 2000 } = options;
 
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
+  await retry(
+    async () => {
       await connectDatabase(uri);
-      // Verify connection with health check
       const health = await checkDatabaseHealth();
       if (!health.healthy) {
         throw new Error('Database health check failed');
       }
-      logger.info('Database connection established and verified');
-      return;
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
-      logger.warn(`Database connection attempt ${attempt}/${maxRetries} failed`, {
-        error: getErrorMessage(error),
-        attempt,
-        maxRetries,
-      });
-
-      if (attempt < maxRetries) {
-        await new Promise(resolve => setTimeout(resolve, retryDelay));
-      }
+    },
+    {
+      maxRetries,
+      strategy: 'fixed',
+      baseDelay: retryDelay,
+      jitter: false,
+      name: 'Database connection',
     }
-  }
+  );
 
-  throw new Error(`Failed to connect to database after ${maxRetries} attempts: ${getErrorMessage(lastError)}`);
+  logger.info('Database connection established and verified');
 }
 
 /**
@@ -73,7 +67,7 @@ export async function initializeRedis(
   url: string | undefined,
   options: { required?: boolean; maxRetries?: number; retryDelay?: number } = {}
 ): Promise<boolean> {
-  const { required = false, maxRetries = 3, retryDelay = 2000 } = options;
+  const { required = false, maxRetries = 2, retryDelay = 2000 } = options;
 
   if (!url) {
     if (required) {
@@ -83,38 +77,35 @@ export async function initializeRedis(
     return false;
   }
 
-  let lastError: Error | null = null;
-
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      await connectRedis(url);
-      // Verify connection with health check
-      const health = await checkRedisHealth();
-      if (!health.healthy) {
-        throw new Error('Redis health check failed');
-      }
-      logger.info('Redis connection established and verified');
-      return true;
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
-      logger.warn(`Redis connection attempt ${attempt}/${maxRetries} failed`, {
-        error: getErrorMessage(error),
-        attempt,
+  try {
+    await retry(
+      async () => {
+        await connectRedis(url);
+        const health = await checkRedisHealth();
+        if (!health.healthy) {
+          throw new Error('Redis health check failed');
+        }
+      },
+      {
         maxRetries,
-      });
-
-      if (attempt < maxRetries) {
-        await new Promise(resolve => setTimeout(resolve, retryDelay));
+        strategy: 'fixed',
+        baseDelay: retryDelay,
+        jitter: false,
+        name: 'Redis connection',
       }
+    );
+
+    logger.info('Redis connection established and verified');
+    return true;
+  } catch (error) {
+    if (required) {
+      throw error;
     }
+    logger.warn('Redis connection failed - continuing without Redis', {
+      error: getErrorMessage(error),
+    });
+    return false;
   }
-
-  if (required) {
-    throw new Error(`Failed to connect to Redis after ${maxRetries} attempts: ${getErrorMessage(lastError)}`);
-  }
-
-  logger.warn(`Redis connection failed after ${maxRetries} attempts - continuing without Redis`);
-  return false;
 }
 
 /**
@@ -130,20 +121,18 @@ export async function initializeService(options: StartupOptions): Promise<{
     redisUrl,
     requireMongo = true,
     requireRedis = false,
-    maxRetries = 3,
+    maxRetries = 2,
     retryDelay = 2000,
     enableGracefulShutdown = true,
   } = options;
 
   logger.info(`Initializing ${serviceName}...`);
 
-  // Setup graceful shutdown handlers
   if (enableGracefulShutdown) {
     setupGracefulShutdown();
     logger.debug('Graceful shutdown handlers registered');
   }
 
-  // Initialize database
   let databaseConnected = false;
   if (mongoUri) {
     try {
@@ -155,17 +144,15 @@ export async function initializeService(options: StartupOptions): Promise<{
           error: getErrorMessage(error),
         });
         throw error;
-      } else {
-        logger.warn(`Database initialization failed for ${serviceName} - continuing without database`, {
-          error: getErrorMessage(error),
-        });
       }
+      logger.warn(`Database initialization failed for ${serviceName} - continuing without database`, {
+        error: getErrorMessage(error),
+      });
     }
   } else if (requireMongo) {
     throw new Error(`MongoDB URI is required for ${serviceName} but not provided`);
   }
 
-  // Initialize Redis
   let redisConnected = false;
   try {
     redisConnected = await initializeRedis(redisUrl, {
@@ -180,7 +167,6 @@ export async function initializeService(options: StartupOptions): Promise<{
       });
       throw error;
     }
-    // Already logged in initializeRedis
   }
 
   logger.info(`${serviceName} initialization complete`, {
@@ -211,13 +197,12 @@ export async function safeInitialize<T>(
     if (required) {
       logger.error(`Failed to initialize ${name} (required)`, { error: errorMsg });
       throw error;
-    } else {
-      if (logError) {
-        logger.warn(`Failed to initialize ${name} (optional) - continuing without it`, {
-          error: errorMsg,
-        });
-      }
-      return null;
     }
+    if (logError) {
+      logger.warn(`Failed to initialize ${name} (optional) - continuing without it`, {
+        error: errorMsg,
+      });
+    }
+    return null;
   }
 }
