@@ -67,6 +67,7 @@ export {
   validateBalanceForDebit,
   resolveDatabaseConnection,
   getBalanceFieldName,
+  buildWalletActivityUpdate,
   buildWalletUpdate,
   withTransaction,
 } from './common/wallet-types.js';

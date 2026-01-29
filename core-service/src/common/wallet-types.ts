@@ -354,6 +354,20 @@ export interface WalletUpdateOptions {
 }
 
 /**
+ * Build MongoDB $set for wallet activity timestamps
+ * Use this when updating wallet without balance changes
+ */
+export function buildWalletActivityUpdate(): { $set: { lastActivityAt: Date; updatedAt: Date } } {
+  const now = new Date();
+  return {
+    $set: {
+      lastActivityAt: now,
+      updatedAt: now,
+    },
+  };
+}
+
+/**
  * Build MongoDB update document for wallet balance change
  */
 export function buildWalletUpdate(options: WalletUpdateOptions): Record<string, unknown> {
@@ -364,10 +378,7 @@ export function buildWalletUpdate(options: WalletUpdateOptions): Record<string, 
     $inc: {
       [balanceField]: charge === 'credit' ? netAmount : -amount,
     },
-    $set: {
-      lastActivityAt: new Date(),
-      updatedAt: new Date(),
-    },
+    ...buildWalletActivityUpdate(),
   };
   
   const $inc = update.$inc as Record<string, number>;

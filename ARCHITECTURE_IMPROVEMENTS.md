@@ -825,6 +825,15 @@ After implementing remaining improvements:
     - `recovery.ts` (1 occurrence)
   - Benefits: Single source of truth for MongoDB transaction settings, consistent behavior across all transactional operations
 
+- **Wallet Activity Update Consolidation** (2026-01-29):
+  - Created `buildWalletActivityUpdate()` helper in `wallet-types.ts`
+  - Returns `{ $set: { lastActivityAt, updatedAt } }` with consistent timestamps
+  - Replaced 7 duplicated timestamp patterns across:
+    - `transfer-helper.ts` (5 occurrences)
+    - `transaction-helper.ts` (2 occurrences)
+  - Also updated `buildWalletUpdate()` to use this helper internally
+  - Benefits: Consistent timestamps (same Date object for both fields), single source of truth
+
 - **CODING_STANDARDS Documentation Update** (2026-01-29):
   - Updated to reflect actual architecture where core-service provides database abstractions
   - Changed from "Never include MongoDB in core-service" to "core-service is single source of truth for database operations"

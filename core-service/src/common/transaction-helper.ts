@@ -30,6 +30,7 @@ import {
   validateBalanceForDebit,
   resolveDatabaseConnection,
   getBalanceFieldName,
+  buildWalletActivityUpdate,
   withTransaction,
   getWalletsCollection,
   getTransactionsCollection,
@@ -276,7 +277,7 @@ export async function createTransaction(
       const walletsCollection = getWalletsCollection(db);
       const update: Record<string, any> = {
         $inc: { [balanceField]: charge === 'credit' ? netAmount : -amount },
-        $set: { lastActivityAt: new Date(), updatedAt: new Date() }
+        ...buildWalletActivityUpdate()
       };
       
       // Update lifetime stats for real balance credits
@@ -395,7 +396,7 @@ export async function createTransactions(
         // Track wallet updates
         const walletKey = `${userId}:${currency}:${tenantId}`;
         if (!walletUpdates.has(walletKey)) {
-          walletUpdates.set(walletKey, { wallet, updates: { $set: { lastActivityAt: new Date(), updatedAt: new Date() } } });
+          walletUpdates.set(walletKey, { wallet, updates: buildWalletActivityUpdate() });
         }
         
         const walletData = walletUpdates.get(walletKey)!;

@@ -47,6 +47,7 @@ import {
   validateBalanceForDebit,
   resolveDatabaseConnection,
   getBalanceFieldName,
+  buildWalletActivityUpdate,
   buildWalletUpdate,
   withTransaction,
   getWalletsCollection,
@@ -652,7 +653,7 @@ export async function createTransferWithTransactions(
       const walletsCollection = getWalletsCollection(db);
       const fromUpdate: Record<string, any> = {
         $inc: { [fromBalanceField]: -amount },
-        $set: { lastActivityAt: new Date(), updatedAt: new Date() }
+        ...buildWalletActivityUpdate()
       };
       
       // For same-user transfers, combine updates
@@ -723,7 +724,7 @@ export async function createTransferWithTransactions(
         
         const toUpdate: Record<string, any> = {
           $inc: { [toBalanceField]: netAmount },
-          $set: { lastActivityAt: new Date(), updatedAt: new Date() }
+          ...buildWalletActivityUpdate()
         };
         
         // Only update lifetime stats for real balance credits
@@ -935,7 +936,7 @@ export async function approveTransfer(
           [fromBalanceField]: -amount,
           [toBalanceField]: netAmount,
         },
-        $set: { lastActivityAt: new Date(), updatedAt: new Date() }
+        ...buildWalletActivityUpdate()
       };
       
       // Only update lifetime stats for real balance credits
@@ -959,7 +960,7 @@ export async function approveTransfer(
         { id: fromWalletId },
         {
           $inc: { [fromBalanceField]: -amount },
-          $set: { lastActivityAt: new Date(), updatedAt: new Date() }
+          ...buildWalletActivityUpdate()
         },
         { session: txSession }
       );
@@ -970,7 +971,7 @@ export async function approveTransfer(
       
       const toUpdate: Record<string, any> = {
         $inc: { [toBalanceField]: netAmount },
-        $set: { lastActivityAt: new Date(), updatedAt: new Date() }
+        ...buildWalletActivityUpdate()
       };
       
       // Only update lifetime stats for real balance credits
