@@ -14,7 +14,12 @@
  */
 
 import http from 'node:http';
-import { createSystemToken } from './config/users.js';
+import { createSystemToken, initializeConfig } from './config/users.js';
+import { 
+  loadScriptConfig,
+  BONUS_SERVICE_URL,
+  PAYMENT_SERVICE_URL,
+} from './config/scripts.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // JWT Token Generation (using centralized utilities)
@@ -46,68 +51,76 @@ interface ServiceConfig {
   description: string;
 }
 
-const SERVICES: Record<string, ServiceConfig> = {
-  bonus: {
-    name: 'bonus-service',
-    url: process.env.BONUS_URL || 'http://localhost:3005/graphql',
-    readQuery: `query { bonusTemplates(take: 10, skip: \${skip}) { nodes { id code type } totalCount } }`,
-    writeQuery: `mutation CreateTemplate($input: CreateBonusTemplateInput!) {
-      createBonusTemplate(input: $input) { success bonusTemplate { id } }
-    }`,
-    writeVariables: () => ({
-      input: {
-        code: `LOAD-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-        name: 'Load Test Bonus',
-        type: 'activity',
-        domain: 'universal',
-        currency: 'USD',
-        valueType: 'fixed',
-        value: 10,
-        turnoverMultiplier: 1,
-        durationDays: 30,
-        isActive: false,
-      },
-    }),
-    countQuery: '{ bonusTemplates { totalCount } }',
-    countExtractor: (data: any) => data?.bonusTemplates?.totalCount || 0,
-    description: 'Bonus service',
-  },
-  payment: {
-    name: 'payment-gateway',
-    url: process.env.PAYMENT_URL || 'http://localhost:3004/graphql',
-    readQuery: `query { wallets(take: 10, skip: \${skip}) { nodes { id balance currency } totalCount } }`,
-    writeQuery: `mutation CreateWallet($input: CreateWalletInput!) {
-      createWallet(input: $input) { success wallet { id } }
-    }`,
-    writeVariables: () => ({
-      input: {
-        userId: `load-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-        currency: 'USD',
-      },
-    }),
-    countQuery: '{ wallets { totalCount } }',
-    countExtractor: (data: any) => data?.wallets?.totalCount || 0,
-    description: 'Payment gateway',
-  },
-  retail: {
-    name: 'retail-app',
-    url: process.env.RETAIL_URL || 'http://localhost:3000/graphql',
-    readQuery: `query { terminals(take: 10, skip: \${skip}) { nodes { id name } totalCount } }`,
-    writeQuery: `mutation CreateTerminal($input: CreateTerminalInput!) {
-      createTerminal(input: $input) { success terminal { id } }
-    }`,
-    writeVariables: () => ({
-      input: {
-        name: `LOAD-${Date.now()}`,
-        branchId: '999',
-        securityCode: `LOAD-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      },
-    }),
-    countQuery: '{ terminals { totalCount } }',
-    countExtractor: (data: any) => data?.terminals?.totalCount || 0,
-    description: 'Retail app',
-  },
-};
+// Initialize service URLs dynamically
+let SERVICES: Record<string, ServiceConfig> = {};
+
+async function initializeServices() {
+  await initializeConfig();
+  await loadScriptConfig(); // This populates BONUS_SERVICE_URL, PAYMENT_SERVICE_URL, etc.
+  
+  SERVICES = {
+    bonus: {
+      name: 'bonus-service',
+      url: BONUS_SERVICE_URL,
+      readQuery: `query { bonusTemplates(take: 10, skip: \${skip}) { nodes { id code type } totalCount } }`,
+      writeQuery: `mutation CreateTemplate($input: CreateBonusTemplateInput!) {
+        createBonusTemplate(input: $input) { success bonusTemplate { id } }
+      }`,
+      writeVariables: () => ({
+        input: {
+          code: `LOAD-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          name: 'Load Test Bonus',
+          type: 'activity',
+          domain: 'universal',
+          currency: 'USD',
+          valueType: 'fixed',
+          value: 10,
+          turnoverMultiplier: 1,
+          durationDays: 30,
+          isActive: false,
+        },
+      }),
+      countQuery: '{ bonusTemplates { totalCount } }',
+      countExtractor: (data: any) => data?.bonusTemplates?.totalCount || 0,
+      description: 'Bonus service',
+    },
+    payment: {
+      name: 'payment-gateway',
+      url: PAYMENT_SERVICE_URL,
+      readQuery: `query { wallets(take: 10, skip: \${skip}) { nodes { id balance currency } totalCount } }`,
+      writeQuery: `mutation CreateWallet($input: CreateWalletInput!) {
+        createWallet(input: $input) { success wallet { id } }
+      }`,
+      writeVariables: () => ({
+        input: {
+          userId: `load-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          currency: 'USD',
+        },
+      }),
+      countQuery: '{ wallets { totalCount } }',
+      countExtractor: (data: any) => data?.wallets?.totalCount || 0,
+      description: 'Payment gateway',
+    },
+    retail: {
+      name: 'retail-app',
+      url: process.env.RETAIL_URL || 'http://localhost:3000/graphql', // Retail not in config yet
+      readQuery: `query { terminals(take: 10, skip: \${skip}) { nodes { id name } totalCount } }`,
+      writeQuery: `mutation CreateTerminal($input: CreateTerminalInput!) {
+        createTerminal(input: $input) { success terminal { id } }
+      }`,
+      writeVariables: () => ({
+        input: {
+          name: `LOAD-${Date.now()}`,
+          branchId: '999',
+          securityCode: `LOAD-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        },
+      }),
+      countQuery: '{ terminals { totalCount } }',
+      countExtractor: (data: any) => data?.terminals?.totalCount || 0,
+      description: 'Retail app',
+    },
+  };
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // Configuration
@@ -489,6 +502,8 @@ function printSummary(allResults: LoadTestResult[]) {
 // ═══════════════════════════════════════════════════════════════════
 
 async function main() {
+  // Initialize services from config
+  await initializeServices();
   console.log(`
 ╔═══════════════════════════════════════════════════════════════════════════╗
 ║              GENERIC MICROSERVICE LOAD TEST                                ║

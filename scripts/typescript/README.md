@@ -18,10 +18,8 @@ typescript/
 ## Script Categories
 
 ### Auth Service (`auth/`)
-- **User Management**: `check-admin-*.ts`, `check-user-*.ts`, `promote-user.ts`
-- **Authentication**: `test-login-trace.ts`, `test-passport-*.ts`, `decode-token.ts`
-- **Sessions**: `check-sessions.ts`
-- **Debugging**: `check-wrong-*.ts`, `find-wrong-user.ts`, `fix-duplicate-admin.ts`
+- **User Management**: `manage-user.ts` (roles, permissions, status, verification)
+- **Testing**: `auth-command-test.ts` (comprehensive test suite)
 
 ### Payment Service (`payment/`)
 - **Tests**: `payment-test-*.ts`, `payment-setup.ts`, `payment-clean.ts`
@@ -51,8 +49,10 @@ Run scripts from the project root:
 # Payment tests
 npx tsx scripts/typescript/payment/payment-test-all.ts
 
-# Auth checks
-npx tsx scripts/typescript/auth/check-admin-user.ts
+# Auth tests
+npm run auth:test
+# Or
+npx tsx scripts/typescript/auth/auth-command-test.ts all
 
 # Ledger tests
 npx tsx scripts/typescript/ledger/ledger-integration-tests.ts

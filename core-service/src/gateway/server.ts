@@ -10,7 +10,7 @@
  * - POST /graphql - Queries & Mutations (graphql-http)
  * - GET/POST /graphql/stream - Subscriptions via SSE (graphql-sse)
  * - Socket.IO /socket.io - Bidirectional real-time (auto-fallback to polling)
- * - GET /health - Health check
+ * - GET /health - Unified health check (liveness, readiness, metrics)
  * 
  * Socket.IO Benefits:
  * - ES5 browser support
@@ -47,10 +47,13 @@ import { createHandler as createHttpHandler } from 'graphql-http/lib/use/http';
 import { createHandler as createSSEHandler } from 'graphql-sse/lib/use/http';
 import type { UserContext, PermissionRule, Resolvers, ResolverContext, JwtConfig, SubscriptionResolver } from '../types/index.js';
 import { extractToken, verifyToken, createToken } from '../common/jwt.js';
-import { connectDatabase, checkDatabaseHealth } from '../common/database.js';
-import { connectRedis, checkRedisHealth, getRedis } from '../common/redis.js';
-import { getCacheStats } from '../common/cache.js';
-import { logger, subscribeToLogs, type LogEntry } from '../common/logger.js';
+import { connectDatabase, checkDatabaseHealth } from '../databases/mongodb.js';
+import { connectRedis, checkRedisHealth, getRedis } from '../databases/redis.js';
+import { getCacheStats } from '../databases/cache.js';
+import { logger, subscribeToLogs, type LogEntry, setCorrelationId, generateCorrelationId, getCorrelationId } from '../common/logger.js';
+import { createResolverBuilder, type ServiceResolvers } from '../common/resolver-builder.js';
+import { formatGraphQLError, getAllErrorCodes, getErrorMessage } from '../common/errors.js';
+import { configGraphQLTypes, configResolvers } from '../common/config-graphql.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -298,20 +301,27 @@ function buildSchema(
   // Parse and merge type definitions from all services
   // Note: JSON scalar is already added to schema.types array (JSONScalar), so we don't declare it in SDL
   // Declaring it in SDL would cause "Type JSON already exists" error
-  let allTypeDefs = '';
+  let allTypeDefs = configGraphQLTypes; // Add config GraphQL types first (core service)
   for (const svc of services) {
     if (svc.types) {
-      allTypeDefs += (allTypeDefs ? '\n' : '') + svc.types;
+      allTypeDefs += '\n' + svc.types;
     }
   }
 
   // Build base schema with minimal Query/Mutation/Subscription types
   // Only include 'health' query - let type definitions extend the rest
+  // Note: Using any for dynamic GraphQL field building - GraphQL types are complex and dynamic
   const queryFields: Record<string, { type: any; args?: any; resolve: any }> = {
     health: {
       type: HealthType,
       resolve: async (_root: unknown, _args: unknown, ctx: GatewayContext) => {
         return resolvers.health({}, ctx);
+      },
+    },
+    errorCodes: {
+      type: new GraphQLList(new GraphQLNonNull(GraphQLString)),
+      resolve: async () => {
+        return getAllErrorCodes();
       },
     },
   };
@@ -328,6 +338,7 @@ function buildSchema(
   });
 
   // Subscription type
+  // Note: Using any for dynamic GraphQL field building - GraphQL types are complex and dynamic
   const subscriptionFields: Record<string, { type: any; subscribe: any; resolve: any }> = {};
   
   for (const [key, subFn] of Object.entries(subscriptionConfig)) {
@@ -364,6 +375,8 @@ function buildSchema(
     fields: {
       hasNextPage: { type: GraphQLBoolean },
       hasPreviousPage: { type: GraphQLBoolean },
+      startCursor: { type: GraphQLString }, // Cursor for first item in page
+      endCursor: { type: GraphQLString },   // Cursor for last item in page
     },
   });
 
@@ -394,15 +407,17 @@ function buildSchema(
         typeCount: Object.keys(baseSchema.getTypeMap()).length,
         hasMutations: baseSchema.getMutationType() ? Object.keys(baseSchema.getMutationType()!.getFields()).length : 0,
       });
-    } catch (error: any) {
+    } catch (error: unknown) {
       // Even if extendSchema throws, it might have partially extended the schema
+      const errorMessage = getErrorMessage(error);
+      const errorStack = error instanceof Error ? error.stack : undefined;
       // Check if mutations were added by inspecting the extended schema
       const tempExtendedMutation = baseSchema.getMutationType();
       const hasMutations = tempExtendedMutation && Object.keys(tempExtendedMutation.getFields()).length > 0;
       
       logger.error('Schema extension error', { 
-        error: error.message,
-        stack: error.stack,
+        error: errorMessage,
+        stack: errorStack,
         hasMutations,
         typeDefsLength: allTypeDefs.length,
         typeDefsPreview: allTypeDefs.substring(0, 500),
@@ -410,12 +425,12 @@ function buildSchema(
       
       if (hasMutations) {
         logger.warn('Schema extension had warnings but mutations were added', { 
-          error: error.message,
+          error: errorMessage,
         });
         // Schema was extended despite the error - continue using it
       } else {
         logger.error('Schema extension failed and no mutations found', { 
-          error: error.message,
+          error: errorMessage,
         });
         // Schema extension truly failed - will need fallback
         throw error; // Re-throw to prevent using broken schema
@@ -429,6 +444,7 @@ function buildSchema(
   const extendedSubscriptionType = baseSchema.getSubscriptionType();
   
   // Generic helper to build field resolvers for any root type
+  // Note: Using any for dynamic GraphQL field building - GraphQL's type system is complex and dynamic
   function buildFieldResolver(
     opType: 'Query' | 'Mutation' | 'Subscription',
     fieldName: string,
@@ -450,16 +466,24 @@ function buildSchema(
       const subFn = subscriptionConfig[fieldName];
       if (subFn) {
         fieldConfig.subscribe = async function* (_root: unknown, args: unknown, ctx: GatewayContext) {
-          // Health and logs subscriptions are always allowed
-          if (fieldName !== 'health' && fieldName !== 'logs') {
-            const result = await checkPermission('Subscription', fieldName, ctx.user, args as Record<string, unknown> || {});
-            if (!result.allowed) {
-              throw new Error(`Not authorized: Subscription.${fieldName}`);
+          try {
+            // Health and logs subscriptions are always allowed
+            if (fieldName !== 'health' && fieldName !== 'logs') {
+              const result = await checkPermission('Subscription', fieldName, ctx.user, args as Record<string, unknown> || {});
+              if (!result.allowed) {
+                throw new Error(`Not authorized: Subscription.${fieldName}`);
+              }
             }
-          }
-          const generator = subFn(args as Record<string, unknown>, ctx);
-          for await (const value of generator) {
-            yield { [fieldName]: value };
+            const generator = subFn(args as Record<string, unknown>, ctx);
+            for await (const value of generator) {
+              yield { [fieldName]: value };
+            }
+          } catch (error) {
+            // Format error for GraphQL response (auto-logged in GraphQLError constructor)
+            throw formatGraphQLError(error, {
+              correlationId: getCorrelationId(),
+              userId: ctx.user?.userId,
+            });
           }
         };
         fieldConfig.resolve = (payload: Record<string, unknown>) => payload[fieldName];
@@ -470,33 +494,42 @@ function buildSchema(
       }
     } else {
       // Query and Mutation use resolve
+      // Note: args and info use any due to GraphQL's dynamic nature
       fieldConfig.resolve = async (_root: unknown, args: any, ctx: GatewayContext, info: any) => {
-        // Use resolver if available
-        if (resolvers[fieldName]) {
-          // Check if mutation uses input wrapper or direct arguments
-          // Some mutations like testWebhook(id: ID!) use direct args, not input wrapper
-          // Some mutations like updateWebhook(id: ID!, input: UpdateWebhookInput!) have both id and input
-          const hasInputArg = opType === 'Mutation' && args.input !== undefined;
-          const checkArgs = hasInputArg 
-            ? (args.input as Record<string, unknown> || {})
-            : (args || {});
-          const result = await checkPermission(opType, fieldName, ctx.user || null, checkArgs);
-          if (!result.allowed) {
-            throw new Error(`Not authorized: ${opType}.${fieldName}`);
+        try {
+          // Use resolver if available
+          if (resolvers[fieldName]) {
+            // Check if mutation uses input wrapper or direct arguments
+            // Some mutations like testWebhook(id: ID!) use direct args, not input wrapper
+            // Some mutations like updateWebhook(id: ID!, input: UpdateWebhookInput!) have both id and input
+            const hasInputArg = opType === 'Mutation' && args.input !== undefined;
+            const checkArgs = hasInputArg 
+              ? (args.input as Record<string, unknown> || {})
+              : (args || {});
+            const result = await checkPermission(opType, fieldName, ctx.user || null, checkArgs);
+            if (!result.allowed) {
+              throw new Error(`Not authorized: ${opType}.${fieldName}`);
+            }
+            // Mutations with input wrapper: pass all args (including id if present)
+            // Mutations with direct args (like testWebhook, deleteWebhook): pass args directly
+            if (opType === 'Mutation' && hasInputArg) {
+              // Preserve all args (id, input, etc.) for mutations like updateWebhook
+              return await resolvers[fieldName](args, ctx);
+            }
+            return await resolvers[fieldName](checkArgs, ctx);
           }
-          // Mutations with input wrapper: pass all args (including id if present)
-          // Mutations with direct args (like testWebhook, deleteWebhook): pass args directly
-          if (opType === 'Mutation' && hasInputArg) {
-            // Preserve all args (id, input, etc.) for mutations like updateWebhook
-            return resolvers[fieldName](args, ctx);
+          // Fallback to field's resolver
+          if (field.resolve) {
+            return await field.resolve(_root, args, ctx, info);
           }
-          return resolvers[fieldName](checkArgs, ctx);
+          throw new Error(`No resolver for ${opType}.${fieldName}`);
+        } catch (error) {
+          // Format error for GraphQL response (auto-logged in GraphQLError constructor)
+          throw formatGraphQLError(error, {
+            correlationId: getCorrelationId(),
+            userId: ctx.user?.userId,
+          });
         }
-        // Fallback to field's resolver
-        if (field.resolve) {
-          return field.resolve(_root, args, ctx, info);
-        }
-        throw new Error(`No resolver for ${opType}.${fieldName}`);
       };
     }
 
@@ -554,6 +587,7 @@ function buildSchema(
   }
 
   // Get all types from extended schema except root types to avoid duplicates
+  // Note: Using any for GraphQL type filtering - GraphQL's type system is complex
   const typeMap = baseSchema.getTypeMap();
   const otherTypes = Object.values(typeMap).filter((type: any) => 
     type.name !== 'Query' && 
@@ -665,7 +699,7 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
     }
   } catch (error) {
     logger.error(`Failed to connect to database for ${name}`, {
-      error: error instanceof Error ? error.message : String(error),
+      error: getErrorMessage(error),
       uri: dbUri.replace(/:[^:@]+@/, ':***@'), // Hide password
     });
     throw error;
@@ -683,7 +717,7 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
       }
     } catch (error) {
       logger.warn(`Failed to connect to Redis for ${name} - continuing without Redis`, {
-        error: error instanceof Error ? error.message : String(error),
+        error: getErrorMessage(error),
       });
       // Don't throw - Redis is optional for most services
     }
@@ -691,9 +725,9 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
 
   const checkPermission = createPermissionMiddleware(permissions, defaultPermission);
 
-  // Merge resolvers from all services
-  const resolvers: Record<string, (args: Record<string, unknown>, ctx: ResolverContext) => unknown> = {
-    health: async () => {
+  // Build resolvers using Builder pattern (simplifies merging and construction)
+  const resolverBuilder = createResolverBuilder()
+    .addQuery('health', async () => {
       const dbHealth = await checkDatabaseHealth();
       const redis = getRedis();
       return { 
@@ -704,26 +738,40 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
         redis: { connected: redis !== null },
         cache: getCacheStats(),
       };
-    },
-  };
+    })
+    .addQuery('errorCodes', async () => {
+      return getAllErrorCodes();
+    })
+    // Add config resolvers (core service) - wrap to match ResolverFunction signature
+    .addQuery('config', async (args, ctx) => {
+      return configResolvers.Query.config(null, args as any, ctx);
+    })
+    .addQuery('configs', async (args, ctx) => {
+      return configResolvers.Query.configs(null, args as any, ctx);
+    })
+    .addMutation('setConfig', async (args, ctx) => {
+      return configResolvers.Mutation.setConfig(null, args as any, ctx);
+    })
+    .addMutation('deleteConfig', async (args, ctx) => {
+      return configResolvers.Mutation.deleteConfig(null, args as any, ctx);
+    })
+    .addMutation('reloadConfig', async (args, ctx) => {
+      return configResolvers.Mutation.reloadConfig(null, args as any, ctx);
+    });
 
-  /**
-   * Helper function to merge resolvers from services
-   */
-  function mergeResolvers(
-    sourceResolvers: Record<string, any> | undefined,
-    targetResolvers: Record<string, any>
-  ): void {
-    if (!sourceResolvers) return;
-    for (const [key, resolver] of Object.entries(sourceResolvers)) {
-      targetResolvers[key] = resolver;
-    }
-  }
-
+  // Add resolvers from all services
   for (const svc of services) {
-    mergeResolvers(svc.resolvers.Query, resolvers);
-    mergeResolvers(svc.resolvers.Mutation, resolvers);
+    resolverBuilder.addService(svc.resolvers as ServiceResolvers);
   }
+
+  // Build resolver object
+  const builtResolvers = resolverBuilder.build();
+  
+  // Convert to format expected by buildSchema (flat object)
+  const resolvers: Record<string, (args: Record<string, unknown>, ctx: ResolverContext) => unknown> = {
+    ...builtResolvers.Query,
+    ...builtResolvers.Mutation,
+  };
 
   // All subscriptions
   const allSubscriptions: SubscriptionConfig = {
@@ -740,9 +788,15 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
   // ─────────────────────────────────────────────────────────────────
   
   function createContext(req: IncomingMessage, socket?: Socket): GatewayContext {
+    // Extract correlation ID from headers (X-Correlation-ID or X-Request-ID)
+    const correlationId = (req.headers['x-correlation-id'] || 
+                          req.headers['x-request-id'] || 
+                          generateCorrelationId()) as string;
+    setCorrelationId(correlationId);
+    
     const token = extractToken(req.headers.authorization);
     const user = token ? verifyToken(token, jwt) : null;
-    return { user, requestId: randomUUID(), socket };
+    return { user, requestId: correlationId, socket };
   }
 
   function createContextFromToken(token: string | null | undefined, socket?: Socket): GatewayContext {
@@ -756,6 +810,7 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
   
   const httpHandler = createHttpHandler({
     schema,
+    // Note: Using any for context function - graphql-http expects specific context type
     context: ((req: { raw: IncomingMessage }) => createContext(req.raw)) as any,
   });
 
@@ -767,6 +822,7 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
     schema,
     execute,
     subscribe,
+    // Note: Using any for context function - graphql-sse expects specific context type
     context: ((req: { raw: IncomingMessage }) => createContext(req.raw)) as any,
   });
 
@@ -861,17 +917,36 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
     if (cors) {
       res.setHeader('Access-Control-Allow-Origin', cors.origins[0] || '*');
       res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Correlation-ID,X-Request-ID');
       res.setHeader('Access-Control-Allow-Credentials', 'true');
       if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
     }
 
-    // Health endpoint
+    // Unified health endpoint - combines liveness, readiness, and metrics
     if (url.pathname === '/health') {
-      const ctx = createContext(req);
-      const health = await resolvers.health({}, ctx);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(health));
+      const dbHealth = await checkDatabaseHealth();
+      const redis = getRedis();
+      const cacheStats = getCacheStats();
+      
+      // Service is healthy if database is healthy
+      const healthy = dbHealth.healthy;
+      const status = healthy ? 'healthy' : 'degraded';
+      
+      // Return 200 if healthy, 503 if degraded (for Kubernetes readiness)
+      res.writeHead(healthy ? 200 : 503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        status,
+        service: name,
+        uptime: (Date.now() - startTime) / 1000,
+        timestamp: new Date().toISOString(),
+        database: {
+          healthy: dbHealth.healthy,
+          latencyMs: dbHealth.latencyMs,
+          connections: dbHealth.connections,
+        },
+        redis: { connected: redis !== null },
+        cache: cacheStats,
+      }));
       return;
     }
 
@@ -905,6 +980,7 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
     cors: cors ? {
       origin: cors.origins,
       methods: ['GET', 'POST'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'X-Correlation-ID', 'X-Request-ID'],
       credentials: true,
     } : undefined,
     // Allow both WebSocket and HTTP long-polling
@@ -922,22 +998,59 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
     activeSubscriptions.set(socketId, new Map());
     
     // Extract token from auth header or handshake
-    const authHeader = socket.handshake.auth?.token || socket.handshake.headers?.authorization;
-    const token = extractToken(authHeader);
+    // Socket.IO client sends auth object which becomes socket.handshake.auth
+    // The auth.token is the raw token (not "Bearer <token>")
+    // Also check headers for Authorization header (which is "Bearer <token>")
+    const authToken = socket.handshake.auth?.token;
+    const headerAuth = socket.handshake.headers?.authorization;
+    
+    // If authToken exists and is a string, use it directly (it's already the token)
+    // Otherwise, extract from Authorization header (which has "Bearer " prefix)
+    const token = authToken && typeof authToken === 'string' 
+      ? authToken 
+      : extractToken(headerAuth);
+    
     const ctx = createContextFromToken(token, socket);
+    
+    // Debug logging
+    if (!ctx.user) {
+      logger.warn('Socket.IO connection: No user context created', {
+        socketId,
+        hasAuthToken: !!authToken,
+        hasHeaderAuth: !!headerAuth,
+        authTokenType: typeof authToken,
+        handshakeAuth: socket.handshake.auth,
+        handshakeHeaders: Object.keys(socket.handshake.headers || {}),
+      });
+    }
     
     logger.info('Socket.IO connected', { 
       socketId, 
       userId: ctx.user?.userId,
+      tenantId: ctx.user?.tenantId,
+      hasToken: !!token,
+      hasAuthToken: !!authToken,
+      hasHeaderAuth: !!headerAuth,
+      authTokenPresent: !!socket.handshake.auth?.token,
       transport: socket.conn.transport.name, // 'websocket' or 'polling'
     });
 
     // Join user-specific room for targeted messages
     if (ctx.user?.userId) {
-      socket.join(`user:${ctx.user.userId}`);
+      const userRoom = `user:${ctx.user.userId}`;
+      socket.join(userRoom);
+      logger.info('Socket joined user room', { socketId, userId: ctx.user.userId, room: userRoom });
+    } else {
+      logger.warn('Socket connected but no userId found - notifications will not be received', {
+        socketId,
+        hasToken: !!token,
+        hasUser: !!ctx.user,
+      });
     }
     if (ctx.user?.tenantId) {
-      socket.join(`tenant:${ctx.user.tenantId}`);
+      const tenantRoom = `tenant:${ctx.user.tenantId}`;
+      socket.join(tenantRoom);
+      logger.info('Socket joined tenant room', { socketId, tenantId: ctx.user.tenantId, room: tenantRoom });
     }
 
     // ─── GraphQL Query/Mutation via Socket.IO ───
@@ -1042,6 +1155,53 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
         sub.running = false;
         subs?.delete(payload.id);
         socket.emit('subscription:complete', { id: payload.id });
+      }
+    });
+
+    // ─── Room Management ───
+    socket.on('joinRoom', (payload: { room: string }, callback?: (response: { success: boolean; room?: string; error?: string }) => void) => {
+      if (payload?.room) {
+        socket.join(payload.room);
+        logger.info('Socket joined room', { socketId, room: payload.room, userId: ctx.user?.userId });
+        if (typeof callback === 'function') {
+          callback({ success: true, room: payload.room });
+        } else {
+          socket.emit('room:joined', { room: payload.room });
+        }
+      } else if (typeof callback === 'function') {
+        callback({ success: false, error: 'Room name required' });
+      }
+    });
+
+    socket.on('leaveRoom', (payload: { room: string }, callback?: (response: { success: boolean; room?: string; error?: string }) => void) => {
+      if (payload?.room) {
+        socket.leave(payload.room);
+        logger.info('Socket left room', { socketId, room: payload.room, userId: ctx.user?.userId });
+        if (typeof callback === 'function') {
+          callback({ success: true, room: payload.room });
+        } else {
+          socket.emit('room:left', { room: payload.room });
+        }
+      } else if (typeof callback === 'function') {
+        callback({ success: false, error: 'Room name required' });
+      }
+    });
+
+    socket.on('getRooms', (callback?: (rooms: string[]) => void) => {
+      const rooms = Array.from(socket.rooms);
+      if (typeof callback === 'function') {
+        callback(rooms);
+      } else {
+        socket.emit('rooms', rooms);
+      }
+    });
+
+    socket.on('getConnectionCount', (callback?: (count: number) => void) => {
+      const count = io.sockets.sockets.size;
+      if (typeof callback === 'function') {
+        callback(count);
+      } else {
+        socket.emit('connectionCount', { count });
       }
     });
 

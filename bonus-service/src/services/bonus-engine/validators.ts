@@ -24,7 +24,7 @@
  * └─────────────────────────────────────────────────────────────────┘
  */
 
-import { getDatabase } from 'core-service';
+import { resolveDatabase, type DatabaseResolutionOptions, type Collection, type Db } from 'core-service';
 import { BonusEligibility } from 'bonus-shared';
 import type { BonusTemplate, BonusType } from '../../types.js';
 import type { 
@@ -33,8 +33,28 @@ import type {
   IEligibilityValidator,
 } from './types.js';
 
-// Re-export types for backward compatibility
-export type { ValidatorResult, IEligibilityValidator };
+// ═══════════════════════════════════════════════════════════════════
+// Validator Options
+// ═══════════════════════════════════════════════════════════════════
+
+export interface ValidatorOptions extends DatabaseResolutionOptions {
+  // Can extend with validator-specific options if needed
+}
+
+// Helper to resolve database (requires database strategy - no fallback per coding standards)
+async function resolveValidatorDatabase(options: ValidatorOptions, tenantId?: string): Promise<Db> {
+  if (!options.databaseStrategy && !options.database) {
+    throw new Error('Validator requires database or databaseStrategy in options. Ensure validator is called with proper database configuration.');
+  }
+  return await resolveDatabase(options, 'bonus-service', tenantId);
+}
+
+// Helper to get user bonuses collection
+async function getUserBonusesCollection(options: ValidatorOptions, tenantId?: string): Promise<Collection> {
+  const db = await resolveValidatorDatabase(options, tenantId);
+  return db.collection('user_bonuses');
+}
+
 
 // ═══════════════════════════════════════════════════════════════════
 // SERVER-ONLY VALIDATORS (Require Database Access)
@@ -46,6 +66,8 @@ export type { ValidatorResult, IEligibilityValidator };
 export class MaxUsesPerUserValidator implements IEligibilityValidator {
   readonly name = 'max_uses_per_user';
   readonly priority = 30;
+  
+  constructor(private options: ValidatorOptions) {}
 
   appliesTo(_bonusType: BonusType): boolean {
     return true;
@@ -56,8 +78,7 @@ export class MaxUsesPerUserValidator implements IEligibilityValidator {
     context: BonusContext
   ): Promise<ValidatorResult> {
     if (template.maxUsesPerUser) {
-      const db = getDatabase();
-      const userBonuses = db.collection('user_bonuses');
+      const userBonuses = await getUserBonusesCollection(this.options, context.tenantId);
       
       const count = await userBonuses.countDocuments({
         userId: context.userId,
@@ -82,6 +103,8 @@ export class MaxUsesPerUserValidator implements IEligibilityValidator {
 export class CooldownValidator implements IEligibilityValidator {
   readonly name = 'cooldown';
   readonly priority = 60;
+  
+  constructor(private options: ValidatorOptions) {}
 
   appliesTo(bonusType: BonusType): boolean {
     return ['reload', 'daily_login', 'cashback', 'consolation', 'free_credit'].includes(bonusType);
@@ -94,8 +117,7 @@ export class CooldownValidator implements IEligibilityValidator {
     const cooldownHours = (template as any).cooldownHours;
     
     if (cooldownHours) {
-      const db = getDatabase();
-      const userBonuses = db.collection('user_bonuses');
+      const userBonuses = await getUserBonusesCollection(this.options, context.tenantId);
       const cutoff = new Date(Date.now() - cooldownHours * 60 * 60 * 1000);
 
       const recent = await userBonuses.findOne({
@@ -123,6 +145,8 @@ export class CooldownValidator implements IEligibilityValidator {
 export class AlreadyClaimedValidator implements IEligibilityValidator {
   readonly name = 'already_claimed';
   readonly priority = 25;
+  
+  constructor(private options: ValidatorOptions) {}
 
   appliesTo(bonusType: BonusType): boolean {
     // Only applies to one-time bonuses
@@ -133,8 +157,7 @@ export class AlreadyClaimedValidator implements IEligibilityValidator {
     template: BonusTemplate,
     context: BonusContext
   ): Promise<ValidatorResult> {
-    const db = getDatabase();
-    const userBonuses = db.collection('user_bonuses');
+    const userBonuses = await getUserBonusesCollection(this.options, context.tenantId);
     
     const existing = await userBonuses.findOne({
       userId: context.userId,
@@ -160,6 +183,8 @@ export class AlreadyClaimedValidator implements IEligibilityValidator {
 export class StackingValidator implements IEligibilityValidator {
   readonly name = 'stacking';
   readonly priority = 70;
+  
+  constructor(private options: ValidatorOptions) {}
 
   appliesTo(_bonusType: BonusType): boolean {
     return true;
@@ -169,10 +194,9 @@ export class StackingValidator implements IEligibilityValidator {
     template: BonusTemplate,
     context: BonusContext
   ): Promise<ValidatorResult> {
+    const userBonuses = await getUserBonusesCollection(this.options, context.tenantId);
+    
     if (template.stackable === false) {
-      const db = getDatabase();
-      const userBonuses = db.collection('user_bonuses');
-      
       // Check for any active bonus
       const activeBonus = await userBonuses.findOne({
         userId: context.userId,
@@ -190,9 +214,6 @@ export class StackingValidator implements IEligibilityValidator {
 
     // Check excluded bonus types
     if (template.excludedBonusTypes?.length) {
-      const db = getDatabase();
-      const userBonuses = db.collection('user_bonuses');
-      
       const conflicting = await userBonuses.findOne({
         userId: context.userId,
         type: { $in: template.excludedBonusTypes },
@@ -218,6 +239,8 @@ export class StackingValidator implements IEligibilityValidator {
 export class ReferralValidator implements IEligibilityValidator {
   readonly name = 'referral';
   readonly priority = 80;
+  
+  constructor(private options: ValidatorOptions) {}
 
   appliesTo(bonusType: BonusType): boolean {
     return ['referral', 'referee', 'commission'].includes(bonusType);
@@ -283,14 +306,17 @@ export class ReferralValidator implements IEligibilityValidator {
 export class ValidatorChain {
   private serverValidators: IEligibilityValidator[] = [];
 
-  constructor() {
+  constructor(private options?: ValidatorOptions) {
     // Server-only validators (require DB access)
     // Client-safe validators are handled by BonusEligibility from bonus-shared
-    this.add(new AlreadyClaimedValidator());
-    this.add(new MaxUsesPerUserValidator());
-    this.add(new CooldownValidator());
-    this.add(new StackingValidator());
-    this.add(new ReferralValidator());
+    if (!options?.databaseStrategy) {
+      throw new Error('ValidatorChain requires databaseStrategy in options');
+    }
+    this.add(new AlreadyClaimedValidator(options));
+    this.add(new MaxUsesPerUserValidator(options));
+    this.add(new CooldownValidator(options));
+    this.add(new StackingValidator(options));
+    this.add(new ReferralValidator(options));
   }
 
   add(validator: IEligibilityValidator): void {
@@ -420,5 +446,7 @@ export class ValidatorChain {
   }
 }
 
-// Singleton instance
-export const validatorChain = new ValidatorChain();
+// Factory function to create validator chain with database strategy
+export function createValidatorChain(options: ValidatorOptions): ValidatorChain {
+  return new ValidatorChain(options);
+}

@@ -9,7 +9,7 @@
  * - Saga services (for transactional writes)
  */
 
-import { logger } from 'core-service';
+import { logger, resolveDatabase, type DatabaseResolutionOptions, type Collection, type Db } from 'core-service';
 import type { BonusTemplate, UserBonus, BonusType, BonusHistoryEntry } from '../../types.js';
 import type {
   BonusContext,
@@ -18,15 +18,32 @@ import type {
   AwardResult,
   IBonusHandler,
 } from './types.js';
-import { templatePersistence, userBonusPersistence } from './persistence.js';
+import { createBonusPersistence, type BonusPersistenceOptions } from './persistence.js';
 import { emitBonusEvent } from '../../event-dispatcher.js';
-import { 
-  recordBonusAwardTransfer,
-  checkBonusPoolBalance,
-} from '../bonus.js';
+// Event-driven architecture: bonus service emits events, payment service handles wallet operations
+// Note: bonus-approval imports are lazy to avoid circular dependency
+
+export interface BaseHandlerOptions extends DatabaseResolutionOptions {
+  // Can extend with handler-specific options if needed
+}
 
 export abstract class BaseBonusHandler implements IBonusHandler {
   abstract readonly type: BonusType;
+  protected persistence: ReturnType<typeof createBonusPersistence>;
+  
+  constructor(protected options?: BaseHandlerOptions) {
+    // Create persistence with database strategy if provided
+    this.persistence = createBonusPersistence(options || {});
+  }
+  
+  // Helper to get user bonuses collection
+  protected async getUserBonusesCollection(tenantId?: string): Promise<Collection> {
+    if (!this.options?.databaseStrategy && !this.options?.database) {
+      throw new Error('BaseBonusHandler requires database or databaseStrategy in options. Ensure handler is initialized via handlerRegistry.initialize() with database strategy.');
+    }
+    const db = await resolveDatabase(this.options, 'bonus-service', tenantId);
+    return db.collection('user_bonuses');
+  }
 
   // ═══════════════════════════════════════════════════════════════════
   // Template Method - Main Algorithm
@@ -65,7 +82,7 @@ export abstract class BaseBonusHandler implements IBonusHandler {
 
   async checkEligibility(context: BonusContext): Promise<EligibilityResult> {
     // Find active template for this bonus type using persistence layer
-    const templates = await templatePersistence.findByType(this.type);
+    const templates = await this.persistence.template.findByType(this.type, context.tenantId);
     const template = templates[0] || null;
 
     if (!template) {
@@ -114,7 +131,7 @@ export abstract class BaseBonusHandler implements IBonusHandler {
 
     // Check max uses per user using persistence layer
     if (template.maxUsesPerUser) {
-      const userCount = await userBonusPersistence.countByTemplate(
+      const userCount = await this.persistence.userBonus.countByTemplate(
         context.userId, 
         template.id
       );
@@ -220,7 +237,7 @@ export abstract class BaseBonusHandler implements IBonusHandler {
   // Bonus Awarding
   // ═══════════════════════════════════════════════════════════════════
 
-  async award(template: BonusTemplate, context: BonusContext): Promise<AwardResult> {
+  async award(template: BonusTemplate, context: BonusContext, skipApprovalCheck = false): Promise<AwardResult> {
     const calculation = this.calculate(template, context);
 
     if (calculation.bonusValue <= 0) {
@@ -231,76 +248,42 @@ export abstract class BaseBonusHandler implements IBonusHandler {
       return { success: false, error: 'Bonus value is zero or negative' };
     }
 
-    // Check ledger balance before awarding (prevent infinite money)
-    try {
-      const balanceCheck = await checkBonusPoolBalance(calculation.bonusValue, template.currency);
-      if (!balanceCheck.sufficient) {
-        logger.warn('Insufficient bonus pool balance', {
+    // Lazy import to avoid circular dependency
+    if (!skipApprovalCheck) {
+      const { requiresApproval, createPendingBonus } = await import('../bonus-approval.js');
+      if (requiresApproval(template, calculation.bonusValue)) {
+        const token = await createPendingBonus(
+          template,
+          context,
+          calculation,
+          (context as any).requestedBy,
+          (context as any).reason
+        );
+
+        logger.info('Bonus requires approval, created pending request', {
           userId: context.userId,
-          templateId: template.id,
-          required: balanceCheck.required,
-          available: balanceCheck.available,
+          templateCode: template.code,
+          value: calculation.bonusValue,
+          token,
         });
-        return { 
-          success: false, 
-          error: `Insufficient bonus pool balance. Available: ${balanceCheck.available}, Required: ${balanceCheck.required}` 
+
+        return {
+          success: false,
+          error: 'Bonus requires approval',
+          pendingToken: token,
         };
       }
-    } catch (ledgerError) {
-      logger.error('Failed to check bonus pool balance', {
-        error: ledgerError,
-        userId: context.userId,
-        templateId: template.id,
-      });
-      // Continue - ledger might not be initialized yet, but log the error
-      // In production, you might want to fail here
     }
 
     const now = new Date();
     const userBonusData = this.buildUserBonus(template, context, calculation, now);
 
-    // Create bonus first to get MongoDB-generated ID
-    // MongoDB will automatically create _id, which will be normalized to id
-    const createdBonus = await userBonusPersistence.create(userBonusData);
+    const createdBonus = await this.persistence.userBonus.create(userBonusData, context.tenantId);
 
-    // Record in ledger AFTER creating bonus record (we need the bonus ID)
-    // If ledger fails, the transaction will roll back the bonus creation
-    try {
-      await recordBonusAwardTransfer(
-        context.userId,
-        calculation.bonusValue,
-        template.currency,
-        context.tenantId,
-        createdBonus.id,
-        template.type,
-        `Bonus awarded: ${template.name} (${template.code})`
-      );
-    } catch (ledgerError) {
-      logger.error('Failed to record bonus in ledger', {
-        error: ledgerError,
-        userId: context.userId,
-        bonusId: createdBonus.id,
-      });
-      // If ledger fails, delete the bonus (transaction will handle rollback if in transaction)
-      try {
-        await userBonusPersistence.delete(createdBonus.id);
-      } catch (deleteError) {
-        logger.error('Failed to delete bonus after ledger error', { error: deleteError });
-      }
-      // If ledger fails, we should not award the bonus
-      return { 
-        success: false, 
-        error: 'Failed to record bonus in ledger. Bonus not awarded.' 
-      };
-    }
-
-    // Increment template usage via persistence layer
-    await templatePersistence.incrementUsage(template.id);
-
-    // Emit event
     await this.emitAwardedEvent(createdBonus, calculation);
 
-    // Run post-award hook
+    await this.persistence.template.incrementUsage(template.id, context.tenantId);
+
     await this.onAwarded(createdBonus, context);
 
     logger.info('Bonus awarded', {
@@ -338,8 +321,7 @@ export abstract class BaseBonusHandler implements IBonusHandler {
       turnoverRequired: calculation.turnoverRequired,
       turnoverProgress: 0,
       walletId: context.walletId,
-      triggerTransactionId: context.depositId || context.transactionId,
-      depositId: context.depositId,
+      triggerTransactionId: context.transactionId,
       referrerId: context.referrerId,
       qualifiedAt: now,
       claimedAt: now,

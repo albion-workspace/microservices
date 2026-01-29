@@ -5,7 +5,7 @@
 
 import { useState, useEffect } from 'react'
 import { useAuth, useAuthRequest } from '../lib/auth-context'
-import { hasRole, isSystem as checkIsSystem } from '../lib/access'
+import { hasRole, isSystem as checkIsSystem, getRoleNames } from '../lib/access'
 import { Shield, Edit, Check, X, Search, Filter, Users, Key, Lock, Unlock, Database, Crown, UserCheck, BookOpen, ChevronDown, ChevronUp } from 'lucide-react'
 
 interface User {
@@ -130,8 +130,8 @@ export default function UserManagement() {
       setError(null)
       
       const query = `
-        query GetUsers($tenantId: String, $first: Int, $skip: Int) {
-          users(tenantId: $tenantId, first: $first, skip: $skip) {
+        query GetUsers($tenantId: String, $first: Int, $after: String) {
+          users(tenantId: $tenantId, first: $first, after: $after) {
             nodes {
               id
               tenantId
@@ -157,7 +157,6 @@ export default function UserManagement() {
       const data = await authRequest(query, {
         tenantId: currentUser?.tenantId || 'default-tenant',
         first: 100,
-        skip: 0,
       })
       
       setUsers(data.users.nodes)

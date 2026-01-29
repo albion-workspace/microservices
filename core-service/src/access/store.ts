@@ -5,9 +5,12 @@
  * Provides CRUD operations with tenant isolation.
  */
 
+// External packages
 import type { Collection, Db } from 'mongodb';
-import { getDatabase } from '../common/database.js';
-import { generateMongoId } from '../common/mongodb-utils.js';
+import { RoleResolver, type ResolvedPermissions, type Role as BaseRole } from 'access-engine';
+
+// Internal imports
+import { generateMongoId } from '../databases/mongodb-utils.js';
 import type {
   Role,
   Policy,
@@ -19,44 +22,84 @@ import type {
   CreateACLGrantInput,
   ResolvedAccessConfig,
 } from './types-ext.js';
+import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/strategy.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Access Store
 // ═══════════════════════════════════════════════════════════════════
 
+export interface AccessStoreOptions {
+  database?: Db;
+  databaseStrategy?: DatabaseStrategyResolver;
+  defaultContext?: DatabaseContext;
+}
+
 export class AccessStore {
   private config: ResolvedAccessConfig;
   private db: Db | null = null;
+  private databaseStrategy: DatabaseStrategyResolver | undefined;
+  private defaultContext: DatabaseContext | undefined;
   
-  constructor(config: ResolvedAccessConfig) {
+  constructor(config: ResolvedAccessConfig, options?: AccessStoreOptions) {
     this.config = config;
+    this.db = options?.database || null;
+    this.databaseStrategy = options?.databaseStrategy;
+    this.defaultContext = options?.defaultContext;
   }
   
   // ─────────────────────────────────────────────────────────────────
   // Database Access
   // ─────────────────────────────────────────────────────────────────
   
-  private getDb(): Db {
-    if (!this.db) {
-      this.db = getDatabase();
+  private async getDb(context?: DatabaseContext): Promise<Db> {
+    if (this.db) {
+      return this.db;
     }
-    return this.db;
+    
+    if (this.databaseStrategy) {
+      const resolvedContext = context || this.defaultContext;
+      if (resolvedContext) {
+        this.db = await this.databaseStrategy.resolve(resolvedContext);
+        return this.db;
+      } else {
+        throw new Error('AccessStore requires database context when using databaseStrategy');
+      }
+    }
+    
+    throw new Error('AccessStore requires either database or databaseStrategy with defaultContext');
   }
   
-  private roles(): Collection<Role> {
-    return this.getDb().collection<Role>(this.config.collections.roles);
+  private buildContext(tenantId?: string): DatabaseContext | undefined {
+    if (!this.databaseStrategy) return undefined;
+    return {
+      service: this.config.serviceName,
+      ...(tenantId && { tenantId }),
+      ...this.defaultContext,
+    };
   }
   
-  private policies(): Collection<Policy> {
-    return this.getDb().collection<Policy>(this.config.collections.policies);
+  private async roles(tenantId?: string): Promise<Collection<Role>> {
+    const context = this.buildContext(tenantId);
+    const db = await this.getDb(context);
+    return db.collection<Role>(this.config.collections.roles);
   }
   
-  private aclGrants(): Collection<ACLGrant> {
-    return this.getDb().collection<ACLGrant>(this.config.collections.aclGrants);
+  private async policies(tenantId?: string): Promise<Collection<Policy>> {
+    const context = this.buildContext(tenantId);
+    const db = await this.getDb(context);
+    return db.collection<Policy>(this.config.collections.policies);
   }
   
-  private auditLog(): Collection<AuditLogEntry> {
-    return this.getDb().collection<AuditLogEntry>(this.config.collections.auditLog);
+  private async aclGrants(tenantId?: string): Promise<Collection<ACLGrant>> {
+    const context = this.buildContext(tenantId);
+    const db = await this.getDb(context);
+    return db.collection<ACLGrant>(this.config.collections.aclGrants);
+  }
+  
+  private async auditLog(tenantId?: string): Promise<Collection<AuditLogEntry>> {
+    const context = this.buildContext(tenantId);
+    const db = await this.getDb(context);
+    return db.collection<AuditLogEntry>(this.config.collections.auditLog);
   }
   
   // ─────────────────────────────────────────────────────────────────
@@ -67,11 +110,12 @@ export class AccessStore {
     const now = new Date();
     // Use MongoDB ObjectId for performant single-insert operation
     const { objectId, idString } = generateMongoId();
+    const tenantId = input.tenantId || 'default';
     const role = {
       _id: objectId,
       id: idString,
       name: input.name,
-      tenantId: input.tenantId || 'default',
+      tenantId,
       description: input.description,
       inherits: input.inherits || [],
       permissions: input.permissions,
@@ -82,8 +126,8 @@ export class AccessStore {
       updatedAt: now,
     };
     
-    await this.roles().insertOne(role as any);
-    return role as Role;
+    const rolesCol = await this.roles(tenantId);
+    await rolesCol.insertOne(role as any);
     
     if (this.config.audit.logWrites) {
       await this.logAudit({
@@ -96,7 +140,7 @@ export class AccessStore {
         tenantId: role.tenantId,
         result: 'allowed',
         metadata: { roleName: role.name },
-      });
+      }, tenantId);
     }
     
     return role;
@@ -107,11 +151,13 @@ export class AccessStore {
     if (tenantId) {
       query.$or = [{ tenantId }, { tenantId: 'default' }];
     }
-    return this.roles().findOne(query);
+    const rolesCol = await this.roles(tenantId);
+    return rolesCol.findOne(query);
   }
   
   async getRoleByName(name: string, tenantId: string): Promise<Role | null> {
-    return this.roles().findOne({
+    const rolesCol = await this.roles(tenantId);
+    return rolesCol.findOne({
       name,
       $or: [{ tenantId }, { tenantId: 'default' }],
     });
@@ -119,24 +165,44 @@ export class AccessStore {
   
   /**
    * Get all permissions for a role (including inherited)
+   * Uses access-engine's RoleResolver for safe resolution with visited set, maxDepth, and active checks
    */
   async getRolePermissions(roleName: string, tenantId: string): Promise<string[]> {
-    const role = await this.getRoleByName(roleName, tenantId);
-    if (!role) return [];
+    // Load role and all inherited roles from DB
+    const roles = await this.resolveRoleHierarchy([roleName], tenantId);
+    if (roles.length === 0) return [];
     
-    const permissions = new Set<string>(role.permissions);
+    // Convert MongoDB Role[] to BaseRole[] format for RoleResolver
+    const baseRoles: BaseRole[] = roles.map(({ name, description, permissions, inherits, priority, active }) => ({
+      name,
+      description,
+      displayName: name, // Use name as displayName if not provided
+      permissions,
+      inherits,
+      priority,
+      active: active !== false, // Default to true if not set
+      context: undefined, // MongoDB roles don't have context
+      metadata: undefined,
+    }));
     
-    // Add inherited permissions
-    if (role.inherits) {
-      for (const inheritedRoleName of role.inherits) {
-        const inheritedPerms = await this.getRolePermissions(inheritedRoleName, tenantId);
-        for (const perm of inheritedPerms) {
-          permissions.add(perm);
-        }
-      }
-    }
+    // Use RoleResolver for safe resolution (handles visited set, maxDepth, active checks)
+    const roleResolver = new RoleResolver(baseRoles);
     
-    return Array.from(permissions);
+    // Use RoleResolver.resolveUserPermissions with a temporary user to get role permissions
+    // This safely resolves permissions with all safety features (visited set, maxDepth, active checks)
+    const testUser = {
+      userId: 'temp',
+      tenantId,
+      roles: [roleName],
+      permissions: [],
+    };
+    
+    const userResolved = roleResolver.resolveUserPermissions(testUser, {
+      includeInherited: true,
+      includePermissions: true,
+    });
+    
+    return Array.from(userResolved.permissions);
   }
   
   async listRoles(tenantId?: string): Promise<Role[]> {
@@ -144,7 +210,8 @@ export class AccessStore {
     if (tenantId) {
       query.$or = [{ tenantId }, { tenantId: 'default' }];
     }
-    return this.roles().find(query).sort({ priority: -1, name: 1 }).toArray();
+    const rolesCol = await this.roles(tenantId);
+    return rolesCol.find(query).sort({ priority: -1, name: 1 }).toArray();
   }
   
   async updateRole(id: string, input: UpdateRoleInput, updatedBy?: string): Promise<Role | null> {
@@ -156,7 +223,10 @@ export class AccessStore {
     if (input.priority !== undefined) update.priority = input.priority;
     if (input.isDefault !== undefined) update.isDefault = input.isDefault;
     
-    const result = await this.roles().findOneAndUpdate(
+    // Get role first to get tenantId for context
+    const existingRole = await this.getRole(id);
+    const rolesCol = await this.roles(existingRole?.tenantId);
+    const result = await rolesCol.findOneAndUpdate(
       { id, isSystem: false }, // Can't update system roles
       { $set: update },
       { returnDocument: 'after' }
@@ -173,7 +243,7 @@ export class AccessStore {
         tenantId: result.tenantId,
         result: 'allowed',
         metadata: { changes: Object.keys(input) },
-      });
+      }, result.tenantId);
     }
     
     return result;
@@ -183,7 +253,8 @@ export class AccessStore {
     const role = await this.getRole(id);
     if (!role || role.isSystem) return false;
     
-    const result = await this.roles().deleteOne({ id, isSystem: false });
+    const rolesCol = await this.roles(role.tenantId);
+    const result = await rolesCol.deleteOne({ id, isSystem: false });
     
     if (result.deletedCount > 0 && this.config.audit.logWrites) {
       await this.logAudit({
@@ -196,14 +267,15 @@ export class AccessStore {
         tenantId: role.tenantId,
         result: 'allowed',
         metadata: { roleName: role.name },
-      });
+      }, role.tenantId);
     }
     
     return result.deletedCount > 0;
   }
   
   async getDefaultRoles(tenantId: string): Promise<Role[]> {
-    return this.roles().find({
+    const rolesCol = await this.roles(tenantId);
+    return rolesCol.find({
       isDefault: true,
       $or: [{ tenantId }, { tenantId: 'default' }],
     }).toArray();
@@ -286,8 +358,9 @@ export class AccessStore {
       updatedAt: now,
     };
     
-    await this.policies().insertOne(policy as any);
-    return policy as Policy;
+    const tenantId = input.tenantId || 'default';
+    const policiesCol = await this.policies(tenantId);
+    await policiesCol.insertOne(policy as any);
     
     if (this.config.audit.logWrites) {
       await this.logAudit({
@@ -300,14 +373,21 @@ export class AccessStore {
         tenantId: policy.tenantId,
         result: 'allowed',
         metadata: { policyName: policy.name, effect: policy.effect },
-      });
+      }, tenantId);
     }
     
     return policy;
   }
   
   async getPolicy(id: string): Promise<Policy | null> {
-    return this.policies().findOne({ id });
+    const policy = await this.listPolicies().then(policies => policies.find(p => p.id === id));
+    if (policy) {
+      const policiesCol = await this.policies(policy.tenantId);
+      return policiesCol.findOne({ id });
+    }
+    // Try with default context if no tenantId found
+    const policiesCol = await this.policies();
+    return policiesCol.findOne({ id });
   }
   
   async listPolicies(tenantId?: string, resource?: string): Promise<Policy[]> {
@@ -318,7 +398,8 @@ export class AccessStore {
     if (resource) {
       query.resource = resource;
     }
-    return this.policies().find(query).sort({ priority: -1 }).toArray();
+    const policiesCol = await this.policies(tenantId);
+    return policiesCol.find(query).sort({ priority: -1 }).toArray();
   }
   
   async getPoliciesForSubject(
@@ -326,7 +407,8 @@ export class AccessStore {
     subjectValue: string,
     tenantId: string
   ): Promise<Policy[]> {
-    return this.policies().find({
+    const policiesCol = await this.policies(tenantId);
+    return policiesCol.find({
       isActive: true,
       $and: [
         { $or: [{ tenantId }, { tenantId: 'default' }] },
@@ -343,7 +425,8 @@ export class AccessStore {
     roleNames: string[],
     tenantId: string
   ): Promise<Policy[]> {
-    return this.policies().find({
+    const policiesCol = await this.policies(tenantId);
+    return policiesCol.find({
       isActive: true,
       $and: [
         { $or: [{ tenantId }, { tenantId: 'default' }] },
@@ -361,6 +444,9 @@ export class AccessStore {
     input: Partial<CreatePolicyInput> & { isActive?: boolean },
     updatedBy?: string
   ): Promise<Policy | null> {
+    const existingPolicy = await this.getPolicy(id);
+    const tenantId = existingPolicy?.tenantId;
+    
     const update: Record<string, unknown> = { updatedAt: new Date() };
     if (input.name !== undefined) update.name = input.name;
     if (input.subject !== undefined) update.subject = input.subject;
@@ -372,7 +458,8 @@ export class AccessStore {
     if (input.description !== undefined) update.description = input.description;
     if (input.isActive !== undefined) update.isActive = input.isActive;
     
-    const result = await this.policies().findOneAndUpdate(
+    const policiesCol = await this.policies(tenantId);
+    const result = await policiesCol.findOneAndUpdate(
       { id },
       { $set: update },
       { returnDocument: 'after' }
@@ -389,7 +476,7 @@ export class AccessStore {
         tenantId: result.tenantId,
         result: 'allowed',
         metadata: { changes: Object.keys(input) },
-      });
+      }, result.tenantId);
     }
     
     return result;
@@ -399,7 +486,8 @@ export class AccessStore {
     const policy = await this.getPolicy(id);
     if (!policy) return false;
     
-    const result = await this.policies().deleteOne({ id });
+    const policiesCol = await this.policies(policy.tenantId);
+    const result = await policiesCol.deleteOne({ id });
     
     if (result.deletedCount > 0 && this.config.audit.logWrites) {
       await this.logAudit({
@@ -412,7 +500,7 @@ export class AccessStore {
         tenantId: policy.tenantId,
         result: 'allowed',
         metadata: { policyName: policy.name },
-      });
+      }, policy.tenantId);
     }
     
     return result.deletedCount > 0;
@@ -443,8 +531,9 @@ export class AccessStore {
       updatedAt: new Date(),
     };
     
-    await this.aclGrants().insertOne(grant as any);
-    return grant as ACLGrant;
+    const tenantId = input.tenantId || 'default';
+    const aclGrantsCol = await this.aclGrants(tenantId);
+    await aclGrantsCol.insertOne(grant as any);
     
     if (this.config.audit.logWrites) {
       await this.logAudit({
@@ -462,14 +551,22 @@ export class AccessStore {
           actions: input.actions,
           reason: input.reason,
         },
-      });
+      }, tenantId);
     }
     
     return grant;
   }
   
   async getACLGrant(id: string): Promise<ACLGrant | null> {
-    return this.aclGrants().findOne({ id });
+    // Try to find grant by listing all and filtering
+    const grants = await this.listACLGrants();
+    const grant = grants.find(g => g.id === id);
+    if (grant) {
+      const aclGrantsCol = await this.aclGrants(grant.tenantId);
+      return aclGrantsCol.findOne({ id });
+    }
+    const aclGrantsCol = await this.aclGrants();
+    return aclGrantsCol.findOne({ id });
   }
   
   async listACLGrants(
@@ -488,7 +585,8 @@ export class AccessStore {
       { expiresAt: { $gt: new Date() } },
     ];
     
-    return this.aclGrants().find(query).toArray();
+    const aclGrantsCol = await this.aclGrants(tenantId);
+    return aclGrantsCol.find(query).toArray();
   }
   
   async getACLGrantsForSubject(
@@ -496,7 +594,8 @@ export class AccessStore {
     subjectId: string,
     tenantId: string
   ): Promise<ACLGrant[]> {
-    return this.aclGrants().find({
+    const aclGrantsCol = await this.aclGrants(tenantId);
+    return aclGrantsCol.find({
       tenantId,
       subjectType,
       subjectId,
@@ -512,7 +611,8 @@ export class AccessStore {
     roleNames: string[],
     tenantId: string
   ): Promise<ACLGrant[]> {
-    return this.aclGrants().find({
+    const aclGrantsCol = await this.aclGrants(tenantId);
+    return aclGrantsCol.find({
       tenantId,
       $and: [
         { $or: [
@@ -531,7 +631,8 @@ export class AccessStore {
     const grant = await this.getACLGrant(id);
     if (!grant) return false;
     
-    const result = await this.aclGrants().deleteOne({ id });
+    const aclGrantsCol = await this.aclGrants(grant.tenantId);
+    const result = await aclGrantsCol.deleteOne({ id });
     
     if (result.deletedCount > 0 && this.config.audit.logWrites) {
       await this.logAudit({
@@ -548,14 +649,15 @@ export class AccessStore {
           subjectId: grant.subjectId,
           actions: grant.actions,
         },
-      });
+      }, grant.tenantId);
     }
     
     return result.deletedCount > 0;
   }
   
-  async cleanupExpiredGrants(): Promise<number> {
-    const result = await this.aclGrants().deleteMany({
+  async cleanupExpiredGrants(tenantId?: string): Promise<number> {
+    const aclGrantsCol = await this.aclGrants(tenantId);
+    const result = await aclGrantsCol.deleteMany({
       expiresAt: { $lt: new Date() },
     });
     return result.deletedCount;
@@ -574,12 +676,13 @@ export class AccessStore {
   // Audit Logging
   // ─────────────────────────────────────────────────────────────────
   
-  private async logAudit(entry: Omit<AuditLogEntry, 'id' | 'timestamp'>): Promise<void> {
+  private async logAudit(entry: Omit<AuditLogEntry, 'id' | 'timestamp'>, tenantId?: string): Promise<void> {
     if (!this.config.audit.enabled) return;
     
     // Use MongoDB ObjectId for performant single-insert operation
     const { objectId, idString } = generateMongoId();
-    await this.auditLog().insertOne({
+    const auditCol = await this.auditLog(tenantId || entry.tenantId);
+    await auditCol.insertOne({
       _id: objectId,
       id: idString,
       timestamp: new Date(),
@@ -607,7 +710,7 @@ export class AccessStore {
       tenantId,
       result: allowed ? 'allowed' : 'denied',
       reason,
-    });
+    }, tenantId);
   }
   
   async getAuditLog(
@@ -626,7 +729,8 @@ export class AccessStore {
     if (options?.actorId) query.actorId = options.actorId;
     if (options?.since) query.timestamp = { $gte: options.since };
     
-    return this.auditLog()
+    const auditCol = await this.auditLog(tenantId);
+    return auditCol
       .find(query)
       .sort({ timestamp: -1 })
       .limit(options?.limit || 100)
@@ -638,24 +742,28 @@ export class AccessStore {
   // ─────────────────────────────────────────────────────────────────
   
   async initialize(): Promise<void> {
-    // Create indexes
-    await this.roles().createIndex({ name: 1, tenantId: 1 }, { unique: true });
-    await this.roles().createIndex({ tenantId: 1 });
-    await this.roles().createIndex({ isDefault: 1 });
+    // Create indexes (use default context)
+    const rolesCol = await this.roles();
+    await rolesCol.createIndex({ name: 1, tenantId: 1 }, { unique: true });
+    await rolesCol.createIndex({ tenantId: 1 });
+    await rolesCol.createIndex({ isDefault: 1 });
     
-    await this.policies().createIndex({ tenantId: 1 });
-    await this.policies().createIndex({ 'subject.type': 1, 'subject.value': 1 });
-    await this.policies().createIndex({ resource: 1, action: 1 });
-    await this.policies().createIndex({ isActive: 1 });
+    const policiesCol = await this.policies();
+    await policiesCol.createIndex({ tenantId: 1 });
+    await policiesCol.createIndex({ 'subject.type': 1, 'subject.value': 1 });
+    await policiesCol.createIndex({ resource: 1, action: 1 });
+    await policiesCol.createIndex({ isActive: 1 });
     
-    await this.aclGrants().createIndex({ tenantId: 1 });
-    await this.aclGrants().createIndex({ subjectType: 1, subjectId: 1 });
-    await this.aclGrants().createIndex({ resourceType: 1, resourceId: 1 });
-    await this.aclGrants().createIndex({ expiresAt: 1 });
+    const aclGrantsCol = await this.aclGrants();
+    await aclGrantsCol.createIndex({ tenantId: 1 });
+    await aclGrantsCol.createIndex({ subjectType: 1, subjectId: 1 });
+    await aclGrantsCol.createIndex({ resourceType: 1, resourceId: 1 });
+    await aclGrantsCol.createIndex({ expiresAt: 1 });
     
-    await this.auditLog().createIndex({ tenantId: 1, timestamp: -1 });
-    await this.auditLog().createIndex({ actorId: 1 });
-    await this.auditLog().createIndex({ resource: 1 });
+    const auditCol = await this.auditLog();
+    await auditCol.createIndex({ tenantId: 1, timestamp: -1 });
+    await auditCol.createIndex({ actorId: 1 });
+    await auditCol.createIndex({ resource: 1 });
     
     // Create default roles
     if (this.config.defaultRoles) {
@@ -673,7 +781,8 @@ export class AccessStore {
     // Create default policies
     if (this.config.defaultPolicies) {
       for (const policyInput of this.config.defaultPolicies) {
-        const existing = await this.policies().findOne({
+        const policiesCol = await this.policies();
+        const existing = await policiesCol.findOne({
           name: policyInput.name,
           tenantId: policyInput.tenantId || 'default',
         });

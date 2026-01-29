@@ -13,6 +13,7 @@ import {
   Bell,
   Shield,
   Zap,
+  Clock,
 } from 'lucide-react'
 import { AuthProvider, useAuth } from './lib/auth-context'
 import { hasRole } from './lib/access'
@@ -29,9 +30,14 @@ import Login from './pages/Login'
 import Register from './pages/Register'
 import Profile from './pages/Profile'
 import AuthCallback from './pages/AuthCallback'
+import ForgotPassword from './pages/ForgotPassword'
+import ResetPassword from './pages/ResetPassword'
+import VerifyOTP from './pages/VerifyOTP'
 import Notifications from './pages/Notifications'
 import UserManagement from './pages/UserManagement'
 import UseCases from './pages/UseCases'
+import PendingOperations from './pages/PendingOperations'
+import NotificationBell from './components/NotificationBell'
 
 function AppContent() {
   const { isAuthenticated, user, logout, isLoading } = useAuth()
@@ -53,6 +59,9 @@ function AppContent() {
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
+      <Route path="/forgot-password" element={<ForgotPassword />} />
+      <Route path="/reset-password" element={<ResetPassword />} />
+      <Route path="/verify-otp" element={<VerifyOTP />} />
       <Route path="/auth/callback" element={<AuthCallback />} />
       <Route path="*" element={<Navigate to="/login" replace />} />
     </Routes>
@@ -82,6 +91,7 @@ function AppContent() {
             <div className="user-name">{user?.email || user?.username}</div>
             <div className="user-role">{Array.isArray(user?.roles) && typeof user.roles[0] === 'string' ? user.roles[0] : (user?.roles?.[0] as any)?.role || 'User'}</div>
           </div>
+          <NotificationBell />
           <button onClick={logout} className="user-logout" title="Logout">
             <LogOut className="w-4 h-4" />
           </button>
@@ -131,6 +141,10 @@ function AppContent() {
                 <Shield />
                 <span>User Management</span>
               </NavLink>
+              <NavLink to="/pending-operations" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
+                <Clock />
+                <span>Pending Operations</span>
+              </NavLink>
             </div>
           )}
 
@@ -170,12 +184,16 @@ function AppContent() {
           <Route path="/use-cases" element={<ProtectedRoute><UseCases /></ProtectedRoute>} />
           <Route path="/notifications" element={<ProtectedRoute><Notifications /></ProtectedRoute>} />
           <Route path="/users" element={<ProtectedRoute requireRoles={['system']}><UserManagement /></ProtectedRoute>} />
+          <Route path="/pending-operations" element={<ProtectedRoute><PendingOperations /></ProtectedRoute>} />
           <Route path="/webhooks" element={<ProtectedRoute requireRoles={['system']}><Webhooks /></ProtectedRoute>} />
           <Route path="/realtime" element={<ProtectedRoute><RealtimeTest /></ProtectedRoute>} />
           <Route path="/playground" element={<ProtectedRoute><GraphQLPlayground /></ProtectedRoute>} />
           <Route path="/settings" element={<ProtectedRoute><SettingsPage /></ProtectedRoute>} />
           <Route path="/login" element={<Navigate to="/" replace />} />
           <Route path="/register" element={<Navigate to="/" replace />} />
+          <Route path="/forgot-password" element={<Navigate to="/" replace />} />
+          <Route path="/reset-password" element={<Navigate to="/" replace />} />
+          <Route path="/verify-otp" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
     </div>

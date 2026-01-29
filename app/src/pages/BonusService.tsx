@@ -3,7 +3,7 @@
  * View claimed bonuses, manage bonus templates
  */
 
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { 
   Gift, 
@@ -14,19 +14,18 @@ import {
   Trash2, 
   Save,
   X,
-  Filter,
   TrendingUp,
-  Calendar,
-  DollarSign,
-  Users,
   CheckCircle,
   XCircle,
   Clock,
   AlertCircle,
+  Eye,
+  Copy,
+  RefreshCw,
 } from 'lucide-react'
-import { graphqlBonus, SERVICE_URLS } from '../lib/graphql-utils'
+import { graphqlBonus, graphql, SERVICE_URLS } from '../lib/graphql-utils'
 import { useAuth } from '../lib/auth-context'
-import { hasRole, isSystem as checkIsSystem, hasAnyRole } from '../lib/access'
+import { isSystem as checkIsSystem, hasAnyRole } from '../lib/access'
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -87,14 +86,14 @@ export default function BonusService() {
   // Check if user is system or admin (for template management)
   const canManageTemplates = isSystem || hasAnyRole(user?.roles, ['admin', 'system'])
   
-  const [activeTab, setActiveTab] = useState<'claimed' | 'templates' | 'create'>('claimed')
+  const [activeTab, setActiveTab] = useState<'claimed' | 'templates' | 'create' | 'approvals'>('claimed')
   const [searchTerm, setSearchTerm] = useState('')
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [typeFilter, setTypeFilter] = useState<string>('all')
   const [categoryFilter, setCategoryFilter] = useState<string>('all')
   const [claimedCategoryFilter, setClaimedCategoryFilter] = useState<string>('all')
   const [editingTemplate, setEditingTemplate] = useState<BonusTemplate | null>(null)
-  const [showCreateForm, setShowCreateForm] = useState(false)
+  const [, setShowCreateForm] = useState(false)
 
   // ═══════════════════════════════════════════════════════════════════
   // Queries
@@ -114,14 +113,14 @@ export default function BonusService() {
       const filter = canManageTemplates ? undefined : { userId: user?.id }
       
       // Build query variables - only include filter if it's defined
-      const variables: Record<string, unknown> = { first: 100, skip: 0 }
+      const variables: Record<string, unknown> = { first: 100 }
       if (filter !== undefined) {
         variables.filter = filter
       }
       
       const query = `
-        query GetUserBonuses($first: Int, $skip: Int, $filter: JSON) {
-          userBonuss(first: $first, skip: $skip, filter: $filter) {
+        query GetUserBonuses($first: Int, $after: String, $filter: JSON) {
+          userBonuss(first: $first, after: $after, filter: $filter) {
             nodes {
               id
               userId
@@ -166,8 +165,8 @@ export default function BonusService() {
       
       try {
       const query = `
-        query GetBonusTemplates($first: Int, $skip: Int) {
-          bonusTemplates(first: $first, skip: $skip) {
+        query GetBonusTemplates($first: Int, $after: String) {
+          bonusTemplates(first: $first, after: $after) {
               nodes {
                 id
                 name
@@ -207,7 +206,7 @@ export default function BonusService() {
         
         const data = await graphqlBonus<{ bonusTemplates: { nodes: BonusTemplate[]; totalCount: number } }>(
           query,
-          { first: 100, skip: 0 },
+          { first: 100 },
           authToken
         )
         
@@ -456,8 +455,15 @@ export default function BonusService() {
           <Gift size={16} style={{ marginRight: 8 }} />
           Claimed Bonuses ({claimedBonusesQuery.data?.totalCount || 0})
         </button>
-        {isSystem && (
+        {canManageTemplates && (
           <>
+            <button
+              className={`tab ${activeTab === 'approvals' ? 'active' : ''}`}
+              onClick={() => setActiveTab('approvals')}
+            >
+              <Clock size={16} style={{ marginRight: 8 }} />
+              Pending Approvals
+            </button>
             <button
               className={`tab ${activeTab === 'templates' ? 'active' : ''}`}
               onClick={() => setActiveTab('templates')}
@@ -654,12 +660,28 @@ export default function BonusService() {
                           )}
                         </td>
                         <td style={{ padding: 12, fontSize: 12, color: 'var(--text-muted)' }}>
-                          {new Date(bonus.expiresAt).toLocaleDateString()}
-                          {new Date(bonus.expiresAt) < new Date() && (
-                            <div style={{ fontSize: 10, color: 'var(--color-status-error)', marginTop: 2 }}>
-                              Expired
-                            </div>
-                          )}
+                          {(() => {
+                            try {
+                              const expiresDate = new Date(bonus.expiresAt)
+                              if (isNaN(expiresDate.getTime())) return 'N/A'
+                              return expiresDate.toLocaleDateString()
+                            } catch {
+                              return 'N/A'
+                            }
+                          })()}
+                          {(() => {
+                            try {
+                              const expiresDate = new Date(bonus.expiresAt)
+                              if (isNaN(expiresDate.getTime())) return null
+                              return expiresDate < new Date() ? (
+                                <div style={{ fontSize: 10, color: 'var(--color-status-error)', marginTop: 2 }}>
+                                  Expired
+                                </div>
+                              ) : null
+                            } catch {
+                              return null
+                            }
+                          })()}
                         </td>
                       </tr>
                     ))}
@@ -852,7 +874,18 @@ export default function BonusService() {
                           </div>
                           <div>
                             <span style={{ color: 'var(--color-text-muted)' }}>Valid:</span>{' '}
-                            <strong>{new Date(template.validFrom).toLocaleDateString()} - {new Date(template.validUntil).toLocaleDateString()}</strong>
+                            <strong>
+                              {(() => {
+                                try {
+                                  const fromDate = new Date(template.validFrom)
+                                  const untilDate = new Date(template.validUntil)
+                                  if (isNaN(fromDate.getTime()) || isNaN(untilDate.getTime())) return 'N/A'
+                                  return `${fromDate.toLocaleDateString()} - ${untilDate.toLocaleDateString()}`
+                                } catch {
+                                  return 'N/A'
+                                }
+                              })()}
+                            </strong>
                           </div>
                         </div>
                       </>
@@ -866,6 +899,11 @@ export default function BonusService() {
       )}
 
       {/* Create Template Tab */}
+      {/* Pending Approvals Tab */}
+      {activeTab === 'approvals' && canManageTemplates && (
+        <PendingApprovalsSection authToken={authToken} />
+      )}
+
       {activeTab === 'create' && canManageTemplates && (
         <div className="card">
           <TemplateEditForm
@@ -883,6 +921,28 @@ export default function BonusService() {
 // ═══════════════════════════════════════════════════════════════════
 // Template Edit Form Component
 // ═══════════════════════════════════════════════════════════════════
+
+// Helper function to safely parse dates
+function safeDateToISOString(dateValue: string | Date | null | undefined, fallback?: Date): string {
+  if (!dateValue) {
+    const defaultDate = fallback || new Date()
+    return defaultDate.toISOString().split('T')[0]
+  }
+  
+  try {
+    const date = dateValue instanceof Date ? dateValue : new Date(dateValue)
+    if (isNaN(date.getTime())) {
+      // Invalid date, use fallback
+      const defaultDate = fallback || new Date()
+      return defaultDate.toISOString().split('T')[0]
+    }
+    return date.toISOString().split('T')[0]
+  } catch (error) {
+    // Error parsing date, use fallback
+    const defaultDate = fallback || new Date()
+    return defaultDate.toISOString().split('T')[0]
+  }
+}
 
 function TemplateEditForm({
   template,
@@ -908,8 +968,8 @@ function TemplateEditForm({
     maxValue: template?.maxValue ? (template.maxValue / 100).toString() : '',
     minDeposit: template?.minDeposit ? (template.minDeposit / 100).toString() : '',
     turnoverMultiplier: template?.turnoverMultiplier?.toString() || '30',
-    validFrom: template?.validFrom ? new Date(template.validFrom).toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
-    validUntil: template?.validUntil ? new Date(template.validUntil).toISOString().split('T')[0] : new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+    validFrom: safeDateToISOString(template?.validFrom, new Date()),
+    validUntil: safeDateToISOString(template?.validUntil, new Date(Date.now() + 90 * 24 * 60 * 60 * 1000)),
     eligibleTiers: template?.eligibleTiers?.join(', ') || '',
     minSelections: template?.minSelections?.toString() || '',
     maxSelections: template?.maxSelections?.toString() || '',
@@ -923,6 +983,21 @@ function TemplateEditForm({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     
+    // Safely parse dates
+    let validFromDate: Date
+    let validUntilDate: Date
+    try {
+      validFromDate = new Date(formData.validFrom)
+      validUntilDate = new Date(formData.validUntil)
+      if (isNaN(validFromDate.getTime()) || isNaN(validUntilDate.getTime())) {
+        alert('Invalid date values. Please check the dates and try again.')
+        return
+      }
+    } catch (error) {
+      alert('Invalid date values. Please check the dates and try again.')
+      return
+    }
+    
     // For updates, only send changed fields (createService handles partial updates)
     const input: any = {
       name: formData.name,
@@ -933,8 +1008,8 @@ function TemplateEditForm({
       value: parseFloat(formData.value) * 100, // Convert to cents
       currency: formData.currency,
       turnoverMultiplier: parseFloat(formData.turnoverMultiplier),
-      validFrom: new Date(formData.validFrom).toISOString(),
-      validUntil: new Date(formData.validUntil).toISOString(),
+      validFrom: validFromDate.toISOString(),
+      validUntil: validUntilDate.toISOString(),
       priority: parseInt(formData.priority),
     }
     
@@ -1328,5 +1403,358 @@ function TemplateEditForm({
         </div>
       </div>
     </form>
+  )
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Pending Approvals Section Component
+// ═══════════════════════════════════════════════════════════════════
+
+interface PendingBonus {
+  token: string
+  userId: string
+  tenantId: string
+  templateId: string
+  templateCode: string
+  bonusType: string
+  calculatedValue: number
+  currency: string
+  depositAmount?: number
+  requestedAt: string
+  requestedBy?: string
+  reason?: string
+  expiresAt: string
+  rawData?: any
+}
+
+function PendingApprovalsSection({ authToken }: { authToken?: string }) {
+  const [selectedRawData, setSelectedRawData] = useState<any | null>(null)
+  const [loadingRawData, setLoadingRawData] = useState(false)
+
+  const { data, isLoading, error, refetch } = useQuery<{ pendingBonuses: PendingBonus[] }>({
+    queryKey: ['pendingBonuses'],
+    queryFn: async () => {
+      return graphqlBonus<{ pendingBonuses: PendingBonus[] }>(
+        `
+          query GetPendingBonuses {
+            pendingBonuses {
+              token
+              userId
+              tenantId
+              templateId
+              templateCode
+              bonusType
+              calculatedValue
+              currency
+              depositAmount
+              requestedAt
+              requestedBy
+              reason
+              expiresAt
+              rawData
+            }
+          }
+        `,
+        {},
+        authToken
+      )
+    },
+    enabled: !!authToken,
+    refetchInterval: 30000,
+  })
+
+  const pendingBonuses = data?.pendingBonuses || []
+
+  const formatTimeRemaining = (expiresAt: string): string => {
+    const expires = new Date(expiresAt)
+    const now = new Date()
+    const diff = expires.getTime() - now.getTime()
+    
+    if (diff <= 0) return 'Expired'
+    
+    const hours = Math.floor(diff / (1000 * 60 * 60))
+    const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60))
+    
+    if (hours > 0) {
+      return `${hours}h ${minutes}m`
+    }
+    return `${minutes}m`
+  }
+
+  const handleViewRawData = async (bonus: PendingBonus) => {
+    setLoadingRawData(true)
+    try {
+      // Use generic raw data query from auth-service
+      // Pass operationType as "approval" since bonus approvals use pending:bonus:approval: pattern
+      // The query will handle token extraction and search correctly
+      const rawData = await graphql<{ pendingOperationRawData: any }>(
+        SERVICE_URLS.auth,
+        `
+          query GetPendingOperationRawData($token: String!, $operationType: String) {
+            pendingOperationRawData(token: $token, operationType: $operationType)
+          }
+        `,
+        { token: bonus.token, operationType: 'approval' },
+        authToken
+      )
+      setSelectedRawData(rawData.pendingOperationRawData || bonus.rawData || bonus)
+    } catch (error) {
+      console.error('Failed to load raw data:', error)
+      // Fallback to rawData field if available
+      setSelectedRawData(bonus.rawData || bonus)
+    } finally {
+      setLoadingRawData(false)
+    }
+  }
+
+  const approveMutation = useMutation({
+    mutationFn: async ({ token, reason }: { token: string; reason?: string }) => {
+      return graphqlBonus(
+        `
+          mutation ApproveBonus($token: String!, $reason: String) {
+            approveBonus(token: $token, reason: $reason) {
+              success
+              bonusId
+              error
+            }
+          }
+        `,
+        { token, reason },
+        authToken
+      )
+    },
+    onSuccess: () => {
+      refetch()
+    },
+  })
+
+  const rejectMutation = useMutation({
+    mutationFn: async ({ token, reason }: { token: string; reason: string }) => {
+      return graphqlBonus(
+        `
+          mutation RejectBonus($token: String!, $reason: String!) {
+            rejectBonus(token: $token, reason: $reason) {
+              success
+              error
+            }
+          }
+        `,
+        { token, reason },
+        authToken
+      )
+    },
+    onSuccess: () => {
+      refetch()
+    },
+  })
+
+  return (
+    <div>
+      <div className="card" style={{ marginBottom: 24 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+          <h2 style={{ fontSize: 18, fontWeight: 600 }}>Pending Bonus Approvals</h2>
+          <button
+            onClick={() => refetch()}
+            className="btn btn-secondary"
+            disabled={isLoading}
+          >
+            <RefreshCw size={16} style={{ marginRight: 8 }} />
+            Refresh
+          </button>
+        </div>
+
+        {error && (
+          <div style={{ padding: 12, backgroundColor: 'var(--color-status-error-bg)', color: 'var(--color-status-error)', borderRadius: 8, marginBottom: 16 }}>
+            Error: {error instanceof Error ? error.message : 'Unknown error'}
+          </div>
+        )}
+
+        {isLoading ? (
+          <div style={{ textAlign: 'center', padding: 40 }}>
+            <RefreshCw size={24} style={{ animation: 'spin 1s linear infinite', marginBottom: 12 }} />
+            <p>Loading pending approvals...</p>
+          </div>
+        ) : pendingBonuses.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: 40 }}>
+            <Clock size={48} style={{ color: 'var(--color-text-muted)', marginBottom: 12 }} />
+            <p style={{ color: 'var(--color-text-muted)' }}>No pending bonus approvals</p>
+          </div>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ borderBottom: '1px solid var(--color-border-subtle)' }}>
+                  <th style={{ padding: 12, textAlign: 'left', fontSize: 12, fontWeight: 600, textTransform: 'uppercase' }}>Template</th>
+                  <th style={{ padding: 12, textAlign: 'left', fontSize: 12, fontWeight: 600, textTransform: 'uppercase' }}>User</th>
+                  <th style={{ padding: 12, textAlign: 'left', fontSize: 12, fontWeight: 600, textTransform: 'uppercase' }}>Type</th>
+                  <th style={{ padding: 12, textAlign: 'left', fontSize: 12, fontWeight: 600, textTransform: 'uppercase' }}>Value</th>
+                  <th style={{ padding: 12, textAlign: 'left', fontSize: 12, fontWeight: 600, textTransform: 'uppercase' }}>Requested</th>
+                  <th style={{ padding: 12, textAlign: 'left', fontSize: 12, fontWeight: 600, textTransform: 'uppercase' }}>Expires</th>
+                  <th style={{ padding: 12, textAlign: 'left', fontSize: 12, fontWeight: 600, textTransform: 'uppercase' }}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pendingBonuses.map((bonus) => {
+                  const expiresAt = new Date(bonus.expiresAt)
+                  const isExpired = expiresAt < new Date()
+                  
+                  return (
+                    <tr key={bonus.token} style={{ borderBottom: '1px solid var(--color-border-subtle)' }}>
+                      <td style={{ padding: 12 }}>
+                        <div style={{ fontWeight: 500 }}>{bonus.templateCode}</div>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{bonus.templateId}</div>
+                      </td>
+                      <td style={{ padding: 12 }}>
+                        <code style={{ fontSize: 11, backgroundColor: 'var(--color-bg-tertiary)', padding: '4px 8px', borderRadius: 4 }}>
+                          {bonus.userId.substring(0, 8)}...
+                        </code>
+                      </td>
+                      <td style={{ padding: 12 }}>
+                        <span style={{ fontSize: 11, backgroundColor: 'var(--color-purple-100)', color: 'var(--color-purple-800)', padding: '4px 8px', borderRadius: 12 }}>
+                          {bonus.bonusType}
+                        </span>
+                      </td>
+                      <td style={{ padding: 12 }}>
+                        <div style={{ fontWeight: 500 }}>{bonus.calculatedValue.toFixed(2)} {bonus.currency}</div>
+                        {bonus.depositAmount && (
+                          <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>Deposit: {bonus.depositAmount.toFixed(2)}</div>
+                        )}
+                      </td>
+                      <td style={{ padding: 12 }}>
+                        <div>{new Date(bonus.requestedAt).toLocaleString()}</div>
+                        {bonus.requestedBy && (
+                          <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>By: {bonus.requestedBy}</div>
+                        )}
+                      </td>
+                      <td style={{ padding: 12 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                          {isExpired ? (
+                            <>
+                              <XCircle size={14} style={{ color: 'var(--color-status-error)' }} />
+                              <span style={{ color: 'var(--color-status-error)' }}>Expired</span>
+                            </>
+                          ) : (
+                            <>
+                              <CheckCircle size={14} style={{ color: 'var(--color-status-success)' }} />
+                              <span>{formatTimeRemaining(bonus.expiresAt)}</span>
+                            </>
+                          )}
+                        </div>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                          {expiresAt.toLocaleString()}
+                        </div>
+                      </td>
+                      <td style={{ padding: 12 }}>
+                        <div style={{ display: 'flex', gap: 8 }}>
+                          <button
+                            onClick={() => handleViewRawData(bonus)}
+                            className="btn btn-secondary"
+                            style={{ padding: '4px 8px', fontSize: 12 }}
+                            disabled={loadingRawData}
+                            title="View raw data"
+                          >
+                            <Eye size={14} />
+                          </button>
+                          <button
+                            onClick={() => {
+                              if (confirm('Approve this bonus?')) {
+                                approveMutation.mutate({ token: bonus.token })
+                              }
+                            }}
+                            className="btn btn-primary"
+                            style={{ padding: '4px 8px', fontSize: 12 }}
+                            disabled={approveMutation.isPending || isExpired}
+                            title="Approve"
+                          >
+                            <CheckCircle size={14} />
+                          </button>
+                          <button
+                            onClick={() => {
+                              const reason = prompt('Rejection reason:')
+                              if (reason) {
+                                rejectMutation.mutate({ token: bonus.token, reason })
+                              }
+                            }}
+                            className="btn"
+                            style={{ padding: '4px 8px', fontSize: 12, backgroundColor: 'var(--color-status-error-bg)', color: 'var(--color-status-error)' }}
+                            disabled={rejectMutation.isPending || isExpired}
+                            title="Reject"
+                          >
+                            <XCircle size={14} />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Raw Data Modal */}
+      {selectedRawData && (
+        <div style={{
+          position: 'fixed',
+          inset: 0,
+          backgroundColor: 'rgba(0, 0, 0, 0.5)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 1000,
+          padding: 16,
+        }}>
+          <div style={{
+            backgroundColor: 'var(--color-bg-card)',
+            borderRadius: 8,
+            maxWidth: '90vw',
+            maxHeight: '90vh',
+            width: '100%',
+            display: 'flex',
+            flexDirection: 'column',
+          }}>
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              padding: 16,
+              borderBottom: '1px solid var(--color-border-subtle)',
+            }}>
+              <h3 style={{ fontSize: 18, fontWeight: 600 }}>Raw Token Data</h3>
+              <button
+                onClick={() => setSelectedRawData(null)}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4 }}
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <div style={{ padding: 16, overflow: 'auto', flex: 1 }}>
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(JSON.stringify(selectedRawData, null, 2))
+                }}
+                className="btn btn-secondary"
+                style={{ marginBottom: 12 }}
+              >
+                <Copy size={14} style={{ marginRight: 8 }} />
+                Copy JSON
+              </button>
+              <pre style={{
+                backgroundColor: '#1a1a1a',
+                color: '#4ade80',
+                padding: 16,
+                borderRadius: 8,
+                overflow: 'auto',
+                fontSize: 12,
+                fontFamily: 'monospace',
+              }}>
+                {JSON.stringify(selectedRawData, null, 2)}
+              </pre>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   )
 }

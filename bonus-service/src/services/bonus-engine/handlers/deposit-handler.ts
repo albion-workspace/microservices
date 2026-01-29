@@ -4,15 +4,11 @@
  * Handles: first_deposit, reload, welcome, first_purchase, first_action, top_up
  */
 
-import { getDatabase } from 'core-service';
+import { resolveDatabase, type DatabaseResolutionOptions, type Collection } from 'core-service';
 import type { BonusTemplate, BonusType } from '../../../types.js';
-import { BaseBonusHandler } from '../base-handler.js';
+import { BaseBonusHandler, type BaseHandlerOptions } from '../base-handler.js';
 import type { BonusContext, EligibilityResult } from '../types.js';
-import { 
-  hasMadeFirstDeposit,
-  hasMadeFirstPurchase,
-  hasCompletedFirstAction,
-} from '../user-status.js';
+import { createUserStatusFunctions } from '../user-status.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // First Deposit Handler
@@ -20,13 +16,18 @@ import {
 
 export class FirstDepositHandler extends BaseBonusHandler {
   readonly type: BonusType = 'first_deposit';
+  private userStatus: ReturnType<typeof createUserStatusFunctions>;
+
+  constructor(options?: BaseHandlerOptions) {
+    super(options);
+    this.userStatus = createUserStatusFunctions(options || {});
+  }
 
   protected async validateSpecific(
     template: BonusTemplate,
     context: BonusContext
   ): Promise<EligibilityResult> {
-    const db = getDatabase();
-    const userBonuses = db.collection('user_bonuses');
+    const userBonuses = await this.getUserBonusesCollection(context.tenantId);
 
     // Check if user already has a first deposit bonus (primary check)
     const existing = await userBonuses.findOne({
@@ -43,7 +44,7 @@ export class FirstDepositHandler extends BaseBonusHandler {
 
     // Performance-optimized check: Use user status flag instead of querying transactions
     // This avoids scanning the large transactions table
-    const hasDeposited = await hasMadeFirstDeposit(context.userId, context.tenantId);
+    const hasDeposited = await this.userStatus.hasMadeFirstDeposit(context.userId, context.tenantId);
     
     if (hasDeposited) {
       return {
@@ -75,8 +76,7 @@ export class ReloadHandler extends BaseBonusHandler {
     context: BonusContext
   ): Promise<EligibilityResult> {
     // Reload bonuses are available after first deposit
-    const db = getDatabase();
-    const userBonuses = db.collection('user_bonuses');
+    const userBonuses = await this.getUserBonusesCollection(context.tenantId);
 
     // Check cooldown period (if template has one)
     const lastReload = await userBonuses
@@ -116,8 +116,7 @@ export class WelcomeHandler extends BaseBonusHandler {
     template: BonusTemplate,
     context: BonusContext
   ): Promise<EligibilityResult> {
-    const db = getDatabase();
-    const userBonuses = db.collection('user_bonuses');
+    const userBonuses = await this.getUserBonusesCollection(context.tenantId);
 
     // Welcome bonus can only be claimed once
     const existing = await userBonuses.findOne({
@@ -142,13 +141,18 @@ export class WelcomeHandler extends BaseBonusHandler {
 
 export class FirstPurchaseHandler extends BaseBonusHandler {
   readonly type: BonusType = 'first_purchase';
+  private userStatus: ReturnType<typeof createUserStatusFunctions>;
+
+  constructor(options?: BaseHandlerOptions) {
+    super(options);
+    this.userStatus = createUserStatusFunctions(options || {});
+  }
 
   protected async validateSpecific(
     template: BonusTemplate,
     context: BonusContext
   ): Promise<EligibilityResult> {
-    const db = getDatabase();
-    const userBonuses = db.collection('user_bonuses');
+    const userBonuses = await this.getUserBonusesCollection(context.tenantId);
 
     // Check if user already has a first purchase bonus
     const existing = await userBonuses.findOne({
@@ -164,7 +168,7 @@ export class FirstPurchaseHandler extends BaseBonusHandler {
     }
 
     // Performance-optimized check: Use user status flag
-    const hasPurchased = await hasMadeFirstPurchase(context.userId, context.tenantId);
+    const hasPurchased = await this.userStatus.hasMadeFirstPurchase(context.userId, context.tenantId);
     
     if (hasPurchased) {
       return {
@@ -188,13 +192,18 @@ export class FirstPurchaseHandler extends BaseBonusHandler {
 
 export class FirstActionHandler extends BaseBonusHandler {
   readonly type: BonusType = 'first_action';
+  private userStatus: ReturnType<typeof createUserStatusFunctions>;
+
+  constructor(options?: BaseHandlerOptions) {
+    super(options);
+    this.userStatus = createUserStatusFunctions(options || {});
+  }
 
   protected async validateSpecific(
     template: BonusTemplate,
     context: BonusContext
   ): Promise<EligibilityResult> {
-    const db = getDatabase();
-    const userBonuses = db.collection('user_bonuses');
+    const userBonuses = await this.getUserBonusesCollection(context.tenantId);
 
     // Check if user already has a first action bonus
     const existing = await userBonuses.findOne({
@@ -210,7 +219,7 @@ export class FirstActionHandler extends BaseBonusHandler {
     }
 
     // Performance-optimized check: Use user status flag
-    const hasAction = await hasCompletedFirstAction(context.userId, context.tenantId);
+    const hasAction = await this.userStatus.hasCompletedFirstAction(context.userId, context.tenantId);
     
     if (hasAction) {
       return {

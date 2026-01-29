@@ -7,7 +7,7 @@ import passport from 'passport';
 import type { Request, Response } from 'express';
 import { createTokenPair, logger } from 'core-service';
 import type { User } from './types.js';
-import { rolesToArray } from './utils.js';
+import { createUserContext } from './utils.js';
 
 /**
  * OAuth provider configuration
@@ -37,20 +37,10 @@ async function handleOAuthCallback(
       return;
     }
 
-    // Normalize roles and permissions
-    const roles = rolesToArray(user.roles);
-    const permissions = Array.isArray(user.permissions)
-      ? user.permissions
-      : typeof user.permissions === 'object' && user.permissions !== null
-      ? Object.keys(user.permissions as unknown as Record<string, boolean>).filter(key => ((user.permissions as unknown as Record<string, boolean>)[key] === true))
-      : [];
+    // Create UserContext using reusable utility
+    const userContext = createUserContext(user);
 
-    const tokens = createTokenPair({
-      userId: user.id,
-      tenantId: user.tenantId,
-      roles,
-      permissions,
-    }, {
+    const tokens = createTokenPair(userContext, {
       secret: process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || 'shared-jwt-secret-change-in-production',
       expiresIn: '1h',
       refreshExpiresIn: '7d',

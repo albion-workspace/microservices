@@ -1,92 +1,12 @@
 /**
- * Cross-Service References
+ * Cross-Service References - Generic Types Only
  * 
- * Types for linking entities across microservices
+ * Generic types for cross-service communication.
+ * Domain-specific types should be defined in their respective services.
  */
 
-import type { Currency } from './currency.js';
-
 // ═══════════════════════════════════════════════════════════════════
-// Wallet Reference (from payment-gateway)
-// ═══════════════════════════════════════════════════════════════════
-
-/**
- * Reference to a wallet in payment-gateway
- * Use in bonus-service to link bonus to specific wallet
- */
-export interface WalletReference {
-  walletId: string;
-  userId: string;
-  tenantId: string;
-  currency: Currency;
-  category?: string;
-}
-
-/**
- * Wallet balance snapshot (for cross-service queries)
- */
-export interface WalletBalanceSnapshot {
-  walletId: string;
-  balance: number;
-  bonusBalance: number;
-  lockedBalance: number;
-  availableBalance: number;
-  currency: Currency;
-  timestamp: Date;
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// Bonus Reference (from bonus-service)
-// ═══════════════════════════════════════════════════════════════════
-
-/**
- * Reference to a bonus in bonus-service
- * Use in payment-gateway to track bonus-related restrictions
- */
-export interface BonusReference {
-  bonusId: string;
-  userId: string;
-  tenantId: string;
-  bonusType: string;
-  currency: Currency;
-  amount: number;
-  turnoverRequired: number;       // Activity/turnover requirement
-  turnoverProgress: number;       // Current progress
-  expiresAt: Date;
-  status: string;
-}
-
-/**
- * Active bonuses summary for a wallet
- */
-export interface WalletBonusSummary {
-  walletId: string;
-  activeBonuses: BonusReference[];
-  totalBonusAmount: number;
-  totalTurnoverRequired: number;  // Total activity requirement
-  totalTurnoverProgress: number;  // Total progress
-  hasBlockingBonus: boolean;      // Blocks withdrawal until requirements met
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// Transaction Reference (from payment-gateway)
-// ═══════════════════════════════════════════════════════════════════
-
-/**
- * Reference to a transaction in payment-gateway
- * Use in bonus-service to link bonus to qualifying deposit
- */
-export interface TransactionReference {
-  transactionId: string;
-  type: 'deposit' | 'withdrawal' | 'transfer';
-  amount: number;
-  currency: Currency;
-  status: string;
-  createdAt: Date;
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// User Reference (shared)
+// User Reference (generic - used across all services)
 // ═══════════════════════════════════════════════════════════════════
 
 /**
@@ -101,7 +21,7 @@ export interface UserReference {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Service Response (for cross-service calls)
+// Service Response (generic - standard API response format)
 // ═══════════════════════════════════════════════════════════════════
 
 /**
@@ -147,4 +67,3 @@ export function errorResponse(
     timestamp: new Date(),
   };
 }
-

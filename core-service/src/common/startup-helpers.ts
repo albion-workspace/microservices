@@ -5,8 +5,8 @@
  */
 
 import { logger } from './logger.js';
-import { connectDatabase, checkDatabaseHealth } from './database.js';
-import { connectRedis, getRedis, checkRedisHealth } from './redis.js';
+import { connectDatabase, checkDatabaseHealth } from '../databases/mongodb.js';
+import { connectRedis, getRedis, checkRedisHealth } from '../databases/redis.js';
 import { setupGracefulShutdown } from './lifecycle.js';
 import { getErrorMessage } from './errors.js';
 

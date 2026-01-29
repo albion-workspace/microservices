@@ -18,8 +18,9 @@ import {
   registerRecoveryHandler,
   getRecoveryJob,
   logger,
+  createTransferRecoveryHandler,
+  onShutdown,
 } from 'core-service';
-import { createTransferRecoveryHandler } from 'core-service';
 
 /**
  * Setup recovery system for bonus service
@@ -40,7 +41,6 @@ export async function setupRecovery(): Promise<void> {
     logger.info('✅ Recovery job started (interval: 5 minutes, max age: 60 seconds)');
 
     // Setup graceful shutdown
-    const { onShutdown } = await import('core-service');
     onShutdown(() => {
       recoveryJob.stop();
       logger.info('Recovery job stopped');

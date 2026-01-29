@@ -168,3 +168,44 @@ export function extractToken(header: string | undefined): string | null {
   const [type, token] = header.split(' ');
   return type?.toLowerCase() === 'bearer' ? token || null : null;
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Generic JWT Operations (for non-auth use cases like pending operations)
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Sign a generic JWT payload with custom expiration
+ * Useful for temporary data storage (e.g., pending operations, registration tokens)
+ */
+export function signGenericJWT(
+  payload: Record<string, unknown>,
+  secret: string,
+  expiresIn: string | number
+): string {
+  // jwt.sign accepts expiresIn as number (seconds) or string (e.g., "24h", "3600s")
+  // SignOptions.expiresIn has a strict type, so we need to cast to bypass TypeScript's strict checking
+  // Runtime behavior is correct - jsonwebtoken accepts both string and number formats
+  const options: any = {
+    expiresIn: expiresIn,
+    algorithm: 'HS256',
+  };
+  return jwt.sign(payload, secret, options);
+}
+
+/**
+ * Verify a generic JWT token and return the payload
+ * Returns null if token is invalid or expired
+ */
+export function verifyGenericJWT<T = Record<string, unknown>>(
+  token: string,
+  secret: string
+): T | null {
+  try {
+    const options: VerifyOptions = {
+      algorithms: ['HS256'],
+    };
+    return jwt.verify(token, secret, options) as T;
+  } catch {
+    return null;
+  }
+}

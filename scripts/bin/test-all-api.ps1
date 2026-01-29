@@ -185,10 +185,10 @@ if ($registerResult) {
                 Start-Sleep -Seconds 1
                 $scriptsDir = Split-Path -Parent $PSScriptRoot
                 Push-Location $scriptsDir
-                $promoteResult = node promote-to-system.js $systemEmail 2>&1 | Out-String
+                $promoteResult = npx tsx typescript/auth/manage-user.ts $systemEmail --all 2>&1 | Out-String
                 Pop-Location
                 
-                if ($promoteResult -match "promoted to system successfully" -or $promoteResult -match "SUCCESS") {
+                if ($promoteResult -match "updated successfully" -or $promoteResult -match "SUCCESS" -or $promoteResult -match "User updated successfully") {
                     Write-Host "  ✅ User promoted to system" -ForegroundColor Green
                     Start-Sleep -Seconds 1
                     

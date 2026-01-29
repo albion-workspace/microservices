@@ -1,47 +1,131 @@
 /**
  * Notification Service Configuration
+ * 
+ * Centralized configuration management with dynamic MongoDB-based config store.
+ * Supports multi-brand/tenant configurations with permission-based access.
+ * 
+ * Priority order:
+ * 1. Environment variables (highest priority - overrides everything)
+ * 2. MongoDB config store (dynamic, multi-brand/tenant) - stored in core_service
+ * 3. Registered defaults (auto-created if missing)
+ * 
+ * NOTE: Config is always stored in core_service.service_configs (central)
+ * because you need to read the database strategy before connecting to service DB.
  */
 
+import { 
+  logger, 
+  getConfigWithDefault, 
+  resolveRedisUrlFromConfig,
+} from 'core-service';
 import type { NotificationConfig } from './types.js';
 
-export function loadConfig(): NotificationConfig {
+export type { NotificationConfig };
+
+// Service name constant
+const SERVICE_NAME = 'notification-service';
+
+/**
+ * Load configuration with dynamic MongoDB config store support
+ * 
+ * Priority order:
+ * 1. Environment variables (highest priority)
+ * 2. MongoDB config store (from core_service.service_configs)
+ * 3. Registered defaults (auto-created if missing)
+ */
+export async function loadConfig(brand?: string, tenantId?: string): Promise<NotificationConfig> {
+  const port = parseInt(process.env.PORT || '3006');
+  
+  // Load from MongoDB config store (core_service.service_configs) with automatic default creation
+  const corsOrigins = await getConfigWithDefault<string[]>(SERVICE_NAME, 'corsOrigins', { brand, tenantId }) ?? [
+    'http://localhost:5173',
+    'http://localhost:3000',
+    'http://127.0.0.1:5173',
+  ];
+  
+  const smtpConfig = await getConfigWithDefault<{ host: string; port: number; user: string; password: string; from: string; secure: boolean }>(SERVICE_NAME, 'smtp', { brand, tenantId }) ?? {
+    host: '',
+    port: 587,
+    user: '',
+    password: '',
+    from: 'noreply@example.com',
+    secure: false,
+  };
+  
+  const twilioConfig = await getConfigWithDefault<{ accountSid: string; authToken: string; phoneNumber: string; whatsappNumber: string }>(SERVICE_NAME, 'twilio', { brand, tenantId }) ?? {
+    accountSid: '',
+    authToken: '',
+    phoneNumber: '',
+    whatsappNumber: '',
+  };
+  
+  const pushConfig = await getConfigWithDefault<{ apiKey: string; projectId: string }>(SERVICE_NAME, 'push', { brand, tenantId }) ?? {
+    apiKey: '',
+    projectId: '',
+  };
+  
+  const queueConfig = await getConfigWithDefault<{ concurrency: number; maxRetries: number; retryDelay: number }>(SERVICE_NAME, 'queue', { brand, tenantId }) ?? {
+    concurrency: 5,
+    maxRetries: 3,
+    retryDelay: 5000,
+  };
+  
+  const realtimeConfig = await getConfigWithDefault<{ sseHeartbeatInterval: number; socketNamespace: string }>(SERVICE_NAME, 'realtime', { brand, tenantId }) ?? {
+    sseHeartbeatInterval: 30000,
+    socketNamespace: '/notifications',
+  };
+  
+  // Load database config (for MongoDB URI and Redis URL resolution)
+  const dbConfig = await getConfigWithDefault<{ strategy: string; mongoUri?: string; redisUrl?: string }>(SERVICE_NAME, 'database', { brand, tenantId });
+  
+  // Resolve MongoDB URI from config or env
+  const mongoUri = process.env.MONGO_URI 
+    || (dbConfig?.mongoUri 
+      ? dbConfig.mongoUri.replace(/{service}/g, 'notification_service')
+      : 'mongodb://localhost:27017/notification_service?directConnection=true');
+  
+  // Resolve Redis URL from config or env
+  const resolvedRedisUrl = await resolveRedisUrlFromConfig(SERVICE_NAME, { brand, tenantId });
+  const redisUrl = process.env.REDIS_URL 
+    || resolvedRedisUrl
+    || `redis://:${process.env.REDIS_PASSWORD || 'redis123'}@localhost:6379`;
+  
+  // Build config object (env vars override MongoDB configs)
   return {
     // Service
-    port: parseInt(process.env.PORT || '3006'),
+    port: parseInt(process.env.PORT || String(port)),
     nodeEnv: process.env.NODE_ENV || 'development',
     
-    // Database
-    // Note: When connecting from localhost, directConnection=true prevents replica set member discovery
-    mongoUri: process.env.MONGO_URI || 'mongodb://localhost:27017/notification_service?directConnection=true',
-    // Redis password: default is redis123 (from Docker container), can be overridden via REDIS_PASSWORD env var
-    redisUrl: process.env.REDIS_URL || `redis://:${process.env.REDIS_PASSWORD || 'redis123'}@localhost:6379`,
+    // Database - Fully configurable from MongoDB config store
+    mongoUri,
+    redisUrl,
     
-    // SMTP (Email)
-    smtpHost: process.env.SMTP_HOST,
-    smtpPort: parseInt(process.env.SMTP_PORT || '587'),
-    smtpUser: process.env.SMTP_USER,
-    smtpPassword: process.env.SMTP_PASSWORD,
-    smtpFrom: process.env.SMTP_FROM || 'noreply@example.com',
-    smtpSecure: process.env.SMTP_SECURE === 'true',
+    // SMTP - Env vars override MongoDB configs
+    smtpHost: process.env.SMTP_HOST || smtpConfig.host,
+    smtpPort: parseInt(process.env.SMTP_PORT || String(smtpConfig.port)),
+    smtpUser: process.env.SMTP_USER || smtpConfig.user,
+    smtpPassword: process.env.SMTP_PASSWORD || smtpConfig.password,
+    smtpFrom: process.env.SMTP_FROM || smtpConfig.from,
+    smtpSecure: process.env.SMTP_SECURE === 'true' ? true : smtpConfig.secure,
     
-    // Twilio (SMS/WhatsApp)
-    twilioAccountSid: process.env.TWILIO_ACCOUNT_SID,
-    twilioAuthToken: process.env.TWILIO_AUTH_TOKEN,
-    twilioPhoneNumber: process.env.TWILIO_PHONE_NUMBER,
-    twilioWhatsAppNumber: process.env.TWILIO_WHATSAPP_NUMBER,
+    // Twilio - Env vars override MongoDB configs
+    twilioAccountSid: process.env.TWILIO_ACCOUNT_SID || twilioConfig.accountSid,
+    twilioAuthToken: process.env.TWILIO_AUTH_TOKEN || twilioConfig.authToken,
+    twilioPhoneNumber: process.env.TWILIO_PHONE_NUMBER || twilioConfig.phoneNumber,
+    twilioWhatsAppNumber: process.env.TWILIO_WHATSAPP_NUMBER || twilioConfig.whatsappNumber,
     
-    // Push Notifications
-    pushProviderApiKey: process.env.PUSH_PROVIDER_API_KEY,
-    pushProviderProjectId: process.env.PUSH_PROVIDER_PROJECT_ID,
+    // Push Notifications - Env vars override MongoDB configs
+    pushProviderApiKey: process.env.PUSH_PROVIDER_API_KEY || pushConfig.apiKey,
+    pushProviderProjectId: process.env.PUSH_PROVIDER_PROJECT_ID || pushConfig.projectId,
     
-    // Queue
-    queueConcurrency: parseInt(process.env.QUEUE_CONCURRENCY || '5'),
-    queueMaxRetries: parseInt(process.env.QUEUE_MAX_RETRIES || '3'),
-    queueRetryDelay: parseInt(process.env.QUEUE_RETRY_DELAY || '5000'),
+    // Queue - Env vars override MongoDB configs
+    queueConcurrency: parseInt(process.env.QUEUE_CONCURRENCY || String(queueConfig.concurrency)),
+    queueMaxRetries: parseInt(process.env.QUEUE_MAX_RETRIES || String(queueConfig.maxRetries)),
+    queueRetryDelay: parseInt(process.env.QUEUE_RETRY_DELAY || String(queueConfig.retryDelay)),
     
-    // Real-time
-    sseHeartbeatInterval: parseInt(process.env.SSE_HEARTBEAT_INTERVAL || '30000'),
-    socketNamespace: process.env.SOCKET_NAMESPACE || '/notifications',
+    // Real-time - Env vars override MongoDB configs
+    sseHeartbeatInterval: parseInt(process.env.SSE_HEARTBEAT_INTERVAL || String(realtimeConfig.sseHeartbeatInterval)),
+    socketNamespace: process.env.SOCKET_NAMESPACE || realtimeConfig.socketNamespace,
   };
 }
 
@@ -54,15 +138,15 @@ export function validateConfig(config: NotificationConfig): void {
   
   // Warn about missing providers
   if (!config.smtpHost) {
-    console.warn('⚠ SMTP not configured - Email notifications disabled');
+    logger.warn('SMTP not configured - Email notifications disabled');
   }
   
   if (!config.twilioAccountSid) {
-    console.warn('⚠ Twilio not configured - SMS/WhatsApp notifications disabled');
+    logger.warn('Twilio not configured - SMS/WhatsApp notifications disabled');
   }
   
   if (!config.pushProviderApiKey) {
-    console.warn('⚠ Push provider not configured - Push notifications disabled');
+    logger.warn('Push provider not configured - Push notifications disabled');
   }
   
   if (errors.length > 0) {
@@ -71,18 +155,20 @@ export function validateConfig(config: NotificationConfig): void {
 }
 
 export function printConfigSummary(config: NotificationConfig): void {
-  console.log('Configuration:');
-  console.log(`  Port: ${config.port}`);
-  console.log(`  MongoDB: ${config.mongoUri}`);
-  console.log(`  Redis: ${config.redisUrl || 'not configured'}`);
-  console.log('');
+  logger.info('Configuration:', {
+    Port: config.port,
+    MongoDB: config.mongoUri,
+    Redis: config.redisUrl || 'not configured',
+  });
   
-  console.log('Available Channels:');
-  if (config.smtpHost) console.log('  ✓ Email (SMTP)');
-  if (config.twilioAccountSid) console.log('  ✓ SMS (Twilio)');
-  if (config.twilioWhatsAppNumber) console.log('  ✓ WhatsApp (Twilio)');
-  if (config.pushProviderApiKey) console.log('  ✓ Push Notifications');
-  console.log('  ✓ SSE (Server-Sent Events)');
-  console.log('  ✓ Socket.IO (Real-time)');
-  console.log('');
+  const availableChannels = [
+    config.smtpHost && 'Email (SMTP)',
+    config.twilioAccountSid && 'SMS (Twilio)',
+    config.twilioWhatsAppNumber && 'WhatsApp (Twilio)',
+    config.pushProviderApiKey && 'Push Notifications',
+    'SSE (Server-Sent Events)',
+    'Socket.IO (Real-time)',
+  ].filter(Boolean);
+  
+  logger.info('Available Channels:', { channels: availableChannels });
 }

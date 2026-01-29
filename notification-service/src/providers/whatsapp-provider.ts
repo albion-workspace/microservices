@@ -4,7 +4,8 @@
 
 import twilio from 'twilio';
 import type { Twilio } from 'twilio';
-import { logger, generateId } from 'core-service';
+import { logger, generateId, GraphQLError } from 'core-service';
+import { NOTIFICATION_ERRORS } from '../error-codes.js';
 import type { NotificationProvider, WhatsAppNotification, NotificationResponse, NotificationConfig } from '../types.js';
 
 export class WhatsAppProvider implements NotificationProvider {
@@ -29,7 +30,7 @@ export class WhatsAppProvider implements NotificationProvider {
   
   async send(notification: WhatsAppNotification): Promise<NotificationResponse> {
     if (!this.client) {
-      throw new Error('WhatsApp provider not configured');
+      throw new GraphQLError(NOTIFICATION_ERRORS.WhatsAppProviderNotConfigured, {});
     }
     
     const recipients = Array.isArray(notification.to) ? notification.to : [notification.to];
@@ -61,12 +62,8 @@ export class WhatsAppProvider implements NotificationProvider {
           providerMessageId: message.sid,
         });
       } catch (error: any) {
-        logger.error('Failed to send WhatsApp', { error: error.message, to });
-        
-        results.push({
-          id: generateId(),
-          status: 'failed',
-          channel: 'whatsapp',
+        throw new GraphQLError(NOTIFICATION_ERRORS.FailedToSendWhatsApp, {
+          to,
           error: error.message,
         });
       }

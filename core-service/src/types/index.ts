@@ -101,49 +101,12 @@ export {
 } from './currency.js';
 
 // ═══════════════════════════════════════════════════════════════════
-// Events (cross-service communication)
-// ═══════════════════════════════════════════════════════════════════
-
-// Example event data types (services can define their own)
-export type {
-  DepositCompletedData,
-  WithdrawalCompletedData,
-  BonusCreditedData,
-  BonusConvertedData,
-  BonusForfeitedData,
-  UserRegisteredData,
-  UserVerifiedData,
-} from './events.js';
-
-// Legacy event types (deprecated - use emit<T>() with IntegrationEvent<T>)
-export type {
-  BaseEvent,
-  IntegrationEvent,
-  DepositCompletedEvent,
-  WithdrawalCompletedEvent,
-  WithdrawalRequestedEvent,
-  BonusCreditedEvent,
-  BonusConvertedEvent,
-  BonusForfeitedEvent,
-  TurnoverCompletedEvent,
-  TurnoverProgressEvent,
-  WageringCompletedEvent,
-  WageringProgressEvent,
-  UserRegisteredEvent,
-  UserVerifiedEvent,
-} from './events.js';
-export { createEvent } from './events.js';
-
-// ═══════════════════════════════════════════════════════════════════
-// References (cross-service linking)
+// References (cross-service linking) - Generic types only
+// Domain-specific types (WalletReference, BonusReference, etc.) 
+// should be defined in their respective services
 // ═══════════════════════════════════════════════════════════════════
 
 export type {
-  WalletReference,
-  WalletBalanceSnapshot,
-  BonusReference,
-  WalletBonusSummary,
-  TransactionReference,
   UserReference,
   ServiceResponse,
 } from './references.js';

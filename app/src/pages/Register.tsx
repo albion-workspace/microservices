@@ -57,6 +57,33 @@ export default function Register() {
       return false;
     }
 
+    // Validate username format if provided (3-30 alphanumeric, underscore, or hyphen)
+    if (formData.username) {
+      const usernameRegex = /^[a-zA-Z0-9_-]{3,30}$/;
+      if (!usernameRegex.test(formData.username)) {
+        setError('Invalid username format. Use 3-30 alphanumeric characters, underscores, or hyphens.');
+        return false;
+      }
+    }
+
+    // Validate email format if provided
+    if (formData.email) {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(formData.email)) {
+        setError('Invalid email format');
+        return false;
+      }
+    }
+
+    // Validate phone format if provided (basic validation)
+    if (formData.phone) {
+      const phoneRegex = /^\+?[1-9]\d{1,14}$/;
+      if (!phoneRegex.test(formData.phone.replace(/\s/g, ''))) {
+        setError('Invalid phone number format. Use international format (e.g., +1234567890)');
+        return false;
+      }
+    }
+
     if (formData.password.length < 8) {
       setError('Password must be at least 8 characters');
       return false;
@@ -97,15 +124,34 @@ export default function Register() {
 
       if (result.success) {
         if (result.requiresOTP) {
+          // Registration requires OTP verification
           setRequiresOTP(true);
           setOtpInfo({
-            sentTo: result.otpSentTo,
-            channel: result.otpChannel,
+            sentTo: result.otpSentTo || formData.email || formData.phone || '',
+            channel: result.otpChannel || 'email',
           });
         } else if (result.tokens) {
-          navigate('/dashboard');
+          // Auto-verified registration - tokens provided
+          navigate('/dashboard', { replace: true });
+        } else if (result.registrationToken) {
+          // Registration token provided - need OTP verification
+          navigate('/verify-otp', {
+            state: {
+              recipient: result.otpSentTo || formData.email || formData.phone || '',
+              purpose: 'registration',
+              registrationToken: result.registrationToken,
+            },
+            replace: true,
+          });
         } else {
-          navigate('/verify-email', { state: { email: formData.email } });
+          // Fallback - navigate to verify OTP page
+          navigate('/verify-otp', {
+            state: {
+              recipient: formData.email || formData.phone || '',
+              purpose: 'email_verification',
+            },
+            replace: true,
+          });
         }
       } else {
         setError(result.message || 'Registration failed');
@@ -134,7 +180,13 @@ export default function Register() {
               We've sent a verification code to <strong className="text-gray-900">{otpInfo.sentTo}</strong>
             </p>
             <button
-              onClick={() => navigate('/verify-otp', { state: { recipient: otpInfo.sentTo, purpose: 'email_verification' } })}
+              onClick={() => navigate('/verify-otp', { 
+                state: { 
+                  recipient: otpInfo.sentTo, 
+                  purpose: 'registration',
+                },
+                replace: true,
+              })}
               className="w-full bg-gradient-to-r from-green-600 to-emerald-600 text-white py-4 px-6 rounded-xl font-semibold hover:from-green-700 hover:to-emerald-700 transition-all shadow-lg"
             >
               Enter Verification Code
@@ -251,6 +303,11 @@ export default function Register() {
           <div>
             <label className="block text-sm font-semibold text-gray-700 mb-2">
               Email <span className="text-red-500">*</span>
+              {formData.email && (
+                <span className="ml-2 text-xs font-normal text-gray-500">
+                  {/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email) ? '✓ Valid format' : '⚠️ Invalid email format'}
+                </span>
+              )}
             </label>
             <div className="relative">
               <Mail className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
@@ -259,7 +316,11 @@ export default function Register() {
                 type="email"
                 value={formData.email}
                 onChange={handleChange}
-                className="w-full pl-12 pr-4 py-3 bg-gray-50 border-2 border-gray-200 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-transparent outline-none transition-all"
+                className={`w-full pl-12 pr-4 py-3 bg-gray-50 border-2 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-transparent outline-none transition-all ${
+                  formData.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)
+                    ? 'border-red-300'
+                    : 'border-gray-200'
+                }`}
                 placeholder="user@example.com"
                 required
               />
@@ -269,21 +330,57 @@ export default function Register() {
           {/* Username & Phone */}
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-semibold text-gray-700 mb-2">Username (optional)</label>
+              <label className="block text-sm font-semibold text-gray-700 mb-2">
+                Username (optional)
+                {formData.username && (
+                  <span className="ml-2 text-xs font-normal text-gray-500">
+                    {formData.username.length < 3 || formData.username.length > 30 || !/^[a-zA-Z0-9_-]+$/.test(formData.username) 
+                      ? '⚠️ 3-30 alphanumeric, underscore, or hyphen only'
+                      : '✓ Valid format'}
+                  </span>
+                )}
+              </label>
               <div className="relative">
                 <User className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
                 <input
                   name="username"
                   type="text"
                   value={formData.username}
-                  onChange={handleChange}
-                  className="w-full pl-12 pr-4 py-3 bg-gray-50 border-2 border-gray-200 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-transparent outline-none transition-all"
+                  onChange={(e) => {
+                    // Only allow alphanumeric, underscore, and hyphen
+                    const value = e.target.value.replace(/[^a-zA-Z0-9_-]/g, '');
+                    // Limit to 30 characters
+                    const limitedValue = value.slice(0, 30);
+                    setFormData(prev => ({ ...prev, username: limitedValue }));
+                  }}
+                  className={`w-full pl-12 pr-4 py-3 bg-gray-50 border-2 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-transparent outline-none transition-all ${
+                    formData.username && (formData.username.length < 3 || formData.username.length > 30 || !/^[a-zA-Z0-9_-]+$/.test(formData.username))
+                      ? 'border-red-300'
+                      : 'border-gray-200'
+                  }`}
                   placeholder="johndoe"
+                  maxLength={30}
                 />
               </div>
+              {formData.username && (
+                <p className="mt-1 text-xs text-gray-500">
+                  {formData.username.length < 3 
+                    ? `Minimum 3 characters (${formData.username.length}/3)`
+                    : formData.username.length > 30
+                    ? 'Maximum 30 characters'
+                    : `${formData.username.length}/30 characters`}
+                </p>
+              )}
             </div>
             <div>
-              <label className="block text-sm font-semibold text-gray-700 mb-2">Phone (optional)</label>
+              <label className="block text-sm font-semibold text-gray-700 mb-2">
+                Phone (optional)
+                {formData.phone && (
+                  <span className="ml-2 text-xs font-normal text-gray-500">
+                    {/^\+?[1-9]\d{1,14}$/.test(formData.phone.replace(/\s/g, '')) ? '✓ Valid format' : '⚠️ Use international format (+1234567890)'}
+                  </span>
+                )}
+              </label>
               <div className="relative">
                 <Phone className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
                 <input
@@ -291,7 +388,11 @@ export default function Register() {
                   type="tel"
                   value={formData.phone}
                   onChange={handleChange}
-                  className="w-full pl-12 pr-4 py-3 bg-gray-50 border-2 border-gray-200 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-transparent outline-none transition-all"
+                  className={`w-full pl-12 pr-4 py-3 bg-gray-50 border-2 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-transparent outline-none transition-all ${
+                    formData.phone && !/^\+?[1-9]\d{1,14}$/.test(formData.phone.replace(/\s/g, ''))
+                      ? 'border-red-300'
+                      : 'border-gray-200'
+                  }`}
                   placeholder="+1234567890"
                 />
               </div>

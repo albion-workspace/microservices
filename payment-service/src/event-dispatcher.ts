@@ -11,7 +11,7 @@
 import {
   createWebhookManager,
   createUnifiedEmitter,
-  logger,
+  initializeWebhooks,
 } from 'core-service';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -40,7 +40,7 @@ export type PaymentWebhookEvents =
 
 /**
  * Webhook manager for payment gateway.
- * Uses 'payment_webhooks' and 'payment_webhook_deliveries' collections.
+ * Uses 'payment_webhooks' collection with deliveries as sub-documents.
  */
 export const paymentWebhooks = createWebhookManager<PaymentWebhookEvents>({
   serviceName: 'payment',
@@ -104,16 +104,18 @@ export interface WithdrawalCompletedData {
 // ═══════════════════════════════════════════════════════════════════
 
 /**
- * Initialize the payment webhooks system.
+ * Initialize the payment webhooks system with database strategy.
  * Call this after database connection is established.
+ * Uses generic initializeWebhooks helper from core-service.
  */
-export async function initializePaymentWebhooks(): Promise<void> {
-  try {
-    await paymentWebhooks.initialize();
-    logger.info('Payment webhooks initialized');
-  } catch (err) {
-    logger.warn('Could not initialize payment webhooks', { error: (err as Error).message });
-  }
+export { initializeWebhooks as initializePaymentWebhooksGeneric };
+
+// Re-export for backward compatibility with existing service code
+export async function initializePaymentWebhooks(options: {
+  databaseStrategy: import('core-service').DatabaseStrategyResolver;
+  defaultContext: import('core-service').DatabaseContext;
+}): Promise<void> {
+  return initializeWebhooks(paymentWebhooks, options);
 }
 
 /**

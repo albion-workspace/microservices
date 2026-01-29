@@ -28,10 +28,11 @@
  * ```
  */
 
-import { getDatabase, getClient, generateId, generateMongoId, logger, deleteCachePattern } from '../index.js';
-import type { ClientSession } from 'mongodb';
+import { generateId, generateMongoId, logger, deleteCachePattern } from '../index.js';
+import type { ClientSession, Db, MongoClient } from 'mongodb';
 import { createTransactionDocument, type CreateTransactionParams, type Transaction } from './transaction-helper.js';
 import { getOperationStateTracker } from './recovery.js';
+import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/strategy.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Helper Functions
@@ -104,15 +105,16 @@ export interface CreateTransferResult {
  * 
  * Use this when you need to coordinate multiple operations atomically.
  * 
+ * @param options - Database options (either database/client or databaseStrategy with context)
  * @returns MongoDB ClientSession
  * 
  * @example
  * ```typescript
- * const session = startSession();
+ * const session = startSession({ databaseStrategy, context: { service: 'payment-service', brand: 'brand-a' } });
  * try {
  *   await session.withTransaction(async () => {
  *     await createOrder(...);
- *     await createTransferWithTransactions(params, session);
+ *     await createTransferWithTransactions(params, { session, databaseStrategy, context });
  *     await createTransaction(...);
  *   });
  * } finally {
@@ -120,8 +122,25 @@ export interface CreateTransferResult {
  * }
  * ```
  */
-export function startSession(): ClientSession {
-  const client = getClient();
+export async function startSession(options: {
+  database?: Db;
+  client?: MongoClient;
+  databaseStrategy?: DatabaseStrategyResolver;
+  context?: DatabaseContext;
+}): Promise<ClientSession> {
+  let client: MongoClient;
+  
+  if (options.client) {
+    client = options.client;
+  } else if (options.database) {
+    client = options.database.client;
+  } else if (options.databaseStrategy && options.context) {
+    const db = await options.databaseStrategy.resolve(options.context);
+    client = db.client;
+  } else {
+    throw new Error('startSession requires either database, client, or databaseStrategy with context');
+  }
+  
   return client.startSession();
 }
 
@@ -196,19 +215,34 @@ export function createNewWallet(
  * @param userId - User ID
  * @param currency - Currency code
  * @param tenantId - Tenant ID
- * @param session - Optional MongoDB session (for transaction support)
- * @param options - Optional wallet creation options (allowNegative, creditLimit)
+ * @param options - Database options and wallet creation options
  * @returns Wallet document
  */
 export async function getOrCreateWallet(
   userId: string,
   currency: string,
   tenantId: string,
-  session?: ClientSession,
-  options?: { allowNegative?: boolean; creditLimit?: number }
+  options?: {
+    database?: Db;
+    databaseStrategy?: DatabaseStrategyResolver;
+    context?: DatabaseContext;
+    session?: ClientSession;
+    allowNegative?: boolean;
+    creditLimit?: number;
+  }
 ): Promise<any> {
-  const db = getDatabase();
+  let db: Db;
+  
+  if (options?.database) {
+    db = options.database;
+  } else if (options?.databaseStrategy && options?.context) {
+    db = await options.databaseStrategy.resolve(options.context);
+  } else {
+    throw new Error('getOrCreateWallet requires either database or databaseStrategy with context');
+  }
+  
   const walletsCollection = db.collection('wallets');
+  const session = options?.session;
   
   // Try to find existing wallet
   const findOptions = session ? { session } : {};
@@ -241,16 +275,50 @@ export async function getOrCreateWallet(
       // Note: We don't update tenantId here to avoid breaking multi-tenant isolation
       // The caller should ensure tenantId consistency
     } else {
-      const newWallet = createNewWallet(userId, currency, tenantId, options);
-      const insertOptions = session ? { session } : {};
-      await walletsCollection.insertOne(newWallet, insertOptions);
-      wallet = newWallet;
-      logger.debug('Created new wallet in getOrCreateWallet', {
-        walletId: (wallet as any).id,
-        userId,
-        currency,
-        tenantId,
+      const newWallet = createNewWallet(userId, currency, tenantId, {
+        allowNegative: options?.allowNegative,
+        creditLimit: options?.creditLimit,
       });
+      const insertOptions = session ? { session } : {};
+      try {
+        await walletsCollection.insertOne(newWallet, insertOptions);
+        wallet = newWallet;
+        logger.debug('Created new wallet in getOrCreateWallet', {
+          walletId: (wallet as any).id,
+          userId,
+          currency,
+          tenantId,
+        });
+      } catch (error: any) {
+        // Handle duplicate key error (race condition - wallet was created by another concurrent call)
+        if (error.code === 11000 || error.message?.includes('duplicate key')) {
+          logger.debug('Wallet creation race condition detected, fetching existing wallet', {
+            userId,
+            currency,
+            tenantId,
+            errorCode: error.code,
+          });
+          // Fetch the wallet that was just created by another concurrent call
+          wallet = await walletsCollection.findOne(
+            { userId, currency, tenantId },
+            findOptions
+          );
+          if (!wallet) {
+            // If still not found, try without tenantId filter (fallback)
+            wallet = await walletsCollection.findOne(
+              { userId, currency },
+              findOptions
+            );
+          }
+          if (!wallet) {
+            // Last resort: throw the original error
+            throw new Error(`Failed to create or find wallet after duplicate key error: ${error.message}`);
+          }
+        } else {
+          // Re-throw non-duplicate errors
+          throw error;
+        }
+      }
     }
   } else {
     logger.debug('Found existing wallet in getOrCreateWallet', {
@@ -275,21 +343,23 @@ export async function getOrCreateWallet(
  * This is a generic helper that can be used by any service (payment, bonus, egg, etc.)
  * 
  * @param params - Transfer parameters
- * @param session - Optional MongoDB session. If provided, operation runs within that session.
- *                  If not provided, a new session is created and managed internally.
+ * @param options - Database options and optional session
  * @returns Created transfer and transactions
  * 
  * @example
  * ```typescript
- * // Standalone usage (manages session internally)
- * const result = await createTransferWithTransactions(params);
+ * // With database strategy
+ * const result = await createTransferWithTransactions(params, {
+ *   databaseStrategy,
+ *   context: { service: 'payment-service', brand: 'brand-a' }
+ * });
  * 
  * // With external session (for multi-operation transactions)
- * const session = startSession();
+ * const session = await startSession({ databaseStrategy, context });
  * try {
  *   await session.withTransaction(async () => {
  *     await createOrder(...);
- *     await createTransferWithTransactions(params, session);
+ *     await createTransferWithTransactions(params, { session, databaseStrategy, context });
  *     await createTransaction(...);
  *   });
  * } finally {
@@ -299,12 +369,29 @@ export async function getOrCreateWallet(
  */
 export async function createTransferWithTransactions(
   params: CreateTransferParams,
-  session?: ClientSession
+  options?: {
+    database?: Db;
+    databaseStrategy?: DatabaseStrategyResolver;
+    context?: DatabaseContext;
+    session?: ClientSession;
+  }
 ): Promise<CreateTransferResult> {
-  const db = getDatabase();
-  const client = getClient();
+  let db: Db;
+  let client: MongoClient;
+  
+  if (options?.database) {
+    db = options.database;
+    client = db.client;
+  } else if (options?.databaseStrategy && options?.context) {
+    db = await options.databaseStrategy.resolve(options.context);
+    client = db.client;
+  } else {
+    throw new Error('createTransferWithTransactions requires either database or databaseStrategy with context');
+  }
+  
   const transfersCollection = db.collection('transfers');
   const transactionsCollection = db.collection('transactions');
+  const session = options?.session;
   
   // Destructure params for cleaner code
   const { 
@@ -340,17 +427,19 @@ export async function createTransferWithTransactions(
   
   if (method.startsWith('bonus_')) {
     if (method === 'bonus_award') {
-      // bonus_award: bonus-pool (real) -> user (bonus)
-      fromBalanceType = fromBalanceTypeParam || 'real';
+      // bonus_award: system (bonus) -> user (bonus)
+      // System user's bonusBalance is the bonus pool
+      fromBalanceType = fromBalanceTypeParam || 'bonus';
       toBalanceType = toBalanceTypeParam || 'bonus';
     } else if (method === 'bonus_convert') {
       // bonus_convert: user (bonus) -> user (real) - same user
       fromBalanceType = fromBalanceTypeParam || 'bonus';
       toBalanceType = toBalanceTypeParam || 'real';
     } else if (method === 'bonus_forfeit') {
-      // bonus_forfeit: user (bonus) -> bonus-pool (real)
+      // bonus_forfeit: user (bonus) -> system (bonus)
+      // Returns forfeited bonus to system user's bonusBalance (bonus pool)
       fromBalanceType = fromBalanceTypeParam || 'bonus';
-      toBalanceType = toBalanceTypeParam || 'real';
+      toBalanceType = toBalanceTypeParam || 'bonus';
     }
   }
   
@@ -363,13 +452,54 @@ export async function createTransferWithTransactions(
   
   // Core transaction logic (reusable with or without external session)
   const executeTransfer = async (txSession: ClientSession): Promise<CreateTransferResult> => {
+    // Check if fromUserId is system user BEFORE creating wallets
+    // This allows us to set allowNegative=true when creating system user wallets
+    let isSystemUser = false;
+    try {
+      const { findUserIdByRole } = await import('../databases/user-utils.js');
+      const systemUserId = await findUserIdByRole({ 
+        role: 'system', 
+        tenantId, 
+        throwIfNotFound: false,
+        client: client,
+      });
+      isSystemUser = systemUserId === fromUserId;
+    } catch (error) {
+      // If role check fails, assume not system user (safe default)
+      logger.debug('Could not verify if user is system user, assuming not', {
+        userId: fromUserId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    
     // Get or create wallets (within transaction)
-    const fromWallet = await getOrCreateWallet(fromUserId, currency, tenantId, txSession);
+    // Set allowNegative=true for system users
+    const fromWalletOptions = {
+      database: db,
+      session: txSession,
+      allowNegative: isSystemUser, // Only system users can go negative
+    };
+    const fromWallet = await getOrCreateWallet(fromUserId, currency, tenantId, fromWalletOptions);
     const fromWalletId = (fromWallet as any).id;
+    
+    // Ensure existing system wallet has allowNegative=true (in case it was created before this fix)
+    if (isSystemUser && !(fromWallet as any)?.allowNegative) {
+      const walletsCollection = db.collection('wallets');
+      await walletsCollection.updateOne(
+        { id: fromWalletId },
+        { $set: { allowNegative: true } },
+        { session: txSession }
+      );
+      (fromWallet as any).allowNegative = true;
+    }
     
     // For same-user transfers (e.g., bonus convert), use the same wallet
     const isSameUser = fromUserId === toUserId;
-    const toWallet = isSameUser ? fromWallet : await getOrCreateWallet(toUserId, currency, tenantId, txSession);
+    const toWalletOptions = {
+      database: db,
+      session: txSession,
+    };
+    const toWallet = isSameUser ? fromWallet : await getOrCreateWallet(toUserId, currency, tenantId, toWalletOptions);
     const toWalletId = (toWallet as any).id;
     
     // Get balance fields based on balance types
@@ -381,10 +511,14 @@ export async function createTransferWithTransactions(
     const toCurrentBalance = (toWallet as any)?.[toBalanceField] || 0;
     
     // Validate balance before debiting (check allowNegative permission)
+    // Security: Even if wallet has allowNegative=true, verify user has system role
     const fromWalletAllowNegative = (fromWallet as any)?.allowNegative ?? false;
     const fromWalletCreditLimit = (fromWallet as any)?.creditLimit;
     
-    if (!fromWalletAllowNegative && fromCurrentBalance < amount) {
+    // Use the isSystemUser check we already did (no need to check again)
+    const userCanGoNegative = isSystemUser && fromWalletAllowNegative;
+    
+    if (!userCanGoNegative && fromCurrentBalance < amount) {
       throw new Error(
         `Insufficient balance. Required: ${amount}, Available: ${fromCurrentBalance}. ` +
         `Wallet does not allow negative balance.`
@@ -392,7 +526,7 @@ export async function createTransferWithTransactions(
     }
     
     // Check credit limit if allowNegative is enabled and creditLimit is set (not null/undefined)
-    if (fromWalletAllowNegative && fromWalletCreditLimit != null && fromWalletCreditLimit !== undefined) {
+    if (userCanGoNegative && fromWalletCreditLimit != null && fromWalletCreditLimit !== undefined) {
       const newBalance = fromCurrentBalance - amount;
       if (newBalance < -fromWalletCreditLimit) {
         throw new Error(
@@ -724,18 +858,35 @@ export async function createTransferWithTransactions(
  * 3. Updates wallet balances atomically
  * 
  * @param transferId - Transfer ID to approve
- * @param session - Optional MongoDB session
+ * @param options - Database options and optional session
  * @returns Updated transfer
  */
 export async function approveTransfer(
   transferId: string,
-  session?: ClientSession
+  options?: {
+    database?: Db;
+    databaseStrategy?: DatabaseStrategyResolver;
+    context?: DatabaseContext;
+    session?: ClientSession;
+  }
 ): Promise<Transfer> {
-  const db = getDatabase();
-  const client = getClient();
+  let db: Db;
+  let client: MongoClient;
+  
+  if (options?.database) {
+    db = options.database;
+    client = db.client;
+  } else if (options?.databaseStrategy && options?.context) {
+    db = await options.databaseStrategy.resolve(options.context);
+    client = db.client;
+  } else {
+    throw new Error('approveTransfer requires either database or databaseStrategy with context');
+  }
+  
   const transfersCollection = db.collection('transfers');
   const transactionsCollection = db.collection('transactions');
   const walletsCollection = db.collection('wallets');
+  const session = options?.session;
   
   const executeApproval = async (txSession: ClientSession): Promise<Transfer> => {
     // Find transfer
@@ -954,19 +1105,36 @@ export async function approveTransfer(
  * 3. Does NOT update wallets (they were never updated for pending transfers)
  * 
  * @param transferId - Transfer ID to decline
- * @param reason - Optional reason for decline
- * @param session - Optional MongoDB session
+ * @param options - Database options, optional reason, and optional session
  * @returns Updated transfer
  */
 export async function declineTransfer(
   transferId: string,
-  reason?: string,
-  session?: ClientSession
+  options?: {
+    database?: Db;
+    databaseStrategy?: DatabaseStrategyResolver;
+    context?: DatabaseContext;
+    reason?: string;
+    session?: ClientSession;
+  }
 ): Promise<Transfer> {
-  const db = getDatabase();
-  const client = getClient();
+  let db: Db;
+  let client: MongoClient;
+  
+  if (options?.database) {
+    db = options.database;
+    client = db.client;
+  } else if (options?.databaseStrategy && options?.context) {
+    db = await options.databaseStrategy.resolve(options.context);
+    client = db.client;
+  } else {
+    throw new Error('declineTransfer requires either database or databaseStrategy with context');
+  }
+  
   const transfersCollection = db.collection('transfers');
   const transactionsCollection = db.collection('transactions');
+  const reason = options?.reason;
+  const session = options?.session;
   
   const executeDecline = async (txSession: ClientSession): Promise<Transfer> => {
     // Find transfer

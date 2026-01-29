@@ -18,6 +18,10 @@ scripts/
     ├── bonus/              # Bonus service scripts
     ├── ledger/             # Ledger scripts (general/common)
     ├── payment/            # Payment service scripts
+    ├── config/             # Configuration (users, scripts, database utilities)
+    │   ├── users.ts        # Centralized user configuration
+    │   ├── scripts.ts      # Centralized script config, database utilities, service URLs
+    │   └── drop-all-databases.ts  # Database cleanup utility
     ├── benchmark.ts        # Generic microservice benchmark
     ├── channels-tests.ts   # Real-time communication tests
     ├── load-test.ts        # Generic load testing
@@ -66,12 +70,19 @@ See `typescript/README.md` for detailed script organization and usage.
 .\scripts\bin\clean-all.ps1
 ```
 
-### Promote User to Admin
-```powershell
-cd scripts/bin
-node promote-to-system.js system@demo.com
-# Or from project root:
-npm run promote-to-system -- system@demo.com
+### Manage User (Roles, Permissions, Status)
+```bash
+# Show user details
+npm run auth:manage -- system@demo.com show
+
+# Promote to system with all permissions
+npm run auth:manage -- system@demo.com --all
+
+# Set specific roles
+npm run auth:manage -- user@test.com --roles admin,system
+
+# Update user status
+npm run auth:manage -- user@test.com status --status active
 ```
 
 ## Notes
@@ -79,4 +90,6 @@ npm run promote-to-system -- system@demo.com
 - All scripts use relative paths from the `scripts` folder
 - PowerShell scripts use `$PSScriptRoot` for script directory
 - TypeScript scripts use `../` to reference parent directories
-- Database scripts require `mongodb` package (installed in scripts/package.json)
+- Database scripts use `core-service` database strategy pattern (no direct `mongodb` dependency)
+- All scripts use centralized configuration from `config/scripts.ts` (single source of truth)
+- Scripts support `--brand` and `--tenant` command-line arguments for dynamic database resolution

@@ -20,9 +20,10 @@
  *                              │
  * ┌────────────────────────────┴────────────────────────────────────┐
  * │                  Persistence Layer                              │
- * │  - templatePersistence (read templates)                         │
- * │  - userBonusPersistence (read/write user bonuses, referrals)    │
- * │  - transactionPersistence (record transactions)                 │
+ * │  - getInitializedPersistence() → persistence.template           │
+ * │  - getInitializedPersistence() → persistence.userBonus          │
+ * │  - getInitializedPersistence() → persistence.transaction        │
+ * │  (Uses centralized database strategy from persistence-singleton)│
  * └────────────────────────────┬────────────────────────────────────┘
  *                              │
  * ┌────────────────────────────┴────────────────────────────────────┐
@@ -63,10 +64,16 @@
  * Usage:
  * 
  * ```typescript
- * import { bonusEngine } from './services/bonus-engine';
+ * import { createBonusEngine } from './services/bonus-engine';
+ * 
+ * // Create engine with database strategy
+ * const engine = createBonusEngine({
+ *   databaseStrategy: myStrategy,
+ *   defaultContext: { service: 'bonus-service' }
+ * });
  * 
  * // Check eligibility
- * const result = await bonusEngine.checkEligibility('first_deposit', {
+ * const result = await engine.checkEligibility('first_deposit', {
  *   userId: 'user-123',
  *   tenantId: 'tenant-1',
  *   depositAmount: 100,
@@ -74,30 +81,28 @@
  * });
  * 
  * // Award bonus (uses persistence layer internally)
- * const award = await bonusEngine.award('first_deposit', context);
+ * const award = await engine.award('first_deposit', context);
  * 
  * // Handle deposit event (event-driven auto-awarding)
- * const bonuses = await bonusEngine.handleDeposit(depositEvent);
- * 
- * // Register custom handler
- * bonusEngine.registerHandler(new MyCustomHandler());
- * 
- * // Add custom validator
- * bonusEngine.addValidator(new MyCustomValidator());
+ * const bonuses = await engine.handleDeposit(depositEvent);
  * ```
  */
 
 // Core
-export { BonusEngine, bonusEngine } from './engine.js';
+export { BonusEngine, createBonusEngine, type BonusEngineOptions } from './engine.js';
 export { BaseBonusHandler } from './base-handler.js';
 
 // Persistence Layer
 export { 
-  persistence,
-  templatePersistence, 
-  userBonusPersistence, 
-  transactionPersistence,
+  createBonusPersistence,
+  createTemplatePersistence,
+  createUserBonusPersistence,
+  createTransactionPersistence,
+  type BonusPersistenceOptions,
 } from './persistence.js';
+
+// Persistence Singleton (use this in services)
+export { getInitializedPersistence, initializeDatabaseLayer } from './persistence-singleton.js';
 
 // Types
 export type {
@@ -125,7 +130,7 @@ export {
 
 // Validators (server-only, client-safe validators are in bonus-shared)
 export { 
-  validatorChain,
+  createValidatorChain,
   ValidatorChain,
   // Server-only validators (require DB access)
   MaxUsesPerUserValidator,

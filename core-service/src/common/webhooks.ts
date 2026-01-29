@@ -42,13 +42,41 @@
 
 import { createHmac, timingSafeEqual } from 'crypto';
 import { logger } from './logger.js';
-import { getDatabase } from './database.js';
 import { getErrorMessage } from './errors.js';
-import { generateMongoId, normalizeDocument } from './mongodb-utils.js';
+import { generateMongoId, normalizeDocument } from '../databases/mongodb-utils.js';
+import { CircuitBreaker, CircuitBreakerOpenError } from './circuit-breaker.js';
+import { retry, RetryConfigs } from './retry.js';
+import type { Db } from 'mongodb';
+import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/strategy.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
 // ═══════════════════════════════════════════════════════════════════
+
+export interface WebhookDelivery {
+  /** Unique delivery ID */
+  id: string;
+  /** Event ID (for idempotency) */
+  eventId: string;
+  /** Event type */
+  eventType: string;
+  /** HTTP status code received */
+  statusCode?: number;
+  /** Response body (truncated) */
+  responseBody?: string;
+  /** Delivery status */
+  status: 'pending' | 'success' | 'failed' | 'retrying';
+  /** Number of attempts made */
+  attempts: number;
+  /** Error message if failed */
+  error?: string;
+  /** Time taken for delivery (ms) */
+  duration?: number;
+  /** Timestamps */
+  createdAt: Date;
+  deliveredAt?: Date;
+  nextRetryAt?: Date;
+}
 
 export interface WebhookConfig {
   id?: string; // MongoDB will automatically generate _id, which we map to id
@@ -82,30 +110,10 @@ export interface WebhookConfig {
   consecutiveFailures: number;
   /** Disabled if too many failures */
   disabledReason?: string;
-}
-
-export interface WebhookDelivery {
-  id?: string; // MongoDB will automatically generate _id, which we map to id
-  webhookId: string;
-  tenantId: string;
-  eventId: string;
-  eventType: string;
-  /** HTTP status code received */
-  statusCode?: number;
-  /** Response body (truncated) */
-  responseBody?: string;
-  /** Delivery status */
-  status: 'pending' | 'success' | 'failed' | 'retrying';
-  /** Number of attempts made */
-  attempts: number;
-  /** Error message if failed */
-  error?: string;
-  /** Time taken for delivery (ms) */
-  duration?: number;
-  /** Timestamps */
-  createdAt: Date;
-  deliveredAt?: Date;
-  nextRetryAt?: Date;
+  /** Recent deliveries (sub-documents, limited to last N for performance) */
+  deliveries?: WebhookDelivery[];
+  /** Total delivery count (for statistics) */
+  deliveryCount?: number;
 }
 
 export interface WebhookPayload<T = unknown> {
@@ -178,6 +186,12 @@ export interface WebhookManagerConfig {
   maxResponseBodyLength?: number;
   /** User-Agent header (default: 'Webhooks/1.0') */
   userAgent?: string;
+  /** Database instance (if provided, uses this directly) */
+  database?: Db;
+  /** Database strategy resolver (for dynamic database resolution) */
+  databaseStrategy?: DatabaseStrategyResolver;
+  /** Default database context for strategy resolution */
+  defaultContext?: DatabaseContext;
 }
 
 export interface WebhookTestResult {
@@ -299,8 +313,15 @@ export function verifySignature(
  * Uses separate MongoDB collections per service.
  */
 export class WebhookManager<TEvents extends string = string> {
-  private config: Required<WebhookManagerConfig>;
+  private config: Required<Omit<WebhookManagerConfig, 'database' | 'databaseStrategy' | 'defaultContext'>> & {
+    database?: Db;
+    databaseStrategy?: DatabaseStrategyResolver;
+    defaultContext?: DatabaseContext;
+  };
   private enabled = false;
+  /** Circuit breakers per webhook URL to prevent cascading failures */
+  private circuitBreakers = new Map<string, CircuitBreaker>();
+  private db: Db | null = null;
 
   constructor(config: WebhookManagerConfig) {
     this.config = {
@@ -316,20 +337,81 @@ export class WebhookManager<TEvents extends string = string> {
       idHeader: config.idHeader ?? DEFAULT_CONFIG.idHeader,
       maxResponseBodyLength: config.maxResponseBodyLength ?? DEFAULT_CONFIG.maxResponseBodyLength,
       userAgent: config.userAgent ?? DEFAULT_CONFIG.userAgent,
+      database: config.database,
+      databaseStrategy: config.databaseStrategy,
+      defaultContext: config.defaultContext,
     };
+    this.db = config.database || null;
+  }
+
+  /**
+   * Configure the webhook manager with database or database strategy.
+   * Call this after database connection is established when the manager
+   * was created at module level without database configuration.
+   */
+  configure(options: {
+    database?: Db;
+    databaseStrategy?: DatabaseStrategyResolver;
+    defaultContext?: DatabaseContext;
+  }): void {
+    if (options.database) {
+      this.db = options.database;
+      this.config.database = options.database;
+    }
+    if (options.databaseStrategy) {
+      this.config.databaseStrategy = options.databaseStrategy;
+    }
+    if (options.defaultContext) {
+      this.config.defaultContext = options.defaultContext;
+    }
+  }
+
+  /**
+   * Get or create circuit breaker for a webhook URL
+   */
+  private getCircuitBreaker(url: string): CircuitBreaker {
+    if (!this.circuitBreakers.has(url)) {
+      this.circuitBreakers.set(
+        url,
+        new CircuitBreaker({
+          name: `Webhook-${this.config.serviceName}-${url}`,
+          failureThreshold: 5,
+          resetTimeout: 60000, // 1 minute
+          monitoringWindow: 120000, // 2 minutes
+        })
+      );
+    }
+    return this.circuitBreakers.get(url)!;
   }
 
   // ─────────────────────────────────────────────────────────────────
   // Collection Access (service-namespaced)
   // ─────────────────────────────────────────────────────────────────
 
-  private getWebhooksCollection() {
-    return getDatabase().collection<WebhookConfig>(`${this.config.serviceName}_webhooks`);
+  private async getWebhooksCollection(context?: Partial<DatabaseContext>) {
+    let db: Db;
+    
+    if (this.db) {
+      db = this.db;
+    } else if (this.config.databaseStrategy) {
+      // Merge context with service name and default context
+      const resolvedContext: DatabaseContext = {
+        service: this.config.serviceName,
+        ...this.config.defaultContext,
+        ...context,
+      };
+      db = await this.config.databaseStrategy.resolve(resolvedContext);
+    } else {
+      throw new Error('WebhookManager requires either database or databaseStrategy with defaultContext');
+    }
+    
+    return db.collection<WebhookConfig>(`${this.config.serviceName}_webhooks`);
   }
 
-  private getDeliveriesCollection() {
-    return getDatabase().collection<WebhookDelivery>(`${this.config.serviceName}_webhook_deliveries`);
-  }
+  /**
+   * Maximum number of recent deliveries to keep in webhook document
+   */
+  private readonly MAX_RECENT_DELIVERIES = 100;
 
   // ─────────────────────────────────────────────────────────────────
   // Lifecycle
@@ -339,8 +421,8 @@ export class WebhookManager<TEvents extends string = string> {
    * Initialize webhook system (call at service startup).
    * Creates indexes and enables webhook dispatching.
    */
-  async initialize(): Promise<void> {
-    await this.createIndexes();
+  async initialize(context?: DatabaseContext): Promise<void> {
+    await this.createIndexes(context);
     this.enabled = true;
     logger.info(`Webhook manager initialized for ${this.config.serviceName}`);
   }
@@ -392,9 +474,12 @@ export class WebhookManager<TEvents extends string = string> {
       createdAt: new Date(),
       updatedAt: new Date(),
       consecutiveFailures: 0,
+      deliveries: [], // Initialize deliveries array
+      deliveryCount: 0, // Initialize delivery count
     };
     
-    await this.getWebhooksCollection().insertOne(webhook as any);
+    const collection = await this.getWebhooksCollection({ tenantId: input.tenantId } as Partial<DatabaseContext>);
+    await collection.insertOne(webhook as any);
     
     logger.info('Webhook registered', { 
       service: this.config.serviceName,
@@ -415,42 +500,73 @@ export class WebhookManager<TEvents extends string = string> {
     tenantId: string,
     updates: Partial<Pick<WebhookConfig, 'name' | 'url' | 'secret' | 'events' | 'headers' | 'timeout' | 'maxRetries' | 'description' | 'isActive'>>
   ): Promise<WebhookConfig | null> {
-    const result = await this.getWebhooksCollection().findOneAndUpdate(
+    const updateDoc: any = { 
+      ...updates, 
+      updatedAt: new Date(),
+      ...(updates.isActive === true && { consecutiveFailures: 0, disabledReason: undefined }),
+    };
+
+    const collection = await this.getWebhooksCollection({ tenantId } as Partial<DatabaseContext>);
+    // Ensure deliveries and deliveryCount are initialized if missing
+    const webhook = await collection.findOne({ id, tenantId });
+    if (webhook) {
+      if (!webhook.deliveries) {
+        updateDoc.deliveries = [];
+      }
+      if (webhook.deliveryCount === undefined || webhook.deliveryCount === null) {
+        updateDoc.deliveryCount = 0;
+      }
+    }
+
+    const result = await collection.findOneAndUpdate(
       { id, tenantId },
-      { 
-        $set: { 
-          ...updates, 
-          updatedAt: new Date(),
-          ...(updates.isActive === true && { consecutiveFailures: 0, disabledReason: undefined }),
-        } 
-      },
+      { $set: updateDoc },
       { returnDocument: 'after' }
     );
     
-    return result as WebhookConfig | null;
+    if (!result) return null;
+    
+    // Ensure deliveries and deliveryCount are initialized in returned result
+    return {
+      ...result,
+      deliveries: result.deliveries || [],
+      deliveryCount: result.deliveryCount ?? 0,
+    } as WebhookConfig;
   }
 
   /**
    * Delete a webhook.
    */
   async delete(id: string, tenantId: string): Promise<boolean> {
-    const result = await this.getWebhooksCollection().deleteOne({ id, tenantId });
+    const collection = await this.getWebhooksCollection({ tenantId } as Partial<DatabaseContext>);
+    const result = await collection.deleteOne({ id, tenantId });
     return result.deletedCount > 0;
   }
 
   /**
    * Get a webhook by ID.
+   * Returns webhook with deliveries array and deliveryCount (merged structure).
    */
   async get(id: string, tenantId: string): Promise<WebhookConfig | null> {
-    const result = await this.getWebhooksCollection().findOne({ id, tenantId }) as WebhookConfig | null;
+    const collection = await this.getWebhooksCollection({ tenantId } as Partial<DatabaseContext>);
+    const result = await collection.findOne({ id, tenantId }) as WebhookConfig | null;
     if (!result) {
       logger.debug(`Webhook not found: id=${id}, tenantId=${tenantId}, service=${this.config.serviceName}, collection=${this.config.serviceName}_webhooks`);
+      return null;
+    }
+    // Ensure deliveries and deliveryCount are initialized (for webhooks created before optimization)
+    if (!result.deliveries) {
+      result.deliveries = [];
+    }
+    if (result.deliveryCount === undefined) {
+      result.deliveryCount = 0;
     }
     return result;
   }
 
   /**
    * List webhooks for a tenant.
+   * Returns webhooks with deliveries arrays and deliveryCount (merged structure).
    */
   async list(
     tenantId: string,
@@ -460,7 +576,14 @@ export class WebhookManager<TEvents extends string = string> {
     if (!options.includeInactive) {
       filter.isActive = true;
     }
-    return await this.getWebhooksCollection().find(filter).toArray() as WebhookConfig[];
+    const collection = await this.getWebhooksCollection({ tenantId } as Partial<DatabaseContext>);
+    const webhooks = await collection.find(filter).toArray() as WebhookConfig[];
+    // Ensure deliveries and deliveryCount are initialized for all webhooks
+    return webhooks.map(webhook => ({
+      ...webhook,
+      deliveries: webhook.deliveries || [],
+      deliveryCount: webhook.deliveryCount ?? 0,
+    }));
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -527,13 +650,10 @@ export class WebhookManager<TEvents extends string = string> {
     webhook: WebhookConfig,
     event: { eventId: string; eventType: string; tenantId: string; userId?: string; data: T }
   ): Promise<WebhookDelivery> {
-    // Use MongoDB ObjectId for performant single-insert operation
-    const { objectId, idString } = generateMongoId();
-    const delivery: Partial<WebhookDelivery> & { _id: typeof objectId; id: string; webhookId: string; tenantId: string; eventId: string; eventType: string; status: WebhookDelivery['status']; attempts: number; createdAt: Date } = {
-      _id: objectId as any,
+    // Generate delivery ID (no MongoDB ObjectId needed - it's a sub-document)
+    const { idString } = generateMongoId();
+    const delivery: Partial<WebhookDelivery> & { id: string; eventId: string; eventType: string; status: WebhookDelivery['status']; attempts: number; createdAt: Date } = {
       id: idString,
-      webhookId: webhook.id!,
-      tenantId: webhook.tenantId,
       eventId: event.eventId,
       eventType: event.eventType,
       status: 'pending',
@@ -580,100 +700,133 @@ export class WebhookManager<TEvents extends string = string> {
     }
 
     const maxAttempts = webhook.maxRetries ?? this.config.defaultMaxRetries;
+    const circuitBreaker = this.getCircuitBreaker(webhook.url);
 
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      delivery.attempts = attempt;
+    // Use enhanced retry with circuit breaker protection
+    try {
+      const retryResult = await retry(
+        async () => {
+          // Wrap fetch with circuit breaker
+          return await circuitBreaker.execute(async () => {
+            const startTime = Date.now();
 
-      try {
-        const startTime = Date.now();
+            const response = await fetch(webhook.url, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'User-Agent': DEFAULT_CONFIG.userAgent,
+                [DEFAULT_CONFIG.signatureHeader]: signature,
+                [DEFAULT_CONFIG.timestampHeader]: String(timestamp),
+                [DEFAULT_CONFIG.idHeader]: event.eventId,
+                ...webhook.headers,
+              },
+              body: payloadJson,
+              signal: AbortSignal.timeout(webhook.timeout ?? this.config.defaultTimeout),
+            });
 
-        const response = await fetch(webhook.url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'User-Agent': DEFAULT_CONFIG.userAgent,
-            [DEFAULT_CONFIG.signatureHeader]: signature,
-            [DEFAULT_CONFIG.timestampHeader]: String(timestamp),
-            [DEFAULT_CONFIG.idHeader]: event.eventId,
-            ...webhook.headers,
-          },
-          body: payloadJson,
-          signal: AbortSignal.timeout(webhook.timeout ?? this.config.defaultTimeout),
-        });
+            delivery.duration = Date.now() - startTime;
+            delivery.statusCode = response.status;
 
-        delivery.duration = Date.now() - startTime;
-        delivery.statusCode = response.status;
-
-        try {
-          const responseText = await response.text();
-          delivery.responseBody = responseText.substring(0, DEFAULT_CONFIG.maxResponseBodyLength);
-        } catch {
-          // Ignore response body errors
-        }
-
-        if (response.ok) {
-          delivery.status = 'success';
-          delivery.deliveredAt = new Date();
-
-          await this.getWebhooksCollection().updateOne(
-            { id: webhook.id },
-            { 
-              $set: { 
-                lastDeliveryAt: new Date(),
-                lastDeliveryStatus: 'success',
-                consecutiveFailures: 0,
-              } 
+            try {
+              const responseText = await response.text();
+              delivery.responseBody = responseText.substring(0, DEFAULT_CONFIG.maxResponseBodyLength);
+            } catch {
+              // Ignore response body errors
             }
-          );
 
-          logger.debug('Webhook delivered', {
-            service: this.config.serviceName,
-            webhookId: webhook.id,
-            eventType: event.eventType,
-            statusCode: response.status,
-            duration: delivery.duration,
+            // Treat non-2xx responses as errors (will trigger retry)
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+
+            return response;
           });
-
-          break;
-        } else {
-          delivery.status = 'retrying';
-          delivery.error = `HTTP ${response.status}`;
-
-          logger.warn('Webhook delivery failed, will retry', {
-            service: this.config.serviceName,
-            webhookId: webhook.id,
-            eventType: event.eventType,
-            statusCode: response.status,
-            attempt,
-            maxAttempts,
-          });
+        },
+        {
+          maxRetries: maxAttempts - 1, // -1 because first attempt is not a retry
+          strategy: 'exponential',
+          baseDelay: 1000, // Start with 1s delay
+          maxDelay: 60000, // Max 60s delay
+          jitter: true,
+          name: `Webhook-${this.config.serviceName}-${webhook.id}`,
+          isRetryable: (error) => {
+            // Don't retry circuit breaker open errors
+            if (error instanceof CircuitBreakerOpenError) {
+              return false;
+            }
+            // Retry network errors and 5xx errors
+            return true;
+          },
         }
-      } catch (error) {
-        delivery.status = 'retrying';
-        delivery.error = getErrorMessage(error);
+      );
 
-        logger.warn('Webhook delivery error, will retry', {
+      delivery.attempts = retryResult.attempts;
+      delivery.status = 'success';
+      delivery.deliveredAt = new Date();
+
+      const collection = await this.getWebhooksCollection({ tenantId: webhook.tenantId });
+      await collection.updateOne(
+        { id: webhook.id },
+        { 
+          $set: { 
+            lastDeliveryAt: new Date(),
+            lastDeliveryStatus: 'success',
+            consecutiveFailures: 0,
+          } 
+        }
+      );
+
+      logger.debug('Webhook delivered', {
+        service: this.config.serviceName,
+        webhookId: webhook.id,
+        eventType: event.eventType,
+        statusCode: delivery.statusCode,
+        duration: delivery.duration,
+        attempts: retryResult.attempts,
+      });
+
+    } catch (error) {
+      delivery.attempts = maxAttempts;
+      delivery.status = 'failed';
+      delivery.error = getErrorMessage(error);
+
+      // Check if circuit breaker is open
+      if (error instanceof CircuitBreakerOpenError) {
+        logger.warn('Webhook delivery blocked by circuit breaker', {
+          service: this.config.serviceName,
+          webhookId: webhook.id,
+          eventType: event.eventType,
+          state: error.state,
+        });
+      } else {
+        logger.error('Webhook delivery failed after all retries', {
           service: this.config.serviceName,
           webhookId: webhook.id,
           eventType: event.eventType,
           error: delivery.error,
-          attempt,
-          maxAttempts,
+          attempts: maxAttempts,
         });
       }
 
-      if (attempt < maxAttempts) {
-        const delay = this.config.retryDelays[attempt - 1] ?? this.config.retryDelays[this.config.retryDelays.length - 1];
-        delivery.nextRetryAt = new Date(Date.now() + delay);
-        await new Promise(resolve => setTimeout(resolve, delay));
-      }
+      // Update consecutive failures
+      const collection1 = await this.getWebhooksCollection({ tenantId: webhook.tenantId });
+      await collection1.updateOne(
+        { id: webhook.id },
+        { 
+          $inc: { consecutiveFailures: 1 },
+          $set: { 
+            lastDeliveryStatus: 'failed',
+          } 
+        }
+      );
     }
 
     // Final status
     if (delivery.status !== 'success') {
       delivery.status = 'failed';
 
-      await this.getWebhooksCollection().updateOne(
+      const collection2 = await this.getWebhooksCollection({ tenantId: webhook.tenantId });
+      await collection2.updateOne(
         { id: webhook.id },
         { 
           $set: { 
@@ -689,7 +842,8 @@ export class WebhookManager<TEvents extends string = string> {
         const updatedWebhook = await this.get(webhook.id, webhook.tenantId);
         if (updatedWebhook && updatedWebhook.consecutiveFailures >= this.config.maxConsecutiveFailures) {
           await this.update(webhook.id, webhook.tenantId, { isActive: false });
-          await this.getWebhooksCollection().updateOne(
+          const collection3 = await this.getWebhooksCollection({ tenantId: webhook.tenantId });
+          await collection3.updateOne(
             { id: webhook.id },
             { $set: { disabledReason: `Auto-disabled after ${this.config.maxConsecutiveFailures} consecutive failures` } }
           );
@@ -703,10 +857,41 @@ export class WebhookManager<TEvents extends string = string> {
       }
     }
 
-    // Save delivery record - single insert operation (already has _id and id set)
-    await this.getDeliveriesCollection().insertOne(delivery as any);
+    // Save delivery record as sub-document in webhook (optimized: single write operation)
+    // Remove webhookId and tenantId from delivery (already in parent webhook)
+    const { webhookId, tenantId, _id, ...deliveryData } = delivery as any;
+    const deliveryToStore: WebhookDelivery = {
+      id: delivery.id,
+      eventId: delivery.eventId,
+      eventType: delivery.eventType,
+      status: delivery.status,
+      attempts: delivery.attempts,
+      createdAt: delivery.createdAt,
+      ...(delivery.statusCode && { statusCode: delivery.statusCode }),
+      ...(delivery.responseBody && { responseBody: delivery.responseBody }),
+      ...(delivery.error && { error: delivery.error }),
+      ...(delivery.duration && { duration: delivery.duration }),
+      ...(delivery.deliveredAt && { deliveredAt: delivery.deliveredAt }),
+      ...(delivery.nextRetryAt && { nextRetryAt: delivery.nextRetryAt }),
+    };
 
-    return delivery as WebhookDelivery;
+    // Update webhook with delivery using $push and $slice to keep only recent deliveries
+    const collection4 = await this.getWebhooksCollection({ tenantId: webhook.tenantId });
+    await collection4.updateOne(
+      { id: webhook.id },
+      {
+        $push: {
+          deliveries: {
+            $each: [deliveryToStore],
+            $slice: -this.MAX_RECENT_DELIVERIES, // Keep only last N deliveries
+          },
+        },
+        $inc: { deliveryCount: 1 },
+        $set: { updatedAt: new Date() },
+      }
+    );
+
+    return deliveryToStore;
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -722,7 +907,8 @@ export class WebhookManager<TEvents extends string = string> {
     if (!webhook) {
       logger.warn(`Webhook not found in test(): id=${id}, tenantId=${tenantId}, service=${this.config.serviceName}`);
       // Try to find any webhooks with this ID to debug
-      const allWithId = await this.getWebhooksCollection().find({ id }).toArray();
+      const collection5 = await this.getWebhooksCollection({ tenantId });
+      const allWithId = await collection5.find({ id }).toArray();
       if (allWithId.length > 0) {
         logger.warn(`Found ${allWithId.length} webhook(s) with id=${id} but different tenantIds: ${allWithId.map(w => w.tenantId).join(', ')}`);
       }
@@ -755,34 +941,54 @@ export class WebhookManager<TEvents extends string = string> {
 
   /**
    * Get delivery history for a webhook.
+   * Reads from webhook.deliveries array (optimized: no separate query needed)
    */
   async getDeliveryHistory(
     webhookId: string,
     tenantId: string,
     options: { limit?: number; status?: WebhookDelivery['status'] } = {}
   ): Promise<WebhookDelivery[]> {
-    const filter: any = { webhookId, tenantId };
-    if (options.status) {
-      filter.status = options.status;
+    const webhook = await this.get(webhookId, tenantId);
+    if (!webhook) {
+      return [];
     }
 
-    return await this.getDeliveriesCollection()
-      .find(filter)
-      .sort({ createdAt: -1 })
-      .limit(options.limit ?? 100)
-      .toArray() as WebhookDelivery[];
+    // Get deliveries from webhook document (recent deliveries are stored here)
+    let deliveries = (webhook.deliveries || []).slice();
+
+    // Filter by status if specified
+    if (options.status) {
+      deliveries = deliveries.filter(d => d.status === options.status);
+    }
+
+    // Sort by createdAt descending (newest first)
+    deliveries.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+
+    // Apply limit
+    const limit = options.limit ?? 100;
+    return deliveries.slice(0, limit);
   }
 
   /**
    * Get webhook statistics for a tenant.
+   * Now counts from webhook.deliveries arrays (optimized: no separate query needed)
    */
   async getStats(tenantId: string): Promise<WebhookStats> {
-    const webhooks = await this.getWebhooksCollection().find({ tenantId }).toArray();
+    const collection = await this.getWebhooksCollection({ tenantId } as Partial<DatabaseContext>);
+    const webhooks = await collection.find({ tenantId }).toArray();
 
     const last24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    const recentDeliveries = await this.getDeliveriesCollection()
-      .find({ tenantId, createdAt: { $gte: last24h } })
-      .toArray();
+    
+    // Count deliveries from webhook.deliveries arrays
+    let recentDeliveries: WebhookDelivery[] = [];
+    for (const webhook of webhooks) {
+      if (webhook.deliveries) {
+        const recent = webhook.deliveries.filter(
+          d => d.createdAt >= last24h
+        );
+        recentDeliveries.push(...recent);
+      }
+    }
 
     const successCount = recentDeliveries.filter(d => d.status === 'success').length;
 
@@ -798,23 +1004,51 @@ export class WebhookManager<TEvents extends string = string> {
   }
 
   /**
-   * Clean up old delivery records.
+   * Clean up old delivery records from webhook.deliveries arrays.
+   * Old deliveries are automatically removed by $slice, but this can clean up
+   * any that might have accumulated.
    */
   async cleanupDeliveries(olderThanDays: number = 30): Promise<number> {
     const cutoff = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000);
+    let cleanedCount = 0;
 
-    const result = await this.getDeliveriesCollection().deleteMany({
-      createdAt: { $lt: cutoff },
-      status: 'success',
-    });
+    // Clean up old deliveries from webhook documents
+    // Note: This method needs to query across all tenants, so we use defaultContext
+    const collection = await this.getWebhooksCollection();
+    const webhooks = await collection
+      .find({ 'deliveries.createdAt': { $lt: cutoff } })
+      .toArray();
 
-    if (result.deletedCount > 0) {
-      logger.info(`Cleaned up ${result.deletedCount} old webhook deliveries`, {
+    for (const webhook of webhooks) {
+      if (webhook.deliveries && webhook.deliveries.length > 0) {
+        const filteredDeliveries = webhook.deliveries.filter(
+          d => d.createdAt >= cutoff || d.status !== 'success'
+        );
+        
+        if (filteredDeliveries.length !== webhook.deliveries.length) {
+          const webhookCollection = await this.getWebhooksCollection({ tenantId: webhook.tenantId });
+          await webhookCollection.updateOne(
+            { id: webhook.id },
+            {
+              $set: {
+                deliveries: filteredDeliveries.slice(-this.MAX_RECENT_DELIVERIES),
+                updatedAt: new Date(),
+              },
+            }
+          );
+          cleanedCount += webhook.deliveries.length - filteredDeliveries.length;
+        }
+      }
+    }
+
+    if (cleanedCount > 0) {
+      logger.info(`Cleaned up ${cleanedCount} old webhook deliveries`, {
         service: this.config.serviceName,
+        olderThanDays,
       });
     }
 
-    return result.deletedCount;
+    return cleanedCount;
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -824,18 +1058,15 @@ export class WebhookManager<TEvents extends string = string> {
   /**
    * Create database indexes.
    */
-  private async createIndexes(): Promise<void> {
-    const webhooksCol = this.getWebhooksCollection();
-    const deliveriesCol = this.getDeliveriesCollection();
+  private async createIndexes(context?: DatabaseContext): Promise<void> {
+    const webhooksCol = await this.getWebhooksCollection(context);
 
     await webhooksCol.createIndex({ tenantId: 1 });
     await webhooksCol.createIndex({ tenantId: 1, isActive: 1 });
     await webhooksCol.createIndex({ id: 1, tenantId: 1 }, { unique: true });
-
-    await deliveriesCol.createIndex({ webhookId: 1, tenantId: 1 });
-    await deliveriesCol.createIndex({ tenantId: 1, createdAt: -1 });
-    await deliveriesCol.createIndex({ eventId: 1 });
-    await deliveriesCol.createIndex({ status: 1, createdAt: -1 });
+    // Indexes for querying deliveries within webhook documents
+    await webhooksCol.createIndex({ 'deliveries.createdAt': -1 });
+    await webhooksCol.createIndex({ 'deliveries.eventId': 1 });
 
     logger.debug(`Webhook indexes created for ${this.config.serviceName}`);
   }
@@ -882,7 +1113,11 @@ export function createWebhookManager<TEvents extends string = string>(
 
 /**
  * GraphQL type definitions for webhook management.
- * Complete and self-contained - no need to extend.
+ * 
+ * Optimized Structure:
+ * - Deliveries are stored as sub-documents in webhook.deliveries array (not separate collection)
+ * - WebhookDelivery does not include webhookId/tenantId (inherited from parent webhook)
+ * - Recent deliveries (last 100) are kept in webhook document for performance
  */
 export const webhookGraphQLTypes = `
   type Webhook {
@@ -900,13 +1135,14 @@ export const webhookGraphQLTypes = `
     lastDeliveryStatus: String
     consecutiveFailures: Int!
     disabledReason: String
+    deliveries: [WebhookDelivery!]!
+    deliveryCount: Int!
     createdAt: String!
     updatedAt: String!
   }
 
   type WebhookDelivery {
     id: ID!
-    webhookId: String!
     eventId: String!
     eventType: String!
     statusCode: Int
@@ -1052,6 +1288,79 @@ function createWebhookResolvers<TEvents extends string>(
         return manager.test(webhookId, tenantId);
       },
     },
+
+    // Field resolvers to ensure deliveries, deliveryCount, and dates are always present
+    Webhook: {
+      deliveries: (webhook: WebhookConfig) => {
+        // Always return an array, never null/undefined
+        return Array.isArray(webhook.deliveries) ? webhook.deliveries : [];
+      },
+      deliveryCount: (webhook: WebhookConfig) => {
+        // Always return a number, never null/undefined
+        return typeof webhook.deliveryCount === 'number' ? webhook.deliveryCount : 0;
+      },
+      lastDeliveryAt: (webhook: WebhookConfig) => {
+        // If lastDeliveryAt is missing, compute it from the most recent delivery
+        if (webhook.lastDeliveryAt) {
+          return webhook.lastDeliveryAt instanceof Date 
+            ? webhook.lastDeliveryAt.toISOString() 
+            : webhook.lastDeliveryAt;
+        }
+        // Compute from deliveries array if available
+        const deliveries = Array.isArray(webhook.deliveries) ? webhook.deliveries : [];
+        if (deliveries.length > 0) {
+          const lastDelivery = deliveries
+            .filter(d => d.deliveredAt || d.createdAt)
+            .sort((a, b) => {
+              const aTime = (a.deliveredAt || a.createdAt)?.getTime() || 0;
+              const bTime = (b.deliveredAt || b.createdAt)?.getTime() || 0;
+              return bTime - aTime;
+            })[0];
+          if (lastDelivery) {
+            const date = lastDelivery.deliveredAt || lastDelivery.createdAt;
+            return date instanceof Date ? date.toISOString() : date;
+          }
+        }
+        return null;
+      },
+      createdAt: (webhook: WebhookConfig) => {
+        // Ensure createdAt is always a string
+        if (!webhook.createdAt) return new Date().toISOString();
+        return webhook.createdAt instanceof Date 
+          ? webhook.createdAt.toISOString() 
+          : webhook.createdAt;
+      },
+      updatedAt: (webhook: WebhookConfig) => {
+        // Ensure updatedAt is always a string
+        if (!webhook.updatedAt) return new Date().toISOString();
+        return webhook.updatedAt instanceof Date 
+          ? webhook.updatedAt.toISOString() 
+          : webhook.updatedAt;
+      },
+    },
+    WebhookDelivery: {
+      createdAt: (delivery: WebhookDelivery) => {
+        // Ensure createdAt is always a string
+        if (!delivery.createdAt) return new Date().toISOString();
+        return delivery.createdAt instanceof Date 
+          ? delivery.createdAt.toISOString() 
+          : delivery.createdAt;
+      },
+      deliveredAt: (delivery: WebhookDelivery) => {
+        // Return null if not delivered, otherwise serialize to string
+        if (!delivery.deliveredAt) return null;
+        return delivery.deliveredAt instanceof Date 
+          ? delivery.deliveredAt.toISOString() 
+          : delivery.deliveredAt;
+      },
+      nextRetryAt: (delivery: WebhookDelivery) => {
+        // Return null if no retry scheduled, otherwise serialize to string
+        if (!delivery.nextRetryAt) return null;
+        return delivery.nextRetryAt instanceof Date 
+          ? delivery.nextRetryAt.toISOString() 
+          : delivery.nextRetryAt;
+      },
+    },
   };
 }
 
@@ -1144,5 +1453,49 @@ export function createWebhookService<TEvents extends string>(
   };
 }
 
-// Legacy export for backward compatibility
 export { createWebhookResolvers };
+
+// ═══════════════════════════════════════════════════════════════════
+// Generic Webhook Initialization Helper
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Generic webhook initialization function for any service.
+ * Configures the webhook manager with database strategy and initializes indexes.
+ * 
+ * @example
+ * // In your service's event-dispatcher.ts:
+ * export const myWebhooks = createWebhookManager<MyEvents>({ serviceName: 'my-service' });
+ * 
+ * // In your service's index.ts (after DB connection):
+ * await initializeWebhooks(myWebhooks, {
+ *   databaseStrategy,
+ *   defaultContext: { service: 'my-service', brand, tenantId },
+ * });
+ */
+export async function initializeWebhooks<TEvents extends string>(
+  webhookManager: WebhookManager<TEvents>,
+  options: {
+    databaseStrategy: DatabaseStrategyResolver;
+    defaultContext: DatabaseContext;
+  }
+): Promise<void> {
+  try {
+    // Configure the webhook manager with database strategy
+    webhookManager.configure({
+      databaseStrategy: options.databaseStrategy,
+      defaultContext: options.defaultContext,
+    });
+    
+    // Initialize indexes and enable dispatching
+    await webhookManager.initialize();
+    logger.info('Webhooks initialized with database strategy', { 
+      service: options.defaultContext.service,
+    });
+  } catch (err) {
+    logger.warn('Could not initialize webhooks', { 
+      service: options.defaultContext.service,
+      error: (err as Error).message,
+    });
+  }
+}

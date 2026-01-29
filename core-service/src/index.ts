@@ -95,7 +95,22 @@ export {
   decodeToken,
   isTokenExpired,
   getTokenExpiration,
+  signGenericJWT,
+  verifyGenericJWT,
 } from './common/jwt.js';
+
+// Pending Operations (Generic temporary data storage)
+export {
+  createPendingOperationStore,
+  createRegistrationStore,
+  createCampaignStore,
+  createFormStore,
+} from './common/pending-operation.js';
+export type {
+  PendingOperationBackend,
+  PendingOperationConfig,
+  PendingOperationOptions,
+} from './common/pending-operation.js';
 export { allow, deny, isAuthenticated, hasRole, hasAnyRole, can, and, or, isOwner, sameTenant, hasPermission, isSystem } from './common/permissions.js';
 
 // Database (optimized)
@@ -108,8 +123,8 @@ export {
   getDatabaseStats,
   registerIndexes,
   DEFAULT_MONGO_CONFIG,
-} from './common/database.js';
-export type { MongoConfig } from './common/database.js';
+} from './databases/mongodb.js';
+export type { MongoConfig } from './databases/mongodb.js';
 
 // MongoDB Utilities
 export {
@@ -128,19 +143,29 @@ export {
   findById,
   findOneById,
   // Document normalization
+  extractDocumentId,
   normalizeDocument,
   normalizeDocuments,
   // Common operations (performance-optimized)
   updateOneById,
   deleteOneById,
   findOneAndUpdateById,
-} from './common/mongodb-utils.js';
+} from './databases/mongodb-utils.js';
+
+// User Utilities
+export {
+  findUserIdByRole,
+  findUserIdsByRole,
+} from './databases/user-utils.js';
+export type { FindUserByRoleOptions } from './databases/user-utils.js';
 export type {
   Collection,
   Filter,
   Document,
   ClientSession,
-} from './common/mongodb-utils.js';
+  Db,
+  MongoClient,
+} from './databases/mongodb-utils.js';
 
 // MongoDB Error Handling (sharding-optimized)
 export {
@@ -148,7 +173,7 @@ export {
   handleDuplicateKeyError,
   executeWithDuplicateHandling,
   type DuplicateKeyErrorOptions,
-} from './common/mongodb-errors.js';
+} from './databases/mongodb-errors.js';
 
 // Pagination Utilities (cursor-based, sharding-optimized)
 export {
@@ -156,7 +181,7 @@ export {
   convertOffsetToCursor,
   type CursorPaginationOptions,
   type CursorPaginationResult,
-} from './common/pagination.js';
+} from './databases/pagination.js';
 
 // Configuration Management (unified, multi-source)
 export {
@@ -165,8 +190,76 @@ export {
   type ConfigLoaderOptions,
 } from './common/config-loader.js';
 
+// Dynamic Configuration Store (MongoDB-based, permission-aware)
+export {
+  createConfigStore,
+  createServiceConfigStore,
+  getCentralConfigStore,
+  clearCentralConfigStore,
+  clearServiceConfigStores,
+  registerServiceConfigDefaults,
+  getConfigWithDefault,
+  ensureDefaultConfigsCreated,
+  ConfigStore,
+} from './common/config-store.js';
+export type {
+  ConfigEntry,
+  ConfigStoreOptions,
+  GetConfigOptions,
+  GetAllConfigOptions,
+  SetConfigOptions,
+} from './common/config-store.js';
+
+// Dynamic Configuration GraphQL API
+export {
+  configGraphQLTypes,
+  configResolvers,
+} from './common/config-graphql.js';
+
+// NOTE: DatabaseConfigStore (db-config-store.ts) is DEPRECATED
+// All database config is now stored in service_configs collection as 'database' key
+// Use getConfigWithDefault(service, 'database') instead
+
+// Database Strategy Pattern (Flexible Database Architecture)
+export {
+  createDatabaseStrategy,
+  getDatabaseByStrategy,
+  createSharedDatabaseStrategy,
+  createPerServiceDatabaseStrategy,
+  createPerBrandDatabaseStrategy,
+  createPerBrandServiceDatabaseStrategy,
+  createPerTenantDatabaseStrategy,
+  createPerTenantServiceDatabaseStrategy,
+  createPerShardDatabaseStrategy,
+  DatabaseStrategyResolver,
+} from './databases/strategy.js';
+export type {
+  DatabaseStrategy,
+  DatabaseResolver,
+  DatabaseContext,
+  DatabaseStrategyConfig,
+  DatabaseResolutionOptions,
+} from './databases/strategy.js';
+export {
+  resolveDatabase,
+} from './databases/strategy.js';
+export {
+  // Strategy resolution from config
+  resolveDatabaseStrategyFromConfig,
+  resolveRedisUrlFromConfig,
+  // Centralized database access (simplified API)
+  getCentralDatabase,
+  getCentralClient,
+  getServiceDatabase,
+  getServiceStrategy,
+  initializeServiceDatabase,
+  clearDatabaseCaches,
+  type DatabaseConfig,
+  type ServiceDatabaseOptions,
+} from './databases/strategy-config.js';
+
 // Repository (with caching)
-export { createRepository, generateId as generateUUID, bulkInsert, bulkUpdate } from './common/repository.js';
+export { createRepository, generateId as generateUUID, bulkInsert, bulkUpdate } from './databases/repository.js';
 
 // Cache
 export { 
@@ -179,7 +272,7 @@ export {
   getCacheStats,
   createCacheKeys,
   CacheKeys,
-} from './common/cache.js';
+} from './databases/cache.js';
 
 // Redis
 export { 
@@ -189,17 +282,26 @@ export {
   subscribe, 
   closeRedis, 
   checkRedisHealth,
-  scanKeys,
   scanKeysIterator,
   scanKeysArray,
   scanKeysWithCallback,
   batchGetValues,
-} from './common/redis.js';
-export type { RedisConfig, ScanOptions } from './common/redis.js';
+} from './databases/redis.js';
+export type { RedisConfig, ScanOptions } from './databases/redis.js';
 
 // Logger
-export { logger, setLogLevel, setLogFormat, configureLogger, createChildLogger } from './common/logger.js';
-export type { LogLevel, LogFormat, LoggerConfig } from './common/logger.js';
+export { 
+  logger, 
+  setLogLevel, 
+  setLogFormat, 
+  configureLogger, 
+  createChildLogger,
+  setCorrelationId,
+  getCorrelationId,
+  generateCorrelationId,
+  withCorrelationId,
+} from './common/logger.js';
+export type { LogLevel, LogFormat, LoggerConfig, LogEntry } from './common/logger.js';
 
 // Lifecycle (graceful shutdown)
 export { onShutdown, offShutdown, shutdown, setupGracefulShutdown, isShutdownInProgress } from './common/lifecycle.js';
@@ -243,11 +345,54 @@ export {
   generateDeviceId,
 } from './common/utils.js';
 
-// Error Utilities
-export { getErrorMessage, normalizeError } from './common/errors.js';
+// Error Utilities (unified)
+export { 
+  getErrorMessage, 
+  normalizeError,
+  GraphQLError,
+  formatGraphQLError,
+  registerServiceErrorCodes,
+  getAllErrorCodes,
+  extractServiceFromCode,
+} from './common/errors.js';
+
+// Circuit Breaker & Retry
+export { 
+  CircuitBreaker, 
+  createCircuitBreaker,
+  CircuitBreakerOpenError,
+} from './common/circuit-breaker.js';
+export type { CircuitBreakerConfig } from './common/circuit-breaker.js';
+
+export { 
+  retry, 
+  createRetryFunction,
+  RetryConfigs,
+} from './common/retry.js';
+export type { 
+  RetryConfig, 
+  RetryResult, 
+  RetryStrategy,
+} from './common/retry.js';
 
 // Resolver Utilities
-export { requireAuth, getTenantId, getUserId } from './common/resolvers.js';
+export { requireAuth, getTenantId, getUserId, createObjectModelQueryResolver } from './common/resolvers.js';
+export { 
+  ValidationHandler,
+  AuthValidator,
+  RequiredFieldValidator,
+  TypeValidator,
+  ExtractInputValidator,
+  PermissionValidator,
+  ValidationChainBuilder,
+  createValidationChain,
+} from './common/validation-chain.js';
+export type { ValidationContext, ValidationResult } from './common/validation-chain.js';
+export { 
+  ResolverBuilder,
+  createResolverBuilder,
+} from './common/resolver-builder.js';
+export type { ResolverFunction, ServiceResolvers } from './common/resolver-builder.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types (from src/types/)
@@ -285,6 +430,35 @@ export type {
   PermissionRule, 
   PermissionMap,
 } from './types/index.js';
+
+// Context Resolution
+export {
+  resolveContext,
+  getBrand,
+  getTenantId as getTenantIdFromContext,
+} from './common/context-resolver.js';
+
+// Core Database
+export {
+  CORE_DATABASE_NAME,
+} from './databases/core-database.js';
+
+// Brand & Tenant Store
+export {
+  getBrandById,
+  getBrandByCode,
+  getAllBrands,
+  invalidateBrandCache,
+  getTenantById,
+  getTenantByCode,
+  getTenantsByBrand,
+  getAllTenants,
+  invalidateTenantCache,
+} from './databases/brand-tenant-store.js';
+export type {
+  Brand,
+  Tenant,
+} from './databases/brand-tenant-store.js';
 
 // Repository
 export type { 
@@ -333,27 +507,13 @@ export {
   formatCurrency,
 } from './types/index.js';
 
-// Event Data Types (example structures for common events)
-export type {
-  // Example data types (services can define their own)
-  DepositCompletedData,
-  WithdrawalCompletedData,
-  BonusCreditedData,
-  BonusConvertedData,
-  BonusForfeitedData,
-  UserRegisteredData,
-  UserVerifiedData,
-} from './types/index.js';
+// Note: Event data types should be defined in each service (domain-specific)
+// Use IntegrationEvent<T> from integration.ts with your own types:
+//   emit('deposit.completed', tenantId, userId, { transactionId, amount, ... });
 
-// Legacy event types removed - use emit<T>() with your own types instead
-
-// References (cross-service linking)
+// References (cross-service linking) - Generic types only
+// Domain-specific types should be defined in their respective services
 export type {
-  WalletReference,
-  WalletBalanceSnapshot,
-  BonusReference,
-  WalletBonusSummary,
-  TransactionReference,
   UserReference,
   ServiceResponse,
 } from './types/index.js';
@@ -375,8 +535,6 @@ export {
   createEmitter,
   createHandler,
   buildEvent,
-  subscribeToEvents,
-  startEventListener,
 } from './common/integration.js';
 export type { IntegrationEvent, EmitOptions, UnifiedEmitOptions } from './common/integration.js';
 
@@ -386,6 +544,8 @@ export {
   createWebhookService,
   createWebhookManager,
   WebhookManager,
+  // Generic initialization helper (use in service's main() after DB connection)
+  initializeWebhooks,
   // Signature utilities (for webhook receivers)
   generateSignature,
   verifySignature,

@@ -9,13 +9,30 @@ import {
   getTenantId, 
   logger,
   findById,
+  extractDocumentId,
   normalizeDocument,
   findOneAndUpdateById,
   paginateCollection,
+  getDatabase,
+  getRedis,
+  scanKeysIterator,
+  createPendingOperationStore,
+  GraphQLError,
   type CursorPaginationOptions,
   type CursorPaginationResult,
 } from 'core-service';
-import { rolesToArray } from './utils.js';
+import { AUTH_ERRORS } from './error-codes.js';
+import { matchAnyUrn, hasRole, hasAnyRole } from 'core-service/access';
+import { 
+  rolesToArray, 
+  normalizeUser, 
+  normalizeUsers, 
+  permissionsToArray,
+  extractToken,
+  extractOperationTypeFromKey,
+  buildPendingOperationPatterns,
+  keyMatchesToken,
+} from './utils.js';
 import type { 
   RegisterInput, 
   LoginInput, 
@@ -68,6 +85,14 @@ export const authGraphQLTypes = `
     requiresOTP: Boolean
     otpSentTo: String
     otpChannel: String
+    registrationToken: String  # JWT token for unverified registration (expires in 24h)
+  }
+  
+  type ForgotPasswordResponse {
+    success: Boolean!
+    message: String!
+    channel: String
+    resetToken: String  # JWT token for password reset (expires in 30m) - for testing/debugging
   }
   
   type OTPResponse {
@@ -76,10 +101,12 @@ export const authGraphQLTypes = `
     otpSentTo: String
     channel: String
     expiresIn: Int
+    otpToken: String  # JWT token with OTP embedded (for verification)
   }
   
   type TwoFactorSetup {
     success: Boolean!
+    message: String
     secret: String
     qrCode: String
     backupCodes: [String!]
@@ -102,6 +129,25 @@ export const authGraphQLTypes = `
   type LogoutAllResponse {
     success: Boolean!
     count: Int!
+  }
+  
+  type PendingOperation {
+    token: String!
+    operationType: String!
+    recipient: String
+    channel: String
+    purpose: String
+    createdAt: String!
+    expiresAt: String
+    expiresIn: Int  # seconds until expiration
+    metadata: JSON
+    # Note: Sensitive data (OTP codes, passwords) is NOT exposed
+  }
+  
+  type PendingOperationConnection {
+    nodes: [PendingOperation!]!
+    totalCount: Int!
+    pageInfo: PageInfo!
   }
   
   # Note: BasicResponse and PageInfo are defined in core-service base schema
@@ -142,9 +188,8 @@ export const authGraphQLTypes = `
   
   input VerifyOTPInput {
     tenantId: String!
-    recipient: String!
     code: String!
-    purpose: String!
+    otpToken: String!  # JWT token from sendOTP response (required)
   }
   
   input ForgotPasswordInput {
@@ -154,8 +199,9 @@ export const authGraphQLTypes = `
   
   input ResetPasswordInput {
     tenantId: String!
-    token: String!
+    token: String!  # JWT reset token (from forgotPassword)
     newPassword: String!
+    otpCode: String  # Optional: OTP code for SMS/WhatsApp-based reset
   }
   
   input ChangePasswordInput {
@@ -179,6 +225,12 @@ export const authGraphQLTypes = `
   
   input RefreshTokenInput {
     refreshToken: String!
+    tenantId: String!
+  }
+  
+  input VerifyRegistrationInput {
+    registrationToken: String!
+    otpCode: String!
     tenantId: String!
   }
   
@@ -222,6 +274,33 @@ export const authGraphQLTypes = `
     
     # Health check
     authHealth: String!
+    
+    # List pending operations (Redis-based only)
+    # Users see only their own operations, admins see all
+    pendingOperations(
+      operationType: String
+      recipient: String
+      first: Int
+      after: String
+    ): PendingOperationConnection!
+    
+    # Get specific pending operation by token
+    # Works for both JWT and Redis-based operations
+    pendingOperation(
+      token: String!
+      operationType: String
+    ): PendingOperation
+    
+    # Get all distinct operation types from Redis
+    # Returns all operation types that exist in Redis (regardless of whether operations exist)
+    pendingOperationTypes: [String!]!
+    
+    # Get raw pending operation data (generic - works for any operation type)
+    # Returns complete raw data including metadata, TTL, and full payload
+    pendingOperationRawData(
+      token: String!
+      operationType: String
+    ): JSON
   }
   
   type UserConnection {
@@ -237,6 +316,7 @@ export const authGraphQLTypes = `
   extend type Mutation {
     # Registration
     register(input: RegisterInput!): AuthResponse!
+    verifyRegistration(input: VerifyRegistrationInput!): AuthResponse!
     
     # Authentication
     login(input: LoginInput!): AuthResponse!
@@ -247,10 +327,10 @@ export const authGraphQLTypes = `
     # OTP
     sendOTP(input: SendOTPInput!): OTPResponse!
     verifyOTP(input: VerifyOTPInput!): OTPResponse!
-    resendOTP(recipient: String!, purpose: String!, tenantId: String!): OTPResponse!
+      resendOTP(recipient: String!, purpose: String!, tenantId: String!, otpToken: String!): OTPResponse!
     
     # Password Management
-    forgotPassword(input: ForgotPasswordInput!): BasicResponse!
+    forgotPassword(input: ForgotPasswordInput!): ForgotPasswordResponse!
     resetPassword(input: ResetPasswordInput!): BasicResponse!
     changePassword(input: ChangePasswordInput!): BasicResponse!
     
@@ -270,24 +350,12 @@ export const authGraphQLTypes = `
 import type { Resolvers } from 'core-service';
 
 /**
- * Normalize roles: convert UserRole[] objects to string[] array
- * Handles both UserRole[] format ({ role: string, active: boolean, ... }) and string[] format
- */
-function normalizeRoles(roles: any): string[] {
-  if (!roles) {
-    return [];
-  }
-  
-  // Use utility function to convert roles to string array
-  return rolesToArray(roles);
-}
-
-/**
  * Check if user has system role or specific permission
  * Helper function for resolver permission checks
  * Uses access-engine URN format: resource:action:target (e.g., 'user:read:*', 'user:read:own')
  * 
  * NOTE: Only 'system' role has full access. 'admin' and other roles use permissions.
+ * Uses matchAnyUrn from core-service/access (access-engine) for proper URN matching.
  */
 function checkSystemOrPermission(
   user: UserContext | null,
@@ -297,61 +365,15 @@ function checkSystemOrPermission(
 ): boolean {
   if (!user) return false;
   
-  // Check system role (only role with full access)
-  if (user.roles?.includes('system')) return true;
+  // Check system role (only role with full access) - use hasRole from access-engine
+  if (hasRole('system')(user)) return true;
   
-  // Check wildcard permission
-  if (user.permissions?.some(p => p === '*:*:*' || p === '*')) return true;
-  
-  // Check specific permission using access-engine URN format: resource:action:target
+  // Check permissions using access-engine's matchAnyUrn (handles wildcards properly)
   const requiredUrn = `${resource}:${action}:${target}`;
-  return user.permissions?.some(p => {
-    // URN matching with wildcard support (access-engine format: resource:action:target)
-    const parts = p.split(':');
-    const reqParts = requiredUrn.split(':');
-    if (parts.length !== 3 || reqParts.length !== 3) return false;
-    
-    // Match: resource, action, target (allowing wildcards)
-    return (
-      (parts[0] === '*' || parts[0] === reqParts[0]) &&
-      (parts[1] === '*' || parts[1] === reqParts[1]) &&
-      (parts[2] === '*' || parts[2] === reqParts[2])
-    );
-  }) ?? false;
-}
-
-/**
- * Normalize user object: map _id to id, normalize permissions and roles
- * Uses core-service helper for document normalization
- */
-function normalizeUser(user: any): any {
-  if (!user) {
-    return null;
-  }
+  const permissions = user.permissions || [];
   
-  // Use core-service helper to ensure id field exists from _id
-  const normalized = normalizeDocument(user);
-  if (!normalized) return null;
-  
-  // Normalize permissions (object → array)
-  if (normalized.permissions && !Array.isArray(normalized.permissions)) {
-    normalized.permissions = Object.keys(normalized.permissions).filter(key => normalized.permissions[key] === true);
-  } else if (!normalized.permissions) {
-    normalized.permissions = [];
-  }
-  
-  // Normalize roles using helper function
-  normalized.roles = normalizeRoles(normalized.roles);
-  
-  return normalized;
-}
-
-/**
- * Normalize multiple user objects
- * Helper function to reduce code duplication
- */
-function normalizeUsers(users: any[]): any[] {
-  return users.map(user => normalizeUser(user)).filter(Boolean);
+  // Use matchAnyUrn from access-engine for proper URN matching with wildcard support
+  return matchAnyUrn(permissions, requiredUrn);
 }
 
 /**
@@ -362,47 +384,51 @@ export function createAuthResolvers(
   authenticationService: any,
   otpService: any,
   passwordService: any,
-  twoFactorService: any
+  twoFactorService: any,
+  authConfig?: { jwtSecret?: string }
 ): Resolvers & Record<string, any> {
   return {
     User: {
       /**
        * Normalize roles field: extract role names from UserRole[] format
        */
-      roles: (parent: any) => normalizeRoles(parent.roles),
+      roles: (parent: any) => rolesToArray(parent.roles),
       /**
        * Normalize permissions field: convert object to array if needed
        */
-      permissions: (parent: any) => {
-        if (!parent.permissions) {
-          return [];
-        }
-        // If permissions is an array, return as-is
-        if (Array.isArray(parent.permissions)) {
-          return parent.permissions;
-        }
-        // If permissions is an object, convert to array of keys where value is true
-        if (typeof parent.permissions === 'object') {
-          return Object.keys(parent.permissions).filter(key => parent.permissions[key] === true);
-        }
-        // Fallback: return empty array
-        return [];
-      },
+      permissions: (parent: any) => permissionsToArray(parent.permissions),
     },
     Query: {
       /**
        * Get current authenticated user
+       * 
+       * NOTE: This query MUST throw UserNotFound error if the user no longer exists in DB
+       * (e.g., user was deleted while token is still valid). This allows the frontend
+       * to detect the scenario and clear auth state, forcing re-login.
        */
       me: async (args: Record<string, unknown>, ctx: ResolverContext) => {
         requireAuth(ctx);
         
-        const { getDatabase } = await import('core-service');
         const db = getDatabase();
         const userId = getUserId(ctx);
         const tenantId = getTenantId(ctx);
         
         // Use generic helper function for document lookup with automatic ObjectId handling
         const user = await findById(db.collection('users'), userId, { tenantId });
+        
+        // IMPORTANT: If user has valid token but user doesn't exist in DB (e.g., deleted),
+        // throw UserNotFound error so frontend can detect and clear auth
+        if (!user) {
+          logger.warn('Authenticated user not found in database (may have been deleted)', { 
+            userId, 
+            tenantId 
+          });
+          throw new GraphQLError(AUTH_ERRORS.UserNotFound, { 
+            userId, 
+            tenantId,
+            reason: 'User authenticated but not found in database - user may have been deleted'
+          });
+        }
         
         return normalizeUser(user);
       },
@@ -428,20 +454,22 @@ export function createAuthResolvers(
             requestedUserId,
             isOwnProfile
           });
-          throw new Error('Unauthorized: Insufficient permissions to read user');
+          throw new GraphQLError(AUTH_ERRORS.InsufficientPermissions, { 
+            action: 'read user',
+            requestedUserId 
+          });
         }
         
-        const { getDatabase } = await import('core-service');
         const db = getDatabase();
         const userId = (args as any).id;
         const tenantId = (args as any).tenantId;
         
         if (!userId) {
-          throw new Error('User ID is required');
+          throw new GraphQLError(AUTH_ERRORS.UserIdRequired, {});
         }
         
         if (!tenantId) {
-          throw new Error('Tenant ID is required');
+          throw new GraphQLError(AUTH_ERRORS.TenantIdRequired, {});
         }
         
         // Use generic helper function for document lookup with automatic ObjectId handling
@@ -465,10 +493,11 @@ export function createAuthResolvers(
         // Check permissions: system or user:list permission
         if (!checkSystemOrPermission(ctx.user, 'user', 'list', '*')) {
           logger.warn('Unauthorized users query attempt', { userId: ctx.user!.userId });
-          throw new Error('Unauthorized: Insufficient permissions to list users');
+          throw new GraphQLError(AUTH_ERRORS.InsufficientPermissions, { 
+            action: 'list users' 
+          });
         }
         
-        const { getDatabase } = await import('core-service');
         const db = getDatabase();
         const { tenantId, first, after, last, before } = args as any;
         
@@ -495,14 +524,23 @@ export function createAuthResolvers(
           // Normalize users from edges
           const normalizedNodes = result.edges.map(edge => normalizeUser(edge.node));
           
+          // Ensure totalCount is always a number (GraphQL requires Int!)
+          // If filters are present, paginateCollection may return undefined, so count manually
+          let totalCount = result.totalCount;
+          if (totalCount === undefined || totalCount === null) {
+            totalCount = await db.collection('users').countDocuments(filter);
+          }
+          
           return {
             nodes: normalizedNodes,
-            totalCount: result.totalCount,
+            totalCount: totalCount || 0, // Ensure it's never null/undefined
             pageInfo: result.pageInfo,
           };
         } catch (error) {
-          logger.error('Error fetching users', { error, tenantId });
-          throw new Error('Failed to fetch users');
+          throw new GraphQLError(AUTH_ERRORS.FailedToFetchUsers, { 
+            tenantId,
+            originalError: error instanceof Error ? error.message : String(error),
+          });
         }
       },
       
@@ -519,15 +557,16 @@ export function createAuthResolvers(
             userId: ctx.user!.userId,
             requestedRole: (args as any).role 
           });
-          throw new Error('Unauthorized: Insufficient permissions to list users by role');
+          throw new GraphQLError(AUTH_ERRORS.InsufficientPermissions, { 
+            action: 'list users by role' 
+          });
         }
         
-        const { getDatabase } = await import('core-service');
         const db = getDatabase();
         const { role, tenantId, first, after, last, before } = args as any;
         
         if (!role || typeof role !== 'string') {
-          throw new Error('Role parameter is required and must be a string');
+          throw new GraphQLError(AUTH_ERRORS.RoleRequired, {});
         }
         
         const finalTenantId = tenantId || 'default-tenant';
@@ -564,14 +603,24 @@ export function createAuthResolvers(
           // Normalize users from edges
           const normalizedNodes = result.edges.map(edge => normalizeUser(edge.node));
           
+          // Ensure totalCount is always a number (GraphQL requires Int!)
+          // If filters are present, paginateCollection may return undefined, so count manually
+          let totalCount = result.totalCount;
+          if (totalCount === undefined || totalCount === null) {
+            totalCount = await db.collection('users').countDocuments(filter);
+          }
+          
           return {
             nodes: normalizedNodes,
-            totalCount: result.totalCount,
+            totalCount: totalCount || 0, // Ensure it's never null/undefined
             pageInfo: result.pageInfo,
           };
         } catch (error) {
-          logger.error('Error fetching users by role', { error, role, tenantId: finalTenantId });
-          throw new Error('Failed to fetch users by role');
+          throw new GraphQLError(AUTH_ERRORS.FailedToFetchUsersByRole, { 
+            role,
+            tenantId: finalTenantId,
+            originalError: error instanceof Error ? error.message : String(error),
+          });
         }
       },
       
@@ -581,7 +630,6 @@ export function createAuthResolvers(
       mySessions: async (args: Record<string, unknown>, ctx: ResolverContext) => {
         requireAuth(ctx);
         
-        const { getDatabase } = await import('core-service');
         const db = getDatabase();
         const sessions = await db.collection('sessions')
           .find({
@@ -592,7 +640,31 @@ export function createAuthResolvers(
           .sort({ lastAccessedAt: -1 })
           .toArray();
         
-        return sessions;
+        // Normalize sessions and map to GraphQL Session type
+        return sessions
+          .map((session: any) => {
+            // Extract session ID using helper function
+            const sessionId = extractDocumentId(session);
+            
+            // Skip sessions without an ID
+            if (!sessionId) {
+              logger.warn('Session missing ID field', { userId: getUserId(ctx), session });
+              return null;
+            }
+            
+            // Normalize the session document
+            const normalized = normalizeDocument(session);
+            
+            // Map id to sessionId for GraphQL schema
+            // Remove tokenHash and other sensitive fields
+            const { tokenHash, token, _id, id, ...safeSession } = (normalized || session) as any;
+            
+            return {
+              ...safeSession,
+              sessionId, // Use extracted sessionId
+            };
+          })
+          .filter(Boolean); // Remove any null entries
       },
       
       /**
@@ -604,9 +676,36 @@ export function createAuthResolvers(
     Mutation: {
       /**
        * Register new user
+       * 
+       * Flow:
+       * - If autoVerify=true: Creates user immediately in DB, returns user + tokens
+       * - If sendOTP=true, autoVerify=false: Uses pending operation store (JWT), returns registrationToken
+       * 
+       * NOTE: OAuth registration bypasses this - OAuth providers already verify users,
+       * so OAuth users are created directly with status='active' (see handleSocialAuth)
        */
       register: async (args: Record<string, unknown>, ctx: ResolverContext) => {
         return await registrationService.register((args as any).input);
+      },
+      
+      /**
+       * Verify registration and create user in DB
+       * 
+       * Called after OTP verification:
+       * - Verifies registrationToken (JWT from pending operation store)
+       * - Verifies OTP code
+       * - Creates user in DB with status='pending' (activated on first login)
+       * - Returns user + tokens
+       * 
+       * NOTE: OAuth doesn't use this - OAuth users are created directly (see handleSocialAuth)
+       */
+      verifyRegistration: async (args: Record<string, unknown>, ctx: ResolverContext) => {
+        const input = (args as any).input;
+        return await registrationService.verifyRegistration(
+          input.registrationToken,
+          input.otpCode,
+          input.tenantId
+        );
       },
       
       /**
@@ -631,7 +730,7 @@ export function createAuthResolvers(
       logoutAll: async (args: Record<string, unknown>, ctx: ResolverContext) => {
         requireAuth(ctx);
         
-        return await authenticationService.logoutAll(getUserId(ctx));
+        return await authenticationService.logoutAll(getUserId(ctx), getTenantId(ctx));
       },
       
       /**
@@ -646,7 +745,15 @@ export function createAuthResolvers(
        * Send OTP
        */
       sendOTP: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-        return await otpService.sendOTP((args as any).input);
+        const result = await otpService.sendOTP((args as any).input);
+        return {
+          success: result.success,
+          message: result.message,
+          otpSentTo: result.otpSentTo,
+          channel: result.channel,
+          expiresIn: result.expiresIn,
+          otpToken: result.otpToken, // JWT token with OTP embedded
+        };
       },
       
       /**
@@ -660,15 +767,31 @@ export function createAuthResolvers(
        * Resend OTP
        */
       resendOTP: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-        const { recipient, purpose, tenantId } = args as any;
-        return await otpService.resendOTP(recipient, purpose, tenantId);
+        const { recipient, purpose, tenantId, otpToken } = args as any;
+        const result = await otpService.resendOTP(recipient, purpose, tenantId, otpToken);
+        return {
+          success: result.success,
+          message: result.message,
+          otpSentTo: result.otpSentTo,
+          channel: result.channel,
+          expiresIn: result.expiresIn,
+          otpToken: result.otpToken, // Return new otpToken
+        };
       },
       
       /**
        * Forgot password
+       * Returns resetToken (JWT) for testing/debugging
+       * In production, you may want to remove resetToken from response
        */
       forgotPassword: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-        return await passwordService.forgotPassword((args as any).input);
+        const result = await passwordService.forgotPassword((args as any).input);
+        return {
+          success: result.success,
+          message: result.message,
+          channel: result.channel,
+          resetToken: result.resetToken, // JWT token (for testing - remove in production if needed)
+        };
       },
       
       /**
@@ -753,23 +876,24 @@ export function createAuthResolvers(
             userId: ctx.user!.userId,
             targetUserId
           });
-          throw new Error('Unauthorized: Insufficient permissions to update user roles');
+          throw new GraphQLError(AUTH_ERRORS.InsufficientPermissions, { 
+            action: 'update user roles' 
+          });
         }
         
-        const { getDatabase } = await import('core-service');
         const db = getDatabase();
         const { userId, tenantId, roles } = (args as any).input;
         
         if (!userId) {
-          throw new Error('User ID is required');
+          throw new GraphQLError(AUTH_ERRORS.UserIdRequired, {});
         }
         
         if (!tenantId) {
-          throw new Error('Tenant ID is required');
+          throw new GraphQLError(AUTH_ERRORS.TenantIdRequired, {});
         }
         
         if (!Array.isArray(roles)) {
-          throw new Error('Roles must be an array');
+          throw new GraphQLError(AUTH_ERRORS.RolesMustBeArray, {});
         }
         
         try {
@@ -789,7 +913,7 @@ export function createAuthResolvers(
           
           if (!result || !result.value) {
             logger.warn('User not found for role update', { userId, tenantId });
-            throw new Error('User not found');
+            throw new GraphQLError(AUTH_ERRORS.UserNotFound, { userId, tenantId });
           }
           
           logger.info('User roles updated', { 
@@ -801,8 +925,11 @@ export function createAuthResolvers(
           
           return normalizeUser(result.value);
         } catch (error) {
-          logger.error('Error updating user roles', { error, userId, tenantId });
-          throw error instanceof Error ? error : new Error('Failed to update user roles');
+          throw new GraphQLError(AUTH_ERRORS.FailedToUpdateUserRoles, { 
+            userId,
+            tenantId,
+            originalError: error instanceof Error ? error.message : String(error),
+          });
         }
       },
       
@@ -820,23 +947,24 @@ export function createAuthResolvers(
             userId: ctx.user!.userId,
             targetUserId
           });
-          throw new Error('Unauthorized: Insufficient permissions to update user permissions');
+          throw new GraphQLError(AUTH_ERRORS.InsufficientPermissions, { 
+            action: 'update user permissions' 
+          });
         }
         
-        const { getDatabase } = await import('core-service');
         const db = getDatabase();
         const { userId, tenantId, permissions } = (args as any).input;
         
         if (!userId) {
-          throw new Error('User ID is required');
+          throw new GraphQLError(AUTH_ERRORS.UserIdRequired, {});
         }
         
         if (!tenantId) {
-          throw new Error('Tenant ID is required');
+          throw new GraphQLError(AUTH_ERRORS.TenantIdRequired, {});
         }
         
         if (!Array.isArray(permissions)) {
-          throw new Error('Permissions must be an array');
+          throw new GraphQLError(AUTH_ERRORS.PermissionsMustBeArray, {});
         }
         
         try {
@@ -856,7 +984,7 @@ export function createAuthResolvers(
           
           if (!result) {
             logger.warn('User not found for permission update', { userId, tenantId });
-            throw new Error('User not found');
+            throw new GraphQLError(AUTH_ERRORS.UserNotFound, { userId, tenantId });
           }
           
           logger.info('User permissions updated', { 
@@ -868,8 +996,11 @@ export function createAuthResolvers(
           
           return normalizeUser(result);
         } catch (error) {
-          logger.error('Error updating user permissions', { error, userId, tenantId });
-          throw error instanceof Error ? error : new Error('Failed to update user permissions');
+          throw new GraphQLError(AUTH_ERRORS.FailedToUpdateUserPermissions, { 
+            userId,
+            tenantId,
+            originalError: error instanceof Error ? error.message : String(error),
+          });
         }
       },
       
@@ -890,7 +1021,6 @@ export function createAuthResolvers(
           throw new Error('Unauthorized: Insufficient permissions to update user status');
         }
         
-        const { getDatabase } = await import('core-service');
         const db = getDatabase();
         const { userId, tenantId, status } = (args as any).input;
         
@@ -928,7 +1058,7 @@ export function createAuthResolvers(
           
           if (!result) {
             logger.warn('User not found for status update', { userId, tenantId });
-            throw new Error('User not found');
+            throw new GraphQLError(AUTH_ERRORS.UserNotFound, { userId, tenantId });
           }
           
           logger.info('User status updated', { 
@@ -940,10 +1070,524 @@ export function createAuthResolvers(
           
           return normalizeUser(result);
         } catch (error) {
-          logger.error('Error updating user status', { error, userId, tenantId, status });
-          throw error instanceof Error ? error : new Error('Failed to update user status');
+          throw new GraphQLError(AUTH_ERRORS.FailedToUpdateUserStatus, { 
+            userId,
+            tenantId,
+            status,
+            originalError: error instanceof Error ? error.message : String(error),
+          });
         }
+      },
+      
+      /**
+       * List pending operations (Redis-based only)
+       * Users see only their own operations, admins/system see all
+       */
+      pendingOperations: async (args: Record<string, unknown>, ctx: ResolverContext) => {
+        requireAuth(ctx);
+        
+        const userId = getUserId(ctx);
+        const tenantId = getTenantId(ctx);
+        const user = ctx.user!;
+        
+        // Check if user is admin/system (can see all operations)
+        const isAdmin = checkSystemOrPermission(user, 'user', 'read', '*') || 
+                        hasAnyRole(['system', 'admin'])(user);
+        
+        const redis = getRedis();
+        if (!redis) {
+          logger.debug('Redis not available for pending operations query');
+          return {
+            nodes: [],
+            totalCount: 0,
+            pageInfo: {
+              hasNextPage: false,
+              hasPreviousPage: false,
+              startCursor: null,
+              endCursor: null,
+            },
+          };
+        }
+        
+        const operationType = (args as any).operationType as string | undefined;
+        const recipientFilter = (args as any).recipient as string | undefined;
+        
+        // Fetch user details if not admin (for filtering)
+        let userEmail: string | undefined;
+        let userPhone: string | undefined;
+        if (!isAdmin) {
+          const db = getDatabase();
+          const userDoc = await findById(db.collection('users'), userId, { tenantId });
+          userEmail = userDoc?.email?.toLowerCase();
+          userPhone = userDoc?.phone;
+        }
+        
+        // Build Redis key pattern
+        const pattern = operationType 
+          ? `pending:${operationType}:*`
+          : 'pending:*';
+        
+        const operations: Array<{
+          token: string;
+          operationType: string;
+          recipient?: string;
+          channel?: string;
+          purpose?: string;
+          createdAt: string;
+          expiresAt: string | null;
+          expiresIn: number;
+          metadata: Record<string, unknown>;
+        }> = [];
+        
+        // Scan Redis keys
+        for await (const key of scanKeysIterator({ pattern, maxKeys: 1000 })) {
+          try {
+            const value = await redis.get(key);
+            if (!value || typeof value !== 'string') continue;
+            
+            const payload = JSON.parse(value);
+            const operationData = payload.data || {};
+            
+            // Extract token from key (format: pending:{operationType}:{token})
+            const token = extractToken(key);
+            
+            // Filter by recipient if not admin
+            if (!isAdmin) {
+              const operationRecipient = operationData.recipient?.toLowerCase();
+              
+              // Skip if doesn't match user's email or phone
+              if (operationRecipient !== userEmail?.toLowerCase() && 
+                  operationRecipient !== userPhone) {
+                continue;
+              }
+            }
+            
+            // Apply recipient filter if provided
+            if (recipientFilter) {
+              const operationRecipient = operationData.recipient?.toLowerCase();
+              if (operationRecipient !== recipientFilter.toLowerCase()) {
+                continue;
+              }
+            }
+            
+            // Get TTL (time to live in seconds)
+            const ttl = await redis.ttl(key);
+            
+            // Sanitize metadata (remove sensitive data)
+            const sanitizedMetadata = sanitizePendingOperationMetadata(operationData);
+            
+            operations.push({
+              token,
+              operationType: payload.operationType || 'unknown',
+              recipient: operationData.recipient,
+              channel: operationData.channel || operationData.otp?.channel,
+              purpose: operationData.purpose || operationData.otp?.purpose,
+              createdAt: new Date(payload.createdAt || Date.now()).toISOString(),
+              expiresAt: ttl > 0 ? new Date(Date.now() + ttl * 1000).toISOString() : null,
+              expiresIn: ttl,
+              metadata: sanitizedMetadata,
+            });
+          } catch (error) {
+            logger.warn('Error parsing pending operation', { key, error });
+            continue;
+          }
+        }
+        
+        // Sort by createdAt (newest first)
+        operations.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        
+        // Apply pagination (simple offset-based for now, can be enhanced with cursor-based)
+        const first = (args as any).first as number | undefined;
+        const after = (args as any).after as string | undefined;
+        
+        let paginatedOps = operations;
+        if (first) {
+          const offset = after ? parseInt(Buffer.from(after, 'base64').toString()) || 0 : 0;
+          paginatedOps = operations.slice(offset, offset + first);
+        }
+        
+        return {
+          nodes: paginatedOps,
+          totalCount: operations.length,
+          pageInfo: {
+            hasNextPage: first ? paginatedOps.length === first && operations.length > (after ? parseInt(Buffer.from(after, 'base64').toString()) || 0 : 0) + first : false,
+            hasPreviousPage: after ? parseInt(Buffer.from(after, 'base64').toString()) > 0 : false,
+            startCursor: paginatedOps.length > 0 ? Buffer.from('0').toString('base64') : null,
+            endCursor: paginatedOps.length > 0 ? Buffer.from(String(operations.indexOf(paginatedOps[paginatedOps.length - 1]))).toString('base64') : null,
+          },
+        };
+      },
+      
+      /**
+       * Get specific pending operation by token
+       * Works for both JWT and Redis-based operations
+       */
+      pendingOperation: async (args: Record<string, unknown>, ctx: ResolverContext) => {
+        requireAuth(ctx);
+        
+        const token = (args as any).token as string;
+        const operationType = (args as any).operationType as string | undefined;
+        
+        if (!token) {
+          throw new GraphQLError(AUTH_ERRORS.TokenRequired, {});
+        }
+        
+        const jwtSecret = authConfig?.jwtSecret || 
+                         process.env.JWT_SECRET || 
+                         process.env.SHARED_JWT_SECRET || 
+                         'shared-jwt-secret-change-in-production';
+        
+        // Try Redis first
+        const redis = getRedis();
+        if (redis) {
+          // Try to find in Redis
+          const patterns = operationType 
+            ? [`pending:${operationType}:${token}`]
+            : [`pending:*:${token}`];
+          
+          for (const pattern of patterns) {
+            // For exact match, try direct key lookup first
+            const key = pattern.includes('*') 
+              ? (await scanKeysIterator({ pattern, maxKeys: 1 }).next()).value
+              : pattern;
+            
+            if (key && !key.includes('*')) {
+              const value = await redis.get(key);
+              if (value && typeof value === 'string') {
+                try {
+                  const payload = JSON.parse(value);
+                  const operationData = payload.data || {};
+                  const ttl = await redis.ttl(key);
+                  
+                  return {
+                    token,
+                    operationType: payload.operationType || 'unknown',
+                    recipient: operationData.recipient,
+                    channel: operationData.channel || operationData.otp?.channel,
+                    purpose: operationData.purpose || operationData.otp?.purpose,
+                    createdAt: new Date(payload.createdAt || Date.now()).toISOString(),
+                    expiresAt: ttl > 0 ? new Date(Date.now() + ttl * 1000).toISOString() : null,
+                    expiresIn: ttl,
+                    metadata: sanitizePendingOperationMetadata(operationData),
+                  };
+                } catch (error) {
+                  logger.warn('Error parsing Redis pending operation', { key, error });
+                }
+              }
+            }
+          }
+        }
+        
+        // Try JWT-based operation
+        try {
+          const store = createPendingOperationStore({ 
+            backend: 'jwt', // Explicitly use JWT backend for checking JWT-based operations
+            jwtSecret 
+          });
+          const exists = await store.exists(token, operationType || '');
+          
+          if (exists) {
+            // For JWT, decode without consuming (for metadata only)
+            // Note: We can't decode JWT without verification, so we'll use a different approach
+            // Try to verify (but don't consume) - this is tricky with JWT
+            
+            // For now, return basic info - full implementation would require JWT decode utility
+            // that doesn't consume the token
+            return {
+              token,
+              operationType: operationType || 'unknown',
+              recipient: null,
+              channel: null,
+              purpose: null,
+              createdAt: new Date().toISOString(),
+              expiresAt: null,
+              expiresIn: null,
+              metadata: {},
+            };
+          }
+        } catch (error) {
+          logger.debug('Error checking JWT pending operation', { error });
+        }
+        
+        return null;
+      },
+      
+      /**
+       * Get all distinct operation types from Redis
+       * Scans Redis keys to find all unique operation types
+       */
+      pendingOperationTypes: async (args: Record<string, unknown>, ctx: ResolverContext) => {
+        requireAuth(ctx);
+        
+        const redis = getRedis();
+        if (!redis) {
+          logger.debug('Redis not available for pending operation types query');
+          return [];
+        }
+        
+        const operationTypes = new Set<string>();
+        
+        // Scan all pending operation keys
+        // Key pattern: pending:{operationType}:{token}
+        const pattern = 'pending:*';
+        
+        try {
+          for await (const key of scanKeysIterator({ pattern, maxKeys: 10000 })) {
+            // Extract operation type from key: pending:{operationType}:{token}
+            if (key.startsWith('pending:')) {
+              const operationType = extractOperationTypeFromKey(key);
+              if (operationType && operationType !== 'unknown') {
+                operationTypes.add(operationType);
+              }
+            }
+          }
+        } catch (error) {
+          return [];
+        }
+        
+        // Return sorted array of unique operation types
+        return Array.from(operationTypes).sort();
+      },
+      
+      /**
+       * Get raw pending operation data (generic - works for any operation type)
+       * Returns complete raw data including metadata, TTL, and full payload
+       */
+      pendingOperationRawData: async (args: Record<string, unknown>, ctx: ResolverContext) => {
+        requireAuth(ctx);
+        
+        const user = ctx.user!;
+        const isAdmin = hasAnyRole(['system', 'admin'])(user);
+        
+        if (!isAdmin) {
+          throw new GraphQLError(AUTH_ERRORS.SystemOrAdminAccessRequired, {});
+        }
+        
+        const originalToken = args.token as string;
+        const operationType = args.operationType as string | undefined;
+        const token = extractToken(originalToken);
+        
+        const redis = getRedis();
+        if (!redis) {
+          throw new GraphQLError(AUTH_ERRORS.RedisNotAvailable, {});
+        }
+        
+        // Determine if this is an approval operation
+        const isApprovalOperation = operationType === 'approval' || 
+          (!operationType && originalToken.includes('approval'));
+        
+        const patterns = buildPendingOperationPatterns(
+          token,
+          isApprovalOperation ? 'approval' : operationType
+        );
+        
+        logger.debug('Searching for pending operation raw data', {
+          originalToken,
+          extractedToken: token,
+          operationType,
+          patterns,
+        });
+        
+        // Try direct key lookups first (no wildcards) - most efficient
+        const directResult = await tryDirectKeyLookups(redis, patterns, token, originalToken, operationType);
+        if (directResult) {
+          return directResult;
+        }
+        
+        // If direct lookups failed, try scanning with wildcards
+        const scanResult = await tryWildcardScan(redis, patterns, token, originalToken, operationType);
+        if (scanResult) {
+          return scanResult;
+        }
+        
+        logger.warn('Pending operation not found', {
+          originalToken,
+          extractedToken: token,
+          operationType,
+          patternsTried: patterns,
+        });
+        
+        return null;
       },
     },
   };
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Helper Functions for Pending Operations
+// ═══════════════════════════════════════════════════════════════════
+
+interface RawOperationData {
+  token: string;
+  operationType: string;
+  data: unknown;
+  metadata: Record<string, unknown>;
+  expiresAt: number;
+  ttlSeconds: number;
+  createdAt?: number;
+}
+
+type RedisClient = NonNullable<ReturnType<typeof getRedis>>;
+
+/**
+ * Try direct Redis key lookups (no wildcards) - most efficient approach
+ * 
+ * @param redis - Redis client instance
+ * @param patterns - Array of key patterns to try (non-wildcard patterns only)
+ * @param token - Extracted token (without prefixes)
+ * @param originalToken - Original token as passed by user
+ * @param operationType - Optional operation type hint
+ * @returns Raw operation data if found, null otherwise
+ */
+async function tryDirectKeyLookups(
+  redis: RedisClient,
+  patterns: readonly string[],
+  token: string,
+  originalToken: string,
+  operationType?: string
+): Promise<RawOperationData | null> {
+  if (!redis) return null;
+  
+  for (const pattern of patterns) {
+    if (pattern.includes('*')) continue; // Skip wildcard patterns
+    
+    const value = await redis.get(pattern);
+    if (!value) continue;
+    
+    try {
+      return await parseRedisPayload(pattern, value, originalToken, operationType);
+    } catch (error) {
+      logger.warn('Error parsing Redis raw data', { pattern, error });
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Try scanning Redis with wildcard patterns - fallback when direct lookup fails
+ * 
+ * @param redis - Redis client instance
+ * @param patterns - Array of key patterns to scan (wildcard patterns only)
+ * @param token - Extracted token (without prefixes)
+ * @param originalToken - Original token as passed by user
+ * @param operationType - Optional operation type hint
+ * @returns Raw operation data if found, null otherwise
+ */
+async function tryWildcardScan(
+  redis: RedisClient,
+  patterns: readonly string[],
+  token: string,
+  originalToken: string,
+  operationType?: string
+): Promise<RawOperationData | null> {
+  if (!redis) return null;
+  
+  for (const pattern of patterns) {
+    if (!pattern.includes('*')) continue; // Skip non-wildcard patterns
+    
+    logger.debug('Scanning Redis with pattern', { pattern });
+    
+    for await (const key of scanKeysIterator({ pattern, maxKeys: 100 })) {
+      if (!keyMatchesToken(key, token)) continue;
+      
+      logger.debug('Found matching key via scan', { key, token });
+      
+      const value = await redis.get(key);
+      if (!value) continue;
+      
+      try {
+        return await parseRedisPayload(key, value, originalToken, operationType);
+      } catch (error) {
+        logger.warn('Error parsing Redis raw data', { key, error });
+      }
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Parse Redis payload and extract operation data
+ * 
+ * @param key - Redis key where the data was found
+ * @param value - Raw JSON string from Redis
+ * @param originalToken - Original token as passed by user
+ * @param operationType - Optional operation type hint (fallback if not in key)
+ * @returns Parsed and structured operation data
+ * @throws Error if Redis is unavailable or payload is invalid
+ */
+async function parseRedisPayload(
+  key: string,
+  value: string,
+  originalToken: string,
+  operationType?: string
+): Promise<RawOperationData> {
+  const payload = JSON.parse(value);
+  const redis = getRedis();
+  
+  if (!redis) {
+    throw new Error('Redis not available');
+  }
+  
+  const ttl = await redis.ttl(key);
+  const expiresAt = Date.now() + (ttl > 0 ? ttl * 1000 : 0);
+  const extractedOperationType = extractOperationTypeFromKey(key);
+  
+  return {
+    token: originalToken,
+    operationType: extractedOperationType || operationType || 'unknown',
+    data: payload.data || payload,
+    metadata: payload.metadata || {},
+    expiresAt,
+    ttlSeconds: ttl,
+    createdAt: payload.createdAt,
+  };
+}
+
+/**
+ * Sanitize pending operation metadata to remove sensitive data
+ */
+function sanitizePendingOperationMetadata(data: Record<string, unknown>): Record<string, unknown> {
+  const sanitized: Record<string, unknown> = {};
+  
+  // Copy safe fields
+  const safeFields = ['tenantId', 'userId', 'deviceInfo', 'ipAddress', 'userAgent'];
+  for (const field of safeFields) {
+    if (data[field] !== undefined) {
+      sanitized[field] = data[field];
+    }
+  }
+  
+  // Sanitize OTP data (remove hashed codes)
+  if (data.otp && typeof data.otp === 'object') {
+    const otp = data.otp as Record<string, unknown>;
+    sanitized.otp = {
+      channel: otp.channel,
+      recipient: otp.recipient,
+      purpose: otp.purpose,
+      createdAt: otp.createdAt,
+      expiresIn: otp.expiresIn,
+      // Explicitly exclude: hashedCode, code
+    };
+  }
+  
+  // Explicitly exclude sensitive fields
+  const excludedFields = [
+    'passwordHash',
+    'password',
+    'hashedCode',
+    'code',
+    'otpCode',
+    'resetToken',
+    'secret',
+  ];
+  
+  for (const field of excludedFields) {
+    if (data[field] !== undefined) {
+      // Don't include in sanitized output
+    }
+  }
+  
+  return sanitized;
 }

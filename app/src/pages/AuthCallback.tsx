@@ -41,7 +41,7 @@ export default function AuthCallback() {
         localStorage.setItem('auth_access_token', accessToken);
         localStorage.setItem('auth_refresh_token', refreshToken);
 
-        // Fetch user data
+        // Fetch user data using auth context's graphqlRequest
         const authServiceUrl = (import.meta.env as any).VITE_AUTH_SERVICE_URL || 'http://localhost:3003/graphql';
         const response = await fetch(authServiceUrl, {
           method: 'POST',
@@ -54,10 +54,24 @@ export default function AuthCallback() {
           }),
         });
 
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
         const result = await response.json();
 
+        if (result.errors) {
+          const error = result.errors[0]
+          const errorMessage = error?.message || 'GraphQL error'
+          const errorCode = error?.extensions?.code || errorMessage
+          const errorObj = new Error(errorMessage)
+          ;(errorObj as any).code = errorCode
+          ;(errorObj as any).extensions = error?.extensions || {}
+          throw errorObj
+        }
+
         if (result.data?.me) {
-          // Save user to localStorage and context
+          // Save user to localStorage and update context
           localStorage.setItem('auth_user', JSON.stringify(result.data.me));
           updateUser(result.data.me);
 
@@ -65,7 +79,7 @@ export default function AuthCallback() {
           setMessage('Authentication successful! Redirecting...');
           
           // Redirect to dashboard
-          setTimeout(() => navigate('/dashboard'), 1500);
+          setTimeout(() => navigate('/dashboard', { replace: true }), 1500);
         } else {
           throw new Error('Failed to fetch user data');
         }

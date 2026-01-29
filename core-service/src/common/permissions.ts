@@ -1,13 +1,13 @@
 /**
  * URN Permission System
  * 
- * This module re-exports access-engine utilities for consistency.
- * All URN parsing, matching, and role checking should use access-engine.
+ * This module re-exports access-engine utilities through core-service/access.
+ * All URN parsing, matching, and role checking should use access-engine via core-service/access.
  */
 
+// Import from core-service/access (which wraps access-engine)
 import {
   // URN utilities
-  matchUrn as matchUrnEngine,
   matchAnyUrn,
   // Permission rules
   allow,
@@ -21,11 +21,11 @@ import {
   isOwner as isOwnerEngine,
   sameTenant as sameTenantEngine,
   type PermissionRule,
-} from 'access-engine';
+} from '../access/index.js';
 
 import type { UserContext } from '../types/index.js';
 
-// Re-export everything from access-engine for consistency
+// Re-export everything from core-service/access for consistency
 export {
   // URN utilities
   parseUrn,
@@ -62,7 +62,7 @@ export {
   rateLimit,
   custom,
   rule,
-} from 'access-engine';
+} from '../access/index.js';
 
 /**
  * Check if user is authenticated

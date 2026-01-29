@@ -1,6 +1,6 @@
 # Microservices Payment System - Complete Documentation
 
-**Last Updated**: 2026-01-21  
+**Last Updated**: 2026-01-28  
 **Status**: ✅ Production Ready
 
 ---
@@ -12,12 +12,16 @@
 3. [Architecture](#architecture)
 4. [Microservices](#microservices)
 5. [Dependencies](#dependencies)
-6. [Databases](#databases)
+6. [Databases & Configuration](#databases)
 7. [Quick Start](#quick-start)
 8. [Testing](#testing)
 9. [Recovery System](#recovery-system)
-10. [GraphQL API](#graphql-api)
-11. [Performance](#performance)
+10. [Pending Operations & Approval Workflows](#-pending-operations--approval-workflows)
+11. [GraphQL API](#graphql-api)
+12. [Performance](#performance)
+13. [Access Control](#access-control)
+14. [Error Handling](#-error-handling)
+15. [Implementation Status](#implementation-status)
 
 ---
 
@@ -115,13 +119,12 @@ tst/
 
 ---
 
-## 🗄️ Databases
+## 🗄️ Databases & Configuration
 
 ### MongoDB
 - **Purpose**: Primary data storage
 - **Collections**: `wallets`, `transactions`, `transfers`, `users`, `bonuses`, etc.
 - **Usage**: All microservices use MongoDB for persistent data
-- **Databases**: Each service has its own database (`payment_service`, `bonus_service`, `auth_service`, `notification_service`)
 
 ### Redis
 - **Purpose**: Caching and state tracking
@@ -129,7 +132,127 @@ tst/
   - Cache invalidation (wallet balances, user data)
   - Recovery system state tracking (operation states with TTL)
   - Session management
-- **Required**: For recovery system (graceful degradation without Redis)
+  - Configuration caching
+
+### Database Strategy Pattern
+
+A flexible database architecture that supports multiple strategies:
+
+| Strategy | Function | Database Name | Use Case |
+|----------|----------|---------------|----------|
+| `shared` | `createSharedDatabaseStrategy()` | `core_service` | Single tenant/brand |
+| `per-service` | `createPerServiceDatabaseStrategy()` | `{service}_service` | Microservices (default) |
+| `per-brand` | `createPerBrandDatabaseStrategy()` | `brand_{brand}` | Multi-brand: all services share |
+| `per-brand-service` | `createPerBrandServiceDatabaseStrategy()` | `brand_{brand}_{service}` | Multi-brand: max isolation |
+| `per-tenant` | `createPerTenantDatabaseStrategy()` | `tenant_{tenantId}` | Multi-tenant SaaS |
+| `per-shard` | `createPerShardDatabaseStrategy()` | `shard_0`, `shard_1` | Horizontal partitioning |
+
+**Centralized Database Access API**:
+
+```typescript
+import { 
+  getCentralDatabase,      // Bootstrap layer - always core_service
+  getServiceDatabase,      // Business layer - uses strategy from config
+  initializeServiceDatabase, // Full initialization helper
+} from 'core-service';
+
+// Central database (for config, auth data)
+const coreDb = getCentralDatabase();
+const users = coreDb.collection('users');
+
+// Service database (strategy-based, for business data)
+const db = await getServiceDatabase('bonus-service', { brand, tenantId });
+const bonuses = db.collection('user_bonuses');
+
+// Full initialization (for service startup)
+const { database, strategy, context } = await initializeServiceDatabase({
+  serviceName: 'bonus-service',
+  brand: process.env.BRAND,
+  tenantId: process.env.TENANT_ID,
+});
+```
+
+**Database Architecture**:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     BOOTSTRAP LAYER (Fixed)                     │
+│  getCentralDatabase() → core_service                           │
+│  - Config (service_configs)                                     │
+│  - Auth data (users, sessions)                                  │
+│  - System data (brands, tenants)                                │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                   BUSINESS LAYER (Strategy-based)               │
+│  getServiceDatabase('service-name', { brand, tenantId })        │
+│  - Reads strategy from config (core_service.service_configs)    │
+│  - Resolves to: per-service | per-brand | per-tenant | ...      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Database Layout (per-service strategy)**:
+
+| Database | Collections |
+|----------|-------------|
+| `core_service` | `service_configs`, `sessions`, `users`, `brands`, `tenants` |
+| `bonus_service` | `bonus_templates`, `user_bonuses`, `bonus_transactions`, `bonus_webhooks` |
+| `payment_service` | `wallets`, `transfers`, `transactions`, `exchange_rates`, `payment_webhooks` |
+| `notification_service` | `notifications` |
+
+### Dynamic Configuration Management
+
+All service configuration is stored in MongoDB (`core_service.service_configs`) and can be changed without redeployment.
+
+**Priority order** (highest to lowest):
+1. Environment variables
+2. MongoDB config store
+3. Registered defaults
+
+**Register and Load Configuration**:
+
+```typescript
+import { 
+  registerServiceConfigDefaults, 
+  getConfigWithDefault,
+  resolveRedisUrlFromConfig,
+} from 'core-service';
+
+// 1. Register defaults at startup
+registerServiceConfigDefaults('my-service', {
+  jwt: { value: { expiresIn: '8h', secret: '' }, sensitivePaths: ['jwt.secret'] },
+  corsOrigins: { value: ['http://localhost:5173'] },
+});
+
+// 2. Load config (auto-creates from defaults if missing)
+const jwtConfig = await getConfigWithDefault<JwtConfig>('my-service', 'jwt', { brand, tenantId });
+const redisUrl = await resolveRedisUrlFromConfig('my-service', { brand, tenantId });
+```
+
+**Database Strategy Configuration** (stored in `service_configs`):
+
+```typescript
+// Database config is always read from core_service (bootstrap)
+const dbConfig = await getConfigWithDefault<DatabaseConfig>('bonus-service', 'database');
+// → { strategy: 'per-service', mongoUri: 'mongodb://localhost:27017/{service}' }
+```
+
+**GraphQL Admin API**:
+
+```graphql
+# Query configurations
+query { configs(service: "auth-service", brand: "brand-a") { key, value } }
+
+# Set configuration (admin only)
+mutation { setConfig(service: "auth-service", key: "otpLength", value: 8) { key, value } }
+```
+
+**Benefits**:
+- ✅ No redeployment needed for config changes
+- ✅ Multi-brand/tenant configuration support
+- ✅ Permission-based access (sensitive vs public)
+- ✅ Automatic default creation
 
 ---
 
@@ -181,7 +304,7 @@ tst/
 
 ### 3. Auth Service (`auth-service`)
 - **Port**: 3003
-- **Database**: `auth_service`
+- **Database**: `core_service` (central database for users and core entities)
 - **Dependencies**: `core-service`, `access-engine`, `notification-service`
 - **Responsibilities**: 
   - User authentication and authorization
@@ -235,8 +358,79 @@ tst/
   - **API Gateway** - GraphQL gateway for microservices
   - **Database Utilities** - MongoDB connection, session management
   - **Redis Utilities** - Caching, state tracking
-  - **Validation** - Shared validation utilities
-  - **Error Handling** - Standardized error utilities
+  - **Validation Chain** - Reusable validation logic (Chain of Responsibility pattern)
+  - **Resolver Builder** - Fluent API for GraphQL resolver construction (Builder pattern)
+  - **Error Handling** - Unified error handling (`core-service/src/common/errors.ts`)
+
+#### Design Patterns Implemented
+
+| Pattern | Location | Purpose |
+|---------|----------|---------|
+| **Registry** | `bonus-service/handler-registry.ts` | Handler lookup by type (eliminates switch statements) |
+| **Factory Method** | `notification-service/provider-factory.ts` | Provider creation based on configuration |
+| **Chain of Responsibility** | `core-service/validation-chain.ts` | Composable validation logic |
+| **Builder** | `core-service/resolver-builder.ts` | Fluent GraphQL resolver construction |
+| **Strategy** | `core-service/databases/strategy.ts` | Database selection per brand/tenant |
+
+#### Validation Chain (Chain of Responsibility Pattern)
+
+Reusable validation logic for GraphQL resolvers. Eliminates repetitive validation code.
+
+**Usage Example**:
+```typescript
+import { createValidationChain } from 'core-service';
+
+async function updateUserRoles(args: Record<string, unknown>, ctx: ResolverContext) {
+  const validationChain = createValidationChain()
+    .requireAuth()
+    .extractInput()
+    .requirePermission('user', 'update', '*')
+    .requireFields(['userId', 'tenantId', 'roles'], 'input')
+    .validateTypes({ roles: 'array' }, 'input')
+    .build();
+  
+  const result = validationChain.handle({ args, ctx });
+  if (!result.valid) {
+    throw new Error(result.error);
+  }
+  
+  // Input is guaranteed to be valid and extracted
+  const input = (args as any).input;
+  const { userId, tenantId, roles } = input;
+  // ... rest of logic
+}
+```
+
+**Available Validators**:
+- `requireAuth()` - Ensures user is authenticated
+- `extractInput()` - Extracts `input` wrapper for mutations
+- `requirePermission(resource, action, target)` - Checks URN-based permissions
+- `requireFields(fields[], source)` - Validates required fields exist
+- `validateTypes(validations, source)` - Validates field types (array, string, number, object)
+
+#### Resolver Builder (Builder Pattern)
+
+Fluent API for constructing GraphQL resolver objects. Simplifies resolver merging in gateways.
+
+**Usage Example**:
+```typescript
+import { createResolverBuilder } from 'core-service';
+
+const resolverBuilder = createResolverBuilder()
+  .addQuery('health', async () => ({ status: 'ok' }))
+  .addMutation('createUser', async (args, ctx) => { return user; })
+  .addService(authService)
+  .addService(bonusService);
+
+const resolvers = resolverBuilder.build();
+```
+
+**Available Methods**:
+- `addQuery(name, resolver)` - Add a query resolver
+- `addMutation(name, resolver)` - Add a mutation resolver
+- `addSubscription(name, resolver)` - Add a subscription resolver
+- `addService(service)` - Merge resolvers from a service module
+- `build()` - Build the final resolver object
 
 ---
 
@@ -403,6 +597,500 @@ Generic recovery system for handling stuck operations:
 - **Recovery Job Interval**: 5 minutes (default)
 - **Max Age**: 60 seconds (default)
 - **State Tracking TTL**: 60 seconds (in-progress), 300 seconds (completed/failed)
+
+---
+
+## ⏳ Pending Operations & Approval Workflows
+
+A generic framework for handling approval/rejection workflows and temporary data storage before committing to the database. Supports both JWT-based (stateless) and Redis-based (stateful) operations.
+
+### Overview
+
+The pending operations pattern provides:
+- **No Incomplete Records**: Operations only created after approval/verification
+- **Audit Trail**: All pending requests stored with metadata
+- **Automatic Expiration**: Pending requests expire after configurable TTL (default 24h)
+- **Queryable**: Redis-based operations can be listed and filtered
+- **Reversible**: Can reject before operation is executed
+- **Performance**: Redis-based, fast queries
+- **Stateless Option**: JWT-based operations for email/SMS links
+
+### Architecture
+
+The pending operation store supports two backends:
+
+#### 1. JWT-based (stateless)
+- Data stored directly in the JWT token
+- No server-side storage required
+- Auto-expires based on token expiration
+- **Use when**: Data doesn't need to be queried/listed, stateless operations (email links, SMS tokens)
+- **Examples**: User registration, password reset, OTP verification
+
+#### 2. Redis-based (stateful)
+- Data stored in Redis with TTL
+- Key pattern: `pending:{operationType}:{token}` or `pending:{operationType}:approval:{token}`
+- Can be queried, updated, and listed
+- Supports multi-step operations
+- **Use when**: Data needs to be queried/updated, multi-step forms, operations that need server-side tracking
+- **Examples**: Bonus approvals, payment approvals, campaign creation
+
+### Backend Selection Guidelines
+
+**Use JWT Backend (`backend: 'jwt'`) when:**
+- ✅ Operation is stateless (token sent via email/SMS link)
+- ✅ Data doesn't need to be queried or listed
+- ✅ Single-use operations (verify once and delete)
+- ✅ No need for updates during the operation lifecycle
+
+**Use Redis Backend (`backend: 'redis'`) when:**
+- ✅ Operation needs to be queried/listed via GraphQL
+- ✅ Multi-step operations that need updates
+- ✅ Operations that need server-side tracking
+- ✅ Data needs to be shared across service instances
+
+### Current Implementation Status
+
+**JWT-Based Operations** (Cannot be listed via GraphQL):
+- **User Registration** (`registration`) - 24 hours expiration
+- **Password Reset** (`password_reset`) - 30 minutes expiration
+- **OTP Verification** (`otp_verification`) - Configurable expiration
+
+**Redis-Based Operations** (Can be listed via GraphQL):
+- **Bonus Approvals** (`bonus:approval`) - 24 hours expiration
+- **Payment Approvals** (future) - Can use same pattern
+- **Withdrawal Approvals** (future) - Can use same pattern
+
+### Generic Pending Operation Approval Service
+
+The `pending-operation-approval.ts` module (`bonus-service/src/services/pending-operation-approval.ts`) provides a reusable service that handles:
+- Creating pending operations
+- Approving pending operations (with custom handlers)
+- Rejecting pending operations
+- Listing pending operations
+- Getting pending operations by token
+- Getting raw operation data (for debugging/admin)
+
+#### Usage Example
+
+```typescript
+import { createPendingOperationApprovalService } from './pending-operation-approval.js';
+
+interface MyOperationData {
+  userId: string;
+  amount: number;
+  currency: string;
+  requestedAt: number;
+}
+
+const approvalService = createPendingOperationApprovalService<MyOperationData>({
+  operationType: 'payment',
+  redisKeyPrefix: 'pending:payment:',
+  defaultExpiration: '24h',
+});
+
+// Register approval handler
+approvalService.registerApprovalHandler(async (data, context) => {
+  // Your custom approval logic here
+  const result = await processPayment({
+    userId: data.userId,
+    amount: data.amount,
+    currency: data.currency,
+  });
+  
+  return { 
+    success: result.success, 
+    resultId: result.paymentId 
+  };
+});
+
+// Create pending operation
+const token = await approvalService.createPendingOperation(data, {
+  operationType: 'high_value_payment',
+  description: 'Large payment request',
+});
+
+// Approve operation
+const result = await approvalService.approvePendingOperation(token, {
+  approvedBy: 'admin@example.com',
+  reason: 'Verified user identity',
+});
+
+// Reject operation
+await approvalService.rejectPendingOperation(token, {
+  rejectedBy: 'admin@example.com',
+  reason: 'Insufficient verification',
+});
+```
+
+### Bonus Approval Workflow
+
+The bonus service uses the generic approval service for high-value bonuses that require admin approval.
+
+#### Architecture
+
+**Components**:
+1. **Pending Bonus Store** (`bonus-service/src/services/bonus-approval.ts`)
+   - Redis-based pending operation store
+   - Stores bonus requests that require approval
+   - 24-hour expiration
+   - Key pattern: `pending:bonus:approval:{token}`
+
+2. **Approval Check** (`bonus-service/src/services/bonus-engine/base-handler.ts`)
+   - Checks `template.requiresApproval` and `template.approvalThreshold`
+   - Creates pending operation if approval required
+   - Bypasses check when approving from pending operation
+
+3. **GraphQL API**
+   - `pendingBonuses` query - List all pending approvals
+   - `pendingBonus(token)` query - Get specific pending bonus
+   - `approveBonus(token, reason)` mutation - Approve and award bonus
+   - `rejectBonus(token, reason)` mutation - Reject pending bonus
+
+#### Bonus Types That Require Approval
+
+1. **High-Value Tournament Prizes** (`tournament`)
+   - Threshold: $10,000+
+   - Example: Tournament Grand Prize ($100,000)
+
+2. **VIP Exclusive Bonuses** (`vip`)
+   - Threshold: $5,000+
+   - Example: VIP Exclusive Welcome ($10,000)
+
+3. **Custom Admin Bonuses** (`custom`)
+   - Always requires approval (no threshold)
+   - Example: Custom Admin Bonus ($5,000)
+
+4. **Large Referral Commissions** (`commission`)
+   - Threshold: $2,500+
+   - Example: High-Value Referral Commission (10% up to $5,000)
+
+5. **Leaderboard Rewards** (`leaderboard`)
+   - Threshold: $25,000+
+   - Example: Leaderboard Top Prize ($50,000)
+
+6. **Special Event Bonuses** (`special_event`)
+   - Threshold: $10,000+
+   - Example: Special Event Mega Bonus ($15,000)
+
+7. **High-Value Promo Codes** (`promo_code`)
+   - Threshold: $5,000+
+   - Example: Promo Code High Value ($7,500)
+
+#### Template Configuration
+
+```typescript
+{
+  name: 'Tournament Grand Prize',
+  code: 'TOURNAMENT_GRAND',
+  type: 'tournament',
+  requiresApproval: true,
+  approvalThreshold: 10000,  // Requires approval if value >= $10,000
+  value: 100000,
+  // ... other fields
+}
+```
+
+#### Approval Flow
+
+```
+User claims bonus
+    ↓
+Bonus engine checks eligibility
+    ↓
+Calculates bonus value
+    ↓
+Checks requiresApproval && value >= approvalThreshold?
+    ↓ YES
+Creates pending operation in Redis
+    ↓
+Returns error: "BONUS_REQUIRES_APPROVAL" + pendingToken
+    ↓
+Admin reviews via pendingBonuses query
+    ↓
+Admin approves/rejects via approveBonus/rejectBonus mutation
+    ↓
+If approved: Bonus awarded (bypasses approval check)
+    ↓
+Pending operation deleted
+```
+
+#### GraphQL Usage
+
+**List Pending Bonuses**:
+```graphql
+query {
+  pendingBonuses {
+    token
+    templateCode
+    calculatedValue
+    currency
+    userId
+    requestedAt
+    expiresAt
+  }
+}
+```
+
+**Get Specific Pending Bonus**:
+```graphql
+query {
+  pendingBonus(token: "abc123...") {
+    token
+    templateCode
+    calculatedValue
+    userId
+    requestedAt
+  }
+}
+```
+
+**Approve Bonus**:
+```graphql
+mutation {
+  approveBonus(token: "abc123...", reason: "Verified eligibility") {
+    success
+    bonusId
+    error
+  }
+}
+```
+
+**Reject Bonus**:
+```graphql
+mutation {
+  rejectBonus(token: "abc123...", reason: "User does not meet requirements") {
+    success
+    error
+  }
+}
+```
+
+#### Generic Pending Operations Query (Auth Service)
+
+The auth service provides generic pending operations queries that work across all services:
+
+**List Pending Operations**:
+```graphql
+query {
+  pendingOperations(operationType: "bonus", first: 100) {
+    nodes {
+      token
+      operationType
+      recipient
+      channel
+      purpose
+      createdAt
+      expiresAt
+      expiresIn
+    }
+    totalCount
+  }
+}
+```
+
+**Get Specific Pending Operation** (works for both JWT and Redis-based):
+```graphql
+query {
+  pendingOperation(token: "abc123...", operationType: "bonus") {
+    token
+    operationType
+    recipient
+    expiresIn
+  }
+}
+```
+
+**Get Raw Pending Operation Data** (admin-only, for debugging):
+```graphql
+query {
+  pendingOperationRawData(token: "abc123...", operationType: "bonus")
+}
+```
+
+### Service Implementation Pattern
+
+All services should follow this pattern:
+
+```typescript
+import { createPendingOperationStore } from 'core-service';
+
+export class MyService {
+  private operationStore: ReturnType<typeof createPendingOperationStore>;
+  
+  constructor(private config: MyConfig) {
+    // ALWAYS specify backend explicitly
+    this.operationStore = createPendingOperationStore({
+      backend: 'redis', // or 'jwt'
+      redisKeyPrefix: 'pending:', // Required for Redis
+      defaultExpiration: 86400, // Seconds for Redis, or '24h' for JWT
+    });
+  }
+  
+  async createOperation(data: MyData): Promise<string> {
+    const token = await this.operationStore.create(
+      'my_operation', // Operation type
+      data, // Operation data
+      {
+        operationType: 'my_operation', // Must match first parameter
+        expiresIn: 86400, // Override default if needed
+        metadata: { /* optional metadata */ },
+      }
+    );
+    return token;
+  }
+  
+  async verifyOperation(token: string): Promise<MyData | null> {
+    const result = await this.operationStore.verify(token, 'my_operation');
+    if (!result) {
+      return null; // Invalid or expired
+    }
+    return result.data;
+  }
+}
+```
+
+### Common Mistakes to Avoid
+
+1. ❌ **Not specifying backend**: Using `backend: 'auto'` can cause inconsistent behavior
+   ```typescript
+   // BAD
+   createPendingOperationStore({ jwtSecret })
+   
+   // GOOD
+   createPendingOperationStore({ backend: 'redis', redisKeyPrefix: 'pending:', defaultExpiration: 86400 })
+   ```
+
+2. ❌ **Mixing expiration formats**: Using wrong format for backend
+   ```typescript
+   // BAD - Using time format for Redis
+   createPendingOperationStore({ backend: 'redis', defaultExpiration: '24h' })
+   
+   // GOOD - Use seconds for Redis
+   createPendingOperationStore({ backend: 'redis', defaultExpiration: 86400 })
+   ```
+
+3. ❌ **Inconsistent operation types**: Using different names for same operation
+   ```typescript
+   // BAD - Inconsistent naming
+   store.create('registration', ...)
+   store.verify(token, 'user_registration') // Mismatch!
+   
+   // GOOD - Consistent naming
+   store.create('registration', ...)
+   store.verify(token, 'registration')
+   ```
+
+### Integration with Other Services
+
+To use the pending operations pattern in other services (e.g., `payment-service`, `withdrawal-service`):
+
+1. Use `createPendingOperationApprovalService` from `bonus-service/src/services/pending-operation-approval.ts` as a template
+2. Create a service-specific wrapper (like `bonus-approval.ts`)
+3. Register your custom approval handler
+4. Expose GraphQL queries/mutations as needed
+5. **Always specify backend explicitly** (`backend: 'redis'` for queryable operations)
+
+### GraphQL Integration
+
+The auth service provides generic pending operations queries that work across all services:
+
+**List Pending Operations** (Redis-based only):
+```graphql
+query {
+  pendingOperations(operationType: "bonus", first: 100) {
+    nodes {
+      token
+      operationType
+      recipient
+      channel
+      purpose
+      createdAt
+      expiresAt
+      expiresIn
+    }
+    totalCount
+  }
+}
+```
+
+**Get Specific Pending Operation** (works for both JWT and Redis-based):
+```graphql
+query {
+  pendingOperation(token: "abc123...", operationType: "bonus") {
+    token
+    operationType
+    recipient
+    expiresIn
+  }
+}
+```
+
+**Get Raw Pending Operation Data** (admin-only, for debugging):
+```graphql
+query {
+  pendingOperationRawData(token: "abc123...", operationType: "bonus")
+}
+```
+
+**Get All Operation Types**:
+```graphql
+query {
+  pendingOperationTypes
+}
+```
+
+### React UI Component
+
+A comprehensive UI component (`app/src/pages/PendingOperations.tsx`) displays pending operations with:
+- **Real-time Updates**: Auto-refreshes every 30 seconds
+- **Filtering**: By operation type and recipient
+- **Statistics**: Shows total, active, and expired operations
+- **Status Indicators**: Visual indicators for operation status
+- **Expiration Display**: Shows time remaining until expiration
+- **Raw Data Viewing**: Admin can view complete raw data for debugging
+
+Accessible at `/pending-operations` route (requires authentication, system users see all operations).
+
+### Testing
+
+Run the bonus approval test scenarios:
+
+```bash
+cd scripts/typescript/bonus
+npx tsx bonus-command-test.ts approval
+```
+
+This will:
+- Create approval-required templates
+- Test high-value bonus claims (require approval)
+- List pending bonus approvals
+- Test approve/reject workflows
+- Leave at least one pending bonus for manual testing
+
+### Security Best Practices
+
+1. **Never expose sensitive data**:
+   - OTP codes (even hashed)
+   - Password hashes
+   - Full user data
+
+2. **Access control**:
+   - Users can only see their own operations
+   - Admins can see all (with proper permissions)
+   - Raw data queries are admin-only
+
+3. **Data sanitization**:
+   - Sensitive fields are automatically removed before returning
+   - `pendingOperationRawData` is admin-only for debugging
+
+### Benefits
+
+1. **Reusable**: One service for all approval workflows
+2. **Type-safe**: Full TypeScript support with generics
+3. **Flexible**: Custom approval handlers for each operation type
+4. **Consistent**: Same API across all services
+5. **Maintainable**: Centralized approval logic
+6. **Dynamic**: Redis key patterns support wildcards for dynamic operation types
 
 ---
 
@@ -699,9 +1387,172 @@ scripts/
 
 **Configuration** (`scripts/typescript/config/`):
 - `users.ts` - Centralized user configuration for all tests
-- `mongodb.ts` - MongoDB connection utilities
+- `scripts.ts` - Centralized script configuration, database utilities, and service URLs (single source of truth)
+  - Loads configuration dynamically from MongoDB config store
+  - Provides database access using database strategy pattern
+  - Supports `--brand` and `--tenant` command-line arguments
 
 See [`scripts/README.md`](./scripts/README.md) for detailed script documentation.
+
+---
+
+## 🚨 Error Handling
+
+Unified error handling system across all microservices with automatic logging, type-safe error codes, and GraphQL error discovery.
+
+### Key Design Principles
+
+- **Ultra-Simple**: Single `GraphQLError` class - just throw with CapitalCamelCase message
+- **CapitalCamelCase Format**: All errors formatted consistently (e.g., `UserNotFound`, `InvalidToken`)
+- **Service Prefixes**: Optional prefixes for disambiguation (e.g., `MSAuthUserNotFound`, `MSNotificationNoRecipient`)
+- **Auto-Logging**: Errors automatically logged in constructor with correlation ID
+- **No Manual Logging**: Eliminates hundreds of `logger.error()` calls across codebase
+- **Gateway Integration**: Gateway automatically catches and formats errors
+- **i18n Ready**: Error codes in `extensions.code` for easy frontend translation
+- **GraphQL Behavior**: GraphQL returns HTTP 200 OK for application-level errors (by design)
+
+### Usage
+
+**Backend - Using Error Constants**:
+
+```typescript
+import { GraphQLError } from 'core-service';
+import { AUTH_ERRORS } from './error-codes.js';
+
+// Use constants directly - type-safe, no duplication
+if (!user) {
+  throw new GraphQLError(AUTH_ERRORS.UserNotFound, { userId: _id });
+  // Automatically logged with correlation ID and context
+}
+```
+
+**Error Code Constants Pattern**:
+
+Each service defines error codes in `error-codes.ts`:
+
+```typescript
+// auth-service/src/error-codes.ts
+export const AUTH_ERRORS = {
+  UserNotFound: 'MSAuthUserNotFound',
+  InvalidToken: 'MSAuthInvalidToken',
+  TokenExpired: 'MSAuthTokenExpired',
+  // ... all auth service errors
+} as const;
+
+// Array derived from constants - automatically synced
+export const AUTH_ERROR_CODES = Object.values(AUTH_ERRORS) as readonly string[];
+```
+
+**Service Registration**:
+
+Each service registers error codes at startup:
+
+```typescript
+import { registerServiceErrorCodes } from 'core-service';
+import { AUTH_ERROR_CODES } from './error-codes.js';
+
+async function main() {
+  // Register error codes
+  registerServiceErrorCodes(AUTH_ERROR_CODES);
+  // ... rest of initialization
+}
+```
+
+**GraphQL Error Discovery**:
+
+Query all available error codes:
+
+```graphql
+query {
+  errorCodes
+}
+```
+
+Returns a flat array of all registered error codes:
+```json
+{
+  "data": {
+    "errorCodes": [
+      "MSAuthUserNotFound",
+      "MSAuthInvalidToken",
+      "MSBonusTemplateNotFound",
+      "MSPaymentInsufficientBalance",
+      "MSNotificationNoRecipient"
+    ]
+  }
+}
+```
+
+**Frontend Usage**:
+
+```typescript
+// Error code is in extensions.code (CapitalCamelCase format)
+const errorCode = error.code || error.extensions?.code || error.message;
+
+// Translate using i18n library
+const translatedMessage = t(`error.${errorCode}`);
+
+// Check error type from code
+if (errorCode.includes('Auth') || errorCode === 'AuthenticationRequired') {
+  redirectToLogin();
+} else if (errorCode.includes('Permission')) {
+  showPermissionDeniedMessage();
+}
+```
+
+### Error Flow
+
+```
+1. Resolver throws: throw new GraphQLError(AUTH_ERRORS.UserNotFound, { userId })
+   ↓
+2. GraphQLError constructor auto-logs error (with correlation ID, code, details)
+   ↓
+3. Gateway catches error automatically
+   ↓
+4. formatGraphQLError() formats error for GraphQL response
+   ↓
+5. Error returned to client (GraphQL format with extensions.code)
+```
+
+### Benefits
+
+- ✅ **No Duplication**: Constants are source of truth, array automatically derived
+- ✅ **Type-Safe**: TypeScript autocomplete and compile-time checking
+- ✅ **Simple API**: Use `GraphQLError` directly - no helper function needed
+- ✅ **Always in Sync**: Array automatically matches constants
+- ✅ **Complete Discovery**: All error codes discoverable via GraphQL query
+- ✅ **Better DX**: IDE autocomplete for error constants
+
+### Implementation
+
+All error handling is unified in `core-service/src/common/errors.ts`:
+- Generic error utilities (`getErrorMessage`, `normalizeError`)
+- GraphQL error handling (`GraphQLError` class, `formatGraphQLError`)
+- Error code registry (`registerServiceErrorCodes`, `getAllErrorCodes`)
+
+---
+
+## 🛣️ Future Roadmap
+
+### High Priority
+- **Distributed Tracing**: OpenTelemetry integration for request tracing
+- **Performance Metrics**: Prometheus-compatible metrics endpoint
+- **Multi-Level Caching**: Memory → Redis → Database caching strategy
+- **Connection Pool Optimization**: Auto-scale MongoDB pools based on load
+
+### Medium Priority
+- **API Gateway Improvements**: Rate limiting, request caching, query complexity analysis
+- **Database Sharding Strategy**: Shard key selection, cross-shard query patterns
+- **Read Replicas Support**: MongoDB read preferences for scaling reads
+
+### Completed Improvements
+- ✅ Cursor pagination (O(1) performance)
+- ✅ Circuit breaker pattern (prevents cascading failures)
+- ✅ Enhanced retry logic (exponential backoff, jitter)
+- ✅ Health check endpoints (`/health`)
+- ✅ Correlation IDs (request tracing)
+- ✅ Dynamic configuration (MongoDB config store)
+- ✅ Design patterns (Registry, Factory, Builder, Chain of Responsibility)
 
 ---
 
@@ -709,9 +1560,10 @@ See [`scripts/README.md`](./scripts/README.md) for detailed script documentation
 
 - ✅ Migration Complete (6 → 3 collections)
 - ✅ Recovery System Implemented and Tested
+- ✅ Error Handling System Implemented
 - ✅ All Tests Passing
 - ✅ Production Ready
 
 ---
 
-**Last Updated**: 2026-01-21
+**Last Updated**: 2026-01-28

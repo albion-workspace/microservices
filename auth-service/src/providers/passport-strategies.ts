@@ -19,7 +19,7 @@ import { Strategy as LinkedInStrategy } from 'passport-linkedin-oauth2';
 import speakeasy from 'speakeasy';
 import type { AuthConfig, User, SocialProfile, AuthProvider } from '../types.js';
 import { logger, getDatabase } from 'core-service';
-import { normalizeEmail, normalizePhone, detectIdentifierType, calculateLockoutEnd } from '../utils.js';
+import { normalizeEmail, normalizePhone, detectIdentifierType, verifyPassword } from '../utils.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Strategy Configuration
@@ -102,30 +102,23 @@ export function configurePassport(config: AuthConfig) {
           }
           
           // Check account status
-          if (user.status !== 'active') {
+          // Allow 'pending' users to login (they'll be activated on first login)
+          // Block 'suspended', 'locked', and 'deleted' users
+          if (user.status === 'suspended' || user.status === 'locked' || user.status === 'deleted') {
             return done(null, false, { message: `Account is ${user.status}` });
           }
           
-          // Check account lockout (using Passport's built-in logic)
-          const isLocked = isAccountLocked(user, config);
-          if (isLocked) {
-            const minutesLeft = getMinutesUntilUnlock(user, config);
-            return done(null, false, { 
-              message: `Account is temporarily locked. Try again in ${minutesLeft} minutes.` 
-            });
-          }
+          // Note: 'pending' users can login but will be activated automatically
           
-          // Passport.js LocalStrategy handles password verification
+          // CRITICAL: Password verification using bcrypt
+          // Passport.js does NOT automatically hash/verify passwords - we must do it ourselves
           if (!user.passwordHash) {
             return done(null, false, { message: 'Password authentication not available' });
           }
           
-          // Passport.js LocalStrategy verify callback
-          // Passport.js handles password comparison - we just return the user if password matches
-          // Note: Passport.js will handle password verification internally
-          // For now, simple comparison (Passport.js should handle hashing/verification)
-          if (password !== user.passwordHash) {
-            await handleFailedLogin(user, config, db);
+          // Verify password using bcrypt (secure comparison)
+          const isPasswordValid = await verifyPassword(password, user.passwordHash);
+          if (!isPasswordValid) {
             return done(null, false, { message: 'Invalid credentials' });
           }
           
@@ -147,15 +140,12 @@ export function configurePassport(config: AuthConfig) {
             }
           }
           
-          // Success! Reset failed attempts and update last login
+          // Success! Update last login
           // Use _id for MongoDB queries (more efficient and reliable)
           await db.collection('users').updateOne(
             { _id: user._id },
             {
               $set: {
-                failedLoginAttempts: 0,
-                lastFailedLoginAt: null,
-                lockedUntil: null,
                 lastLoginAt: new Date(),
                 lastActiveAt: new Date(),
               },
@@ -315,74 +305,6 @@ export function configurePassport(config: AuthConfig) {
 // Helper Functions (Used by LocalStrategy)
 // ═══════════════════════════════════════════════════════════════════
 
-/**
- * Check if account is currently locked
- */
-function isAccountLocked(user: User, config: AuthConfig): boolean {
-  // Check explicit lockout
-  if (user.lockedUntil && user.lockedUntil > new Date()) {
-    return true;
-  }
-  
-  // Check failed attempts threshold
-  if (user.failedLoginAttempts >= config.maxLoginAttempts) {
-    if (!user.lastFailedLoginAt) return false;
-    
-    const lockoutEndTime = new Date(
-      user.lastFailedLoginAt.getTime() + config.lockoutDuration * 60 * 1000
-    );
-    return lockoutEndTime > new Date();
-  }
-  
-  return false;
-}
-
-/**
- * Get minutes until account unlocks
- */
-function getMinutesUntilUnlock(user: User, config: AuthConfig): number {
-  if (user.lockedUntil) {
-    const minutesLeft = Math.ceil((user.lockedUntil.getTime() - Date.now()) / 60000);
-    return Math.max(0, minutesLeft);
-  }
-  
-  if (user.lastFailedLoginAt) {
-    const lockoutEndTime = new Date(
-      user.lastFailedLoginAt.getTime() + config.lockoutDuration * 60 * 1000
-    );
-    const minutesLeft = Math.ceil((lockoutEndTime.getTime() - Date.now()) / 60000);
-    return Math.max(0, minutesLeft);
-  }
-  
-  return 0;
-}
-
-/**
- * Handle failed login attempt (Passport-managed)
- */
-async function handleFailedLogin(user: User, config: AuthConfig, db: any): Promise<void> {
-  const now = new Date();
-  const newFailedAttempts = user.failedLoginAttempts + 1;
-  
-  const update: any = {
-    failedLoginAttempts: newFailedAttempts,
-    lastFailedLoginAt: now,
-  };
-  
-  // Lock account if max attempts reached
-  if (newFailedAttempts >= config.maxLoginAttempts) {
-    update.lockedUntil = calculateLockoutEnd(config);
-    logger.warn('Account locked due to failed login attempts', { 
-      userId: user.id,
-      attempts: newFailedAttempts 
-    });
-  }
-  
-  await db.collection('users').updateOne(
-    { id: user.id },
-    { $set: update }
-  );
-}
 
 /**
  * Verify 2FA code using TOTP
@@ -544,13 +466,18 @@ async function handleSocialAuth(
   }
   
   // Create new user - let MongoDB generate _id automatically
+  // NOTE: OAuth providers (Google, Facebook, etc.) already verify users, so we:
+  // - Create user directly in DB (no pending operation store)
+  // - Set status to 'active' immediately (not 'pending')
+  // - Set emailVerified to true (provider already verified)
+  // This is different from regular registration which uses pending operation store
   const newUser: User = {
     // Don't set id - MongoDB will generate _id automatically
     tenantId,
     email,
     emailVerified: email ? true : false, // Social providers verify email
     phoneVerified: false,
-    status: 'active',
+    status: 'active', // OAuth users are active immediately (provider already verified)
     roles: [{ role: 'user', assignedAt: new Date(), active: true }], // New UserRole[] format
     permissions: [],
     socialProfiles: [{
@@ -584,75 +511,3 @@ async function handleSocialAuth(
   return createdUser;
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// Passport Serialization (for session-based auth)
-// ═══════════════════════════════════════════════════════════════════
-
-/**
- * Passport Serialization - Store MongoDB _id in session
- * 
- * Best Practice: Always serialize MongoDB's _id (ObjectId) as a string.
- * This is what Passport.js recommends - store the minimal identifier needed
- * to retrieve the user on subsequent requests.
- */
-passport.serializeUser((user: any, done) => {
-  // CRITICAL: Always use MongoDB's _id as the identifier (Passport.js best practice)
-  // MongoDB's _id is the source of truth - convert to string for session storage
-  if (!user._id) {
-    logger.error('Passport serializeUser: User missing _id field', {
-      userId: user?.id,
-      email: user?.email,
-      userKeys: user ? Object.keys(user) : [],
-    });
-    return done(new Error('User missing _id field'));
-  }
-  
-  // Serialize MongoDB _id as string (Passport.js standard pattern)
-  // This is what will be stored in the session
-  const serializedId = user._id.toString();
-  
-  // Store minimal data: just the _id (as string) and tenantId
-  done(null, { id: serializedId, tenantId: user.tenantId });
-});
-
-/**
- * Passport Deserialization - Retrieve user from MongoDB by _id
- * 
- * Best Practice: Always query by MongoDB's _id using findById() or findOne({ _id: id }).
- * MongoDB driver automatically handles string-to-ObjectId conversion.
- * This is the standard Passport.js pattern for MongoDB.
- */
-passport.deserializeUser(async (data: any, done) => {
-  try {
-    if (!data?.id) {
-      logger.error('Passport deserializeUser: No id in session data', { data });
-      return done(null, null);
-    }
-    
-    const db = getDatabase();
-    
-    // CRITICAL: Always query by MongoDB's _id (Passport.js best practice)
-    // MongoDB driver automatically converts string to ObjectId for _id queries
-    // This is the standard pattern: User.findById(id) or findOne({ _id: id })
-    const userDoc = await db.collection('users').findOne({
-      _id: data.id as any, // MongoDB driver handles string-to-ObjectId conversion automatically
-      tenantId: data.tenantId,
-    }) as any;
-    
-    if (!userDoc || !userDoc._id) {
-      return done(null, null);
-    }
-    
-    // Convert MongoDB document to User type
-    const user = {
-      ...userDoc,
-      _id: userDoc._id,
-      id: userDoc._id.toString(),
-    } as unknown as User;
-    
-    done(null, user);
-  } catch (error) {
-    logger.error('Passport deserializeUser error', { error });
-    done(error);
-  }
-});

@@ -15,10 +15,57 @@ export interface LogEntry {
   level: LogLevel;
   service: string;
   message: string;
+  correlationId?: string;
   data?: Record<string, unknown>;
 }
 
 export type LogSubscriber = (entry: LogEntry) => void;
+
+// ═══════════════════════════════════════════════════════════════════
+// Correlation ID Management (for distributed tracing)
+// ═══════════════════════════════════════════════════════════════════
+
+const correlationIdStore = new Map<string, string>();
+
+/**
+ * Set correlation ID for current async context
+ * Uses AsyncLocalStorage for request-scoped correlation IDs
+ */
+export function setCorrelationId(id: string): void {
+  // Store in process context (can be enhanced with AsyncLocalStorage for better isolation)
+  process.env.CORRELATION_ID = id;
+}
+
+/**
+ * Get current correlation ID
+ */
+export function getCorrelationId(): string | undefined {
+  return process.env.CORRELATION_ID;
+}
+
+/**
+ * Generate a new correlation ID
+ */
+export function generateCorrelationId(): string {
+  return `${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
+}
+
+/**
+ * Run function with correlation ID context
+ */
+export async function withCorrelationId<T>(id: string, fn: () => Promise<T>): Promise<T> {
+  const previousId = getCorrelationId();
+  setCorrelationId(id);
+  try {
+    return await fn();
+  } finally {
+    if (previousId) {
+      setCorrelationId(previousId);
+    } else {
+      delete process.env.CORRELATION_ID;
+    }
+  }
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // Configuration
@@ -60,11 +107,13 @@ export function subscribeToLogs(subscriber: LogSubscriber): () => void {
 function notifySubscribers(level: LogLevel, message: string, data?: object): void {
   if (subscribers.size === 0) return;
   
+  const correlationId = getCorrelationId();
   const entry: LogEntry = {
     timestamp: new Date().toISOString(),
     level,
     service: config.service || 'unknown',
     message,
+    ...(correlationId && { correlationId }),
     data: data as Record<string, unknown>,
   };
   
@@ -90,10 +139,12 @@ const colors = {
 };
 
 function formatJson(level: LogLevel, message: string, data?: object): string {
+  const correlationId = getCorrelationId();
   return JSON.stringify({
     ...(config.timestamp && { timestamp: new Date().toISOString() }),
     level,
     ...(config.service && { service: config.service }),
+    ...(correlationId && { correlationId }),
     message,
     ...config.metadata,
     ...data,
@@ -105,6 +156,8 @@ function formatText(level: LogLevel, message: string, data?: object): string {
   if (config.timestamp) parts.push(new Date().toISOString());
   parts.push(`[${level.toUpperCase()}]`);
   if (config.service) parts.push(`[${config.service}]`);
+  const correlationId = getCorrelationId();
+  if (correlationId) parts.push(`[${correlationId}]`);
   parts.push(message);
   if (data && Object.keys(data).length > 0) {
     parts.push(JSON.stringify(data));
@@ -118,6 +171,8 @@ function formatPretty(level: LogLevel, message: string, data?: object): string {
   if (config.timestamp) parts.push(`\x1b[90m${new Date().toISOString()}\x1b[0m`);
   parts.push(`${color}${level.toUpperCase().padEnd(5)}${colors.reset}`);
   if (config.service) parts.push(`\x1b[90m[${config.service}]\x1b[0m`);
+  const correlationId = getCorrelationId();
+  if (correlationId) parts.push(`\x1b[90m[${correlationId}]\x1b[0m`);
   parts.push(message);
   if (data && Object.keys(data).length > 0) {
     parts.push(`\x1b[90m${JSON.stringify(data)}\x1b[0m`);

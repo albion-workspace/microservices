@@ -52,37 +52,41 @@ export type {
   RevokeRoleInput,
 } from './types/role-types.js';
 
-// Role type from access-engine
-export type { Role } from 'access-engine';
+// Role type from core-service/access
+export type { Role } from 'core-service/access';
 
 // SocialProfile is exported from user-types.ts
 
 // ═══════════════════════════════════════════════════════════════════
-// Session Types
+// Session Types (Unified - combines refresh token and session data)
 // ═══════════════════════════════════════════════════════════════════
 
 export interface Session {
-  sessionId?: string; // MongoDB will automatically generate _id, which we map to sessionId
+  id?: string; // MongoDB _id as string
   userId: string;
   tenantId: string;
   
-  // Token reference
-  refreshTokenId: string;
+  // Refresh Token (embedded, not separate collection)
+  token: string; // Plain token (only stored temporarily during creation, not persisted)
+  tokenHash: string; // Hashed token for lookups
+  refreshTokenExpiresAt: Date; // Refresh token expiration (e.g., 7 days)
   
-  // Session info
+  // Device & Session Info
+  deviceId: string;
+  deviceInfo?: DeviceInfo;
   ipAddress?: string;
   userAgent?: string;
-  deviceInfo?: DeviceInfo;
   
   // Lifecycle
   createdAt: Date;
-  expiresAt: Date;
-  lastAccessedAt: Date;
+  lastAccessedAt: Date; // Updated on each access
+  lastUsedAt?: Date; // Updated when refresh token is used
+  sessionExpiresAt: Date; // Session expiration (e.g., 30 days)
   
   // Security
   isValid: boolean;
-  invalidatedAt?: Date;
-  invalidatedReason?: string;
+  revokedAt?: Date;
+  revokedReason?: string; // 'logout', 'logout_all', 'expired', 'password_reset', etc.
 }
 
 export interface DeviceInfo {
@@ -139,30 +143,6 @@ export interface OTP {
 // ═══════════════════════════════════════════════════════════════════
 // Token Types
 // ═══════════════════════════════════════════════════════════════════
-
-export interface RefreshToken {
-  id?: string; // MongoDB will automatically generate _id, which we map to id
-  userId: string;
-  tenantId: string;
-  
-  // Token
-  token: string;
-  tokenHash: string;
-  
-  // Device/Session info
-  deviceId?: string;
-  deviceInfo?: DeviceInfo;
-  
-  // Lifecycle
-  createdAt: Date;
-  expiresAt: Date;
-  lastUsedAt?: Date;
-  
-  // Security
-  isValid: boolean;
-  revokedAt?: Date;
-  revokedReason?: string;
-}
 
 export interface TokenPair {
   accessToken: string;
@@ -236,9 +216,8 @@ export interface SocialAuthInput {
 
 export interface VerifyOTPInput {
   tenantId: string;
-  recipient: string; // email or phone
   code: string;
-  purpose: OTPPurpose;
+  otpToken: string; // JWT token from sendOTP response (required)
 }
 
 export interface SendOTPInput {
@@ -256,8 +235,9 @@ export interface ForgotPasswordInput {
 
 export interface ResetPasswordInput {
   tenantId: string;
-  token: string;
+  token: string; // JWT reset token (from forgotPassword)
   newPassword: string;
+  otpCode?: string; // Optional: OTP code for SMS/WhatsApp-based reset
 }
 
 export interface ChangePasswordInput {
@@ -284,6 +264,12 @@ export interface RefreshTokenInput {
   tenantId: string;
 }
 
+export interface VerifyRegistrationInput {
+  registrationToken: string;
+  otpCode: string;
+  tenantId: string;
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Response Types
 // ═══════════════════════════════════════════════════════════════════
@@ -296,6 +282,7 @@ export interface AuthResponse {
   requiresOTP?: boolean;
   otpSentTo?: string;
   otpChannel?: OTPChannel;
+  registrationToken?: string; // JWT token for unverified registration
 }
 
 export interface OTPResponse {
@@ -304,10 +291,12 @@ export interface OTPResponse {
   otpSentTo?: string;
   channel?: OTPChannel;
   expiresIn?: number;
+  otpToken?: string; // JWT token with OTP embedded (for verification)
 }
 
 export interface TwoFactorSetupResponse {
   success: boolean;
+  message?: string;
   secret?: string;
   qrCode?: string;
   backupCodes?: string[];
@@ -329,13 +318,10 @@ export interface AuthConfig {
   passwordRequireUppercase: boolean;
   passwordRequireNumbers: boolean;
   passwordRequireSymbols: boolean;
-  maxLoginAttempts: number;
-  lockoutDuration: number; // minutes
   
   // OTP
   otpLength: number;
   otpExpiryMinutes: number;
-  otpMaxAttempts: number;
   
   // Session
   sessionMaxAge: number; // days

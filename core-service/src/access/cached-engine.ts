@@ -5,12 +5,14 @@
  * Compiles and caches user permissions for fast lookups.
  */
 
-import type { User, AccessResult } from 'access-engine';
-import { matchUrn } from 'access-engine';
-import type { AccessEngine } from 'access-engine';
+// External packages
+import type { User, AccessResult, UserRole, ResolvedPermissions, AccessEngine } from 'access-engine';
+import { matchUrn, RoleResolver, type Role as BaseRole } from 'access-engine';
+
+// Internal imports
 import type { AccessStore } from './store.js';
 import type { AccessCache } from './cache.js';
-import type { CompiledPermissions } from './types-ext.js';
+import type { CompiledPermissions, Role, URN } from './types-ext.js';
 
 export class CachedAccessEngine {
   constructor(
@@ -75,51 +77,79 @@ export class CachedAccessEngine {
 
   /**
    * Compile all permissions for a user
+   * Uses access-engine's RoleResolver for safe resolution with all features:
+   * - Role expiration checking
+   * - Active role filtering
+   * - Context-based role support
+   * - UserRole[] format support
+   * - Safe inheritance resolution (visited set, maxDepth)
    * 
    * Sources:
    * 1. User-specific permissions
-   * 2. Role permissions (from DB)
-   * 3. Inherited role permissions
+   * 2. Role permissions (from DB, resolved via RoleResolver)
+   * 3. Inherited role permissions (safely resolved)
    */
   private async compileUserPermissions(user: User): Promise<CompiledPermissions> {
-    const urns = new Set<string>();
-    const roles = new Set<string>();
-
-    // Add user-specific permissions
-    if (user.permissions) {
-      for (const perm of user.permissions) {
-        urns.add(perm);
+    const { tenantId: userTenantId, userId, roles: userRoles, permissions: userPermissions } = user;
+    const tenantId = userTenantId || 'default';
+    
+    // Extract role names from user.roles (handles both string[] and UserRole[] formats)
+    let roleNames: string[] = [];
+    if (Array.isArray(userRoles) && userRoles.length > 0) {
+      if (typeof userRoles[0] === 'string') {
+        roleNames = userRoles as string[];
+      } else {
+        roleNames = (userRoles as unknown as UserRole[]).map(({ role }) => role);
       }
     }
-
-    // Add role permissions (includes inheritance)
-    if (user.roles) {
-      for (const roleName of user.roles) {
-        roles.add(roleName);
-        
-        // Get role from DB (this is the DB hit we're caching)
-        const rolePerms = await this.store.getRolePermissions(roleName, user.tenantId || 'default');
-        for (const perm of rolePerms) {
-          urns.add(perm);
-        }
-      }
-    }
-
+    
+    // Load all roles from DB (including inherited roles)
+    const roles = await this.store.resolveRoleHierarchy(roleNames, tenantId);
+    
+    // Convert MongoDB Role[] to BaseRole[] format for RoleResolver
+    const baseRoles: BaseRole[] = roles.map(({ name, description, permissions, inherits, priority, active }) => ({
+      name,
+      description,
+      displayName: name,
+      permissions,
+      inherits,
+      priority,
+      active: active !== false,
+      context: undefined,
+      metadata: undefined,
+    }));
+    
+    // Use RoleResolver to resolve permissions (handles expiration, context, active status, inheritance)
+    const roleResolver = new RoleResolver(baseRoles);
+    
+    // Resolve user permissions using RoleResolver (handles all edge cases)
+    const resolved: ResolvedPermissions = roleResolver.resolveUserPermissions(user, {
+      includeInherited: true,
+      includePermissions: true,
+      resolveContextRoles: true,
+      maxDepth: 10,
+    });
+    
+    // Convert ResolvedPermissions to CompiledPermissions format
+    const permissions = Array.from(resolved.permissions);
+    const resolvedRoles = Array.from(resolved.roles);
     const now = Date.now();
 
     return {
-      userId: user.userId,
-      tenantId: user.tenantId || 'default',
-      urns: Array.from(urns),
-      roles: Array.from(roles),
-      grants: [] as any,
-      denies: [] as any,
+      userId,
+      tenantId,
+      urns: permissions, // URNs are the permissions strings
+      roles: resolvedRoles,
+      grants: {} as Record<string, string[]>, // Empty grants object
+      denies: [] as string[], // Empty denies array
       computedAt: now,
       expiresAt: now + 300000, // 5 minutes
       permissions: [],
-      matcher: (urnObj: any) => {
-        const urnString = typeof urnObj === 'string' ? urnObj : `${urnObj.resource}:${urnObj.action}:${urnObj.target}`;
-        return Array.from(urns).some(u => matchUrn(u, urnString));
+      matcher: (urnObj: string | URN) => {
+        const urnString = typeof urnObj === 'string' 
+          ? urnObj 
+          : `${urnObj.resource}:${urnObj.action}:${urnObj.target}`;
+        return permissions.some(u => matchUrn(u, urnString));
       },
       compiledAt: new Date(now),
     };

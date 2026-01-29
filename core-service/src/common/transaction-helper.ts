@@ -14,8 +14,9 @@
  */
 
 import { logger } from './logger.js';
-import { getDatabase, getClient, generateId, generateMongoId } from '../index.js';
-import type { ClientSession } from 'mongodb';
+import { generateId, generateMongoId } from '../index.js';
+import type { ClientSession, Db, MongoClient } from 'mongodb';
+import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/strategy.js';
 
 // Re-export transaction state types from transaction-state.ts
 export type { TransactionState } from './transaction-state.js';
@@ -187,11 +188,28 @@ export function createTransactionDocument(
  */
 export async function createTransaction(
   params: CreateTransactionParams,
-  session?: ClientSession
+  options?: {
+    database?: Db;
+    databaseStrategy?: DatabaseStrategyResolver;
+    context?: DatabaseContext;
+    session?: ClientSession;
+  }
 ): Promise<CreateTransactionResult> {
-  const db = getDatabase();
-  const client = getClient();
+  let db: Db;
+  let client: MongoClient;
+  
+  if (options?.database) {
+    db = options.database;
+    client = db.client;
+  } else if (options?.databaseStrategy && options?.context) {
+    db = await options.databaseStrategy.resolve(options.context);
+    client = db.client;
+  } else {
+    throw new Error('createTransaction requires either database or databaseStrategy with context');
+  }
+  
   const transactionsCollection = db.collection('transactions');
+  const session = options?.session;
   
   const {
     userId,
@@ -219,7 +237,10 @@ export async function createTransaction(
   // Core transaction logic (reusable with or without external session)
   const executeTransaction = async (txSession: ClientSession): Promise<CreateTransactionResult> => {
       // Get or create wallet (within transaction)
-      const wallet = await getOrCreateWalletHelper(userId, currency, tenantId, txSession);
+      const wallet = await getOrCreateWalletHelper(userId, currency, tenantId, {
+        database: db,
+        session: txSession,
+      });
       
       // Get current balance
       const currentBalance = (wallet as any)?.[balanceField] || 0;
@@ -331,11 +352,28 @@ export async function createTransaction(
  */
 export async function createTransactions(
   transactions: CreateTransactionParams[],
-  session?: ClientSession
+  options?: {
+    database?: Db;
+    databaseStrategy?: DatabaseStrategyResolver;
+    context?: DatabaseContext;
+    session?: ClientSession;
+  }
 ): Promise<CreateTransactionResult[]> {
-  const db = getDatabase();
-  const client = getClient();
+  let db: Db;
+  let client: MongoClient;
+  
+  if (options?.database) {
+    db = options.database;
+    client = db.client;
+  } else if (options?.databaseStrategy && options?.context) {
+    db = await options.databaseStrategy.resolve(options.context);
+    client = db.client;
+  } else {
+    throw new Error('createTransactions requires either database or databaseStrategy with context');
+  }
+  
   const transactionsCollection = db.collection('transactions');
+  const session = options?.session;
   
   // Core transaction logic (reusable with or without external session)
   const executeTransactions = async (txSession: ClientSession): Promise<CreateTransactionResult[]> => {
@@ -366,7 +404,10 @@ export async function createTransactions(
         const balanceField = getBalanceField(balanceType);
         
         // Get or create wallet
-        const wallet = await getOrCreateWalletHelper(userId, currency, tenantId, txSession);
+        const wallet = await getOrCreateWalletHelper(userId, currency, tenantId, {
+          database: db,
+          session: txSession,
+        });
         
         // Track wallet updates
         const walletKey = `${userId}:${currency}:${tenantId}`;

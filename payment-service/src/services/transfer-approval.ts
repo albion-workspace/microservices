@@ -23,7 +23,11 @@ export const transferApprovalResolvers = {
       const transferId = args.transferId as string;
       
       try {
-        const transfer = await approveTransfer(transferId);
+        // GraphQL resolvers use getDatabase() as database strategies are initialized at gateway level
+        const db = getDatabase();
+        const transfer = await approveTransfer(transferId, {
+          database: db,
+        });
         
         return {
           success: true,
@@ -43,7 +47,12 @@ export const transferApprovalResolvers = {
       const reason = (args.reason as string) || 'Manually declined';
       
       try {
-        const transfer = await declineTransfer(transferId, reason);
+        // GraphQL resolvers use getDatabase() as database strategies are initialized at gateway level
+        const db = getDatabase();
+        const transfer = await declineTransfer(transferId, {
+          database: db,
+          reason,
+        });
         
         return {
           success: true,

@@ -51,7 +51,8 @@
  *    - Consistent across all entities
  */
 
-import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, getDatabase, deleteCache, deleteCachePattern, logger, validateInput, findOneById, findOneAndUpdateById, requireAuth, getUserId, getTenantId, getOrCreateWallet } from 'core-service';
+import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, resolveDatabase, getDatabase, deleteCache, deleteCachePattern, logger, validateInput, findOneById, findOneAndUpdateById, requireAuth, getUserId, getTenantId, getOrCreateWallet, paginateCollection, extractDocumentId, GraphQLError, type DatabaseResolutionOptions } from 'core-service';
+import { PAYMENT_ERRORS } from '../error-codes.js';
 import type { Wallet, WalletCategory } from '../types.js';
 import { SYSTEM_CURRENCY } from '../constants.js';
 import { emitPaymentEvent } from '../event-dispatcher.js';
@@ -136,6 +137,7 @@ export const walletResolvers = {
      * ```
      */
     userWallets: async (args: Record<string, unknown>, ctx: ResolverContext): Promise<UserWalletsResponse | null> => {
+      // GraphQL resolvers use getDatabase() as database strategies are initialized at gateway level
       const db = getDatabase();
       const walletsCollection = db.collection('wallets');
       
@@ -145,7 +147,7 @@ export const walletResolvers = {
       // Use authenticated user's ID if not provided (self-service)
       const userId = (input.userId as string) || ctx.user?.userId;
       if (!userId) {
-        throw new Error('userId is required');
+        throw new GraphQLError(PAYMENT_ERRORS.UserIdRequired, {});
       }
       
       // Build query
@@ -207,7 +209,7 @@ export const walletResolvers = {
      * 
      * Supports both formats:
      * 1. Direct args: walletBalance(userId: String, category: String, currency: String)
-     * 2. JSON input: walletBalance(input: JSON) - for backward compatibility
+     * 2. JSON input: walletBalance(input: JSON)
      */
     walletBalance: async (
       args: Record<string, unknown>,
@@ -248,7 +250,7 @@ export const walletResolvers = {
           
           // If not found and category is 'main' (or default), use getOrCreateWallet
           if (!wallet && (!category || category === 'main')) {
-            wallet = await getOrCreateWallet(userId, currency, tenantId);
+            wallet = await getOrCreateWallet(userId, currency, tenantId, { database: db });
           }
           
           // If still not found, return null (non-main categories must be created explicitly)
@@ -276,7 +278,6 @@ export const walletResolvers = {
           pendingIn: 0, // Not tracked separately - use transactions for pending
           pendingOut: 0, // Not tracked separately - use transactions for pending
           allowNegative,
-          // Additional fields for backward compatibility with WalletBalanceResponse type
           realBalance: balance,
           bonusBalance,
           lockedBalance,
@@ -285,8 +286,11 @@ export const walletResolvers = {
           status: (wallet as any).status || 'active',
         };
       } catch (error) {
-        logger.error('Failed to get wallet balance', { error, userId, category });
-        throw new Error(`Failed to get wallet balance: ${error instanceof Error ? error.message : String(error)}`);
+        throw new GraphQLError(PAYMENT_ERRORS.FailedToGetWalletBalance, {
+          userId,
+          category,
+          originalError: error instanceof Error ? error.message : String(error),
+        });
       }
     },
     
@@ -304,6 +308,7 @@ export const walletResolvers = {
       
       try {
         const tenantId = getTenantId(ctx) || 'default-tenant';
+        const db = getDatabase();
         const balances: Array<{
           currency: string;
           balance: number;
@@ -313,7 +318,7 @@ export const walletResolvers = {
         
         for (const currency of currencies) {
           // Get or create wallet (creates if doesn't exist)
-          const wallet = await getOrCreateWallet(userId, currency, tenantId);
+          const wallet = await getOrCreateWallet(userId, currency, tenantId, { database: db });
           
           const balance = (wallet as any).balance || 0;
           const lockedBalance = (wallet as any).lockedBalance || 0;
@@ -335,8 +340,10 @@ export const walletResolvers = {
           balances,
         };
       } catch (error) {
-        logger.error('Failed to get user balances', { error, userId });
-        throw new Error(`Failed to get user balances: ${error instanceof Error ? error.message : String(error)}`);
+        throw new GraphQLError(PAYMENT_ERRORS.FailedToGetUserBalances, {
+          userId,
+          originalError: error instanceof Error ? error.message : String(error),
+        });
       }
     },
     
@@ -361,6 +368,7 @@ export const walletResolvers = {
       
       try {
         const tenantId = getTenantId(ctx) || 'default-tenant';
+        // GraphQL resolvers use getDatabase() as database strategies are initialized at gateway level
         const db = getDatabase();
         
         // Fetch existing wallets in one query
@@ -390,8 +398,45 @@ export const walletResolvers = {
           let wallet = walletMap.get(userId);
           
           // Get or create wallet if it doesn't exist
+          // Use getOrCreateWallet which handles race conditions and duplicate key errors
           if (!wallet) {
-            wallet = await getOrCreateWallet(userId, currency, tenantId);
+            try {
+              wallet = await getOrCreateWallet(userId, currency, tenantId, { database: db });
+              // Re-fetch from map in case it was created by another concurrent call
+              // This prevents duplicate key errors
+              const existingWallet = walletMap.get(userId);
+              if (existingWallet) {
+                wallet = existingWallet;
+              } else {
+                // Add to map for future iterations
+                walletMap.set(userId, wallet);
+              }
+            } catch (error: any) {
+              // If duplicate key error, fetch the existing wallet
+              if (error.code === 11000 || error.message?.includes('duplicate key')) {
+                logger.debug('Wallet already exists (race condition), fetching existing wallet', {
+                  userId,
+                  currency,
+                  tenantId,
+                });
+                // Re-fetch wallets to get the one that was just created
+                const existingWallets = await db.collection('wallets').find(
+                  { userId: { $in: userIds }, currency, category: subtype },
+                  { projection: { userId: 1, id: 1, balance: 1, bonusBalance: 1, lockedBalance: 1, allowNegative: 1 } }
+                ).toArray();
+                const foundWallet = existingWallets.find((w: any) => w.userId === userId);
+                if (foundWallet) {
+                  wallet = foundWallet;
+                  walletMap.set(userId, wallet);
+                } else {
+                  // If still not found, try one more time with getOrCreateWallet
+                  wallet = await getOrCreateWallet(userId, currency, tenantId, { database: db });
+                  walletMap.set(userId, wallet);
+                }
+              } else {
+                throw error;
+              }
+            }
           }
           
           const balance = wallet.balance || 0;
@@ -401,9 +446,10 @@ export const walletResolvers = {
           // Get allowNegative directly from wallet (wallet-level permissions)
           const allowNegative = wallet.allowNegative ?? false;
           
+          const walletId = extractDocumentId(wallet);
           balances.push({
             userId,
-            walletId: wallet.id,
+            walletId: walletId || '',
             balance,
             availableBalance,
             pendingIn: 0,
@@ -431,44 +477,47 @@ export const walletResolvers = {
       ctx: ResolverContext
     ) => {
       requireAuth(ctx);
+      // GraphQL resolvers use getDatabase() as database strategies are initialized at gateway level
       const db = getDatabase();
       const transactionsCollection = db.collection('transactions');
       
       const first = (args.first as number) || 100;
-      const skip = (args.skip as number) || 0;
+      const after = args.after as string | undefined;
+      const last = args.last as number | undefined;
+      const before = args.before as string | undefined;
       const filter = (args.filter as Record<string, unknown>) || {};
       
-      // Build MongoDB query
-      const query: Record<string, unknown> = {};
+      // Build MongoDB query filter
+      const queryFilter: Record<string, unknown> = {};
       
       // Filter by charge type if specified
       if (filter.charge) {
-        query.charge = filter.charge;
+        queryFilter.charge = filter.charge;
       }
       
       // Filter by wallet if specified
       if (filter.walletId) {
-        query.walletId = filter.walletId;
+        queryFilter.walletId = filter.walletId;
       }
       
       // Filter by userId if specified
       if (filter.userId) {
-        query.userId = filter.userId;
+        queryFilter.userId = filter.userId;
       }
       
       // Filter by currency if specified
       if (filter.currency) {
-        query.currency = filter.currency;
+        queryFilter.currency = filter.currency;
       }
       
       // Filter by status if specified
       if (filter.status) {
-        query.status = filter.status;
+        queryFilter.status = filter.status;
       }
       
       // Filter by externalRef if specified
       if (filter.externalRef) {
-        query.externalRef = { $regex: filter.externalRef, $options: 'i' };
+        queryFilter.externalRef = { $regex: filter.externalRef, $options: 'i' };
       }
       
       // Filter by date range if specified
@@ -482,47 +531,45 @@ export const walletResolvers = {
           toDate.setHours(23, 59, 59, 999); // Include full day
           dateFilter.$lte = toDate;
         }
-        query.createdAt = dateFilter;
+        queryFilter.createdAt = dateFilter;
       }
       
-      // Execute query
-      const [nodes, totalCount] = await Promise.all([
-        transactionsCollection
-          .find(query)
-          .sort({ createdAt: -1 })
-          .skip(skip)
-          .limit(first)
-          .toArray(),
-        transactionsCollection.countDocuments(query),
-      ]);
+      // Use cursor-based pagination (O(1) performance)
+      const result = await paginateCollection(transactionsCollection, {
+        first: first ? Math.min(Math.max(1, first), 100) : undefined, // Max 100 per page
+        after,
+        last: last ? Math.min(Math.max(1, last), 100) : undefined,
+        before,
+        filter: queryFilter,
+        sortField: 'createdAt',
+        sortDirection: 'desc',
+      });
       
       return {
-        nodes: nodes.map((tx: any) => ({
-          _id: tx._id?.toString() || tx.id,
-          type: tx.charge, // debit or credit
-          fromWalletId: tx.charge === 'debit' ? tx.walletId : null, // For debit, walletId is the source
-          toWalletId: tx.charge === 'credit' ? tx.walletId : null, // For credit, walletId is the destination
-          amount: tx.amount,
-          currency: tx.currency,
-          description: tx.meta?.description,
-          externalRef: tx.externalRef,
-          status: tx.status || 'completed',
-          createdAt: tx.createdAt,
-          metadata: tx.meta,
-        })),
-        totalCount,
-        pageInfo: {
-          hasNextPage: skip + first < totalCount,
-          hasPreviousPage: skip > 0,
-        },
+        nodes: result.edges.map((edge: { node: any; cursor: string }) => {
+          const tx = edge.node as any;
+          return {
+            _id: tx._id?.toString() || tx.id,
+            type: tx.charge, // debit or credit
+            fromWalletId: tx.charge === 'debit' ? tx.walletId : null, // For debit, walletId is the source
+            toWalletId: tx.charge === 'credit' ? tx.walletId : null, // For credit, walletId is the destination
+            amount: tx.amount,
+            currency: tx.currency,
+            description: tx.meta?.description,
+            externalRef: tx.externalRef,
+            status: tx.status || 'completed',
+            createdAt: tx.createdAt,
+            metadata: tx.meta,
+          };
+        }),
+        totalCount: result.totalCount,
+        pageInfo: result.pageInfo,
       };
     },
   },
   Mutation: {},
 };
 
-// Export with "userWallet" name for backward compatibility
-export const userWalletResolvers = walletResolvers;
 
 // ═══════════════════════════════════════════════════════════════════
 // Wallet Types & Validation
@@ -564,7 +611,11 @@ const walletSaga = [
       } as any);
       
       if (existing) {
-        throw new Error(`Wallet already exists for this user, currency (${input.currency}), and category (${category})`);
+        throw new GraphQLError(PAYMENT_ERRORS.WalletAlreadyExists, {
+          userId: input.userId,
+          currency: input.currency,
+          category,
+        });
       }
       return { ...ctx, input, data };
     },
@@ -688,7 +739,6 @@ export const walletTypes = `
     pendingIn: Float!
     pendingOut: Float!
     allowNegative: Boolean!
-    # Additional fields for backward compatibility
     realBalance: Float!
     bonusBalance: Float!
     lockedBalance: Float!
@@ -755,7 +805,7 @@ export const walletTypes = `
     
     Supports both formats:
     - Direct args: walletBalance(userId: String, category: String, currency: String)
-    - JSON input: walletBalance(input: JSON) - for backward compatibility
+    - JSON input: walletBalance(input: JSON)
     """
     walletBalance(
       userId: String
@@ -789,35 +839,11 @@ export const walletTypes = `
     """
     transactionHistory(
       first: Int
-      skip: Int
+      after: String
+      last: Int
+      before: String
       filter: JSON
     ): TransactionHistoryConnection!
   }
 `;
 
-// Export with "ledger" names for backward compatibility with test scripts
-// These map old GraphQL query names to new implementations
-export const ledgerResolvers = {
-  Query: {
-    ...walletResolvers.Query,
-    // Legacy query aliases (for test scripts that use old names)
-    ledgerAccountBalance: walletResolvers.Query.walletBalance,
-    bulkLedgerBalances: walletResolvers.Query.bulkWalletBalances,
-    ledgerTransactions: walletResolvers.Query.transactionHistory,
-  },
-  Mutation: walletResolvers.Mutation,
-};
-
-// Export types with both old and new names for backward compatibility
-export const ledgerTypes = walletTypes + `
-  # Legacy type aliases for backward compatibility
-  type LedgerAccountBalance = WalletBalance
-  type BulkLedgerBalance = BulkWalletBalance
-  type BulkLedgerBalancesResponse = BulkWalletBalancesResponse
-  type LedgerTransaction = TransactionHistory
-  type LedgerTransactionConnection = TransactionHistoryConnection
-`;
-
-// Export walletBalanceResolvers and walletBalanceTypes as aliases for backward compatibility
-export const walletBalanceResolvers = walletResolvers;
-export const walletBalanceTypes = walletTypes;

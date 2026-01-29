@@ -16,11 +16,12 @@
  * ```
  */
 
-import type { ClientSession } from 'mongodb';
-import { getDatabase, logger } from '../index.js';
+import type { ClientSession, Db } from 'mongodb';
+import { logger } from '../index.js';
 import type { Transfer } from './transfer-helper.js';
 import { createTransferWithTransactions, type CreateTransferParams } from './transfer-helper.js';
 import type { RecoveryHandler, RecoverableOperation } from './recovery.js';
+import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/strategy.js';
 
 /**
  * Create reverse transfer (opposite direction)
@@ -28,7 +29,12 @@ import type { RecoveryHandler, RecoverableOperation } from './recovery.js';
  */
 async function createReverseTransfer(
   transfer: Transfer,
-  session: ClientSession
+  session: ClientSession,
+  options?: {
+    database?: Db;
+    databaseStrategy?: DatabaseStrategyResolver;
+    context?: DatabaseContext;
+  }
 ): Promise<{ operationId: string }> {
   const transferData = transfer as any;
   
@@ -51,7 +57,10 @@ async function createReverseTransfer(
     toBalanceType,
     // Mark as recovery transfer
     externalRef: `recovery_${transferData.id}_${Date.now()}`,
-  }, session);
+  }, {
+    ...options,
+    session,
+  });
   
   return { operationId: reverseTransfer.transfer.id };
 }
@@ -60,16 +69,31 @@ async function createReverseTransfer(
  * Create transfer recovery handler
  * Implements RecoveryHandler interface for transfers
  */
-export function createTransferRecoveryHandler(): RecoveryHandler<Transfer> {
-  const db = getDatabase();
-  const transfersCollection = db.collection('transfers');
-  const transactionsCollection = db.collection('transactions');
+export function createTransferRecoveryHandler(options?: {
+  database?: Db;
+  databaseStrategy?: DatabaseStrategyResolver;
+  context?: DatabaseContext;
+}): RecoveryHandler<Transfer> {
+  let db: Db | null = options?.database || null;
+  const strategy = options?.databaseStrategy;
+  const context = options?.context;
+
+  const getDb = async (): Promise<Db> => {
+    if (db) return db;
+    if (strategy && context) {
+      db = await strategy.resolve(context);
+      return db;
+    }
+    throw new Error('createTransferRecoveryHandler requires either database or databaseStrategy with context');
+  };
 
   return {
     /**
      * Find transfer by ID
      */
     findOperation: async (id: string, session?: ClientSession): Promise<Transfer | null> => {
+      const database = await getDb();
+      const transfersCollection = database.collection('transfers');
       const transfer = await transfersCollection.findOne(
         { id },
         { session }
@@ -81,6 +105,8 @@ export function createTransferRecoveryHandler(): RecoveryHandler<Transfer> {
      * Find transactions related to this transfer
      */
     findRelatedTransactions: async (id: string, session?: ClientSession): Promise<unknown[]> => {
+      const database = await getDb();
+      const transactionsCollection = database.collection('transactions');
       const transactions = await transactionsCollection
         .find(
           {
@@ -97,13 +123,15 @@ export function createTransferRecoveryHandler(): RecoveryHandler<Transfer> {
      * Reverse the transfer by creating opposite transfer
      */
     reverseOperation: async (transfer: Transfer, session: ClientSession): Promise<{ operationId: string }> => {
-      return await createReverseTransfer(transfer, session);
+      return await createReverseTransfer(transfer, session, options);
     },
 
     /**
      * Delete transfer (if no transactions exist)
      */
     deleteOperation: async (id: string, session: ClientSession): Promise<void> => {
+      const database = await getDb();
+      const transfersCollection = database.collection('transfers');
       await transfersCollection.deleteOne({ id }, { session });
     },
 
@@ -116,6 +144,8 @@ export function createTransferRecoveryHandler(): RecoveryHandler<Transfer> {
       meta: Record<string, unknown>,
       session: ClientSession
     ): Promise<void> => {
+      const database = await getDb();
+      const transfersCollection = database.collection('transfers');
       await transfersCollection.updateOne(
         { id },
         {

@@ -4,13 +4,21 @@
  * Uses core-service's SSE support for real-time notifications to end users
  */
 
-import { logger, generateId } from 'core-service';
+import { logger, generateId, emit, GraphQLError } from 'core-service';
+import { NOTIFICATION_ERRORS } from '../error-codes.js';
 import type { NotificationProvider, SseNotification, NotificationResponse } from '../types.js';
+import type { SSEBroadcast, UnifiedRealtimeProvider } from './realtime-interface.js';
 
-export class SseProvider implements NotificationProvider {
+export class SseProvider implements NotificationProvider, UnifiedRealtimeProvider {
   name = 'sse';
   channel = 'sse' as const;
   private connections: Map<string, any> = new Map();
+  private sseHelpers: { 
+    pushToUser: (userId: string, event: string, data: unknown) => void;
+    pushToTenant: (tenantId: string, event: string, data: unknown) => void;
+    push: (event: string, data: unknown) => void;
+    getConnectionCount: () => number;
+  } | null = null;
   
   constructor() {
     logger.info('SSE provider initialized');
@@ -18,6 +26,68 @@ export class SseProvider implements NotificationProvider {
   
   isConfigured(): boolean {
     return true; // SSE is always available
+  }
+  
+  /**
+   * Set gateway SSE helpers for direct SSE emission
+   */
+  setGateway(sseHelpers: { 
+    pushToUser: (userId: string, event: string, data: unknown) => void;
+    pushToTenant: (tenantId: string, event: string, data: unknown) => void;
+    push: (event: string, data: unknown) => void;
+    getConnectionCount: () => number;
+  }): void {
+    this.sseHelpers = sseHelpers;
+    logger.info('SSE provider gateway set');
+  }
+  
+  /**
+   * Get unified broadcast interface
+   */
+  getBroadcast(): SSEBroadcast {
+    return {
+      type: 'sse',
+      toUser: (userId: string, event: string, data: unknown) => {
+        if (this.sseHelpers) {
+          this.sseHelpers.pushToUser(userId, event, data);
+        }
+      },
+      toTenant: (tenantId: string, event: string, data: unknown) => {
+        if (this.sseHelpers) {
+          this.sseHelpers.pushToTenant(tenantId, event, data);
+        }
+      },
+      toAll: (event: string, data: unknown) => {
+        if (this.sseHelpers) {
+          this.sseHelpers.push(event, data);
+        }
+      },
+      toRoom: (room: string, event: string, data: unknown) => {
+        // SSE doesn't support rooms, fallback to broadcasting to all
+        // In a real implementation, you might want to track room memberships
+        if (this.sseHelpers) {
+          this.sseHelpers.push(event, data);
+        }
+        logger.warn('SSE does not support rooms, broadcasting to all instead', { room });
+      },
+      getConnectionCount: () => {
+        return this.sseHelpers?.getConnectionCount() || this.connections.size;
+      },
+    };
+  }
+  
+  /**
+   * Check if bidirectional
+   */
+  isBidirectional(): boolean {
+    return false; // SSE is unidirectional (server -> client only)
+  }
+  
+  /**
+   * Get provider type
+   */
+  getType(): 'sse' {
+    return 'sse';
   }
   
   /**
@@ -38,29 +108,36 @@ export class SseProvider implements NotificationProvider {
   
   /**
    * Send notification via SSE
+   * Uses core-service's SSE push functionality via Redis emit
    */
   async send(notification: SseNotification): Promise<NotificationResponse> {
-    const connection = this.connections.get(notification.userId);
-    
-    if (!connection) {
-      logger.warn('No SSE connection for user', { userId: notification.userId });
-      return {
-        id: generateId(),
-        status: 'failed',
-        channel: 'sse',
-        error: 'No active SSE connection',
-      };
-    }
-    
     try {
-      // Send SSE event
-      connection.write(`event: ${notification.event}\n`);
-      connection.write(`data: ${JSON.stringify(notification.data)}\n\n`);
+      const eventName = notification.event || 'notification';
+      const eventData = notification.data || {};
       
-      logger.info('SSE notification sent', {
-        userId: notification.userId,
-        event: notification.event,
-      });
+      // Use gateway SSE helpers directly if available (preferred method)
+      if (this.sseHelpers) {
+        this.sseHelpers.pushToUser(notification.userId, eventName, eventData);
+        logger.info('SSE notification sent via gateway', {
+          userId: notification.userId,
+          event: eventName,
+        });
+      } else {
+        // Fallback: Emit via Redis (requires listener setup)
+        await emit(
+          'sse',
+          'system', // tenantId
+          notification.userId,
+          {
+            event: eventName,
+            data: eventData,
+          }
+        );
+        logger.info('SSE notification queued via Redis', {
+          userId: notification.userId,
+          event: eventName,
+        });
+      }
       
       return {
         id: generateId(),
@@ -69,17 +146,10 @@ export class SseProvider implements NotificationProvider {
         sentAt: new Date(),
       };
     } catch (error: any) {
-      logger.error('Failed to send SSE notification', {
+      throw new GraphQLError(NOTIFICATION_ERRORS.FailedToSendSSENotification, {
         error: error.message,
         userId: notification.userId,
       });
-      
-      return {
-        id: generateId(),
-        status: 'failed',
-        channel: 'sse',
-        error: error.message,
-      };
     }
   }
   

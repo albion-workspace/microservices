@@ -5,8 +5,8 @@
  * Supports context-based roles and hierarchical role inheritance.
  */
 
-import { getDatabase, logger, findOneById, updateOneById } from 'core-service';
-import { RoleResolver, type Role } from 'access-engine';
+import { getDatabase, logger, findOneById, updateOneById, extractDocumentId } from 'core-service';
+import { RoleResolver, type BaseRole as Role } from 'core-service/access';
 import type {
   UserRole,
   RoleContext,
@@ -78,7 +78,7 @@ export class RoleService {
     
     // Convert User to access-engine User format
     const accessEngineUser = {
-      userId: user.id || (user._id ? user._id.toString() : ''),
+      userId: extractDocumentId(user) || '',
       tenantId: user.tenantId,
       roles: rolesArray,
       permissions: user.permissions || [],
@@ -106,7 +106,7 @@ export class RoleService {
     const rolesArray = rolesToArray(user.roles);
     
     const accessEngineUser = {
-      userId: user.id || (user._id ? user._id.toString() : ''),
+      userId: extractDocumentId(user) || '',
       tenantId: user.tenantId,
       roles: rolesArray,
       permissions: user.permissions || [],
@@ -129,7 +129,7 @@ export class RoleService {
     const rolesArray = rolesToArray(user.roles);
     
     const accessEngineUser = {
-      userId: user.id || (user._id ? user._id.toString() : ''),
+      userId: extractDocumentId(user) || '',
       tenantId: user.tenantId,
       roles: rolesArray,
       permissions: user.permissions || [],
@@ -152,7 +152,7 @@ export class RoleService {
     const rolesArray = rolesToArray(user.roles);
     
     const accessEngineUser = {
-      userId: user.id || (user._id ? user._id.toString() : ''),
+      userId: extractDocumentId(user) || '',
       tenantId: user.tenantId,
       roles: rolesArray,
       permissions: user.permissions || [],

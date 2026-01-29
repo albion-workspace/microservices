@@ -7,14 +7,17 @@
  * - Transfers = User-to-user operations (creates 2 transactions)
  */
 
-import { createService, type, type Repository, type SagaContext, validateInput, getDatabase, getClient, logger } from 'core-service';
-import { createTransferWithTransactions } from 'core-service';
-import type { CreateTransferParams } from 'core-service';
+import { createService, type, type Repository, type SagaContext, validateInput, logger, findUserIdByRole, GraphQLError, type DatabaseResolutionOptions } from 'core-service';
+import { BONUS_ERRORS } from '../error-codes.js';
 import type { BonusTemplate, UserBonus, BonusTransaction, BonusStatus } from '../types.js';
-import { bonusEngine } from './bonus-engine/index.js';
-import { templatePersistence } from './bonus-engine/persistence.js';
+import { createBonusEngine, type BonusEngineOptions } from './bonus-engine/index.js';
+import { createBonusPersistence } from './bonus-engine/persistence.js';
 import type { BonusContext } from './bonus-engine/types.js';
 import { getHandler } from './bonus-engine/handler-registry.js';
+import type { BaseHandlerOptions } from './bonus-engine/base-handler.js';
+
+// Import initialized persistence getter from singleton module
+import { getInitializedPersistence } from './bonus-engine/persistence-singleton.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Bonus Template Types & Validation
@@ -60,8 +63,30 @@ const bonusTemplateSaga = [
       // Check if template with same code already exists (code is unique index)
       const existing = await repo.findOne({ code: input.code });
       if (existing) {
-        // Template exists, return it (prevents duplicates)
-        return { ...ctx, input, data, entity: existing };
+        // Template exists - update it with new fields (especially requiresApproval)
+        const updates: Partial<BonusTemplate> = {
+          name: input.name,
+          type: input.type as any,
+          domain: input.domain as any,
+          valueType: input.valueType as any,
+          value: input.value,
+          currency: input.currency as any,
+          supportedCurrencies: input.supportedCurrencies as any[],
+          turnoverMultiplier: input.turnoverMultiplier,
+          validFrom: new Date(input.validFrom),
+          validUntil: new Date(input.validUntil),
+          stackable: (input as any).stackable !== undefined ? (input as any).stackable : existing.stackable,
+          priority: (input as any).priority !== undefined ? (input as any).priority : existing.priority,
+          isActive: (input as any).isActive !== undefined ? (input as any).isActive : existing.isActive,
+          requiresApproval: (input as any).requiresApproval !== undefined ? (input as any).requiresApproval : existing.requiresApproval,
+          approvalThreshold: (input as any).approvalThreshold !== undefined ? (input as any).approvalThreshold : existing.approvalThreshold,
+          description: (input as any).description !== undefined ? (input as any).description : existing.description,
+        };
+        const updated = await repo.update(existing.id, updates);
+        if (!updated) {
+          throw new GraphQLError(BONUS_ERRORS.FailedToUpdateTemplate, {});
+        }
+        return { ...ctx, input, data, entity: updated };
       }
       
       // Template doesn't exist, create new one
@@ -79,9 +104,12 @@ const bonusTemplateSaga = [
         validFrom: new Date(input.validFrom),
         validUntil: new Date(input.validUntil),
         currentUsesTotal: 0,
-        stackable: true,
-        priority: 0,
-        isActive: true,
+        stackable: (input as any).stackable !== undefined ? (input as any).stackable : true,
+        priority: (input as any).priority || 0,
+        isActive: (input as any).isActive !== undefined ? (input as any).isActive : true,
+        requiresApproval: (input as any).requiresApproval || false,
+        approvalThreshold: (input as any).approvalThreshold,
+        description: (input as any).description,
       };
       
       // Repository.create() will generate MongoDB ObjectId automatically
@@ -157,13 +185,18 @@ export const bonusTemplateService = createService<BonusTemplate, CreateBonusTemp
         tags: [String!]
         priority: Int!
         isActive: Boolean!
+        
+        # Approval
+        requiresApproval: Boolean
+        approvalThreshold: Float
+        
         createdAt: String
         updatedAt: String
       }
       type BonusTemplateConnection { nodes: [BonusTemplate!]! totalCount: Int! pageInfo: PageInfo! }
       type CreateBonusTemplateResult { success: Boolean! bonusTemplate: BonusTemplate sagaId: ID! errors: [String!] executionTimeMs: Int }
     `,
-    graphqlInput: `input CreateBonusTemplateInput { name: String! code: String! type: String! domain: String! valueType: String! value: Float! currency: String! supportedCurrencies: [String!] maxValue: Float minDeposit: Float turnoverMultiplier: Float! validFrom: String! validUntil: String! eligibleTiers: [String!] minSelections: Int maxSelections: Int priority: Int }`,
+    graphqlInput: `input CreateBonusTemplateInput { name: String! code: String! type: String! domain: String! valueType: String! value: Float! currency: String! supportedCurrencies: [String!] maxValue: Float minDeposit: Float turnoverMultiplier: Float! validFrom: String! validUntil: String! eligibleTiers: [String!] minSelections: Int maxSelections: Int priority: Int description: String isActive: Boolean stackable: Boolean requiresApproval: Boolean approvalThreshold: Float }`,
     validateInput: (input) => {
       const result = bonusTemplateSchema(input);
       return validateInput(result) as CreateBonusTemplateInput | { errors: string[] };
@@ -206,10 +239,11 @@ const userBonusSaga = [
     name: 'loadTemplate',
     critical: true,
     execute: async ({ input, data, ...ctx }: UserBonusCtx): Promise<UserBonusCtx> => {
-      // Load template by code
-      const template = await templatePersistence.findByCode(input.templateCode);
+      // Load template by code using initialized persistence
+      const persistence = await getInitializedPersistence();
+      const template = await persistence.template.findByCode(input.templateCode);
       if (!template) {
-        throw new Error(`Template not found: ${input.templateCode}`);
+        throw new GraphQLError(BONUS_ERRORS.TemplateNotFound, { templateCode: input.templateCode });
       }
       if (!template.isActive) {
         throw new Error(`Template ${input.templateCode} is not active`);
@@ -225,7 +259,7 @@ const userBonusSaga = [
     execute: async ({ input, data, ...ctx }: UserBonusCtx): Promise<UserBonusCtx> => {
       const template = data.template as BonusTemplate;
       if (!template) {
-        throw new Error('Template not loaded');
+        throw new GraphQLError(BONUS_ERRORS.TemplateNotLoaded, {});
       }
 
       // Get handler for this bonus type
@@ -247,24 +281,41 @@ const userBonusSaga = [
       // First, run common validators
       const commonResult = await (handler as any).runCommonValidators(template, context);
       if (!commonResult.eligible) {
-        throw new Error(commonResult.reason || 'User is not eligible for this bonus');
+        throw new GraphQLError(BONUS_ERRORS.UserNotEligible, { 
+          reason: commonResult.reason || 'User is not eligible for this bonus' 
+        });
       }
 
       // Then run specific validators
       const specificResult = await (handler as any).validateSpecific(template, context);
       if (!specificResult.eligible) {
-        throw new Error(specificResult.reason || 'User is not eligible for this bonus');
+        throw new GraphQLError(BONUS_ERRORS.UserNotEligible, { 
+          reason: specificResult.reason || 'User is not eligible for this bonus' 
+        });
       }
 
       // Award bonus using the handler with the specific template
       const result = await handler.award(template, context);
       
       if (!result.success) {
-        throw new Error(result.error || 'Bonus award failed');
+        // If bonus requires approval, embed pendingToken in error message
+        // Note: Saga framework converts errors to strings, so we use a structured format
+        // Format: "BONUS_REQUIRES_APPROVAL|PENDING_TOKEN:{token}"
+        if (result.pendingToken) {
+          (data as any).pendingToken = result.pendingToken;
+          throw new GraphQLError(BONUS_ERRORS.BonusRequiresApproval, { 
+            pendingToken: result.pendingToken 
+          });
+        }
+        throw new GraphQLError(BONUS_ERRORS.BonusAwardFailed, { 
+          error: result.error || 'Bonus award failed' 
+        });
       }
 
       if (!result.bonus) {
-        throw new Error('Bonus award failed - no bonus returned');
+        throw new GraphQLError(BONUS_ERRORS.BonusAwardFailed, { 
+          reason: 'No bonus returned' 
+        });
       }
 
       // Verify the bonus was created with the correct template
@@ -272,7 +323,7 @@ const userBonusSaga = [
         // Delete the incorrectly awarded bonus and throw error
         const repo = data._repository as Repository<UserBonus>;
         await repo.delete(result.bonus.id);
-        throw new Error(`Bonus was created with wrong template`);
+        throw new GraphQLError(BONUS_ERRORS.BonusWrongTemplate, {});
       }
 
       // Store the awarded bonus
@@ -300,14 +351,14 @@ const userBonusSaga = [
       const awardedBonus = data.awardedBonus as UserBonus;
       
       if (!awardedBonus) {
-        throw new Error('Bonus not awarded');
+        throw new GraphQLError(BONUS_ERRORS.BonusNotAwarded, {});
       }
 
       // Bonus was already created by the engine, just verify and return it
       const repo = data._repository as Repository<UserBonus>;
       const existing = await repo.findById(awardedBonus.id);
       if (!existing) {
-        throw new Error('Awarded bonus not found in database');
+        throw new GraphQLError(BONUS_ERRORS.AwardedBonusNotFound, {});
       }
 
       return { ...ctx, input, data, entity: existing };
@@ -329,7 +380,18 @@ export const userBonusService = createService<UserBonus, CreateUserBonusSagaInpu
     graphqlType: `
       type UserBonus { id: ID! userId: String! templateCode: String! type: String! status: String! currency: String! originalValue: Float! currentValue: Float! turnoverRequired: Float! turnoverProgress: Float! expiresAt: String! }
       type UserBonusConnection { nodes: [UserBonus!]! totalCount: Int! pageInfo: PageInfo! }
-      type CreateUserBonusResult { success: Boolean! userBonus: UserBonus sagaId: ID! errors: [String!] executionTimeMs: Int }
+      type CreateUserBonusResult { 
+        success: Boolean! 
+        userBonus: UserBonus 
+        sagaId: ID! 
+        errors: [String!] 
+        executionTimeMs: Int 
+        # pendingToken: Exposed when bonus requires approval (requiresApproval=true)
+        # Purpose: Allows admins/users to track and approve pending bonus requests
+        # Security: Only returned when approval is required, not for successful awards
+        # Usage: Admin can use this token with approveBonus/rejectBonus mutations
+        pendingToken: String 
+      }
     `,
     graphqlInput: `input CreateUserBonusInput { userId: String! templateCode: String! currency: String! tenantId: String depositAmount: Float }`,
     validateInput: (input) => {
@@ -462,322 +524,47 @@ export const bonusTransactionService = createService<BonusTransaction, CreateBon
 // ═══════════════════════════════════════════════════════════════════
 
 /**
- * Get bonus-pool user ID from auth database
- * Bonus-pool is a registered user (bonus-pool@system.com), not a string literal
+ * Get system user ID from auth database using role-based lookup
+ * Uses a user with 'system' role's bonusBalance as the bonus pool
+ * This is generic and flexible - supports multiple system users if needed
+ * 
+ * @param tenantId - Optional tenant ID to filter by (for multi-tenant scenarios)
+ * @returns System user ID
  */
-async function getBonusPoolUserId(): Promise<string> {
-  try {
-    const client = getClient();
-    const authDb = client.db('auth_service');
-    const usersCollection = authDb.collection('users');
-    
-    // Look up bonus-pool user by email
-    const bonusPoolUser = await usersCollection.findOne({ email: 'bonus-pool@system.com' });
-    
-    if (!bonusPoolUser) {
-      logger.warn('Bonus-pool user not found in auth database, using string literal as fallback');
-      return 'bonus-pool';
-    }
-    
-    const userId = bonusPoolUser._id?.toString() || bonusPoolUser.id;
-    logger.debug('Bonus-pool user ID resolved', { userId, email: bonusPoolUser.email });
-    return userId;
-  } catch (error) {
-    logger.error('Failed to get bonus-pool user ID', { error });
-    return 'bonus-pool';
-  }
-}
-
-/**
- * Check if bonus pool has sufficient balance
- * Uses wallet balance directly (wallets are the source of truth)
- */
-export async function checkBonusPoolBalance(
-  amount: number,
-  currency: string = 'USD'
-): Promise<{ sufficient: boolean; available: number; required: number }> {
-  const db = getDatabase();
-  const bonusPoolUserId = await getBonusPoolUserId();
-  
-  // Get wallet balance directly
-  const wallet = await db.collection('wallets').findOne(
-    { userId: bonusPoolUserId, currency, category: 'main' },
-    { projection: { balance: 1 } }
-  );
-  
-  const available = wallet ? ((wallet as any).balance || 0) : 0;
-  const sufficient = available >= amount;
-  
-  if (!sufficient) {
-    logger.warn('Insufficient bonus pool balance', {
-      available,
-      required: amount,
-      currency,
-      bonusPoolUserId,
-    });
-  }
-  
-  return {
-    sufficient,
-    available,
-    required: amount,
-  };
-}
-
-/**
- * Record bonus award using transfer helper
- * Flow: Bonus Pool (real) -> User (bonus)
- * Creates a transfer with 2 transactions atomically
- */
-export async function recordBonusAwardTransfer(
-  userId: string,
-  amount: number,
-  currency: string,
-  tenantId: string,
-  bonusId: string,
-  bonusType: string,
-  description?: string
-): Promise<string> {
-  // Check balance first
-  const balanceCheck = await checkBonusPoolBalance(amount, currency);
-  if (!balanceCheck.sufficient) {
-    throw new Error(
-      `Insufficient bonus pool balance. Available: ${balanceCheck.available}, Required: ${balanceCheck.required}`
-    );
-  }
-  
-  // Get bonus-pool user ID
-  const bonusPoolUserId = await getBonusPoolUserId();
+async function getSystemUserId(tenantId?: string): Promise<string> {
   
   try {
-    // Create transfer: bonus-pool (real) -> user (bonus)
-    const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
-      fromUserId: bonusPoolUserId,
-      toUserId: userId,
-      amount,
-      currency,
+    // Find user with 'system' role (role-based, not hardcoded email)
+    const systemUserId = await findUserIdByRole({
+      role: 'system',
       tenantId,
-      feeAmount: 0,
-      method: 'bonus_award',
-      externalRef: `bonus-award-${bonusId}-${Date.now()}`,
-      description: description || `Bonus awarded: ${bonusType}`,
-      fromBalanceType: 'real',  // Debit from bonus-pool real balance
-      toBalanceType: 'bonus',   // Credit to user bonus balance
-      objectId: bonusId,         // Transactions reference bonus, not transfer
-      objectModel: 'bonus',
-      bonusId,
-      bonusType,
+      throwIfNotFound: true,
     });
     
-    logger.info('Bonus award recorded via transfer', {
-      transferId: transfer.id,
-      debitTxId: debitTx.id,
-      creditTxId: creditTx.id,
-      userId,
-      bonusId,
-      bonusType,
-      amount,
-      currency,
-    });
-    
-    return transfer.id;
-  } catch (error: any) {
-    logger.error('Failed to create transfer for bonus award', {
-      error: error.message,
-      stack: error.stack,
-      userId,
-      bonusId,
-      bonusType,
-      amount,
-      currency,
-    });
-    throw error;
-  }
-}
-
-/**
- * Record bonus conversion using transfer helper
- * Flow: User (bonus) -> User (real) - same user, different balance types
- * Creates a transfer with 2 transactions atomically
- */
-export async function recordBonusConversionTransfer(
-  userId: string,
-  amount: number,
-  currency: string,
-  tenantId: string,
-  bonusId: string,
-  description?: string
-): Promise<string> {
-  const db = getDatabase();
-  
-  // Check bonus balance
-  const wallet = await db.collection('wallets').findOne(
-    { userId, currency, category: 'main' },
-    { projection: { bonusBalance: 1 } }
-  );
-  
-  const bonusBalance = wallet ? ((wallet as any).bonusBalance || 0) : 0;
-  if (bonusBalance < amount) {
-    throw new Error(
-      `Insufficient bonus balance. Available: ${bonusBalance}, Required: ${amount}`
-    );
-  }
-  
-  try {
-    // Create transfer: user (bonus) -> user (real) - same user
-    const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
-      fromUserId: userId,
-      toUserId: userId,  // Same user
-      amount,
-      currency,
+    logger.debug('System user ID resolved for bonus pool', { 
+      userId: systemUserId, 
       tenantId,
-      feeAmount: 0,
-      method: 'bonus_convert',
-      externalRef: `bonus-convert-${bonusId}-${Date.now()}`,
-      description: description || `Bonus converted to real balance`,
-      fromBalanceType: 'bonus',  // Debit from bonus balance
-      toBalanceType: 'real',     // Credit to real balance
-      objectId: bonusId,         // Transactions reference bonus, not transfer
-      objectModel: 'bonus',
-      bonusId,
+      method: 'role-based' 
     });
     
-    logger.info('Bonus conversion recorded via transfer', {
-      transferId: transfer.id,
-      debitTxId: debitTx.id,
-      creditTxId: creditTx.id,
-      userId,
-      bonusId,
-      amount,
-      currency,
-    });
-    
-    return transfer.id;
-  } catch (error: any) {
-    logger.error('Failed to create transfer for bonus conversion', {
-      error: error.message,
-      userId,
-      bonusId,
-      amount,
-      currency,
-    });
-    throw error;
-  }
-}
-
-/**
- * Record bonus forfeiture using transfer helper
- * Flow: User (bonus) -> Bonus Pool (real) - return forfeited bonus
- * Creates a transfer with 2 transactions atomically
- */
-export async function recordBonusForfeitTransfer(
-  userId: string,
-  amount: number,
-  currency: string,
-  tenantId: string,
-  bonusId: string,
-  reason: string,
-  description?: string
-): Promise<string> {
-  const db = getDatabase();
-  const bonusPoolUserId = await getBonusPoolUserId();
-  
-  // Check bonus balance
-  const wallet = await db.collection('wallets').findOne(
-    { userId, currency, category: 'main' },
-    { projection: { bonusBalance: 1 } }
-  );
-  
-  const bonusBalance = wallet ? ((wallet as any).bonusBalance || 0) : 0;
-  const forfeitAmount = Math.min(amount, bonusBalance);
-  
-  if (forfeitAmount <= 0) {
-    throw new Error('No bonus balance to forfeit');
-  }
-  
-  try {
-    // Create transfer: user (bonus) -> bonus-pool (real)
-    const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
-      fromUserId: userId,
-      toUserId: bonusPoolUserId,
-      amount: forfeitAmount,
-      currency,
-      tenantId,
-      feeAmount: 0,
-      method: 'bonus_forfeit',
-      externalRef: `bonus-forfeit-${bonusId}-${Date.now()}`,
-      description: description || `Bonus forfeited: ${reason}`,
-      fromBalanceType: 'bonus',  // Debit from user bonus balance
-      toBalanceType: 'real',      // Credit to bonus-pool real balance
-      objectId: bonusId,           // Transactions reference bonus, not transfer
-      objectModel: 'bonus',
-      bonusId,
-      reason,
-    });
-    
-    logger.info('Bonus forfeiture recorded via transfer', {
-      transferId: transfer.id,
-      debitTxId: debitTx.id,
-      creditTxId: creditTx.id,
-      userId,
-      bonusId,
-      amount: forfeitAmount,
-      currency,
-      reason,
-    });
-    
-    return transfer.id;
-  } catch (error: any) {
-    logger.error('Failed to create transfer for bonus forfeiture', {
-      error: error.message,
-      userId,
-      bonusId,
-      amount: forfeitAmount,
-      currency,
-      reason,
-    });
-    throw error;
-  }
-}
-
-/**
- * Get user bonus balance from wallet
- * Uses wallet balance directly (wallets are the source of truth)
- */
-export async function getUserBonusBalance(
-  userId: string,
-  currency: string = 'USD'
-): Promise<number> {
-  try {
-    const db = getDatabase();
-    const wallet = await db.collection('wallets').findOne(
-      { userId, currency, category: 'main' },
-      { projection: { bonusBalance: 1 } }
-    );
-    
-    return wallet ? ((wallet as any).bonusBalance || 0) : 0;
+    return systemUserId;
   } catch (error) {
-    logger.debug('Failed to get user bonus balance', { userId, currency, error });
-    return 0;
+    throw new GraphQLError(BONUS_ERRORS.FailedToGetSystemUserId, { 
+      error: error instanceof Error ? error.message : String(error),
+      tenantId 
+    });
   }
 }
 
 /**
- * Get bonus pool balance from wallet
- * Uses wallet balance directly (wallets are the source of truth)
+ * Event-Driven Architecture:
+ * Bonus service emits events, payment service handles all wallet operations.
+ * 
+ * Flow:
+ * - bonus.awarded → payment service creates transfer (system bonus → user bonus)
+ * - bonus.converted → payment service creates transfer (user bonus → user real)
+ * - bonus.forfeited → payment service creates transfer (user bonus → system bonus)
+ * 
+ * Balance checks are handled by payment service when creating transfers.
+ * If insufficient balance, payment service will throw an error.
  */
-export async function getBonusPoolBalance(currency: string = 'USD'): Promise<number> {
-  try {
-    const db = getDatabase();
-    const bonusPoolUserId = await getBonusPoolUserId();
-    const wallet = await db.collection('wallets').findOne(
-      { userId: bonusPoolUserId, currency, category: 'main' },
-      { projection: { balance: 1 } }
-    );
-    
-    return wallet ? ((wallet as any).balance || 0) : 0;
-  } catch (error) {
-    logger.debug('Failed to get bonus pool balance', { currency, error });
-    return 0;
-  }
-}

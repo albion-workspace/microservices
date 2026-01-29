@@ -1,9 +1,9 @@
 #!/usr/bin/env npx tsx
 /**
- * Test script to verify user lookup in auth_service database
+ * Test script to verify user lookup in core_service database (formerly auth_service)
  */
 
-import { getAuthDatabase, closeAllConnections } from './config/mongodb.js';
+import { getAuthDatabase, closeAllConnections } from './config/scripts.js';
 
 async function main() {
   try {
@@ -30,7 +30,7 @@ async function main() {
     }
     
     // Try query by _id field
-    const { ObjectId } = await import('mongodb');
+    const { ObjectId } = await import('../core-service/src/index.js');
     let userBy_id: any = null;
     try {
       if (ObjectId.isValid(systemUserId)) {

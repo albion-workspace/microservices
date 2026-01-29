@@ -10,23 +10,21 @@
  *   npx tsx bonus-command-test.ts         # Run all tests
  *   npx tsx bonus-command-test.ts setup   # Setup users
  *   npx tsx bonus-command-test.ts all    # Run complete test suite (clean, setup, all tests)
+ * 
+ * Following CODING_STANDARDS.md:
+ * - Import ordering: Node built-ins → External packages → Local imports → Type imports
  */
 
+// External packages (core-service)
 import { 
-  loginAs, 
-  registerAs, 
-  users, 
-  DEFAULT_TENANT_ID,
-  DEFAULT_CURRENCY,
-  createSystemToken,
-  getUserId,
-} from '../config/users.js';
-import { getBonusDatabase, getAuthDatabase, getPaymentDatabase, closeAllConnections } from '../config/mongodb.js';
-import { 
-  BonusEligibility, 
-  type BonusTemplate as ClientBonusTemplate,
-  type EligibilityContext 
-} from '../../../bonus-shared/src/BonusEligibility.js';
+  connectRedis, 
+  checkRedisHealth, 
+  connectDatabase, 
+  getDatabase,
+  getClient,
+  findUserIdByRole,
+  findUserIdsByRole,
+} from '../../../core-service/src/index.js';
 import { 
   recoverOperation,
   recoverStuckOperations,
@@ -35,17 +33,48 @@ import {
   registerRecoveryHandler,
 } from '../../../core-service/src/common/recovery.js';
 import { createTransferRecoveryHandler } from '../../../core-service/src/common/transfer-recovery.js';
-import { connectRedis, checkRedisHealth } from '../../../core-service/src/common/redis.js';
-import { connectDatabase, getDatabase } from '../../../core-service/src/common/database.js';
 import { createTransferWithTransactions } from '../../../core-service/src/common/transfer-helper.js';
 
+// External packages (bonus-shared)
+import { BonusEligibility } from '../../../bonus-shared/src/BonusEligibility.js';
+
+// Local imports
+import { 
+  loginAs, 
+  registerAs, 
+  users, 
+  DEFAULT_TENANT_ID,
+  DEFAULT_CURRENCY,
+  createSystemToken,
+  getUserId,
+  getSystemUserIdByRole,
+  getBonusPoolUserIdByRole,
+  getUserIdsByRole,
+  initializeConfig,
+  getDefaultTenantId,
+} from '../config/users.js';
+import { 
+  getBonusDatabase,
+  getAuthDatabase,
+  getPaymentDatabase,
+  closeAllConnections,
+  loadScriptConfig,
+  getDatabaseContextFromArgs,
+  AUTH_SERVICE_URL,
+  PAYMENT_SERVICE_URL,
+  BONUS_SERVICE_URL,
+} from '../config/scripts.js';
+
+// Type imports
+import type { BonusTemplate as ClientBonusTemplate, EligibilityContext } from '../../../bonus-shared/src/BonusEligibility.js';
+
 // ═══════════════════════════════════════════════════════════════════
-// Configuration - Single Source of Truth
+// Configuration - Loaded dynamically from MongoDB config store
+// Service URLs are imported from scripts.ts (single source of truth)
 // ═══════════════════════════════════════════════════════════════════
 
-const BONUS_URL = process.env.BONUS_URL || 'http://localhost:3005/graphql';
-const AUTH_SERVICE_URL = 'http://localhost:3003/graphql';
-const PAYMENT_SERVICE_URL = 'http://localhost:3004/graphql';
+// Use BONUS_SERVICE_URL from scripts.ts
+const BONUS_URL = BONUS_SERVICE_URL;
 
 const CONFIG = {
   currency: DEFAULT_CURRENCY, // Use shared currency from users.ts
@@ -124,6 +153,9 @@ interface TemplateConfig {
   max?: number;
   minTotal?: number;
   maxTotal?: number;
+  requiresApproval?: boolean;
+  approvalThreshold?: number;
+  description?: string;
 }
 
 const TEMPLATES: Record<string, TemplateConfig[]> = {
@@ -140,7 +172,7 @@ const TEMPLATES: Record<string, TemplateConfig[]> = {
   referral: [
     { code: 'REFERRAL', name: 'Referral Reward', type: 'referral', value: 2500 },
     { code: 'REFEREE', name: 'New User Referral Bonus', type: 'referee', valueType: 'percentage', value: 50, maxValue: 5000 },
-    { code: 'COMMISSION', name: 'Referral Commission', type: 'commission', valueType: 'percentage', value: 5, maxValue: 10000 },
+    { code: 'COMMISSION', name: 'Referral Commission', type: 'commission', valueType: 'percentage', value: 5, maxValue: 10000, requiresApproval: true, approvalThreshold: 2500 },
   ],
   activity: [
     { code: 'ACTIVITY', name: 'Activity Bonus', type: 'activity', valueType: 'percentage', value: 1, maxValue: 5000 },
@@ -159,7 +191,7 @@ const TEMPLATES: Record<string, TemplateConfig[]> = {
   loyalty: [
     { code: 'LOYALTY', name: 'Loyalty Bonus', type: 'loyalty', value: 1000, eligibleTiers: ['silver', 'gold', 'platinum'] },
     { code: 'LOYALTYPTS', name: 'Loyalty Points', type: 'loyalty_points', valueType: 'points', value: 100, turnoverMultiplier: 0 },
-    { code: 'VIP', name: 'VIP Exclusive Bonus', type: 'vip', value: 10000, eligibleTiers: ['vip', 'platinum', 'diamond'] },
+    { code: 'VIP', name: 'VIP Exclusive Bonus', type: 'vip', value: 10000, eligibleTiers: ['vip', 'platinum', 'diamond'], requiresApproval: true, approvalThreshold: 5000 },
     { code: 'TIERUP', name: 'Tier Upgrade Bonus', type: 'tier_upgrade', value: 2500 },
   ],
   timeBased: [
@@ -175,8 +207,8 @@ const TEMPLATES: Record<string, TemplateConfig[]> = {
     { code: 'CHALLENGE', name: 'Challenge Winner', type: 'challenge', value: 5000 },
   ],
   competition: [
-    { code: 'TOURNAMENT', name: 'Tournament Prize', type: 'tournament', value: 100000 },
-    { code: 'LEADERBOARD', name: 'Leaderboard Reward', type: 'leaderboard', value: 50000 },
+    { code: 'TOURNAMENT', name: 'Tournament Prize', type: 'tournament', value: 100000, requiresApproval: true, approvalThreshold: 10000 },
+    { code: 'LEADERBOARD', name: 'Leaderboard Reward', type: 'leaderboard', value: 50000, requiresApproval: true, approvalThreshold: 25000 },
   ],
   selection: [
     { code: 'SELECT', name: 'Pick Your Bonus', type: 'selection', value: 2000 },
@@ -184,9 +216,9 @@ const TEMPLATES: Record<string, TemplateConfig[]> = {
     { code: 'BUNDLE', name: 'Bundle Purchase Bonus', type: 'bundle', valueType: 'percentage', value: 15, maxValue: 5000 },
   ],
   promotional: [
-    { code: 'PROMO50', name: 'Promo Code Bonus', type: 'promo_code', value: 5000 },
-    { code: 'SPECIAL', name: 'Special Event Bonus', type: 'special_event', value: 10000 },
-    { code: 'CUSTOM', name: 'Custom Admin Bonus', type: 'custom', value: 2500 },
+    { code: 'PROMO50', name: 'Promo Code Bonus', type: 'promo_code', value: 5000, requiresApproval: true, approvalThreshold: 5000 },
+    { code: 'SPECIAL', name: 'Special Event Bonus', type: 'special_event', value: 10000, requiresApproval: true, approvalThreshold: 10000 },
+    { code: 'CUSTOM', name: 'Custom Admin Bonus', type: 'custom', value: 2500, requiresApproval: true },
   ],
 };
 
@@ -457,6 +489,8 @@ async function createTemplate(config: TemplateConfig): Promise<string> {
     validFrom: new Date().toISOString(),
     validUntil: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString(),
     eligibleTiers: config.eligibleTiers,
+    requiresApproval: config.requiresApproval ?? false,
+    approvalThreshold: config.approvalThreshold,
     priority: 50,
   };
 
@@ -489,13 +523,12 @@ async function testSetup() {
     const systemUser = await registerAs('system', { updateRoles: true, updatePermissions: true });
     console.log(`  ✅ System user ${systemUser.created ? 'created' : 'updated'}: ${systemUser.userId}`);
 
-    // Register bonus-pool user (will create if doesn't exist, update if exists)
-    console.log('🔐 Registering bonus-pool user...');
-    const bonusPoolUser = await registerAs('bonusPool', { updateRoles: true, updatePermissions: true });
-    console.log(`  ✅ Bonus-pool user ${bonusPoolUser.created ? 'created' : 'updated'}: ${bonusPoolUser.userId}`);
+    // Note: Bonus pool is now system user's bonusBalance (no separate user needed)
+    console.log('ℹ️  Bonus pool uses system user\'s bonusBalance (no separate user needed)');
 
     // Normalize system user roles in MongoDB to string array format if needed
-    const db = await getAuthDatabase();
+    const dbContext = (global as any).__dbContext || {};
+    const db = await getAuthDatabase(dbContext);
     const usersCollection = db.collection('users');
     const systemUserDoc = await usersCollection.findOne({ id: systemUser.userId });
     
@@ -513,7 +546,55 @@ async function testSetup() {
       }
     }
     
-    await closeAllConnections();
+    // Test role-based user lookup (demonstrates flexibility)
+    console.log('🔍 Testing role-based user lookup...');
+    try {
+      const client = getClient();
+      
+      // Find system user by role (same approach as services use)
+      const systemUserIdByRole = await findUserIdByRole({ 
+        role: 'system', 
+        tenantId: getDefaultTenantId(),
+        throwIfNotFound: false,
+        client,
+      });
+      
+      if (systemUserIdByRole) {
+        console.log(`  ✅ Found system user by role: ${systemUserIdByRole}`);
+      } else {
+        console.log(`  ⚠️  No system user found with 'system' role`);
+      }
+      
+      // Try to find bonus-pool user by role (if exists)
+      try {
+        const bonusPoolUserId = await findUserIdByRole({ 
+          role: 'bonus-pool', 
+          tenantId: getDefaultTenantId(),
+          throwIfNotFound: false,
+          client,
+        });
+        
+        if (bonusPoolUserId) {
+          console.log(`  ✅ Found bonus-pool user by role: ${bonusPoolUserId}`);
+        } else {
+          console.log(`  ℹ️  No bonus-pool user found (using system user's bonusBalance instead)`);
+        }
+      } catch (error: any) {
+        console.log(`  ℹ️  No bonus-pool role found (expected - using system user's bonusBalance)`);
+      }
+      
+      // Find all users with system role (demonstrates multi-user support)
+      const allSystemUsers = await findUserIdsByRole({ 
+        role: 'system', 
+        tenantId: DEFAULT_TENANT_ID,
+        client,
+      });
+      console.log(`  ℹ️  Total users with 'system' role: ${allSystemUsers.length}`);
+      
+    } catch (error: any) {
+      console.warn(`  ⚠️  Role-based lookup test failed: ${error.message}`);
+    }
+    console.log();
     
     // Now login as system user
     console.log('🔐 Logging in as system user...');
@@ -581,7 +662,7 @@ async function testOnboardingBonuses() {
         userId: testUserId,
         templateCode: welcomeTemplateCode,
         currency: CONFIG.currency,
-        tenantId: DEFAULT_TENANT_ID,
+        tenantId: getDefaultTenantId(),
       }
     });
     
@@ -624,7 +705,7 @@ async function testOnboardingBonuses() {
         userId: testUserId6,
         templateCode: firstDepositTemplateCode,
         currency: CONFIG.currency,
-        tenantId: DEFAULT_TENANT_ID,
+        tenantId: getDefaultTenantId(),
         depositAmount: depositAmount / 100, // Convert to dollars
       }
     });
@@ -653,7 +734,7 @@ async function testOnboardingBonuses() {
         userId: testUserId6,
         templateCode: firstDepositTemplateCode,
         currency: CONFIG.currency,
-        tenantId: DEFAULT_TENANT_ID,
+        tenantId: getDefaultTenantId(),
         depositAmount: depositAmount / 100, // Convert to dollars
       }
     });
@@ -738,36 +819,29 @@ async function testTimeBasedBonuses() {
   // Helper function to ensure bonus pool has sufficient balance
   async function ensureBonusPoolBalance(minRequired: number) {
     try {
-      const systemUserId = await getUserId('system');
-      const bonusPoolUserId = await getUserId('bonusPool');
-      const fundQuery = `
-        mutation FundBonusPool($input: CreateDepositInput!) {
-          createDeposit(input: $input) {
-            success
-            deposit { id amount netAmount }
-            errors
-          }
-        }
-      `;
+      // Use role-based lookup to find system user (same approach as services)
+      const systemUserId = await getSystemUserIdByRole();
       
-      // Fund bonus pool with additional $5M if needed (safety margin)
+      // Fund bonus pool: Transfer from system (real) -> system (bonus)
+      // This funds the system user's bonusBalance which is the bonus pool
       const fundAmount = 500000000; // $5,000,000 in cents
-      const fundData = await graphql(PAYMENT_SERVICE_URL, fundQuery, {
-        input: {
-          userId: bonusPoolUserId,
-          amount: fundAmount,
-          currency: CONFIG.currency,
-          tenantId: DEFAULT_TENANT_ID,
-          fromUserId: systemUserId,
-          method: `bonus-pool-topup-${Date.now()}`,
-        }
-      }, systemToken);
       
-      if (fundData.createDeposit.success) {
-        const netAmount = fundData.createDeposit.deposit?.netAmount || fundAmount;
-        console.log(`     → ✅ Bonus pool topped up: ${(netAmount / 100).toLocaleString()} ${CONFIG.currency}`);
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
+      await createTransferWithTransactions({
+        fromUserId: systemUserId,
+        toUserId: systemUserId,  // Same user, different balance types
+        amount: fundAmount,
+        currency: CONFIG.currency,
+        tenantId: getDefaultTenantId(),
+        feeAmount: 0,
+        method: 'bonus_pool_funding',
+        externalRef: `bonus-pool-topup-${Date.now()}`,
+        description: 'Funding bonus pool (system bonusBalance)',
+        fromBalanceType: 'real',   // Debit from system real balance
+        toBalanceType: 'bonus',    // Credit to system bonusBalance (bonus pool)
+      });
+      
+      console.log(`     → ✅ Bonus pool topped up: ${(fundAmount / 100).toLocaleString()} ${CONFIG.currency}`);
+      await new Promise(resolve => setTimeout(resolve, 1000));
     } catch (error: any) {
       console.warn(`     → ⚠️  Could not top up bonus pool: ${error.message}`);
     }
@@ -804,7 +878,7 @@ async function testTimeBasedBonuses() {
         userId: birthdayUser.userId,
         templateCode: birthdayTemplateCode,
         currency: CONFIG.currency,
-        tenantId: DEFAULT_TENANT_ID,
+        tenantId: getDefaultTenantId(),
       }
     }, systemToken);
     
@@ -846,7 +920,7 @@ async function testTimeBasedBonuses() {
         userId: loginUser.userId,
         templateCode: dailyLoginTemplateCode,
         currency: CONFIG.currency,
-        tenantId: DEFAULT_TENANT_ID,
+        tenantId: getDefaultTenantId(),
       }
     }, systemToken);
     
@@ -873,7 +947,8 @@ async function testTimeBasedBonuses() {
     const anniversaryUser = await registerAs('user5');
     
     // Delete any existing anniversary bonus for this user (to allow re-testing)
-    const bonusDb = await getBonusDatabase();
+    const dbContext = (global as any).__dbContext || {};
+    const bonusDb = await getBonusDatabase(dbContext);
     const userBonusesCollection = bonusDb.collection('user_bonuses');
     const deleteResult = await userBonusesCollection.deleteMany({
       userId: anniversaryUser.userId,
@@ -882,7 +957,6 @@ async function testTimeBasedBonuses() {
     if (deleteResult.deletedCount > 0) {
       console.log(`     → Deleted ${deleteResult.deletedCount} existing anniversary bonus(es) for clean test`);
     }
-    await closeAllConnections();
     
     // Update the user's createdAt date to one year ago (simulating account created 1 year ago)
     // This is what the anniversary handler checks
@@ -890,13 +964,12 @@ async function testTimeBasedBonuses() {
     oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
     oneYearAgo.setHours(0, 0, 0, 0); // Set to start of day for consistency
     
-    const authDb = await getAuthDatabase();
+    const authDb = await getAuthDatabase(dbContext);
     const usersCollection = authDb.collection('users');
     await usersCollection.updateOne(
       { id: anniversaryUser.userId },
       { $set: { createdAt: oneYearAgo } }
     );
-    await closeAllConnections();
     
     console.log(`     → Updated user ${anniversaryUser.userId} createdAt to ${oneYearAgo.toISOString().split('T')[0]} (1 year ago)`);
 
@@ -914,7 +987,7 @@ async function testTimeBasedBonuses() {
         userId: anniversaryUser.userId,
         templateCode: anniversaryTemplateCode,
         currency: CONFIG.currency,
-        tenantId: DEFAULT_TENANT_ID,
+        tenantId: getDefaultTenantId(),
       }
     }, systemToken);
     
@@ -1269,14 +1342,14 @@ async function testRecovery() {
   
   console.log('  ✅ Redis is available and healthy\n');
   
-  // Connect to database
-  const mongoUri = process.env.MONGO_URI || 'mongodb://localhost:27017/bonus_service?directConnection=true';
-  await connectDatabase(mongoUri);
-  const db = getDatabase();
+  // Connect to database using strategy
+  const dbContext = (global as any).__dbContext || {};
+  const { getBonusDatabase } = await import('../config/scripts.js');
+  const db = await getBonusDatabase(dbContext);
   
   // Get test users
-  const systemUserId = await getUserId('system');
-  const bonusPoolUserId = await getUserId('bonusPool');
+  // Use role-based lookup to find system user (same approach as services)
+  const systemUserId = await getSystemUserIdByRole();
   const testUser = testUserId || await getUserId('user1');
   
   // Register transfer recovery handler
@@ -1289,32 +1362,32 @@ async function testRecovery() {
     // Test 1: Create a bonus award transfer and track its state
     console.log('📝 Test 1: Creating bonus award transfer with state tracking...');
     
-    // Ensure bonus pool has balance
-    const bonusPoolWallet = await db.collection('wallets').findOne({ 
-      userId: bonusPoolUserId, 
+    // Ensure bonus pool has balance (check system user's bonusBalance)
+    const systemWallet = await db.collection('wallets').findOne({ 
+      userId: systemUserId, 
       currency: CONFIG.currency 
     });
     
-    if (!bonusPoolWallet || (bonusPoolWallet as any).balance < 10000) {
-      // Fund bonus pool (system -> bonus pool)
+    if (!systemWallet || (systemWallet as any).bonusBalance < 10000) {
+      // Fund bonus pool: Transfer from system (real) -> system (bonus)
       await createTransferWithTransactions({
         fromUserId: systemUserId,
-        toUserId: bonusPoolUserId,
+        toUserId: systemUserId,  // Same user, different balance types
         amount: 100000,
         currency: CONFIG.currency,
-        tenantId: DEFAULT_TENANT_ID,
+        tenantId: getDefaultTenantId(),
         feeAmount: 0,
         method: 'test_funding',
         externalRef: `test-bonus-pool-funding-${Date.now()}`,
-        description: 'Test funding for bonus pool',
-        fromBalanceType: 'real',
-        toBalanceType: 'real',
+        description: 'Test funding for bonus pool (system bonusBalance)',
+        fromBalanceType: 'real',   // Debit from system real balance
+        toBalanceType: 'bonus',     // Credit to system bonusBalance (bonus pool)
       });
     }
     
-    // Create a bonus award transfer (bonus pool -> user)
+    // Create a bonus award transfer (system bonus -> user bonus)
     const transferResult = await createTransferWithTransactions({
-      fromUserId: bonusPoolUserId,
+      fromUserId: systemUserId,  // System user's bonusBalance is the bonus pool
       toUserId: testUser,
       amount: 5000,
       currency: CONFIG.currency,
@@ -1323,8 +1396,8 @@ async function testRecovery() {
       method: 'bonus_award',
       externalRef: `test-bonus-recovery-${Date.now()}`,
       description: 'Test bonus award for recovery',
-      fromBalanceType: 'real',
-      toBalanceType: 'bonus',
+      fromBalanceType: 'bonus',  // Debit from system bonusBalance (bonus pool)
+      toBalanceType: 'bonus',    // Credit to user bonus balance
     });
     
     const transferId = transferResult.transfer.id;
@@ -1576,6 +1649,403 @@ async function testConsistencyServerClient() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// Bonus Approval Tests
+// ═══════════════════════════════════════════════════════════════════
+
+async function verifyTemplateApproval(templateCode: string) {
+  try {
+    const result = await graphql<{ bonusTemplateByCode: { code: string; requiresApproval: boolean; approvalThreshold?: number; value: number } }>(
+      BONUS_URL,
+      `
+        query GetTemplate($code: String!) {
+          bonusTemplateByCode(code: $code) {
+            code
+            requiresApproval
+            approvalThreshold
+            value
+          }
+        }
+      `,
+      { code: templateCode },
+      systemToken
+    );
+    
+    return result.bonusTemplateByCode;
+  } catch (error: any) {
+    console.warn(`  Failed to verify template ${templateCode}: ${error.message}`);
+    return null;
+  }
+}
+
+async function testBonusApproval() {
+  console.log('\n📦 BONUS APPROVAL TESTS\n');
+  
+  // Find templates that require approval from existing templates
+  const approvalTemplates: Array<{ template: TemplateConfig; category: string }> = [];
+  for (const [category, templates] of Object.entries(TEMPLATES)) {
+    for (const template of templates) {
+      if (template.requiresApproval) {
+        approvalTemplates.push({ template, category });
+      }
+    }
+  }
+  
+  if (approvalTemplates.length === 0) {
+    console.log('     ⚠️  No templates with requiresApproval found in TEMPLATES');
+    return;
+  }
+  
+  console.log(`     Found ${approvalTemplates.length} templates requiring approval:`);
+  approvalTemplates.forEach(({ template, category }) => {
+    console.log(`       - ${template.name} (${category}/${template.type})`);
+  });
+  
+  // Test high-value bonus claim (should require approval)
+  await runTest('Test high-value bonus claim (requires approval)', async () => {
+    // Try templates in order: CUSTOM (always requires), PROMO50, VIP, TOURNAMENT
+    const testOrder = ['custom', 'promo_code', 'vip', 'tournament'];
+    let pendingToken: string | null = null;
+    
+    for (const type of testOrder) {
+      const template = approvalTemplates.find(({ template: t }) => t.type === type);
+      if (!template) continue;
+      
+      try {
+        // Use the actual template code (with timestamp) if available
+        const actualCode = templateCodes[type] || template.template.code;
+        console.log(`     Trying ${template.template.name} (${actualCode})...`);
+        
+        const templateData = await verifyTemplateApproval(actualCode);
+        if (templateData) {
+          console.log(`       Template requiresApproval: ${templateData.requiresApproval}, threshold: ${templateData.approvalThreshold || 'none'}, value: ${templateData.value}`);
+        }
+        
+        const result = await graphql<{ createUserBonus: { success: boolean; userBonus: { id: string }; errors: string[]; pendingToken?: string } }>(
+          BONUS_URL,
+          `
+            mutation CreateUserBonus($input: CreateUserBonusInput!) {
+              createUserBonus(input: $input) {
+                success
+                userBonus {
+                  id
+                  status
+                }
+                errors
+                pendingToken
+              }
+            }
+          `,
+          {
+            input: {
+              userId: testUserId,
+              templateCode: actualCode,
+              currency: CONFIG.currency,
+              tenantId: getDefaultTenantId(),
+            },
+          },
+          systemToken
+        );
+        
+        if (!result.createUserBonus.success) {
+          const error = result.createUserBonus.errors?.[0] || 'Unknown error';
+          const pendingTokenFromResponse = (result.createUserBonus as any).pendingToken;
+          
+          if (pendingTokenFromResponse || error.includes('BONUS_REQUIRES_APPROVAL')) {
+            console.log(`       ✅ ${template.template.name} correctly requires approval`);
+            console.log(`       Error: ${error}`);
+            if (pendingTokenFromResponse) {
+              pendingToken = pendingTokenFromResponse;
+              console.log(`       Pending token: ${pendingToken.substring(0, 30)}...`);
+            }
+            break;
+          } else {
+            console.log(`       ⚠️  ${template.template.name} failed with: ${error}`);
+          }
+        } else {
+          console.log(`       ⚠️  ${template.template.name} was created without approval`);
+        }
+      } catch (error: any) {
+        console.log(`       ⚠️  ${template.template.name} test failed: ${error.message}`);
+      }
+    }
+    
+    if (!pendingToken) {
+      throw new Error('No pending token found - bonus may have been auto-approved or failed for other reasons');
+    }
+    
+    console.log(`     ✅ Found pending bonus requiring approval`);
+  });
+  
+  // List pending bonuses
+  await runTest('List pending bonus approvals', async () => {
+    const result = await graphql<{ pendingBonuses: Array<{ token: string; templateCode: string; calculatedValue: number; userId: string }> }>(
+      BONUS_URL,
+      `
+        query {
+          pendingBonuses {
+            token
+            templateCode
+            calculatedValue
+            currency
+            userId
+            requestedAt
+          }
+        }
+      `,
+      undefined,
+      systemToken
+    );
+    
+    console.log(`     Found ${result.pendingBonuses.length} pending bonuses:`);
+    result.pendingBonuses.forEach((pending, idx) => {
+      console.log(`       ${idx + 1}. ${pending.templateCode} - $${pending.calculatedValue} (User: ${pending.userId.substring(0, 8)}...)`);
+    });
+  });
+  
+  // Test approve bonus (if we have multiple pending bonuses, approve one but leave at least one)
+  await runTest('Test approve pending bonus', async () => {
+    // Get pending bonuses first
+    const pendingResult = await graphql<{ pendingBonuses: Array<{ token: string; templateCode: string; calculatedValue: number }> }>(
+      BONUS_URL,
+      `
+        query {
+          pendingBonuses {
+            token
+            templateCode
+            calculatedValue
+          }
+        }
+      `,
+      undefined,
+      systemToken
+    );
+    
+    if (pendingResult.pendingBonuses.length === 0) {
+      console.log(`     ⚠️  No pending bonuses to approve (this is okay if none were created)`);
+      return;
+    }
+    
+    // Only approve if we have more than one pending bonus (leave at least one for manual testing)
+    if (pendingResult.pendingBonuses.length > 1) {
+      const firstPending = pendingResult.pendingBonuses[0];
+      console.log(`     Approving bonus: ${firstPending.templateCode} ($${firstPending.calculatedValue})`);
+      
+      const result = await graphql<{ approveBonus: { success: boolean; bonusId?: string; error?: string } }>(
+        BONUS_URL,
+        `
+          mutation ApproveBonus($token: String!, $reason: String) {
+            approveBonus(token: $token, reason: $reason) {
+              success
+              bonusId
+              error
+            }
+          }
+        `,
+        {
+          token: firstPending.token,
+          reason: 'Approved by admin - verified eligibility',
+        },
+        systemToken
+      );
+      
+      if (result.approveBonus.success) {
+        console.log(`     ✅ Bonus approved successfully! Bonus ID: ${result.approveBonus.bonusId}`);
+        console.log(`     ℹ️  Left ${pendingResult.pendingBonuses.length - 1} pending bonus(es) for manual testing`);
+      } else {
+        console.log(`     ⚠️  Approval failed: ${result.approveBonus.error}`);
+      }
+    } else {
+      console.log(`     ℹ️  Only ${pendingResult.pendingBonuses.length} pending bonus found - leaving it for manual testing`);
+      console.log(`     Token: ${pendingResult.pendingBonuses[0].token.substring(0, 30)}...`);
+      console.log(`     Template: ${pendingResult.pendingBonuses[0].templateCode}`);
+      console.log(`     Value: $${pendingResult.pendingBonuses[0].calculatedValue}`);
+    }
+  });
+  
+  // Test reject bonus (create a new pending one specifically for rejection test, then reject it)
+  await runTest('Test reject pending bonus', async () => {
+    // First, try to create a bonus that requires approval (use a different template than the one we might approve)
+    const testTemplates = approvalTemplates.filter(({ template }) => 
+      template.type === 'promo_code' || template.type === 'special_event'
+    );
+    
+    if (testTemplates.length === 0) {
+      console.log(`     ⚠️  No approval templates available for rejection test`);
+      return;
+    }
+    
+    const testTemplate = testTemplates[0];
+    const actualCode = templateCodes[testTemplate.template.type] || testTemplate.template.code;
+    
+    // Create a bonus that requires approval (for rejection test only)
+    const createResult = await graphql<{ createUserBonus: { success: boolean; errors: string[]; pendingToken?: string } }>(
+      BONUS_URL,
+      `
+        mutation CreateUserBonus($input: CreateUserBonusInput!) {
+          createUserBonus(input: $input) {
+            success
+            errors
+            pendingToken
+          }
+        }
+      `,
+      {
+        input: {
+          userId: testUserId2, // Use different user
+          templateCode: actualCode,
+          currency: CONFIG.currency,
+          tenantId: getDefaultTenantId(),
+        },
+      },
+      systemToken
+    );
+    
+    if (!createResult.createUserBonus.success) {
+      const pendingToken = (createResult.createUserBonus as any).pendingToken;
+      if (pendingToken) {
+        console.log(`     Rejecting bonus with token: ${pendingToken.substring(0, 30)}...`);
+        
+        const rejectResult = await graphql<{ rejectBonus: { success: boolean; error?: string } }>(
+          BONUS_URL,
+          `
+            mutation RejectBonus($token: String!, $reason: String!) {
+              rejectBonus(token: $token, reason: $reason) {
+                success
+                error
+              }
+            }
+          `,
+          {
+            token: pendingToken,
+            reason: 'User does not meet eligibility requirements',
+          },
+          systemToken
+        );
+        
+        if (rejectResult.rejectBonus.success) {
+          console.log(`     ✅ Bonus rejected successfully`);
+        } else {
+          console.log(`     ⚠️  Rejection failed: ${rejectResult.rejectBonus.error}`);
+        }
+      } else {
+        console.log(`     ⚠️  No pending token created (bonus may have been auto-approved)`);
+      }
+    } else {
+      console.log(`     ⚠️  Bonus was created without requiring approval`);
+    }
+  });
+  
+  // Create a pending bonus specifically for manual testing (if we don't have one already)
+  await runTest('Ensure pending bonus exists for manual testing', async () => {
+    const pendingResult = await graphql<{ pendingBonuses: Array<{ token: string; templateCode: string; calculatedValue: number }> }>(
+      BONUS_URL,
+      `
+        query {
+          pendingBonuses {
+            token
+            templateCode
+            calculatedValue
+          }
+        }
+      `,
+      undefined,
+      systemToken
+    );
+    
+    if (pendingResult.pendingBonuses.length === 0) {
+      // Create one for manual testing
+      const manualTestTemplate = approvalTemplates.find(({ template }) => template.type === 'custom');
+      if (manualTestTemplate) {
+        const actualCode = templateCodes[manualTestTemplate.template.type] || manualTestTemplate.template.code;
+        console.log(`     Creating pending bonus for manual testing: ${manualTestTemplate.template.name}`);
+        
+        const createResult = await graphql<{ createUserBonus: { success: boolean; errors: string[]; pendingToken?: string } }>(
+          BONUS_URL,
+          `
+            mutation CreateUserBonus($input: CreateUserBonusInput!) {
+              createUserBonus(input: $input) {
+                success
+                errors
+                pendingToken
+              }
+            }
+          `,
+          {
+            input: {
+              userId: testUserId,
+              templateCode: actualCode,
+              currency: CONFIG.currency,
+              tenantId: getDefaultTenantId(),
+            },
+          },
+          systemToken
+        );
+        
+        if (!createResult.createUserBonus.success) {
+          const pendingToken = (createResult.createUserBonus as any).pendingToken;
+          if (pendingToken) {
+            console.log(`     ✅ Created pending bonus for manual testing`);
+            console.log(`     Token: ${pendingToken.substring(0, 30)}...`);
+            console.log(`     Template: ${actualCode}`);
+          }
+        }
+      }
+    } else {
+      console.log(`     ✅ ${pendingResult.pendingBonuses.length} pending bonus(es) available for manual testing`);
+      pendingResult.pendingBonuses.forEach((pending, idx) => {
+        console.log(`       ${idx + 1}. ${pending.templateCode} - $${pending.calculatedValue} (Token: ${pending.token.substring(0, 30)}...)`);
+      });
+    }
+  });
+}
+
+async function testBonusApprovalFlow() {
+  console.log('\n═══════════════════════════════════════════════════════════════');
+  console.log('BONUS APPROVAL FLOW TESTS');
+  console.log('═══════════════════════════════════════════════════════════════');
+  
+  // Ensure we're logged in
+  if (!systemToken) {
+    systemToken = await login();
+  }
+  
+  // Ensure test users exist
+  if (!testUserId) {
+    try {
+      testUserId = await getUserId('user1');
+    } catch {
+      const testUser1 = await registerAs('user1', { updateRoles: true, updatePermissions: true });
+      testUserId = testUser1.userId;
+    }
+  }
+  
+  if (!testUserId2) {
+    try {
+      testUserId2 = await getUserId('user2');
+    } catch {
+      const testUser2 = await registerAs('user2', { updateRoles: true, updatePermissions: true });
+      testUserId2 = testUser2.userId;
+    }
+  }
+  
+  // Ensure templates are created first (create all templates that require approval)
+  console.log('\n📝 Creating approval-required templates...\n');
+  for (const [category, templates] of Object.entries(TEMPLATES)) {
+    for (const template of templates) {
+      if (template.requiresApproval) {
+        try {
+          await createTemplate(template);
+        } catch (error: any) {
+          console.warn(`     ⚠️  Could not create ${template.name}: ${error.message}`);
+        }
+      }
+    }
+  }
+  
+  await testBonusApproval();
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // Test Runner - All Tests
 // ═══════════════════════════════════════════════════════════════════
 
@@ -1614,14 +2084,8 @@ async function testAll() {
     systemToken = await login();
     console.log('✅ System user logged in');
     
-    // Register bonus-pool user (required for bonus pool funding)
-    console.log('🔐 Registering bonus-pool user...');
-    try {
-      const bonusPoolUser = await registerAs('bonusPool', { updateRoles: true, updatePermissions: true });
-      console.log(`  ✅ Bonus-pool user ${bonusPoolUser.created ? 'created' : 'updated'}: ${bonusPoolUser.userId}`);
-    } catch (error: any) {
-      console.warn(`  ⚠️  Could not register bonus-pool user: ${error.message}`);
-    }
+    // Note: Bonus pool is now system user's bonusBalance (no separate user needed)
+    console.log('ℹ️  Bonus pool uses system user\'s bonusBalance (no separate user needed)');
     
     // Get test user IDs from existing users (created by payment tests)
     console.log('🔍 Getting test user IDs from existing users...');
@@ -1649,14 +2113,50 @@ async function testAll() {
 
   // Step 2.5: Fund bonus pool (required for bonus awards)
   console.log('\n╔═══════════════════════════════════════════════════════════════════╗');
-  console.log('║           STEP 2.5: FUNDING BONUS POOL                           ║');
+  console.log('║           STEP 2.5: ROLE-BASED USER LOOKUP & FUNDING            ║');
   console.log('╚═══════════════════════════════════════════════════════════════════╝\n');
+  
+  // Test role-based user lookup (demonstrates flexibility - uses users.ts utilities)
+  console.log('🔍 Testing role-based user lookup (same approach as services)...');
+  let systemUserId: string;
+  let bonusPoolUserId: string = '';
+  
+  try {
+    // Find system user by role (same approach as bonus-service and payment-service use)
+    systemUserId = await getSystemUserIdByRole();
+    console.log(`  ✅ Found system user by role: ${systemUserId}`);
+    
+    // Try to find bonus-pool user by role (if exists - demonstrates flexibility)
+    bonusPoolUserId = await getBonusPoolUserIdByRole();
+    
+    if (bonusPoolUserId) {
+      console.log(`  ✅ Found bonus-pool user by role: ${bonusPoolUserId}`);
+      console.log(`  ℹ️  Note: Services use system user's bonusBalance, but bonus-pool user exists`);
+    } else {
+      console.log(`  ℹ️  No bonus-pool user found (using system user's bonusBalance instead)`);
+    }
+    
+    // Find all users with system role (demonstrates multi-user support)
+    const allSystemUsers = await getUserIdsByRole('system');
+    console.log(`  ℹ️  Total users with 'system' role: ${allSystemUsers.length}`);
+    
+    if (allSystemUsers.length > 1) {
+      console.log(`  ℹ️  Multiple system users found - services will use first match`);
+    }
+    
+  } catch (error: any) {
+    console.error(`  ❌ Role-based lookup failed: ${error.message}`);
+    throw error;
+  }
+  console.log();
+  
+  // Connect to payment database for wallet operations (wallets are stored in payment_service)
+  const dbContext = (global as any).__dbContext || {};
+  const paymentDb = await getPaymentDatabase(dbContext);
+  const walletsCollection = paymentDb.collection('wallets');
   
   try {
     // Ensure system user's wallets allow negative balance (wallet-level permission)
-    const systemUserId = await getUserId('system');
-    const paymentDb = await getPaymentDatabase();
-    const walletsCollection = paymentDb.collection('wallets');
     
     // Update system user's wallets to allow negative balance
     const updateResult = await walletsCollection.updateMany(
@@ -1670,46 +2170,208 @@ async function testAll() {
       console.log(`ℹ️  System user wallets already configured (or will be configured on creation)`);
     }
     
-    // Fund bonus pool via payment service (bonus pool is a user with a wallet)
-    // System user can go negative, so this should work even if system user has 0 balance
-    const fundQuery = `
-      mutation FundBonusPool($input: CreateDepositInput!) {
-        createDeposit(input: $input) {
-          success
-          deposit { id amount netAmount }
-          errors
+    // Fund bonus pool: Directly credit system user's bonusBalance
+    // Architecture: System user's bonusBalance is the bonus pool
+    // Since system user's real balance may be 0, we directly credit the bonus balance
+    const fundAmount = 2000000000; // $20,000,000 in cents
+    
+    try {
+      // Get or create system user's wallet (must have category: 'main' for bonus service to find it)
+      let systemWallet = await walletsCollection.findOne({ 
+        userId: systemUserId, 
+        currency: CONFIG.currency,
+        category: 'main'  // Bonus service queries with category: 'main'
+      });
+      
+      if (!systemWallet) {
+        // Try without category filter (for backward compatibility)
+        systemWallet = await walletsCollection.findOne({ 
+          userId: systemUserId, 
+          currency: CONFIG.currency 
+        });
+        
+        if (systemWallet) {
+          // Update existing wallet to add category
+          await walletsCollection.updateOne(
+            { userId: systemUserId, currency: CONFIG.currency },
+            { $set: { category: 'main', updatedAt: new Date() } }
+          );
+          console.log(`  ✅ Updated system wallet to include category: 'main'`);
+        } else {
+          // Create wallet if it doesn't exist
+          const { generateMongoId } = await import('../../../core-service/src/index.js');
+          const { objectId, idString } = generateMongoId();
+          systemWallet = {
+            _id: objectId,
+            id: idString,
+            userId: systemUserId,
+            currency: CONFIG.currency,
+            category: 'main',  // Required for bonus service to find it
+            balance: 0,
+            bonusBalance: 0,
+            lockedBalance: 0,
+            allowNegative: true,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          };
+          await walletsCollection.insertOne(systemWallet);
+          console.log(`  ✅ Created system wallet for ${CONFIG.currency} with category: 'main'`);
         }
       }
-    `;
-    
-    // Fund bonus pool with $20,000,000 (enough for all tests including large bonuses)
-    const fundAmount = 2000000000; // $20,000,000 in cents (increased to ensure sufficient balance for all bonuses including showcase scenarios)
-    const bonusPoolUserId = await getUserId('bonusPool');
-    const fundData = await graphql(PAYMENT_SERVICE_URL, fundQuery, {
-      input: {
-        userId: bonusPoolUserId,
-        amount: fundAmount,
-        currency: CONFIG.currency,
-        tenantId: DEFAULT_TENANT_ID,
-        fromUserId: systemUserId,
-        method: `bonus-pool-funding-${Date.now()}`,
+      
+      // Directly credit the bonus balance (bonus pool)
+      const updateResult = await walletsCollection.updateOne(
+        { userId: systemUserId, currency: CONFIG.currency, category: 'main' },
+        { 
+          $inc: { bonusBalance: fundAmount },
+          $set: { updatedAt: new Date() }
+        }
+      );
+      
+      if (updateResult.modifiedCount > 0) {
+        console.log(`✅ Bonus pool funded: ${(fundAmount / 100).toLocaleString()} ${CONFIG.currency}`);
+        // Wait for update to be fully committed
+        await new Promise(resolve => setTimeout(resolve, 500));
+      } else {
+        console.warn(`⚠️  Could not update bonus balance (wallet may not exist)`);
       }
-    }, systemToken);
-    
-    if (!fundData.createDeposit.success) {
-      console.warn(`⚠️  Could not fund bonus pool: ${fundData.createDeposit.errors?.join(', ') || 'Unknown error'}`);
+    } catch (error: any) {
+      console.warn(`⚠️  Could not fund bonus pool: ${error.message}`);
       console.warn('   Bonus awards may fail due to insufficient pool balance');
-    } else {
-      const netAmount = fundData.createDeposit.deposit?.netAmount || fundAmount;
-      console.log(`✅ Bonus pool funded: ${(netAmount / 100).toLocaleString()} ${CONFIG.currency}`);
-      // Wait longer for ledger transaction to be fully committed (bonus pool balance check needs this)
-      // Increased delay to ensure balance is available for subsequent bonus awards
-      await new Promise(resolve => setTimeout(resolve, 3000));
     }
   } catch (error: any) {
     console.warn(`⚠️  Could not fund bonus pool: ${error.message}`);
     console.warn('   Bonus awards may fail due to insufficient pool balance');
   }
+  
+  // Test bonus-pool user behavior (if exists): can receive credits but cannot go negative
+  if (bonusPoolUserId) {
+    console.log('\n╔═══════════════════════════════════════════════════════════════════╗');
+    console.log('║           TESTING BONUS-POOL USER BEHAVIOR                        ║');
+    console.log('╚═══════════════════════════════════════════════════════════════════╝\n');
+    
+    try {
+      // createTransferWithTransactions already imported at top of file
+      const dbContext = (global as any).__dbContext || {};
+      const paymentDb = await getPaymentDatabase(dbContext);
+      const walletsCollection = paymentDb.collection('wallets');
+      
+      // Get bonus-pool user's wallet
+      const bonusPoolWallet = await walletsCollection.findOne({
+        userId: bonusPoolUserId,
+        currency: CONFIG.currency,
+        category: 'main'
+      });
+      
+      if (bonusPoolWallet) {
+        const initialBalance = (bonusPoolWallet as any).balance || 0;
+        console.log(`📊 Bonus-pool user wallet balance: ${(initialBalance / 100).toLocaleString()} ${CONFIG.currency}`);
+        
+        // Test 1: Bonus-pool user can receive credits from system (like provider user)
+        console.log('\n📥 Test 1: Funding bonus-pool user from system...');
+        const creditAmount = 1000000; // $10,000 in cents
+        
+        await createTransferWithTransactions({
+          fromUserId: systemUserId,
+          toUserId: bonusPoolUserId,
+          amount: creditAmount,
+          currency: CONFIG.currency,
+          tenantId: getDefaultTenantId(),
+          feeAmount: 0,
+          method: 'test_funding',
+          externalRef: `bonus-pool-test-funding-${Date.now()}`,
+          description: 'Test funding bonus-pool user (provider-like behavior)',
+          fromBalanceType: 'real',
+          toBalanceType: 'real',
+        });
+        
+        // Wait for transaction to commit
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        const walletAfterCredit = await walletsCollection.findOne({
+          userId: bonusPoolUserId,
+          currency: CONFIG.currency,
+          category: 'main'
+        });
+        
+        const balanceAfterCredit = (walletAfterCredit as any).balance || 0;
+        const expectedBalance = initialBalance + creditAmount;
+        
+        if (balanceAfterCredit === expectedBalance) {
+          console.log(`  ✅ Bonus-pool user can receive credits: ${(balanceAfterCredit / 100).toLocaleString()} ${CONFIG.currency}`);
+        } else {
+          console.log(`  ⚠️  Balance mismatch: expected ${(expectedBalance / 100).toLocaleString()}, got ${(balanceAfterCredit / 100).toLocaleString()}`);
+        }
+        
+        // Test 2: Bonus-pool user cannot go negative (unlike system user)
+        console.log('\n📤 Test 2: Attempting to debit more than balance (should fail)...');
+        const debitAmount = balanceAfterCredit + 10000; // Try to debit more than available
+        
+        try {
+          await createTransferWithTransactions({
+            fromUserId: bonusPoolUserId,
+            toUserId: systemUserId,
+            amount: debitAmount,
+            currency: CONFIG.currency,
+            tenantId: getDefaultTenantId(),
+            feeAmount: 0,
+            method: 'test_debit',
+            externalRef: `bonus-pool-test-debit-${Date.now()}`,
+            description: 'Test debit from bonus-pool user (should fail - cannot go negative)',
+            fromBalanceType: 'real',
+            toBalanceType: 'real',
+          });
+          
+          // If we get here, the transfer succeeded (unexpected)
+          const walletAfterDebit = await walletsCollection.findOne({
+            userId: bonusPoolUserId,
+            currency: CONFIG.currency,
+            category: 'main'
+          });
+          const balanceAfterDebit = (walletAfterDebit as any).balance || 0;
+          
+          if (balanceAfterDebit < 0) {
+            console.log(`  ❌ ERROR: Bonus-pool user went negative: ${(balanceAfterDebit / 100).toLocaleString()} ${CONFIG.currency}`);
+            console.log(`     This should not happen - bonus-pool user should not allow negative balance`);
+          } else {
+            console.log(`  ⚠️  Transfer succeeded but balance is not negative: ${(balanceAfterDebit / 100).toLocaleString()} ${CONFIG.currency}`);
+          }
+        } catch (error: any) {
+          if (error.message?.includes('Insufficient balance') || error.message?.includes('allow negative')) {
+            console.log(`  ✅ Correctly rejected: ${error.message}`);
+            console.log(`     Bonus-pool user cannot go negative (correct behavior)`);
+          } else {
+            console.log(`  ⚠️  Unexpected error: ${error.message}`);
+          }
+        }
+        
+        // Verify wallet allowNegative setting
+        const finalWallet = await walletsCollection.findOne({
+          userId: bonusPoolUserId,
+          currency: CONFIG.currency,
+          category: 'main'
+        });
+        const allowNegative = (finalWallet as any).allowNegative ?? false;
+        
+        console.log(`\n📋 Bonus-pool user wallet settings:`);
+        console.log(`   allowNegative: ${allowNegative} (should be false)`);
+        console.log(`   Final balance: ${((finalWallet as any).balance || 0) / 100} ${CONFIG.currency}`);
+        
+        if (!allowNegative) {
+          console.log(`   ✅ Wallet correctly configured: cannot go negative`);
+        } else {
+          console.log(`   ⚠️  Wallet allows negative (should be false for bonus-pool user)`);
+        }
+        
+      } else {
+        console.log(`  ℹ️  Bonus-pool user wallet not found (will be created on first transaction)`);
+      }
+    } catch (error: any) {
+      console.warn(`  ⚠️  Bonus-pool user test failed: ${error.message}`);
+    }
+    console.log();
+  }
+  
   console.log();
 
   // Step 3: Run bonus tests
@@ -1752,6 +2414,9 @@ async function testAll() {
   await testClientSideEligibility();
   await testSelectionValidation();
   await testConsistencyServerClient();
+  
+  // Bonus approval tests
+  await testBonusApprovalFlow();
 
   // Final verification: Confirm templates were created
   console.log('\n╔═══════════════════════════════════════════════════════════════════╗');
@@ -1861,6 +2526,7 @@ const COMMAND_REGISTRY: Record<string, () => Promise<void>> = {
   'selection-validation': testSelectionValidation,
   consistency: testConsistencyServerClient,
   'transfer-recovery': testRecovery,
+  approval: testBonusApprovalFlow,
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1869,6 +2535,17 @@ const COMMAND_REGISTRY: Record<string, () => Promise<void>> = {
 
 async function main() {
   const args = process.argv.slice(2);
+  
+  // Initialize configuration from MongoDB config store
+  // This will populate AUTH_SERVICE_URL, PAYMENT_SERVICE_URL, BONUS_SERVICE_URL
+  await initializeConfig();
+  await loadScriptConfig();
+  
+  // Get database context from command line args (--brand, --tenant)
+  const dbContext = await getDatabaseContextFromArgs(args);
+  
+  // Store context globally for use in test functions
+  (global as any).__dbContext = dbContext;
   
   if (args.length === 0) {
     // Default: run all tests

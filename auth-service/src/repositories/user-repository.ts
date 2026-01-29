@@ -6,36 +6,66 @@
  */
 
 import { 
-  getDatabase, 
   logger, 
   findById, 
   normalizeDocument, 
   findOneAndUpdateById,
   updateOneById,
   deleteOneById,
+  paginateCollection,
+  resolveDatabase,
+  type DatabaseStrategyResolver,
+  type DatabaseContext,
+  type Db,
+  type Collection,
+  type Document,
 } from 'core-service';
 import type { User, UserFilter, UserQueryOptions, UpdateUserInput, UpdateUserMetadataInput } from '../types/user-types.js';
 import type { UserRole, AssignRoleInput } from '../types.js';
+
+export interface UserRepositoryOptions {
+  database?: Db;
+  databaseStrategy?: DatabaseStrategyResolver;
+  defaultContext?: DatabaseContext;
+}
 
 /**
  * User Repository for data access operations
  */
 export class UserRepository {
   private collectionName = 'users';
+  private db: Db | null = null;
+  private databaseStrategy: DatabaseStrategyResolver | undefined;
+  private defaultContext: DatabaseContext | undefined;
+  
+  constructor(options?: UserRepositoryOptions) {
+    this.db = options?.database || null;
+    this.databaseStrategy = options?.databaseStrategy;
+    this.defaultContext = options?.defaultContext;
+  }
   
   /**
    * Get MongoDB collection
    */
-  private getCollection() {
-    const db = getDatabase();
-    return db.collection(this.collectionName);
+  private async getCollection(tenantId?: string): Promise<Collection<Document>> {
+    const db = await resolveDatabase(
+      {
+        database: this.db || undefined,
+        databaseStrategy: this.databaseStrategy,
+        defaultContext: this.defaultContext,
+      },
+      'auth-service',
+      tenantId
+    );
+    
+    return db.collection<Document>(this.collectionName);
   }
   
   /**
    * Find user by ID (handles both _id and id fields automatically)
    */
   async findById(userId: string, tenantId: string): Promise<User | null> {
-    const collection = this.getCollection();
+    const collection = await this.getCollection(tenantId);
     const user = await findById<User>(collection, userId, { tenantId });
     return normalizeDocument(user);
   }
@@ -44,7 +74,7 @@ export class UserRepository {
    * Find user by MongoDB _id
    */
   async findByMongoId(_id: any, tenantId: string): Promise<User | null> {
-    const collection = this.getCollection();
+    const collection = await this.getCollection(tenantId);
     const user = await collection.findOne({ _id, tenantId }) as any;
     return normalizeDocument(user);
   }
@@ -53,7 +83,7 @@ export class UserRepository {
    * Find user by email
    */
   async findByEmail(email: string, tenantId: string): Promise<User | null> {
-    const collection = this.getCollection();
+    const collection = await this.getCollection(tenantId);
     const normalizedEmail = email.toLowerCase().trim();
     const user = await collection.findOne({ 
       email: normalizedEmail, 
@@ -66,7 +96,7 @@ export class UserRepository {
    * Find user by username
    */
   async findByUsername(username: string, tenantId: string): Promise<User | null> {
-    const collection = this.getCollection();
+    const collection = await this.getCollection(tenantId);
     const user = await collection.findOne({ 
       username, 
       tenantId 
@@ -78,7 +108,7 @@ export class UserRepository {
    * Find user by phone
    */
   async findByPhone(phone: string, tenantId: string): Promise<User | null> {
-    const collection = this.getCollection();
+    const collection = await this.getCollection(tenantId);
     const user = await collection.findOne({ 
       phone, 
       tenantId 
@@ -114,7 +144,7 @@ export class UserRepository {
    * Create a new user
    */
   async create(user: Omit<User, '_id' | 'id' | 'createdAt' | 'updatedAt'>): Promise<User> {
-    const collection = this.getCollection();
+    const collection = await this.getCollection(user.tenantId);
     const now = new Date();
     
     const userDoc: any = {
@@ -145,7 +175,7 @@ export class UserRepository {
    * Update user (handles both _id and id fields automatically)
    */
   async update(input: UpdateUserInput): Promise<User | null> {
-    const collection = this.getCollection();
+    const collection = await this.getCollection(input.tenantId);
     const now = new Date();
     
     const update: any = {
@@ -174,7 +204,7 @@ export class UserRepository {
    * Update user metadata (handles both _id and id fields automatically)
    */
   async updateMetadata(input: UpdateUserMetadataInput): Promise<User | null> {
-    const collection = this.getCollection();
+    const collection = await this.getCollection(input.tenantId);
     const now = new Date();
     
     // Use optimized helper function for updateOne (performance-optimized)
@@ -196,7 +226,7 @@ export class UserRepository {
    * Add role to user (handles both _id and id fields automatically)
    */
   async addRole(userId: string, tenantId: string, role: UserRole): Promise<void> {
-    const collection = this.getCollection();
+    const collection = await this.getCollection(tenantId);
     const now = new Date();
     
     // Use optimized helper function for updateOne (performance-optimized)
@@ -220,7 +250,7 @@ export class UserRepository {
     roleName: string,
     context?: string
   ): Promise<void> {
-    const collection = this.getCollection();
+    const collection = await this.getCollection(tenantId);
     const now = new Date();
     
     const user = await this.findById(userId, tenantId);
@@ -248,69 +278,77 @@ export class UserRepository {
   
   /**
    * Query users with filters
+   * Uses cursor-based pagination for O(1) performance and sharding compatibility
    */
   async query(options: UserQueryOptions = {}): Promise<{ users: User[]; total: number }> {
-    const collection = this.getCollection();
+    const tenantId = options.filter?.tenantId;
+    const collection = await this.getCollection(tenantId);
     const { filter = {}, sort, pagination } = options;
     
-    // Build query
-    const query: any = {};
+    // Build query filter
+    const queryFilter: any = {};
     
-    if (filter.tenantId) query.tenantId = filter.tenantId;
+    if (filter.tenantId) queryFilter.tenantId = filter.tenantId;
     if (filter.status) {
-      query.status = Array.isArray(filter.status)
+      queryFilter.status = Array.isArray(filter.status)
         ? { $in: filter.status }
         : filter.status;
     }
-    if (filter.emailVerified !== undefined) query.emailVerified = filter.emailVerified;
-    if (filter.phoneVerified !== undefined) query.phoneVerified = filter.phoneVerified;
-    if (filter.twoFactorEnabled !== undefined) query.twoFactorEnabled = filter.twoFactorEnabled;
+    if (filter.emailVerified !== undefined) queryFilter.emailVerified = filter.emailVerified;
+    if (filter.phoneVerified !== undefined) queryFilter.phoneVerified = filter.phoneVerified;
+    if (filter.twoFactorEnabled !== undefined) queryFilter.twoFactorEnabled = filter.twoFactorEnabled;
     
     if (filter.createdAfter || filter.createdBefore) {
-      query.createdAt = {};
-      if (filter.createdAfter) query.createdAt.$gte = filter.createdAfter;
-      if (filter.createdBefore) query.createdAt.$lte = filter.createdBefore;
+      queryFilter.createdAt = {};
+      if (filter.createdAfter) queryFilter.createdAt.$gte = filter.createdAfter;
+      if (filter.createdBefore) queryFilter.createdAt.$lte = filter.createdBefore;
     }
     
     // Role filter
     if (filter.roles && filter.roles.length > 0) {
-      query['roles.role'] = { $in: filter.roles };
+      queryFilter['roles.role'] = { $in: filter.roles };
       if (filter.context) {
-        query['roles.context'] = filter.context;
+        queryFilter['roles.context'] = filter.context;
       }
     }
     
     // Metadata filter
     if (filter.metadata) {
       for (const [key, value] of Object.entries(filter.metadata)) {
-        query[`metadata.${key}`] = value;
+        queryFilter[`metadata.${key}`] = value;
       }
     }
     
-    // Build sort
-    const sortOptions: any = {};
-    if (sort) {
-      sortOptions[sort.field] = sort.direction === 'asc' ? 1 : -1;
-    } else {
-      sortOptions.createdAt = -1; // Default: newest first
+    // Determine sort field and direction
+    const sortField = sort?.field || 'createdAt';
+    const sortDirection = sort?.direction || 'desc';
+    
+    // Use cursor-based pagination (O(1) performance, sharding-friendly)
+    // If no pagination provided, default to first 100 items
+    const paginationOptions = pagination || { first: 100 };
+    
+    const result = await paginateCollection<User>(
+      collection,
+      {
+        first: paginationOptions.first,
+        after: paginationOptions.after,
+        last: paginationOptions.last,
+        before: paginationOptions.before,
+        filter: queryFilter,
+        sortField,
+        sortDirection,
+      }
+    );
+    
+    // Get total count if not provided
+    let total = result.totalCount;
+    if (total === undefined || total === null) {
+      total = await collection.countDocuments(queryFilter);
     }
-    
-    // Get total count
-    const total = await collection.countDocuments(query);
-    
-    // Build cursor
-    let cursor = collection.find(query).sort(sortOptions);
-    
-    // Apply pagination
-    if (pagination) {
-      cursor = cursor.skip(pagination.offset).limit(pagination.limit);
-    }
-    
-    const users = await cursor.toArray();
     
     return {
-      users: users as User[],
-      total,
+      users: result.edges.map(edge => edge.node),
+      total: total || 0,
     };
   }
   
@@ -318,7 +356,7 @@ export class UserRepository {
    * Delete user (soft delete) - handles both _id and id fields automatically
    */
   async delete(userId: string, tenantId: string): Promise<void> {
-    const collection = this.getCollection();
+    const collection = await this.getCollection(tenantId);
     const now = new Date();
     
     // Use optimized helper function for updateOne (performance-optimized)
@@ -340,7 +378,7 @@ export class UserRepository {
    * Hard delete user (permanent) - handles both _id and id fields automatically
    */
   async hardDelete(userId: string, tenantId: string): Promise<void> {
-    const collection = this.getCollection();
+    const collection = await this.getCollection(tenantId);
     // Use optimized helper function for deleteOne (performance-optimized)
     await deleteOneById(collection, userId, { tenantId });
   }
@@ -349,7 +387,7 @@ export class UserRepository {
    * Update last login timestamp - handles both _id and id fields automatically
    */
   async updateLastLogin(userId: string, tenantId: string): Promise<void> {
-    const collection = this.getCollection();
+    const collection = await this.getCollection(tenantId);
     const now = new Date();
     
     // Use optimized helper function for updateOne (performance-optimized)
@@ -371,7 +409,7 @@ export class UserRepository {
    * Update last active timestamp - handles both _id and id fields automatically
    */
   async updateLastActive(userId: string, tenantId: string): Promise<void> {
-    const collection = this.getCollection();
+    const collection = await this.getCollection(tenantId);
     const now = new Date();
     
     // Use optimized helper function for updateOne (performance-optimized)

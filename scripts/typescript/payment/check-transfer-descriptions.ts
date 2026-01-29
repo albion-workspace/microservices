@@ -1,5 +1,5 @@
 #!/usr/bin/env npx tsx
-import { getPaymentDatabase, getAuthDatabase, closeAllConnections } from '../config/mongodb.js';
+import { getPaymentDatabase, getAuthDatabase, closeAllConnections } from '../config/scripts.js';
 
 async function checkTransfers() {
   const paymentDb = await getPaymentDatabase();

@@ -2,15 +2,15 @@
  * Role Types
  * 
  * Types for graph-based role system.
- * These types are re-exported from access-engine for consistency.
+ * These types are re-exported from core-service/access for consistency.
  */
 
 import type {
   RoleContext as AccessEngineRoleContext,
   UserRole as AccessEngineUserRole,
-} from 'access-engine';
+} from 'core-service/access';
 
-// Re-export from access-engine
+// Re-export from core-service/access
 export type RoleContext = AccessEngineRoleContext;
 export type UserRole = AccessEngineUserRole;
 

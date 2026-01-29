@@ -4,7 +4,8 @@
 
 import twilio from 'twilio';
 import type { Twilio } from 'twilio';
-import { logger, generateId } from 'core-service';
+import { logger, generateId, GraphQLError } from 'core-service';
+import { NOTIFICATION_ERRORS } from '../error-codes.js';
 import type { NotificationProvider, SmsNotification, NotificationResponse, NotificationConfig } from '../types.js';
 
 export class SmsProvider implements NotificationProvider {
@@ -29,7 +30,7 @@ export class SmsProvider implements NotificationProvider {
   
   async send(notification: SmsNotification): Promise<NotificationResponse> {
     if (!this.client) {
-      throw new Error('SMS provider not configured');
+      throw new GraphQLError(NOTIFICATION_ERRORS.SMSProviderNotConfigured, {});
     }
     
     const recipients = Array.isArray(notification.to) ? notification.to : [notification.to];
@@ -57,12 +58,8 @@ export class SmsProvider implements NotificationProvider {
           providerMessageId: message.sid,
         });
       } catch (error: any) {
-        logger.error('Failed to send SMS', { error: error.message, to });
-        
-        results.push({
-          id: generateId(),
-          status: 'failed',
-          channel: 'sms',
+        throw new GraphQLError(NOTIFICATION_ERRORS.FailedToSendSMS, {
+          to,
           error: error.message,
         });
       }

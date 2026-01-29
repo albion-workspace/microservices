@@ -20,17 +20,30 @@ import {
   logger,
   on,
   startListening,
-  getDatabase,
+  getRedis,
+  getUserId,
   createWebhookService,
+  requireAuth,
+  GraphQLError,
+  registerServiceErrorCodes,
+  registerServiceConfigDefaults,
+  ensureDefaultConfigsCreated,
+  resolveContext,
+  initializeWebhooks,
   type IntegrationEvent,
   type ResolverContext,
 } from 'core-service';
+import { hasAnyRole as hasAnyRoleAccess } from 'core-service/access';
+import { BONUS_ERRORS, BONUS_ERROR_CODES } from './error-codes.js';
+import { setupRecovery } from './recovery-setup.js';
+import { createBonusEngine, type BonusEngineOptions } from './services/bonus-engine/index.js';
+import { loadConfig, validateConfig, printConfigSummary, type BonusConfig } from './config.js';
+import { BONUS_CONFIG_DEFAULTS } from './config-defaults.js';
 
 // Import unified event dispatcher (handles both internal events + webhooks)
 import {
   bonusWebhooks,
   emitBonusEvent,
-  initializeBonusWebhooks,
   cleanupBonusWebhookDeliveries,
   type BonusWebhookEvents,
 } from './event-dispatcher.js';
@@ -63,8 +76,52 @@ import {
   bonusTransactionService 
 } from './services/bonus.js';
 
-import { bonusEngine } from './services/bonus-engine/index.js';
 import type { BonusTemplate } from './types.js';
+
+// ═══════════════════════════════════════════════════════════════════
+// Database Strategy & Persistence Initialization
+// ═══════════════════════════════════════════════════════════════════
+
+// Import centralized persistence singleton (avoids circular deps)
+import { 
+  initializeDatabaseLayer, 
+  getInitializedPersistence,
+} from './services/bonus-engine/persistence-singleton.js';
+
+// Configuration will be loaded asynchronously in main()
+let bonusConfig: BonusConfig | null = null;
+
+// Bonus engine instance (initialized lazily)
+let bonusEngineInstance: ReturnType<typeof createBonusEngine> | undefined;
+
+// Re-export persistence getter for use by other modules
+export { getInitializedPersistence as initializePersistence };
+
+async function initializeBonusEngine(): Promise<ReturnType<typeof createBonusEngine>> {
+  if (!bonusEngineInstance) {
+    const { strategy, context } = await initializeDatabaseLayer();
+    const options: BonusEngineOptions = {
+      databaseStrategy: strategy,
+      defaultContext: context,
+    };
+    bonusEngineInstance = createBonusEngine(options);
+    logger.info('Bonus engine initialized with database strategy');
+  }
+  return bonusEngineInstance;
+}
+
+// Import handler registry for initialization
+import { handlerRegistry } from './services/bonus-engine/handler-registry.js';
+
+async function initializeHandlerRegistry(): Promise<void> {
+  // Use the centralized initializeDatabaseLayer from persistence-singleton
+  const { strategy, context } = await initializeDatabaseLayer();
+  handlerRegistry.initialize({
+    databaseStrategy: strategy,
+    defaultContext: context,
+  });
+  logger.info('Handler registry initialized with database strategy');
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // Custom Resolvers for Client-Side Eligibility and Role-Based Filtering
@@ -76,6 +133,18 @@ import type { BonusTemplate } from './types.js';
  */
 const availableBonusesResolver = {
   Query: {
+    bonusTemplateByCode: async (
+      args: Record<string, unknown>,
+      _ctx: ResolverContext
+    ): Promise<BonusTemplate | null> => {
+      const code = args.code as string;
+      if (!code) {
+        return null;
+      }
+      const persistence = await getInitializedPersistence();
+      return await persistence.template.findByCode(code);
+    },
+    
     /**
      * Fetch active bonus templates for client-side eligibility checking.
      * 
@@ -99,7 +168,8 @@ const availableBonusesResolver = {
       args: Record<string, unknown>,
       _ctx: ResolverContext
     ): Promise<BonusTemplate[]> => {
-      const db = getDatabase();
+      const persistence = await getInitializedPersistence();
+      const tenantId = _ctx.user?.tenantId as string | undefined;
       
       const now = new Date();
       const filter: Record<string, unknown> = {
@@ -127,12 +197,11 @@ const availableBonusesResolver = {
         filter.type = args.type;
       }
       
-      const templates = await db.collection('bonus_templates')
-        .find(filter)
-        .sort({ priority: -1 })
-        .toArray();
+      // Use persistence layer to find active templates
+      const allTemplates = await persistence.template.findActive(filter, tenantId);
       
-      return templates as unknown as BonusTemplate[];
+      // Sort by priority
+      return allTemplates.sort((a, b) => b.priority - a.priority);
     },
   },
   Mutation: {}, // Required by Resolvers type
@@ -153,7 +222,7 @@ const userBonussCustomResolver = {
       // Get default resolver from userBonusService
       const defaultResolver = userBonusService.resolvers?.Query?.userBonuss;
       if (!defaultResolver) {
-        throw new Error('Default userBonuss resolver not found');
+        throw new GraphQLError(BONUS_ERRORS.ResolverNotFound, { resolver: 'userBonuss' });
       }
       
       // Check if user is system or admin
@@ -218,8 +287,185 @@ const userBonussCustomResolver = {
   },
 };
 
-// GraphQL type extension for custom query
+const bonusApprovalTypeDefs = `
+  type PendingBonus {
+    token: String!
+    userId: String!
+    tenantId: String!
+    templateId: String!
+    templateCode: String!
+    bonusType: String!
+    calculatedValue: Float!
+    currency: String!
+    depositAmount: Float
+    requestedAt: String!
+    requestedBy: String
+    reason: String
+    expiresAt: String!
+    # Full data including nested objects (context, calculation, etc.)
+    rawData: JSON
+  }
+  
+  type ApproveBonusResult {
+    success: Boolean!
+    bonusId: String
+    error: String
+  }
+  
+  type RejectBonusResult {
+    success: Boolean!
+    error: String
+  }
+  
+  extend type Query {
+    pendingBonuses(userId: String, templateCode: String): [PendingBonus!]!
+    pendingBonus(token: String!): PendingBonus
+  }
+  
+  extend type Mutation {
+    approveBonus(token: String!, reason: String): ApproveBonusResult!
+    rejectBonus(token: String!, reason: String!): RejectBonusResult!
+  }
+`;
+
+const bonusApprovalResolvers = {
+  Query: {
+    pendingBonuses: async (
+      args: Record<string, unknown>,
+      context: ResolverContext
+    ) => {
+      requireAuth(context);
+      if (!hasAnyRoleAccess(['system', 'admin'])(context.user!)) {
+        throw new GraphQLError(BONUS_ERRORS.SystemOrAdminAccessRequired, {});
+      }
+      
+      const { listPendingBonuses } = await import('./services/bonus-approval.js');
+      const filter: { userId?: string; templateCode?: string } = {};
+      if (args.userId) filter.userId = args.userId as string;
+      if (args.templateCode) filter.templateCode = args.templateCode as string;
+      
+      const pending = await listPendingBonuses(filter);
+      
+      return pending.map(item => ({
+        token: item.token,
+        userId: item.data.userId,
+        tenantId: item.data.tenantId,
+        templateId: item.data.templateId,
+        templateCode: item.data.templateCode,
+        bonusType: item.data.bonusType,
+        calculatedValue: item.data.calculatedValue,
+        currency: item.data.currency,
+        depositAmount: item.data.depositAmount,
+        requestedAt: new Date(item.data.requestedAt).toISOString(),
+        requestedBy: item.data.requestedBy,
+        reason: item.data.reason,
+        expiresAt: new Date(item.expiresAt).toISOString(),
+        rawData: item.data, // Include full data with context, calculation, etc.
+      }));
+    },
+    
+    pendingBonus: async (
+      args: Record<string, unknown>,
+      context: ResolverContext
+    ) => {
+      requireAuth(context);
+      if (!hasAnyRoleAccess(['system', 'admin'])(context.user!)) {
+        throw new GraphQLError(BONUS_ERRORS.SystemOrAdminAccessRequired, {});
+      }
+      
+      const { getPendingBonus } = await import('./services/bonus-approval.js');
+      const token = args.token as string;
+      const pending = await getPendingBonus(token);
+      
+      if (!pending) {
+        return null;
+      }
+      
+      const redis = getRedis();
+      if (!redis) {
+        throw new GraphQLError(BONUS_ERRORS.RedisNotAvailable, {});
+      }
+      
+      const key = `pending:bonus:approval:${token}`;
+      const ttl = await redis.ttl(key);
+      const expiresAt = Date.now() + (ttl * 1000);
+      
+      return {
+        token,
+        userId: pending.userId,
+        tenantId: pending.tenantId,
+        templateId: pending.templateId,
+        templateCode: pending.templateCode,
+        bonusType: pending.bonusType,
+        calculatedValue: pending.calculatedValue,
+        currency: pending.currency,
+        depositAmount: pending.depositAmount,
+        requestedAt: new Date(pending.requestedAt).toISOString(),
+        requestedBy: pending.requestedBy,
+        reason: pending.reason,
+        expiresAt: new Date(expiresAt).toISOString(),
+        rawData: pending, // Include full data with context, calculation, etc.
+      };
+    },
+    
+  },
+  
+  Mutation: {
+    approveBonus: async (
+      args: Record<string, unknown>,
+      context: ResolverContext
+    ) => {
+      requireAuth(context);
+      if (!hasAnyRoleAccess(['system', 'admin'])(context.user!)) {
+        throw new GraphQLError(BONUS_ERRORS.SystemOrAdminAccessRequired, {});
+      }
+      
+      const { approvePendingBonus } = await import('./services/bonus-approval.js');
+      
+      const token = args.token as string;
+      const reason = args.reason as string | undefined;
+      const approvedBy = (context.user as any).email || (context.user as any).username || 'system';
+      const approvedByUserId = getUserId(context);
+      
+      const result = await approvePendingBonus(token, approvedBy, approvedByUserId);
+      
+      return {
+        success: result.success,
+        bonusId: result.bonusId,
+        error: result.error,
+      };
+    },
+    
+    rejectBonus: async (
+      args: Record<string, unknown>,
+      context: ResolverContext
+    ) => {
+      requireAuth(context);
+      if (!hasAnyRoleAccess(['system', 'admin'])(context.user!)) {
+        throw new GraphQLError(BONUS_ERRORS.SystemOrAdminAccessRequired, {});
+      }
+      
+      const { rejectPendingBonus } = await import('./services/bonus-approval.js');
+      
+      const token = args.token as string;
+      const reason = args.reason as string;
+      const rejectedBy = (context.user as any).email || (context.user as any).username || 'system';
+      const rejectedByUserId = getUserId(context);
+      
+      const result = await rejectPendingBonus(token, rejectedBy, rejectedByUserId, reason);
+      
+      return {
+        success: result.success,
+        error: result.error,
+      };
+    },
+  },
+};
+
 const availableBonusesTypeDefs = `
+  extend type Query {
+    bonusTemplateByCode(code: String!): BonusTemplate
+  }
   extend type Query {
     """
     Fetch active bonus templates for client-side eligibility checking.
@@ -230,84 +476,113 @@ const availableBonusesTypeDefs = `
 `;
 
 // ═══════════════════════════════════════════════════════════════════
-// Configuration
+// Configuration (will be loaded asynchronously in main())
 // ═══════════════════════════════════════════════════════════════════
 
-const config = {
-  name: 'bonus-service',
-  port: parseInt(process.env.PORT || '3005'),
-  cors: {
-    origins: ['http://localhost:5173', 'http://localhost:3000', 'http://127.0.0.1:5173'],
-  },
-  jwt: {
-    secret: process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || 'shared-jwt-secret-change-in-production',
-    expiresIn: '8h',
-  },
-  services: [
-    { name: 'bonusTemplate', types: bonusTemplateService.types, resolvers: bonusTemplateService.resolvers },
-    { 
-      name: 'userBonus', 
-      types: userBonusService.types, 
-      resolvers: {
-        Query: {
-          ...userBonusService.resolvers?.Query,
-          ...userBonussCustomResolver.Query,
-        },
-        Mutation: userBonusService.resolvers?.Mutation || {},
-      }
+// Gateway config builder (will be built from bonusConfig)
+const buildGatewayConfig = (): Parameters<typeof createGateway>[0] => {
+  if (!bonusConfig) {
+    throw new Error('Configuration not loaded yet');
+  }
+  
+  const config = bonusConfig; // Type narrowing helper
+  
+  return {
+    name: 'bonus-service',
+    port: config.port,
+    cors: {
+      origins: config.corsOrigins,
     },
-    { name: 'bonusTransaction', types: bonusTransactionService.types, resolvers: bonusTransactionService.resolvers },
-    // Custom resolver for client-side eligibility
-    { name: 'availableBonuses', types: availableBonusesTypeDefs, resolvers: availableBonusesResolver },
-    // Webhooks - just plug it in!
-    webhookService,
-  ],
-  // Permission rules using URN-based helpers
-  permissions: {
-    Query: {
-      health: allow,
-      // Templates (read) - system/admin only
-      bonusTemplates: hasAnyRole('system', 'admin', 'super-admin'),
-      bonusTemplate: hasAnyRole('system', 'admin', 'super-admin'),
-      availableBonuses: isAuthenticated, // Client-side eligibility check (users need to see available bonuses)
-      // User bonuses (includes referral bonuses)
-      // System/admin see all, regular users see only their own (enforced in resolver)
-      userBonuss: isAuthenticated,
-      userBonus: isAuthenticated,
-      // Transactions (includes turnover tracking)
-      bonusTransactions: isAuthenticated,
-      bonusTransaction: isAuthenticated,
-      // Webhooks (system only)
-      webhooks: hasRole('system'),
-      webhook: hasRole('system'),
-      webhookStats: hasRole('system'),
-      webhookDeliveries: hasRole('system'),
+    jwt: {
+      secret: config.jwtSecret,
+      expiresIn: config.jwtExpiresIn,
+      refreshSecret: config.jwtRefreshSecret,
+      refreshExpiresIn: config.jwtRefreshExpiresIn,
     },
-    Mutation: {
-      // System: Template management
-      createBonusTemplate: hasRole('system'),
-      updateBonusTemplate: hasRole('system'),
-      deleteBonusTemplate: hasRole('system'),
-      // User: Bonus operations (claim, forfeit)
-      createUserBonus: isAuthenticated,
-      updateUserBonus: hasRole('system'),
-      deleteUserBonus: hasRole('system'),
-      // Transactions
-      createBonusTransaction: isAuthenticated,
-      updateBonusTransaction: hasRole('system'),
-      deleteBonusTransaction: hasRole('system'),
-      // Webhooks (system only)
-      registerWebhook: hasRole('system'),
-      updateWebhook: hasRole('system'),
-      deleteWebhook: hasRole('system'),
-      testWebhook: hasRole('system'),
+    services: [
+      { name: 'bonusTemplate', types: bonusTemplateService.types, resolvers: bonusTemplateService.resolvers },
+      { 
+        name: 'userBonus', 
+        types: userBonusService.types, 
+        resolvers: {
+          Query: {
+            ...userBonusService.resolvers?.Query,
+            ...userBonussCustomResolver.Query,
+          },
+          Mutation: {
+            ...userBonusService.resolvers?.Mutation,
+            createUserBonus: async (args: Record<string, unknown>, ctx: ResolverContext) => {
+              // Call the default resolver
+              const result = await (userBonusService.resolvers?.Mutation?.createUserBonus as any)(args, ctx);
+              
+              // Extract pendingToken from error message if present
+              // Format: "BONUS_REQUIRES_APPROVAL|PENDING_TOKEN:{token}"
+              if (!result.success && result.errors && result.errors.length > 0) {
+                const errorMsg = result.errors[0];
+                const tokenMatch = errorMsg.match(/PENDING_TOKEN:([^\s|]+)/);
+                if (tokenMatch) {
+                  return {
+                    ...result,
+                    pendingToken: tokenMatch[1],
+                    errors: [errorMsg.replace(/\|PENDING_TOKEN:[^\s|]+/, '')], // Remove token from error message
+                  };
+                }
+              }
+              
+              return result;
+            },
+          },
+        }
+      },
+      { name: 'bonusTransaction', types: bonusTransactionService.types, resolvers: bonusTransactionService.resolvers },
+      { name: 'bonusApproval', types: bonusApprovalTypeDefs, resolvers: bonusApprovalResolvers },
+      { name: 'availableBonuses', types: availableBonusesTypeDefs, resolvers: availableBonusesResolver },
+      webhookService,
+    ],
+    permissions: {
+      Query: {
+        health: allow,
+        // Templates (read) - system/admin only
+        bonusTemplates: hasAnyRole('system', 'admin', 'super-admin'),
+        bonusTemplate: hasAnyRole('system', 'admin', 'super-admin'),
+        bonusTemplateByCode: hasAnyRole('system', 'admin', 'super-admin'),
+        availableBonuses: isAuthenticated, // Client-side eligibility check (users need to see available bonuses)
+        // User bonuses (includes referral bonuses)
+        // System/admin see all, regular users see only their own (enforced in resolver)
+        userBonuss: isAuthenticated,
+        userBonus: isAuthenticated,
+        // Transactions (includes turnover tracking)
+        bonusTransactions: isAuthenticated,
+        bonusTransaction: isAuthenticated,
+        pendingBonuses: hasAnyRole('system', 'admin'),
+        pendingBonus: hasAnyRole('system', 'admin'),
+        // Webhooks (system only)
+        webhooks: hasRole('system'),
+        webhook: hasRole('system'),
+        webhookStats: hasRole('system'),
+        webhookDeliveries: hasRole('system'),
+      },
+      Mutation: {
+        // User actions (authenticated users)
+        claimBonus: isAuthenticated,
+        recordActivity: isAuthenticated,
+        // Admin actions (system/admin only)
+        createBonusTemplate: hasAnyRole('system', 'admin'),
+        createUserBonus: hasAnyRole('system', 'admin'),
+        createBonusTransaction: hasAnyRole('system', 'admin'),
+        approveBonus: hasAnyRole('system', 'admin'),
+        rejectBonus: hasAnyRole('system', 'admin'),
+        // Webhooks (system only)
+        registerWebhook: hasRole('system'),
+        updateWebhook: hasRole('system'),
+        deleteWebhook: hasRole('system'),
+        testWebhook: hasRole('system'),
+      },
     },
-  },
-  // Note: When connecting from localhost, directConnection=true prevents replica set member discovery
-  mongoUri: process.env.MONGO_URI || 'mongodb://localhost:27017/bonus_service?directConnection=true',
-  // Redis password: default is redis123 (from Docker container), can be overridden via REDIS_PASSWORD env var
-  redisUrl: process.env.REDIS_URL || `redis://:${process.env.REDIS_PASSWORD || 'redis123'}@localhost:6379`,
-  defaultPermission: 'deny' as const, // Secure default
+    mongoUri: config.mongoUri,
+    redisUrl: config.redisUrl,
+    defaultPermission: 'deny' as const,
+  };
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -350,7 +625,8 @@ function setupEventHandlers() {
     
     try {
       // Use bonusEngine to check eligibility and award bonuses
-      const awardedBonuses = await bonusEngine.handleDeposit({
+      const engine = await initializeBonusEngine();
+      const awardedBonuses = await engine.handleDeposit({
         transactionId: event.data.transactionId,
         walletId: event.data.walletId,
         userId: event.userId!,
@@ -385,7 +661,8 @@ function setupEventHandlers() {
     try {
       // Use bonusEngine to check eligibility and award bonuses
       // Metadata check (isFirstPurchase) happens in FirstPurchaseHandler.validateSpecific
-      const awardedBonuses = await bonusEngine.handlePurchase({
+      const engine = await initializeBonusEngine();
+      const awardedBonuses = await engine.handlePurchase({
         transactionId: event.data.transactionId,
         walletId: event.data.walletId,
         userId: event.userId!,
@@ -420,7 +697,8 @@ function setupEventHandlers() {
     try {
       // First bet can be considered first action
       // Metadata check (hasCompletedFirstAction) happens in FirstActionHandler.validateSpecific
-      const awardedBonuses = await bonusEngine.handleAction({
+      const engine = await initializeBonusEngine();
+      const awardedBonuses = await engine.handleAction({
         transactionId: event.data.transactionId,
         walletId: event.data.walletId,
         userId: event.userId!,
@@ -450,7 +728,8 @@ function setupEventHandlers() {
     
     try {
       // Metadata check (hasCompletedFirstAction) happens in FirstActionHandler.validateSpecific
-      const awardedBonuses = await bonusEngine.handleAction({
+      const engine = await initializeBonusEngine();
+      const awardedBonuses = await engine.handleAction({
         transactionId: event.data.transactionId,
         walletId: event.data.walletId,
         userId: event.userId!,
@@ -498,7 +777,8 @@ function setupEventHandlers() {
     });
     
     try {
-      await bonusEngine.handleActivity({
+      const engine = await initializeBonusEngine();
+      await engine.handleActivity({
         userId: event.data.userId || event.userId!,
         tenantId: event.tenantId,
         amount: event.data.amount,
@@ -519,7 +799,8 @@ function setupEventHandlers() {
     logger.info('Processing birthday bonus', { userId: event.userId });
     
     try {
-      const result = await bonusEngine.award('birthday', {
+      const engine = await initializeBonusEngine();
+      const result = await engine.award('birthday', {
         userId: event.userId!,
         tenantId: event.tenantId,
       });
@@ -533,7 +814,8 @@ function setupEventHandlers() {
   
   on('user.login', async (event: IntegrationEvent<{ consecutiveDays: number }>) => {
     try {
-      const result = await bonusEngine.award('daily_login', {
+      const engine = await initializeBonusEngine();
+      const result = await engine.award('daily_login', {
         userId: event.userId!,
         tenantId: event.tenantId,
         consecutiveDays: event.data.consecutiveDays,
@@ -550,7 +832,8 @@ function setupEventHandlers() {
     logger.info('Processing tier upgrade bonus', { userId: event.userId, tier: event.data.newTier });
     
     try {
-      const result = await bonusEngine.award('tier_upgrade', {
+      const engine = await initializeBonusEngine();
+      const result = await engine.award('tier_upgrade', {
         userId: event.userId!,
         tenantId: event.tenantId,
         newTier: event.data.newTier,
@@ -580,7 +863,8 @@ function setupEventHandlers() {
     
     try {
       // Award bonus to referrer
-      const referrerResult = await bonusEngine.award('referral', {
+      const engine = await initializeBonusEngine();
+      const referrerResult = await engine.award('referral', {
         userId: event.data.referrerId,
         tenantId: event.tenantId,
         refereeId: event.data.refereeId,
@@ -592,7 +876,7 @@ function setupEventHandlers() {
       }
       
       // Award bonus to referee
-      const refereeResult = await bonusEngine.award('referee', {
+      const refereeResult = await engine.award('referee', {
         userId: event.data.refereeId,
         tenantId: event.tenantId,
         referrerId: event.data.referrerId,
@@ -618,7 +902,8 @@ function setupEventHandlers() {
     });
     
     try {
-      const result = await bonusEngine.award('achievement', {
+      const engine = await initializeBonusEngine();
+      const result = await engine.award('achievement', {
         userId: event.userId!,
         tenantId: event.tenantId,
         achievementCode: event.data.achievementCode,
@@ -642,7 +927,8 @@ function setupEventHandlers() {
     });
     
     try {
-      const result = await bonusEngine.award('cashback', {
+      const engine = await initializeBonusEngine();
+      const result = await engine.award('cashback', {
         userId: event.userId!,
         tenantId: event.tenantId,
         lossAmount: event.data.lossAmount,
@@ -672,31 +958,71 @@ function setupEventHandlers() {
 }
 
 async function main() {
-  logger.info('╔═══════════════════════════════════════════════════════════════════╗');
-  logger.info('║                       BONUS SERVICE                               ║');
-  logger.info('╠═══════════════════════════════════════════════════════════════════╣');
-  logger.info('║  Design Patterns: Strategy, Template Method, Factory, Facade     ║');
-  logger.info('║  Bonus Types: 38 types across 6 domains                           ║');
-  logger.info('║  Events: wallet, activity, user, referral, achievement           ║');
-  logger.info('╚═══════════════════════════════════════════════════════════════════╝');
-  
-  logger.info('Environment', {
-    port: config.port,
-    mongoUri: process.env.MONGO_URI || 'mongodb://localhost:27017/bonus_service',
-    redisUrl: process.env.REDIS_URL ? 'configured' : 'not configured',
-  });
+  // ═══════════════════════════════════════════════════════════════════
+  // Configuration
+  // ═══════════════════════════════════════════════════════════════════
+
+  // Register error codes
+  registerServiceErrorCodes(BONUS_ERROR_CODES);
+
+  // Register default configs (auto-created in DB if missing)
+  registerServiceConfigDefaults('bonus-service', BONUS_CONFIG_DEFAULTS);
+
+  // Load config (MongoDB + env vars + defaults)
+  // Resolve brand/tenantId dynamically (from user context, config store, or env vars)
+  const context = await resolveContext();
+  bonusConfig = await loadConfig(context.brand, context.tenantId);
+  validateConfig(bonusConfig);
+  printConfigSummary(bonusConfig);
+
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Initialize Services
+  // ═══════════════════════════════════════════════════════════════════
 
   // Register event handlers before starting gateway
   setupEventHandlers();
 
-  // Create gateway first (this connects to database)
-  await createGateway({
-    ...config,
-  });
+  // ═══════════════════════════════════════════════════════════════════
+  // Initialize Handler Registry BEFORE Gateway
+  // ═══════════════════════════════════════════════════════════════════
+  
+  // Handler registry must be initialized with database strategy BEFORE
+  // gateway starts accepting requests, otherwise handlers will be created
+  // without database options and fail with "BonusPersistence requires database"
+  await initializeHandlerRegistry();
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Gateway Configuration
+  // ═══════════════════════════════════════════════════════════════════
+
+  // Create gateway (this connects to database and starts accepting requests)
+  await createGateway(buildGatewayConfig());
+
+  // Ensure all registered default configs are created in database
+  // This happens after database connection is established
+  try {
+    const createdCount = await ensureDefaultConfigsCreated('bonus-service', {
+      brand: context.brand,
+      tenantId: context.tenantId,
+    });
+    if (createdCount > 0) {
+      logger.info(`Created ${createdCount} default config(s) in database`);
+    }
+  } catch (error) {
+    logger.warn('Failed to ensure default configs are created', { error });
+    // Continue - configs will be created on first access
+  }
 
   // Initialize bonus webhooks AFTER database connection is established
   try {
-    await initializeBonusWebhooks();
+    const { strategy, context: dbContext } = await initializeDatabaseLayer();
+    // Use centralized initializeWebhooks helper from core-service
+    await initializeWebhooks(bonusWebhooks, {
+      databaseStrategy: strategy,
+      defaultContext: dbContext,
+    });
+    logger.info('Bonus webhooks initialized via centralized helper');
   } catch (error) {
     logger.error('Failed to initialize bonus webhooks', { error });
     // Continue - webhooks are optional
@@ -709,7 +1035,6 @@ async function main() {
   // Setup recovery system (transfer recovery + recovery job)
   // Bonus operations use createTransferWithTransactions, so they need transfer recovery
   try {
-    const { setupRecovery } = await import('./recovery-setup.js');
     await setupRecovery();
     logger.info('✅ Recovery system initialized');
   } catch (err) {
@@ -749,7 +1074,8 @@ async function main() {
       // Start periodic bonus expiration check (every hour)
       setInterval(async () => {
         try {
-          const expired = await bonusEngine.expireOldBonuses();
+          const engine = await initializeBonusEngine();
+          const expired = await engine.expireOldBonuses();
           if (expired > 0) {
             logger.info(`Expired ${expired} bonuses`);
           }

@@ -18,7 +18,6 @@ export interface BonusContext {
   
   // Deposit/transaction context
   depositAmount?: number;
-  depositId?: string;
   transactionId?: string;
   walletId?: string;
   isFirstDeposit?: boolean;
@@ -75,6 +74,7 @@ export interface AwardResult {
   success: boolean;
   bonus?: UserBonus;
   error?: string;
+  pendingToken?: string;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -96,7 +96,7 @@ export interface IBonusHandler {
   calculate(template: BonusTemplate, context: BonusContext): BonusCalculation;
   
   /** Award the bonus to the user */
-  award(template: BonusTemplate, context: BonusContext): Promise<AwardResult>;
+  award(template: BonusTemplate, context: BonusContext, skipApprovalCheck?: boolean): Promise<AwardResult>;
   
   /** Optional: Handle specific events for this bonus type */
   handleEvent?(eventType: string, data: unknown): Promise<void>;

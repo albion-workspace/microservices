@@ -10,16 +10,41 @@
  * Also provides centralized JWT token generation utilities.
  */
 
-import { getAuthDatabase } from './mongodb.js';
+import { getAuthDatabase, loadScriptConfig } from './scripts.js';
 import { createHmac } from 'crypto';
+import { connectDatabase, resolveContext, getClient } from '../../../core-service/src/index.js';
+import { findUserIdByRole, findUserIdsByRole } from '../../../core-service/src/index.js';
 
 // ═══════════════════════════════════════════════════════════════════
-// Configuration
+// Configuration (loaded dynamically from MongoDB config store)
 // ═══════════════════════════════════════════════════════════════════
 
-const AUTH_SERVICE_URL = process.env.AUTH_SERVICE_URL || 'http://localhost:3003/graphql';
-export const DEFAULT_TENANT_ID = 'default-tenant';
+let AUTH_SERVICE_URL: string = process.env.AUTH_SERVICE_URL || 'http://localhost:3003/graphql';
+let DEFAULT_TENANT_ID: string = 'default-tenant';
+
+// Export DEFAULT_TENANT_ID for backward compatibility
+export { DEFAULT_TENANT_ID };
 const JWT_SECRET = process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || 'shared-jwt-secret-change-in-production';
+
+/**
+ * Initialize configuration from MongoDB config store
+ * Should be called before using AUTH_SERVICE_URL or DEFAULT_TENANT_ID
+ */
+export async function initializeConfig(): Promise<void> {
+  const config = await loadScriptConfig();
+  AUTH_SERVICE_URL = config.serviceUrls.auth;
+  const context = await resolveContext();
+  DEFAULT_TENANT_ID = context.tenantId || 'default-tenant';
+}
+
+// Export getter functions for backward compatibility
+export function getAuthServiceUrl(): string {
+  return AUTH_SERVICE_URL;
+}
+
+export function getDefaultTenantId(): string {
+  return DEFAULT_TENANT_ID;
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // Currency Configuration - Shared across all tests
@@ -95,7 +120,7 @@ export const PROVIDER_USERS: Record<string, UserDefinition> = {
       transaction: true,
       wallet: true,
     },
-    description: 'Bonus pool user - holds bonus funds with fixed budget, cannot go negative',
+    description: 'Bonus pool user - kept for testing multi-user scenarios (services use system user\'s bonusBalance)',
   },
 };
 
@@ -164,28 +189,44 @@ export const ALL_USERS: Record<string, UserDefinition> = {
 async function graphql<T = any>(
   query: string,
   variables?: Record<string, unknown>,
-  token?: string
+  token?: string,
+  timeoutMs: number = 30000 // Default 30 second timeout
 ): Promise<T> {
-  const response = await fetch(AUTH_SERVICE_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token && { Authorization: `Bearer ${token}` }),
-    },
-    body: JSON.stringify({ query, variables }),
-  });
+  // Add timeout to prevent hanging
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-  if (!response.ok) {
-    throw new Error(`HTTP error! status: ${response.status}`);
+  try {
+    const response = await fetch(getAuthServiceUrl(), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token && { Authorization: `Bearer ${token}` }),
+      },
+      body: JSON.stringify({ query, variables }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const result = await response.json();
+
+    if (result.errors) {
+      throw new Error(`GraphQL errors: ${JSON.stringify(result.errors)}`);
+    }
+
+    return result.data;
+  } catch (error: any) {
+    clearTimeout(timeoutId);
+    if (error.name === 'AbortError') {
+      throw new Error(`GraphQL request timed out after ${timeoutMs}ms to ${getAuthServiceUrl()}`);
+    }
+    throw error;
   }
-
-  const result = await response.json();
-
-  if (result.errors) {
-    throw new Error(`GraphQL errors: ${JSON.stringify(result.errors)}`);
-  }
-
-  return result.data;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -249,8 +290,8 @@ export async function loginAs(
 
   const loginVars = {
     input: {
-      tenantId: DEFAULT_TENANT_ID,
-      identifier: user.email,
+      tenantId: getDefaultTenantId(),
+      identifier: user.email.toLowerCase().trim(), // Normalize email to match Passport
       password: user.password,
     },
   };
@@ -331,43 +372,69 @@ export async function registerAs(
   }
 
   // Check if user already exists in MongoDB (more reliable)
-  const db = await getAuthDatabase();
+  // CRITICAL: Check by both email AND tenantId (Passport queries by tenantId)
+  // Also normalize email to match Passport's normalization
+  // Get dbContext from global if available (set by test scripts)
+  const dbContext = (global as any).__dbContext || {};
+  const db = await getAuthDatabase(dbContext);
   const usersCollection = db.collection('users');
-  const existingUser = await usersCollection.findOne({ email: user.email });
+  const normalizedEmail = user.email.toLowerCase().trim(); // Match Passport's normalizeEmail
+  const existingUser = await usersCollection.findOne({ 
+    email: normalizedEmail,
+    tenantId: getDefaultTenantId() 
+  });
 
   if (existingUser) {
     const userId = existingUser._id?.toString() || existingUser.id;
     
-    // Update roles and permissions if requested
+    // IMPORTANT: Don't delete/recreate if user exists - just update roles/permissions
+    // This preserves the user ID and prevents creating new wallets each time
+    // Only delete/recreate if we need to update the password (which we don't for system users)
     if (updateRoles || updatePermissions) {
-      const update: Record<string, unknown> = {};
-      if (updateRoles) {
-        // Normalize roles to string array format (GraphQL expects strings, not objects)
-        // Handle both string[] and UserRole[] formats
-        const existingRoles = existingUser.roles || [];
-        const normalizedRoles = Array.isArray(existingRoles) && existingRoles.length > 0 && typeof existingRoles[0] === 'object'
-          ? existingRoles.map((r: any) => typeof r === 'string' ? r : r.role)
-          : user.roles;
-        update.roles = normalizedRoles;
-      }
-      if (updatePermissions) {
-        update.permissions = user.permissions;
-      }
+      // Convert permissions object to array format
+      const permissionsArray = typeof user.permissions === 'object' && !Array.isArray(user.permissions)
+        ? Object.keys(user.permissions).filter(key => user.permissions[key] === true)
+        : Array.isArray(user.permissions)
+        ? user.permissions
+        : [];
       
+      // Update roles and permissions without deleting user (preserves user ID)
       await usersCollection.updateOne(
-        { email: user.email },
-        { $set: update }
+        { email: normalizedEmail, tenantId: DEFAULT_TENANT_ID },
+        {
+          $set: {
+            roles: user.roles, // Roles should already be array
+            permissions: permissionsArray, // Convert to array format
+          },
+        }
       );
+      
+      return {
+        userId,
+        email: normalizedEmail,
+        created: false, // User already existed, just updated
+      };
     }
-
+    
+    // If no updates needed, just return existing user
     return {
       userId,
-      email: user.email,
+      email: normalizedEmail,
       created: false,
     };
   }
 
   // Try to register via GraphQL
+  // NOTE: For testing/system setup, we use autoVerify: true to bypass OTP verification
+  // In production, regular users would use the new verification flow:
+  //   1. register() returns registrationToken (JWT)
+  //   2. OTP is sent to email/phone
+  //   3. verifyRegistration(registrationToken, otpCode) creates user and returns tokens
+  // System users (system, payment-gateway, payment-provider) can use autoVerify: true
+  const isSystemUser = user.roles.includes('system') || 
+                       user.roles.includes('payment-gateway') || 
+                       user.roles.includes('payment-provider');
+  
   const registerQuery = `
     mutation Register($input: RegisterInput!) {
       register(input: $input) {
@@ -376,74 +443,132 @@ export async function registerAs(
         user {
           id
           email
+          status
+        }
+        registrationToken
+        tokens {
+          accessToken
+          refreshToken
         }
       }
     }
   `;
 
+  // Use autoVerify for all users in test setup (bypasses OTP verification)
+  // In production, only system users would use autoVerify
   const registerVars = {
     input: {
-      tenantId: DEFAULT_TENANT_ID,
-      email: user.email,
+      tenantId: getDefaultTenantId(),
+      email: normalizedEmail, // Use normalized email for consistency
       password: user.password,
-      autoVerify: true,
+      autoVerify: true, // Bypass verification for testing/system setup
+      sendOTP: false, // Don't send OTP when autoVerify is true
       ...(metadata && { metadata }),
     },
   };
 
   try {
-    const data = await graphql<{ register: { success: boolean; message?: string; user?: { id: string; email: string } } }>(
+    const data = await graphql<{ 
+      register: { 
+        success: boolean; 
+        message?: string; 
+        user?: { id: string; email: string; status: string }; 
+        registrationToken?: string;
+        tokens?: { accessToken: string; refreshToken: string };
+      } 
+    }>(
       registerQuery,
       registerVars
     );
 
+    // Handle registration response
     if (data.register.success && data.register.user) {
       const userId = data.register.user.id;
 
       // Update roles and permissions via MongoDB (more reliable)
-      await usersCollection.updateOne(
-        { email: user.email },
+      // CRITICAL: Update by both email AND tenantId, use normalized email
+      // Password hash is already correct (created by registration service)
+      // Re-get database connection in case it was closed during GraphQL call
+      const dbContext = (global as any).__dbContext || {};
+      const dbUpdate = await getAuthDatabase(dbContext);
+      const usersCollectionUpdate = dbUpdate.collection('users');
+      
+      // Convert permissions object to array format (GraphQL expects array)
+      // Permissions can be stored as object { '*:*:*': true } or array ['*:*:*']
+      const permissionsArray = typeof user.permissions === 'object' && !Array.isArray(user.permissions)
+        ? Object.keys(user.permissions).filter(key => user.permissions[key] === true)
+        : Array.isArray(user.permissions)
+        ? user.permissions
+        : [];
+      
+      await usersCollectionUpdate.updateOne(
+        { email: normalizedEmail, tenantId: DEFAULT_TENANT_ID },
         {
           $set: {
-            roles: user.roles,
-            permissions: user.permissions,
+            roles: user.roles, // Roles should already be array
+            permissions: permissionsArray, // Convert to array format
           },
         }
       );
 
       return {
         userId,
-        email: user.email,
+        email: normalizedEmail, // Return normalized email
         created: true,
       };
     }
 
     throw new Error(`Registration failed: ${data.register.message || 'Unknown error'}`);
   } catch (error: any) {
-    // If registration fails (e.g., user already exists), try to find user
-    const foundUser = await usersCollection.findOne({ email: user.email });
+    // If registration fails (e.g., user already exists), try to find and update user
+    // CRITICAL: Check by both email AND tenantId, use normalized email
+    // Re-get database connection in case it was closed
+    const dbContext = (global as any).__dbContext || {};
+    const dbRetry = await getAuthDatabase(dbContext);
+    const usersCollectionRetry = dbRetry.collection('users');
+    const foundUser = await usersCollectionRetry.findOne({ 
+      email: normalizedEmail,
+      tenantId: DEFAULT_TENANT_ID 
+    });
     if (foundUser) {
-      const userId = foundUser._id?.toString() || foundUser.id;
+      // User exists - update roles and permissions instead of deleting
+      // This avoids race conditions with services that auto-create default users
+      const userId = foundUser.id || foundUser._id?.toString();
       
-      // Update roles and permissions
-      await usersCollection.updateOne(
-        { email: user.email },
-        {
-          $set: {
-            roles: user.roles,
-            permissions: user.permissions,
-          },
+      if (options.updateRoles || options.updatePermissions) {
+        const updateFields: Record<string, unknown> = {};
+        
+        if (options.updateRoles) {
+          updateFields.roles = user.roles;
         }
-      );
-
+        
+        if (options.updatePermissions) {
+          const permissionsArray = typeof user.permissions === 'object' && !Array.isArray(user.permissions)
+            ? Object.entries(user.permissions)
+                .filter(([_, v]) => v === true)
+                .map(([k]) => k)
+            : Array.isArray(user.permissions)
+            ? user.permissions
+            : [];
+          updateFields.permissions = permissionsArray;
+        }
+        
+        if (Object.keys(updateFields).length > 0) {
+          await usersCollectionRetry.updateOne(
+            { email: normalizedEmail, tenantId: DEFAULT_TENANT_ID },
+            { $set: updateFields }
+          );
+        }
+      }
+      
       return {
         userId,
-        email: user.email,
-        created: false,
+        email: normalizedEmail,
+        created: false, // User already existed
       };
     }
 
-    throw new Error(`Failed to register ${user.email}: ${error.message}`);
+    throw new Error(`Failed to register ${normalizedEmail}: ${error.message}`);
   }
 }
 
@@ -468,12 +593,18 @@ export async function getUserId(userKeyOrEmail: string): Promise<string> {
     }
   }
 
-  const db = await getAuthDatabase();
+  // Get dbContext from global if available (set by test scripts)
+  const dbContext = (global as any).__dbContext || {};
+  const db = await getAuthDatabase(dbContext);
   const usersCollection = db.collection('users');
-  const userDoc = await usersCollection.findOne({ email: user.email });
+  const normalizedEmail = user.email.toLowerCase().trim(); // Match Passport's normalization
+  const userDoc = await usersCollection.findOne({ 
+    email: normalizedEmail,
+    tenantId: DEFAULT_TENANT_ID 
+  });
 
   if (!userDoc) {
-    throw new Error(`User not found in database: ${user.email}`);
+    throw new Error(`User not found in database: ${normalizedEmail}`);
   }
 
   return userDoc._id?.toString() || userDoc.id;
@@ -491,7 +622,9 @@ export async function getUserIds(userKeys: string[]): Promise<Record<string, str
     return user.email;
   });
 
-  const db = await getAuthDatabase();
+  // Get dbContext from global if available (set by test scripts)
+  const dbContext = (global as any).__dbContext || {};
+  const db = await getAuthDatabase(dbContext);
   const usersCollection = db.collection('users');
   const users = await usersCollection.find({ email: { $in: emails } }).toArray();
 
@@ -704,7 +837,7 @@ export function decodeJWT(token: string): JWTPayload {
  * Pre-generated tokens for common users (for testing without auth service)
  * These are mock tokens - use loginAs() for real tokens from auth service
  */
-export function getMockTokens(tenantId: string = DEFAULT_TENANT_ID) {
+export function getMockTokens(tenantId: string = getDefaultTenantId()) {
   return {
     system: createTokenForUser('system', '8h', { tenantId }),
     paymentGateway: createTokenForUser('paymentGateway', '8h', { tenantId }),
@@ -715,4 +848,112 @@ export function getMockTokens(tenantId: string = DEFAULT_TENANT_ID) {
     user4: createTokenForUser('user4', '8h', { tenantId }),
     user5: createTokenForUser('user5', '8h', { tenantId }),
   };
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Role-Based User Lookup (uses core-service utilities)
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Find a user ID by role (role-based lookup)
+ * Uses the same approach as bonus-service and payment-service
+ * 
+ * @example
+ * // Find system user
+ * const systemUserId = await getUserIdByRole('system');
+ * 
+ * // Find system user for specific tenant
+ * const systemUserId = await getUserIdByRole('system', 'tenant-123');
+ * 
+ * // Find bonus-pool user (if exists)
+ * const bonusPoolUserId = await getUserIdByRole('bonus-pool', undefined, false);
+ * 
+ * @param role - Role to search for (e.g., 'system', 'payment-provider', 'bonus-pool')
+ * @param tenantId - Optional tenant ID to filter by (defaults to DEFAULT_TENANT_ID)
+ * @param throwIfNotFound - Whether to throw error if no user found (default: true)
+ * @returns User ID (string) or empty string if not found and throwIfNotFound is false
+ */
+export async function getUserIdByRole(
+  role: string,
+  tenantId?: string,
+  throwIfNotFound: boolean = true
+): Promise<string> {
+  // Ensure database is connected (required for role-based lookup)
+  // Use script config to get MongoDB URI dynamically
+  const config = await loadScriptConfig();
+  await connectDatabase(config.coreMongoUri);
+  
+  // Get the MongoDB client to pass to findUserIdByRole
+  const client = getClient();
+  
+  return await findUserIdByRole({
+    role,
+    tenantId: tenantId || DEFAULT_TENANT_ID,
+    throwIfNotFound,
+    client,
+  });
+}
+
+/**
+ * Find multiple user IDs by role
+ * Returns all users with the specified role (useful when multiple system users exist)
+ * 
+ * @example
+ * // Find all system users
+ * const systemUserIds = await getUserIdsByRole('system');
+ * 
+ * // Find all payment providers for a tenant
+ * const providerIds = await getUserIdsByRole('payment-provider', 'tenant-123');
+ * 
+ * @param role - Role to search for
+ * @param tenantId - Optional tenant ID to filter by (defaults to DEFAULT_TENANT_ID)
+ * @returns Array of user IDs
+ */
+export async function getUserIdsByRole(
+  role: string,
+  tenantId?: string
+): Promise<string[]> {
+  // Ensure database is connected (required for role-based lookup)
+  // Use script config to get MongoDB URI dynamically
+  const config = await loadScriptConfig();
+  await connectDatabase(config.coreMongoUri);
+  
+  // Get the MongoDB client to pass to findUserIdsByRole
+  const client = getClient();
+  
+  return await findUserIdsByRole({
+    role,
+    tenantId: tenantId || getDefaultTenantId(),
+    client,
+  });
+}
+
+/**
+ * Get system user ID using role-based lookup
+ * Convenience function that uses the same approach as services
+ * 
+ * @example
+ * const systemUserId = await getSystemUserIdByRole();
+ * const systemUserId = await getSystemUserIdByRole('tenant-123');
+ * 
+ * @param tenantId - Optional tenant ID (defaults to DEFAULT_TENANT_ID)
+ * @returns System user ID
+ */
+export async function getSystemUserIdByRole(tenantId?: string): Promise<string> {
+  return await getUserIdByRole('system', tenantId, true);
+}
+
+/**
+ * Get bonus-pool user ID using role-based lookup (if exists)
+ * Note: Services now use system user's bonusBalance, but this function
+ * can find a bonus-pool user if one exists for testing/demonstration
+ * 
+ * @example
+ * const bonusPoolUserId = await getBonusPoolUserIdByRole(); // Returns '' if not found
+ * 
+ * @param tenantId - Optional tenant ID (defaults to DEFAULT_TENANT_ID)
+ * @returns Bonus-pool user ID or empty string if not found
+ */
+export async function getBonusPoolUserIdByRole(tenantId?: string): Promise<string> {
+  return await getUserIdByRole('bonus-pool', tenantId, false);
 }

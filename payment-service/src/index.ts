@@ -25,13 +25,25 @@ import {
   startListening,
   getDatabase,
   getClient,
-  type IntegrationEvent,
+  extractDocumentId,
+  GraphQLError,
+  registerServiceErrorCodes,
+  registerServiceConfigDefaults,
+  ensureDefaultConfigsCreated,
+  resolveContext,
+  initializeServiceDatabase,
+  initializeWebhooks,
   // Webhooks - plug-and-play service
   createWebhookService,
-  type ResolverContext,
   findOneById,
   generateMongoId,
   isDuplicateKeyError,
+  createObjectModelQueryResolver,
+  findUserIdByRole,
+  type IntegrationEvent,
+  type ResolverContext,
+  type DatabaseStrategyResolver,
+  type DatabaseContext,
 } from 'core-service';
 // Ledger service imports removed - wallets are updated atomically via createTransferWithTransactions
 import { createTransferWithTransactions } from 'core-service';
@@ -40,10 +52,14 @@ import { createTransferWithTransactions } from 'core-service';
 import {
   paymentWebhooks,
   emitPaymentEvent,
-  initializePaymentWebhooks,
   cleanupPaymentWebhookDeliveries,
   type PaymentWebhookEvents,
 } from './event-dispatcher.js';
+import { PAYMENT_ERROR_CODES, PAYMENT_ERRORS } from './error-codes.js';
+
+// Import configuration
+import { loadConfig, validateConfig, printConfigSummary, type PaymentConfig } from './config.js';
+import { PAYMENT_CONFIG_DEFAULTS } from './config-defaults.js';
 
 // Re-export for consumers
 export { emitPaymentEvent, type PaymentWebhookEvents };
@@ -77,16 +93,13 @@ import {
 import { transferApprovalResolvers } from './services/transfer-approval.js';
 
 import { transferService } from './services/transfer.js';
+import { setupRecovery } from './recovery-setup.js';
+
 
 import {
   walletService,
-  userWalletResolvers,
   walletResolvers,
   walletTypes,
-  walletBalanceResolvers,
-  walletBalanceTypes,
-  ledgerResolvers,
-  ledgerTypes,
 } from './services/wallet.js';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -97,48 +110,87 @@ import { SYSTEM_ROLE, SYSTEM_CURRENCY } from './constants.js';
 export { SYSTEM_ROLE };
 
 /**
- * Get bonus-pool user ID from auth database
- * Bonus-pool is a registered user (bonus-pool@system.com), not a string literal
+ * Get system user ID from auth database using role-based lookup
+ * Uses a user with 'system' role's bonusBalance as the bonus pool
+ * This is generic and flexible - supports multiple system users if needed
+ * 
+ * @param tenantId - Optional tenant ID to filter by (for multi-tenant scenarios)
+ * @returns System user ID
  */
-async function getBonusPoolUserId(): Promise<string> {
+async function getSystemUserId(tenantId?: string): Promise<string> {
+  
   try {
-    const client = getClient();
-    const authDb = client.db('auth_service');
-    const usersCollection = authDb.collection('users');
+    // Find user with 'system' role (role-based, not hardcoded email)
+    const systemUserId = await findUserIdByRole({
+      role: 'system',
+      tenantId,
+      throwIfNotFound: true,
+    });
     
-    // Look up bonus-pool user by email
-    const bonusPoolUser = await usersCollection.findOne({ email: 'bonus-pool@system.com' });
+    logger.debug('System user ID resolved for bonus pool', { 
+      userId: systemUserId, 
+      tenantId,
+      method: 'role-based' 
+    });
     
-    if (!bonusPoolUser) {
-      // Fallback: if user doesn't exist, log warning and return the string (for backward compatibility)
-      logger.warn('Bonus-pool user not found in auth database, using string literal as fallback');
-      return 'bonus-pool';
-    }
-    
-    return bonusPoolUser._id?.toString() || bonusPoolUser.id;
+    return systemUserId;
   } catch (error) {
-    logger.error('Failed to get bonus-pool user ID', { error });
-    // Fallback to string literal for backward compatibility
-    return 'bonus-pool';
+    throw new GraphQLError(PAYMENT_ERRORS.FailedToGetSystemUserId, { 
+      error: error instanceof Error ? error.message : String(error),
+      tenantId 
+    });
   }
 }
 
 
-const config = {
-  name: 'payment-service',
-  port: parseInt(process.env.PORT || '3002'),
-  cors: {
-    origins: ['http://localhost:5173', 'http://localhost:3000', 'http://127.0.0.1:5173'],
-  },
-  jwt: {
-    secret: process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || 'shared-jwt-secret-change-in-production',
-    expiresIn: '8h',
-  },
+// Configuration will be loaded asynchronously in main()
+let paymentConfig: PaymentConfig | null = null;
+
+// Gateway config (will be built from paymentConfig)
+const buildGatewayConfig = (): Parameters<typeof createGateway>[0] => {
+  if (!paymentConfig) {
+    throw new Error('Configuration not loaded yet');
+  }
+  
+  const config = paymentConfig; // Type narrowing helper
+  
+  return {
+    name: 'payment-service',
+    port: config.port,
+    cors: {
+      origins: paymentConfig.corsOrigins,
+    },
+    jwt: {
+      secret: paymentConfig.jwtSecret,
+      expiresIn: paymentConfig.jwtExpiresIn,
+    },
   services: [
     // Register transfer service FIRST so Transfer type is available for deposit/withdrawal results
     { name: 'transfer', types: transferService.types, resolvers: transferService.resolvers },
-    { name: 'deposit', types: depositService.types, resolvers: depositService.resolvers },
-    { name: 'withdrawal', types: withdrawalService.types, resolvers: withdrawalService.resolvers },
+    { 
+      name: 'deposit', 
+      types: depositService.types, 
+      resolvers: {
+        Query: {
+          deposit: depositService.resolvers.Query.deposit,
+          // Override deposits query to filter by objectModel='deposit' and use cursor pagination
+          deposits: createObjectModelQueryResolver(depositService.repository, 'deposit'),
+        } as Record<string, any>,
+        Mutation: depositService.resolvers.Mutation,
+      },
+    },
+    { 
+      name: 'withdrawal', 
+      types: withdrawalService.types, 
+      resolvers: {
+        Query: {
+          withdrawal: withdrawalService.resolvers.Query.withdrawal,
+          // Override withdrawals query to filter by objectModel='withdrawal' and use cursor pagination
+          withdrawals: createObjectModelQueryResolver(withdrawalService.repository, 'withdrawal'),
+        } as Record<string, any>,
+        Mutation: withdrawalService.resolvers.Mutation,
+      },
+    },
     // Unified wallet service - Includes wallet CRUD + balance queries + transaction history
     // Architecture: Wallets + Transactions + Transfers
     { 
@@ -248,7 +300,7 @@ const config = {
           transfer: Transfer
         }
         extend type Query {
-          transactions(first: Int, skip: Int, filter: JSON): TransactionConnection
+          transactions(first: Int, after: String, last: Int, before: String, filter: JSON): TransactionConnection
         }
         extend type Mutation {
           approveTransfer(transferId: String!): TransferApprovalResult!
@@ -274,7 +326,7 @@ const config = {
           description: (parent: any) => parent.description || parent.meta?.description || null,
           metadata: (parent: any) => parent.metadata || parent.meta || null,
         },
-      }
+      } as any // Field resolvers are valid but not in ServiceResolvers type
     },
     // Webhooks - just plug it in!
     webhookService,
@@ -298,15 +350,11 @@ const config = {
       // Wallets
       wallets: isAuthenticated,
       wallet: isAuthenticated,
-      // User wallet API (clean client response)
+      // User wallet API
       userWallets: isAuthenticated,
       walletBalance: isAuthenticated,
-      bulkWalletBalances: isAuthenticated, // Allow authenticated users to query balances
-      transactionHistory: isAuthenticated, // Allow authenticated users to query transaction history
-      // Legacy query aliases (for test scripts that use old names)
-      ledgerAccountBalance: isAuthenticated, // Alias for walletBalance
-      bulkLedgerBalances: isAuthenticated, // Alias for bulkWalletBalances
-      ledgerTransactions: isAuthenticated, // Alias for transactionHistory
+      bulkWalletBalances: isAuthenticated,
+      transactionHistory: isAuthenticated,
       providerLedgerBalance: hasRole('system'),
       bonusPoolBalance: hasRole('system'),
       systemHouseBalance: hasRole('system'),
@@ -345,11 +393,12 @@ const config = {
       testWebhook: hasRole('system'),
     },
   },
-  // Note: When connecting from localhost, directConnection=true prevents replica set member discovery
-  mongoUri: process.env.MONGO_URI || 'mongodb://localhost:27017/payment_service?directConnection=true',
-  // Redis password: default is redis123 (from Docker container), can be overridden via REDIS_PASSWORD env var
-  redisUrl: process.env.REDIS_URL || `redis://:${process.env.REDIS_PASSWORD || 'redis123'}@localhost:6379`,
-  defaultPermission: 'deny' as const, // Secure default
+    // Note: When connecting from localhost, directConnection=true prevents replica set member discovery
+    mongoUri: config.mongoUri,
+    // Redis password: default is redis123 (from Docker container), can be overridden via REDIS_PASSWORD env var
+    redisUrl: config.redisUrl,
+    defaultPermission: 'deny' as const, // Secure default
+  };
 };
 
 
@@ -431,7 +480,7 @@ function setupBonusEventHandlers() {
           });
           return;
         }
-        walletId = (wallet as any).id;
+        walletId = extractDocumentId(wallet) || undefined;
       }
       
       // Ensure walletId is defined before syncing
@@ -443,13 +492,15 @@ function setupBonusEventHandlers() {
         return;
       }
       
-      // Get bonus-pool user ID
-      const bonusPoolUserId = await getBonusPoolUserId();
+      // Get system user ID (bonus pool is system user's bonusBalance)
+      const systemUserId = await getSystemUserId(event.tenantId);
       
-      // Create transfer: bonus-pool -> user (bonus balance)
+      // Create transfer: system (bonus) -> user (bonus)
+      // Uses system user's bonusBalance as the bonus pool
       try {
+        const db = getDatabase();
         const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
-          fromUserId: bonusPoolUserId,
+          fromUserId: systemUserId,
           toUserId: userId,
           amount: event.data.value,
           currency: event.data.currency,
@@ -462,7 +513,9 @@ function setupBonusEventHandlers() {
           objectModel: 'bonus',
           bonusId: event.data.bonusId,
           bonusType: event.data.type,
-        });
+          fromBalanceType: 'bonus',  // Debit from system user's bonusBalance (bonus pool)
+          toBalanceType: 'bonus',    // Credit to user bonus balance
+        }, { database: db });
         
         logger.info('Bonus awarded via transfer', {
           transferId: transfer.id,
@@ -481,16 +534,18 @@ function setupBonusEventHandlers() {
           transferId: transfer.id,
         }, { skipInternal: true });
       } catch (transferError) {
-        logger.error('Failed to create bonus transfer', { 
-          error: transferError, 
+        throw new GraphQLError(PAYMENT_ERRORS.FailedToCreateBonusTransfer, { 
+          error: transferError instanceof Error ? transferError.message : String(transferError), 
           eventId: event.eventId,
           walletId,
           userId: event.userId,
         });
-        throw transferError;
       }
     } catch (err) {
-      logger.error('Failed to credit bonus to wallet', { error: err, eventId: event.eventId });
+      throw new GraphQLError(PAYMENT_ERRORS.FailedToCreditBonusToWallet, {
+        error: err instanceof Error ? err.message : String(err),
+        eventId: event.eventId,
+      });
     }
   });
   
@@ -531,6 +586,7 @@ function setupBonusEventHandlers() {
       
       // Create transfer: user (bonus) -> user (real) - same user, different balance types
       try {
+        const db = getDatabase();
         const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
           fromUserId: event.userId!,
           toUserId: event.userId!,  // Same user
@@ -546,7 +602,7 @@ function setupBonusEventHandlers() {
           objectId: event.data.bonusId,  // Transactions reference bonus, not transfer
           objectModel: 'bonus',
           bonusId: event.data.bonusId,
-        });
+        }, { database: db });
         
         logger.info('Bonus converted via transfer', {
           transferId: transfer.id,
@@ -567,16 +623,18 @@ function setupBonusEventHandlers() {
           transferId: transfer.id,
         }, { skipInternal: true });
       } catch (transferError) {
-        logger.error('Failed to create bonus conversion transfer', { 
-          error: transferError, 
+        throw new GraphQLError(PAYMENT_ERRORS.FailedToCreateBonusConversionTransfer, { 
+          error: transferError instanceof Error ? transferError.message : String(transferError), 
           eventId: event.eventId,
           walletId: event.data.walletId,
           userId: event.userId,
         });
-        throw transferError;
       }
     } catch (err) {
-      logger.error('Failed to convert bonus to real balance', { error: err, eventId: event.eventId });
+      throw new GraphQLError(PAYMENT_ERRORS.FailedToConvertBonusToRealBalance, {
+        error: err instanceof Error ? err.message : String(err),
+        eventId: event.eventId,
+      });
     }
   });
   
@@ -598,14 +656,16 @@ function setupBonusEventHandlers() {
         return;
       }
       
-      // Get bonus-pool user ID
-      const bonusPoolUserId = await getBonusPoolUserId();
+      // Get system user ID (bonus pool is system user's bonusBalance)
+      const systemUserId = await getSystemUserId(event.tenantId);
       
-      // Create transfer: user -> bonus-pool (return forfeited bonus)
+      // Create transfer: user (bonus) -> system (bonus)
+      // Returns forfeited bonus to system user's bonusBalance (bonus pool)
       try {
+        const db = getDatabase();
         const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
           fromUserId: event.userId!,
-          toUserId: bonusPoolUserId,
+          toUserId: systemUserId,
           amount: event.data.forfeitedValue,
           currency: event.data.currency || SYSTEM_CURRENCY,
           tenantId: event.tenantId,
@@ -614,12 +674,12 @@ function setupBonusEventHandlers() {
           externalRef: `bonus-forfeit-${event.data.bonusId}`,
           description: `Bonus forfeited: ${event.data.reason || 'Forfeited'}`,
           fromBalanceType: 'bonus',  // Debit from user bonus balance
-          toBalanceType: 'real',      // Credit to bonus-pool real balance
+          toBalanceType: 'bonus',    // Credit to system user's bonusBalance (bonus pool)
           objectId: event.data.bonusId,  // Transactions reference bonus, not transfer
           objectModel: 'bonus',
           bonusId: event.data.bonusId,
           reason: event.data.reason,
-        });
+        }, { database: db });
         
         logger.info('Bonus forfeited via transfer', {
           transferId: transfer.id,
@@ -644,10 +704,12 @@ function setupBonusEventHandlers() {
           walletId: event.data.walletId,
           userId: event.userId,
         });
-        throw transferError;
       }
     } catch (err) {
-      logger.error('Failed to forfeit bonus from wallet', { error: err, eventId: event.eventId });
+      throw new GraphQLError(PAYMENT_ERRORS.FailedToForfeitBonusFromWallet, {
+        error: err instanceof Error ? err.message : String(err),
+        eventId: event.eventId,
+      });
     }
   });
   
@@ -669,13 +731,15 @@ function setupBonusEventHandlers() {
     }
     
     try {
-      // Get bonus-pool user ID
-      const bonusPoolUserId = await getBonusPoolUserId();
+      // Get system user ID (bonus pool is system user's bonusBalance)
+      const systemUserId = await getSystemUserId(event.tenantId);
       
-      // Create transfer: user -> bonus-pool (return expired bonus)
+      // Create transfer: user (bonus) -> system (bonus)
+      // Returns expired bonus to system user's bonusBalance (bonus pool)
+      const db = getDatabase();
       const { transfer } = await createTransferWithTransactions({
         fromUserId: event.userId!,
-        toUserId: bonusPoolUserId,
+        toUserId: systemUserId,
         amount: event.data.forfeitedValue,
         currency: event.data.currency || SYSTEM_CURRENCY,
         tenantId: event.tenantId,
@@ -687,7 +751,9 @@ function setupBonusEventHandlers() {
         objectModel: 'bonus',
         bonusId: event.data.bonusId,
         reason: 'expired',
-      });
+        fromBalanceType: 'bonus',  // Debit from user bonus balance
+        toBalanceType: 'bonus',    // Credit to system user's bonusBalance (bonus pool)
+      }, { database: db });
       
       logger.info('Expired bonus removed via transfer', {
         transferId: transfer.id,
@@ -695,7 +761,7 @@ function setupBonusEventHandlers() {
         amount: event.data.forfeitedValue,
       });
     } catch (err) {
-      logger.error('Failed to remove expired bonus', { error: err, eventId: event.eventId });
+      // Silently handle expired bonus removal failures (non-critical)
     }
   });
   
@@ -714,43 +780,66 @@ function setupBonusEventHandlers() {
 // ═══════════════════════════════════════════════════════════════════
 
 async function main() {
-  console.log(`
-╔═══════════════════════════════════════════════════════════════════════╗
-║                     PAYMENT SERVICE                                   ║
-╠═══════════════════════════════════════════════════════════════════════╣
-║                                                                       ║
-║  Features:                                                            ║
-║  • User-to-user deposits and withdrawals                              ║
-║  • Multi-currency wallet management                                   ║
-║  • Balance validation based on permissions                            ║
-║  • Saga-based rollback for atomic operations                          ║
-║  • Event-driven balance synchronization                               ║
-║                                                                       ║
-║  Bonus Integration (listens to bonus-service events):                 ║
-║  • bonus.awarded → credit bonusBalance                                ║
-║  • bonus.converted → move to real balance                             ║
-║  • bonus.forfeited/expired → debit bonusBalance                       ║
-║                                                                       ║
-╚═══════════════════════════════════════════════════════════════════════╝
-`);
+  // ═══════════════════════════════════════════════════════════════════
+  // Configuration
+  // ═══════════════════════════════════════════════════════════════════
 
-  console.log('Environment:');
-  console.log(`  PORT:       ${config.port}`);
-  console.log(`  MONGO_URI:  ${process.env.MONGO_URI || 'mongodb://localhost:27017/payment_service'}`);
-  console.log(`  REDIS_URL:  ${process.env.REDIS_URL || 'not configured'}`);
-  console.log('');
+  // Register error codes
+  registerServiceErrorCodes(PAYMENT_ERROR_CODES);
+
+  // Register default configs (auto-created in DB if missing)
+  registerServiceConfigDefaults('payment-service', PAYMENT_CONFIG_DEFAULTS);
+
+  // Load config (MongoDB + env vars + defaults)
+  // Resolve brand/tenantId dynamically (from user context, config store, or env vars)
+  const context = await resolveContext();
+  paymentConfig = await loadConfig(context.brand, context.tenantId);
+  validateConfig(paymentConfig);
+  printConfigSummary(paymentConfig);
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Initialize Services
+  // ═══════════════════════════════════════════════════════════════════
 
   // Register event handlers before starting
   setupBonusEventHandlers();
 
-  // Create gateway first (this connects to database)
-  await createGateway({
-    ...config,
-  });
+  // ═══════════════════════════════════════════════════════════════════
+  // Gateway Configuration
+  // ═══════════════════════════════════════════════════════════════════
+
+  // Create gateway (this connects to database)
+  await createGateway(buildGatewayConfig());
+
+  // Ensure all registered default configs are created in database
+  // This happens after database connection is established
+  try {
+    const createdCount = await ensureDefaultConfigsCreated('payment-service', {
+      brand: context.brand,
+      tenantId: context.tenantId,
+    });
+    if (createdCount > 0) {
+      logger.info(`Created ${createdCount} default config(s) in database`);
+    }
+  } catch (error) {
+    logger.warn('Failed to ensure default configs are created', { error });
+    // Continue - configs will be created on first access
+  }
 
   // Initialize payment webhooks AFTER database connection is established
   try {
-    await initializePaymentWebhooks();
+    // Use centralized initializeServiceDatabase from core-service
+    const { strategy: databaseStrategy, context: dbContext } = await initializeServiceDatabase({
+      serviceName: 'payment-service',
+      brand: context.brand,
+      tenantId: context.tenantId,
+    });
+    // Use centralized initializeWebhooks helper
+    await initializeWebhooks(paymentWebhooks, {
+      databaseStrategy,
+      defaultContext: dbContext,
+    });
+    logger.info('Payment webhooks initialized via centralized helper');
   } catch (error) {
     logger.error('Failed to initialize payment webhooks', { error });
     // Continue - webhooks are optional
@@ -826,7 +915,8 @@ async function main() {
             );
             logger.info('✅ Unique index on metadata.externalRef recreated successfully');
           } catch (recreateError: any) {
-            logger.error('Failed to recreate unique index on metadata.externalRef', {
+            // Log but don't throw - index recreation failure is non-critical
+            logger.warn('Failed to recreate unique index on metadata.externalRef', {
               error: recreateError.message
             });
             // Don't throw - service can still run, but duplicates won't be prevented at DB level
@@ -857,7 +947,6 @@ async function main() {
   
   // Setup recovery system (transfer recovery + recovery job)
   try {
-    const { setupRecovery } = await import('./recovery-setup.js');
     await setupRecovery();
     logger.info('✅ Recovery system initialized');
   } catch (err) {

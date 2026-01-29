@@ -153,7 +153,7 @@ const userRepo = new UserRepository();
 // Find user by email
 const user = await userRepo.findByEmail('user@example.com', 'tenant-abc');
 
-// Query users with filters
+// Query users with filters (cursor-based pagination)
 const result = await userRepo.query({
   filter: {
     tenantId: 'tenant-abc',
@@ -162,8 +162,8 @@ const result = await userRepo.query({
     context: 'branch:branch-001',
   },
   pagination: {
-    limit: 10,
-    offset: 0,
+    first: 10,      // Number of items to return
+    after: cursor,  // Optional: cursor from previous page
   },
 });
 

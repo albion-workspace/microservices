@@ -4,7 +4,8 @@
 
 import nodemailer from 'nodemailer';
 import type { Transporter } from 'nodemailer';
-import { logger, generateId } from 'core-service';
+import { logger, generateId, GraphQLError } from 'core-service';
+import { NOTIFICATION_ERRORS } from '../error-codes.js';
 import type { NotificationProvider, EmailNotification, NotificationResponse, NotificationConfig } from '../types.js';
 
 export class EmailProvider implements NotificationProvider {
@@ -37,7 +38,7 @@ export class EmailProvider implements NotificationProvider {
   
   async send(notification: EmailNotification): Promise<NotificationResponse> {
     if (!this.transporter) {
-      throw new Error('Email provider not configured');
+      throw new GraphQLError(NOTIFICATION_ERRORS.EmailProviderNotConfigured, {});
     }
     
     try {
@@ -85,8 +86,9 @@ export class EmailProvider implements NotificationProvider {
       logger.info('Email provider verified successfully');
       return true;
     } catch (error: any) {
-      logger.error('Email provider verification failed', { error: error.message });
-      return false;
+      throw new GraphQLError(NOTIFICATION_ERRORS.EmailProviderVerificationFailed, {
+        error: error.message,
+      });
     }
   }
 }

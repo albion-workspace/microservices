@@ -16,7 +16,8 @@
  * - Exchange rates are cached for 5 minutes to reduce API calls
  */
 
-import { getDatabase, logger } from 'core-service';
+import { getDatabase, logger, CircuitBreaker, GraphQLError } from 'core-service';
+import { PAYMENT_ERRORS } from '../error-codes.js';
 import { SYSTEM_CURRENCY } from '../constants.js';
 
 export interface ExchangeRate {
@@ -39,6 +40,17 @@ export interface ExchangeRateProvider {
  */
 const rateCache = new Map<string, { rate: number; expiresAt: number }>();
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Circuit breaker for exchange rate API calls
+ * Prevents cascading failures when external API is down
+ */
+const exchangeRateCircuitBreaker = new CircuitBreaker({
+  name: 'ExchangeRateAPI',
+  failureThreshold: 5,
+  resetTimeout: 60000, // 1 minute
+  monitoringWindow: 120000, // 2 minutes
+});
 
 /**
  * Get exchange rate between two currencies
@@ -86,7 +98,10 @@ export async function getExchangeRate(
   
   // Try to fetch from external API (placeholder - implement actual API integration)
   try {
-    const rate = await fetchExchangeRateFromAPI(fromCurrency, toCurrency);
+    // Use circuit breaker to protect against API failures
+    const rate = await exchangeRateCircuitBreaker.execute(() =>
+      fetchExchangeRateFromAPI(fromCurrency, toCurrency)
+    );
     
     // Cache the rate
     if (useCache) {
@@ -101,24 +116,34 @@ export async function getExchangeRate(
     
     return rate;
   } catch (error) {
+    const circuitBreakerState = exchangeRateCircuitBreaker.getState();
+    
     logger.warn('Failed to fetch exchange rate from API', {
       fromCurrency,
       toCurrency,
       error: error instanceof Error ? error.message : String(error),
+      circuitBreakerState,
     });
     
     // Fallback: Try reverse rate if available
     const reverseKey = `${toCurrency}:${fromCurrency}`;
     const reverseCached = rateCache.get(reverseKey);
     if (reverseCached && reverseCached.expiresAt > Date.now()) {
+      logger.info('Using reverse cached exchange rate as fallback', {
+        fromCurrency,
+        toCurrency,
+        reverseRate: reverseCached.rate,
+      });
       return 1 / reverseCached.rate;
     }
     
     // Last resort: throw error (don't guess exchange rates!)
-    throw new Error(
-      `Exchange rate not available for ${fromCurrency} to ${toCurrency}. ` +
-      `Please configure manual rate or ensure exchange rate API is available.`
-    );
+    throw new GraphQLError(PAYMENT_ERRORS.ExchangeRateNotAvailable, {
+      fromCurrency,
+      toCurrency,
+      circuitBreakerState,
+      reason: 'Please configure manual rate or ensure exchange rate API is available',
+    });
   }
 }
 
@@ -143,6 +168,7 @@ async function getManualExchangeRate(
   toCurrency: string
 ): Promise<number | null> {
   try {
+    // GraphQL resolvers use getDatabase() as database strategies are initialized at gateway level
     const db = getDatabase();
     const rate = await db.collection('exchange_rates').findOne(
       {
@@ -171,6 +197,7 @@ async function storeExchangeRate(
   source: 'api' | 'manual'
 ): Promise<void> {
   try {
+    // GraphQL resolvers use getDatabase() as database strategies are initialized at gateway level
     const db = getDatabase();
     await db.collection('exchange_rates').insertOne({
       fromCurrency,
@@ -189,21 +216,33 @@ async function storeExchangeRate(
 
 /**
  * Fetch exchange rate from external API
- * TODO: Integrate with actual exchange rate API (e.g., Fixer.io, ExchangeRate-API, etc.)
+ * 
+ * **Future Enhancement**: This function currently returns mock rates for development/testing.
+ * In production, integrate with an actual exchange rate API provider.
+ * 
+ * **Recommended Providers**:
+ * - Fixer.io: https://fixer.io (supports 170+ currencies, real-time rates)
+ * - ExchangeRate-API: https://www.exchangerate-api.com (free tier available)
+ * - Open Exchange Rates: https://openexchangerates.org (good for high-volume)
+ * - CurrencyLayer: https://currencylayer.com (reliable, good documentation)
+ * 
+ * **Implementation Notes**:
+ * - The function is already protected by a circuit breaker (see `exchangeRateCircuitBreaker`)
+ * - Rates are cached for 5 minutes (see `CACHE_TTL_MS`)
+ * - Manual rate overrides take precedence (see `getManualExchangeRate`)
+ * - Ensure API key is stored securely (use environment variables)
+ * - Handle rate limits and API errors gracefully (circuit breaker will protect)
+ * - Consider implementing retry logic with exponential backoff
+ * 
+ * **Current Behavior**: Returns mock rates for EUR/USD/GBP pairs. Falls back to error
+ * for unsupported pairs, which triggers manual rate configuration requirement.
  */
 async function fetchExchangeRateFromAPI(
   fromCurrency: string,
   toCurrency: string
 ): Promise<number> {
-  // Placeholder implementation
-  // In production, integrate with:
-  // - Fixer.io: https://fixer.io
-  // - ExchangeRate-API: https://www.exchangerate-api.com
-  // - Open Exchange Rates: https://openexchangerates.org
-  // - Or your preferred provider
-  
-  // For now, return a mock rate (1 EUR = 1.1 USD, etc.)
-  // This should be replaced with actual API call
+  // Mock implementation for development/testing
+  // TODO: Replace with actual API integration when moving to production
   
   const mockRates: Record<string, Record<string, number>> = {
     EUR: { USD: 1.1, GBP: 0.85, BTC: 0.000015, ETH: 0.00025 },
@@ -220,7 +259,11 @@ async function fetchExchangeRateFromAPI(
     return mockRates[fromCurrency][toCurrency];
   }
   
-  throw new Error(`Mock exchange rate not available for ${fromCurrency} to ${toCurrency}`);
+  throw new GraphQLError(PAYMENT_ERRORS.ExchangeRateNotAvailable, {
+    fromCurrency,
+    toCurrency,
+    reason: 'Mock exchange rate not available',
+  });
 }
 
 /**
@@ -232,6 +275,7 @@ export async function setManualExchangeRate(
   rate: number,
   expiresAt?: Date
 ): Promise<void> {
+  // GraphQL resolvers use getDatabase() as database strategies are initialized at gateway level
   const db = getDatabase();
   
   // Deactivate existing manual rates for this pair
@@ -270,6 +314,7 @@ export async function setManualExchangeRate(
  * Get all active exchange rates
  */
 export async function getAllExchangeRates(): Promise<ExchangeRate[]> {
+  // GraphQL resolvers use getDatabase() as database strategies are initialized at gateway level
   const db = getDatabase();
   const rates = await db.collection('exchange_rates')
     .find({ isActive: true })

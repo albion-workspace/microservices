@@ -7,9 +7,10 @@
  * All 33 bonus types are registered here.
  */
 
-import { logger } from 'core-service';
+import { logger, type DatabaseResolutionOptions } from 'core-service';
 import type { BonusType } from '../../types.js';
 import type { IBonusHandler, HandlerMap } from './types.js';
+import type { BaseHandlerOptions } from './base-handler.js';
 
 // Import all handlers
 import { 
@@ -77,88 +78,100 @@ import {
 class BonusHandlerRegistry {
   private handlers: HandlerMap = new Map();
   private initialized = false;
+  private handlerOptions: BaseHandlerOptions | undefined;
 
   /**
    * Initialize registry with all handlers.
+   * @param options - Database strategy options to pass to all handlers
    */
-  initialize(): void {
-    if (this.initialized) {
+  initialize(options?: BaseHandlerOptions): void {
+    if (this.initialized && !options) {
       return;
+    }
+
+    // Store options for handler creation
+    this.handlerOptions = options;
+
+    // Clear existing handlers if reinitializing with new options
+    if (this.initialized && options) {
+      this.handlers.clear();
+      this.initialized = false;
     }
 
     // ═══════════════════════════════════════════════════════════════════
     // Onboarding & Deposit handlers
     // ═══════════════════════════════════════════════════════════════════
-    this.register(new WelcomeHandler());
-    this.register(new FirstDepositHandler());
-    this.register(new FirstPurchaseHandler());
-    this.register(new FirstActionHandler());
-    this.register(new ReloadHandler());
-    this.register(new TopUpHandler());
+    this.register(new WelcomeHandler(options));
+    this.register(new FirstDepositHandler(options));
+    this.register(new FirstPurchaseHandler(options));
+    this.register(new FirstActionHandler(options));
+    this.register(new ReloadHandler(options));
+    this.register(new TopUpHandler(options));
 
     // ═══════════════════════════════════════════════════════════════════
     // Referral handlers
     // ═══════════════════════════════════════════════════════════════════
-    this.register(new ReferralHandler());
-    this.register(new RefereeHandler());
-    this.register(new CommissionHandler());
+    this.register(new ReferralHandler(options));
+    this.register(new RefereeHandler(options));
+    this.register(new CommissionHandler(options));
 
     // ═══════════════════════════════════════════════════════════════════
     // Activity handlers
     // ═══════════════════════════════════════════════════════════════════
-    this.register(new ActivityHandler());
-    this.register(new StreakHandler());
-    this.register(new WinbackHandler());
+    this.register(new ActivityHandler(options));
+    this.register(new StreakHandler(options));
+    this.register(new WinbackHandler(options));
 
     // ═══════════════════════════════════════════════════════════════════
     // Loyalty & Time-based handlers
     // ═══════════════════════════════════════════════════════════════════
-    this.register(new CashbackHandler());
-    this.register(new ConsolationHandler());
-    this.register(new LoyaltyHandler());
-    this.register(new LoyaltyPointsHandler());
-    this.register(new VipHandler());
-    this.register(new TierUpgradeHandler());
-    this.register(new BirthdayHandler());
-    this.register(new AnniversaryHandler());
-    this.register(new SeasonalHandler());
-    this.register(new DailyLoginHandler());
-    this.register(new FlashHandler());
+    this.register(new CashbackHandler(options));
+    this.register(new ConsolationHandler(options));
+    this.register(new LoyaltyHandler(options));
+    this.register(new LoyaltyPointsHandler(options));
+    this.register(new VipHandler(options));
+    this.register(new TierUpgradeHandler(options));
+    this.register(new BirthdayHandler(options));
+    this.register(new AnniversaryHandler(options));
+    this.register(new SeasonalHandler(options));
+    this.register(new DailyLoginHandler(options));
+    this.register(new FlashHandler(options));
 
     // ═══════════════════════════════════════════════════════════════════
     // Achievement handlers
     // ═══════════════════════════════════════════════════════════════════
-    this.register(new AchievementHandler());
-    this.register(new MilestoneHandler());
-    this.register(new TaskCompletionHandler());
-    this.register(new ChallengeHandler());
+    this.register(new AchievementHandler(options));
+    this.register(new MilestoneHandler(options));
+    this.register(new TaskCompletionHandler(options));
+    this.register(new ChallengeHandler(options));
 
     // ═══════════════════════════════════════════════════════════════════
     // Competition handlers
     // ═══════════════════════════════════════════════════════════════════
-    this.register(new TournamentHandler());
-    this.register(new LeaderboardHandler());
+    this.register(new TournamentHandler(options));
+    this.register(new LeaderboardHandler(options));
 
     // ═══════════════════════════════════════════════════════════════════
     // Promotional handlers
     // ═══════════════════════════════════════════════════════════════════
-    this.register(new PromoCodeHandler());
-    this.register(new SpecialEventHandler());
-    this.register(new CustomHandler());
+    this.register(new PromoCodeHandler(options));
+    this.register(new SpecialEventHandler(options));
+    this.register(new CustomHandler(options));
 
     // ═══════════════════════════════════════════════════════════════════
     // Credit & Bundle handlers
     // ═══════════════════════════════════════════════════════════════════
-    this.register(new FreeCreditHandler());
-    this.register(new TrialHandler());
-    this.register(new SelectionHandler());
-    this.register(new ComboHandler());
-    this.register(new BundleHandler());
+    this.register(new FreeCreditHandler(options));
+    this.register(new TrialHandler(options));
+    this.register(new SelectionHandler(options));
+    this.register(new ComboHandler(options));
+    this.register(new BundleHandler(options));
 
     this.initialized = true;
     logger.info('Bonus handler registry initialized', {
       handlers: Array.from(this.handlers.keys()),
       count: this.handlers.size,
+      hasDatabaseStrategy: !!options?.databaseStrategy,
     });
   }
 
@@ -248,77 +261,31 @@ export const handlerRegistry = new BonusHandlerRegistry();
 /**
  * Factory function to create/get a handler for a bonus type.
  * Ensures registry is initialized.
+ * @param options - Optional database strategy options (only used on first initialization)
  */
-export function getHandler(type: BonusType): IBonusHandler | undefined {
-  handlerRegistry.initialize();
+export function getHandler(type: BonusType, options?: BaseHandlerOptions): IBonusHandler | undefined {
+  handlerRegistry.initialize(options);
   return handlerRegistry.getHandler(type);
 }
 
 /**
- * Factory function to create a new handler instance.
- * Useful when you need a fresh instance instead of singleton.
+ * Factory function to create/get a handler instance.
+ * Uses registry pattern - eliminates need for large switch statement.
+ * 
+ * Note: Handlers are singletons from the registry. If you need a fresh instance,
+ * you can extend the registry to support cloning, but typically singleton is sufficient.
+ * @param options - Optional database strategy options (only used on first initialization)
  */
-export function createHandler(type: BonusType): IBonusHandler | null {
-  switch (type) {
-    // Onboarding & Deposit
-    case 'welcome': return new WelcomeHandler();
-    case 'first_deposit': return new FirstDepositHandler();
-    case 'first_purchase': return new FirstPurchaseHandler();
-    case 'first_action': return new FirstActionHandler();
-    case 'reload': return new ReloadHandler();
-    case 'top_up': return new TopUpHandler();
-    
-    // Referral
-    case 'referral': return new ReferralHandler();
-    case 'referee': return new RefereeHandler();
-    case 'commission': return new CommissionHandler();
-    
-    // Activity
-    case 'activity': return new ActivityHandler();
-    case 'milestone': return new MilestoneHandler();
-    case 'streak': return new StreakHandler();
-    
-    // Recovery
-    case 'cashback': return new CashbackHandler();
-    case 'consolation': return new ConsolationHandler();
-    case 'winback': return new WinbackHandler();
-    
-    // Loyalty
-    case 'loyalty': return new LoyaltyHandler();
-    case 'loyalty_points': return new LoyaltyPointsHandler();
-    case 'vip': return new VipHandler();
-    case 'tier_upgrade': return new TierUpgradeHandler();
-    
-    // Time-based
-    case 'birthday': return new BirthdayHandler();
-    case 'anniversary': return new AnniversaryHandler();
-    case 'seasonal': return new SeasonalHandler();
-    case 'daily_login': return new DailyLoginHandler();
-    case 'flash': return new FlashHandler();
-    
-    // Achievement
-    case 'achievement': return new AchievementHandler();
-    case 'task_completion': return new TaskCompletionHandler();
-    case 'challenge': return new ChallengeHandler();
-    
-    // Competition
-    case 'tournament': return new TournamentHandler();
-    case 'leaderboard': return new LeaderboardHandler();
-    
-    // Promotional
-    case 'promo_code': return new PromoCodeHandler();
-    case 'special_event': return new SpecialEventHandler();
-    case 'custom': return new CustomHandler();
-    
-    // Credits & Bundles
-    case 'free_credit': return new FreeCreditHandler();
-    case 'trial': return new TrialHandler();
-    case 'selection': return new SelectionHandler();
-    case 'combo': return new ComboHandler();
-    case 'bundle': return new BundleHandler();
-    
-    default:
-      logger.warn('No handler available for bonus type', { type });
-      return null;
+export function createHandler(type: BonusType, options?: BaseHandlerOptions): IBonusHandler | null {
+  handlerRegistry.initialize(options);
+  const handler = handlerRegistry.getHandler(type);
+  
+  if (!handler) {
+    logger.warn('No handler available for bonus type', { type });
+    return null;
   }
+  
+  // Return handler from registry (singleton pattern)
+  // If fresh instances are needed in the future, implement cloning here
+  return handler;
 }

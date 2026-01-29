@@ -8,14 +8,11 @@
  * - Betting Platform: admin, agent, player, etc.
  */
 
-import type { Role } from 'access-engine';
-
-// Alias for backward compatibility
-type RoleDefinition = Role;
+import type { BaseRole as Role } from 'core-service/access';
 
 /**
  * Default role definitions for common scenarios
- * Uses access-engine's Role type
+ * Uses access-engine's base Role type (without MongoDB fields)
  */
 export const DEFAULT_ROLES: Role[] = [
   // ═══════════════════════════════════════════════════════════════
@@ -282,7 +279,7 @@ export const DEFAULT_ROLES: Role[] = [
 /**
  * Get default roles for a specific use case
  */
-export function getDefaultRolesForUseCase(useCase: 'banking' | 'crypto' | 'forex' | 'betting' | 'all'): RoleDefinition[] {
+export function getDefaultRolesForUseCase(useCase: 'banking' | 'crypto' | 'forex' | 'betting' | 'all'): Role[] {
   if (useCase === 'all') {
     return DEFAULT_ROLES;
   }

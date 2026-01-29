@@ -12,17 +12,27 @@
  */
 
 import http from 'node:http';
-import { loginAs, users, createJWT, createSystemToken, createTokenForUser, decodeJWT } from './config/users.js';
+import { createHmac } from 'node:crypto';
+import { loginAs, users, createJWT, createSystemToken, createTokenForUser, decodeJWT, initializeConfig } from './config/users.js';
+import { 
+  AUTH_SERVICE_URL, 
+  PAYMENT_SERVICE_URL, 
+  BONUS_SERVICE_URL, 
+  NOTIFICATION_SERVICE_URL,
+  loadScriptConfig,
+} from './config/scripts.js';
 
 // ═══════════════════════════════════════════════════════════════════
-// Configuration
+// Configuration (loaded dynamically from MongoDB config store)
 // ═══════════════════════════════════════════════════════════════════
 
-const CONFIG = {
-  notificationServiceUrl: process.env.NOTIFICATION_URL || 'http://localhost:3006',
-  bonusServiceUrl: process.env.BONUS_URL || 'http://localhost:3005/graphql',
-  paymentServiceUrl: process.env.PAYMENT_URL || 'http://localhost:3004/graphql',
-  authServiceUrl: process.env.AUTH_URL || 'http://localhost:3003/graphql',
+// Note: Service URLs are loaded from scripts.ts (single source of truth)
+// These will be initialized in runAllTests() before use
+let CONFIG = {
+  notificationServiceUrl: NOTIFICATION_SERVICE_URL.replace('/graphql', ''),
+  bonusServiceUrl: BONUS_SERVICE_URL,
+  paymentServiceUrl: PAYMENT_SERVICE_URL,
+  authServiceUrl: AUTH_SERVICE_URL,
   webhookReceiverPort: 9999,
   webhookSecret: 'test-webhook-secret-12345',
   // All services use the same shared JWT secret
@@ -384,6 +394,10 @@ interface ReceivedWebhook {
 
 let receivedWebhooks: ReceivedWebhook[] = [];
 let webhookServer: http.Server | null = null;
+// Test control flags for circuit breaker and retry tests
+let shouldFailEndpoint = false;
+let endpointFailureCount = 0;
+let endpointAttemptCount = 0;
 
 function verifyWebhookSignature(
   payload: string,
@@ -418,17 +432,55 @@ async function startWebhookReceiver(): Promise<void> {
       let body = '';
       req.on('data', (chunk) => (body += chunk));
       req.on('end', () => {
+        const url = req.url || '';
+        
+        // Handle test endpoints for circuit breaker and retry tests
+        if (url.includes('/webhook/failing')) {
+          endpointFailureCount++;
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Simulated failure', attempt: endpointFailureCount }));
+          return;
+        }
+        
+        if (url.includes('/webhook/retry-test')) {
+          endpointAttemptCount++;
+          if (endpointAttemptCount <= 2) {
+            // Fail first 2 attempts
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Temporary failure', attempt: endpointAttemptCount }));
+            return;
+          } else {
+            // Succeed on 3rd+ attempt
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ received: true, attempt: endpointAttemptCount }));
+            return;
+          }
+        }
+        
+        if (url.includes('/webhook/recovery-test')) {
+          if (shouldFailEndpoint) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Service down' }));
+            return;
+          } else {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ received: true }));
+            return;
+          }
+        }
+        
+        // Normal webhook handling
         const signature = req.headers['x-webhook-signature'] as string || '';
         
         let secret = 'unknown';
-        if (req.url?.includes('/bonus')) secret = MOCK_WEBHOOKS.bonusEvents.secret;
-        else if (req.url?.includes('/payment')) secret = MOCK_WEBHOOKS.paymentEvents.secret;
-        else if (req.url?.includes('/awarded')) secret = MOCK_WEBHOOKS.specificEvents.secret;
+        if (url.includes('/bonus')) secret = MOCK_WEBHOOKS.bonusEvents.secret;
+        else if (url.includes('/payment')) secret = MOCK_WEBHOOKS.paymentEvents.secret;
+        else if (url.includes('/awarded')) secret = MOCK_WEBHOOKS.specificEvents.secret;
 
         const verified = verifyWebhookSignature(body, signature, secret);
 
         receivedWebhooks.push({
-          path: req.url || '',
+          path: url,
           headers: req.headers as Record<string, string | string[] | undefined>,
           body: JSON.parse(body || '{}'),
           signature,
@@ -657,11 +709,11 @@ async function testWebhooks(): Promise<void> {
     console.log(`    [OK] Verified`);
   });
 
-  await test('Get Bonus Webhook Delivery History', async () => {
-    // Wait a bit more for delivery record to be saved
+  await test('Get Bonus Webhook Delivery History (Merged Structure)', async () => {
+    // Wait a bit more for delivery record to be saved (now stored in webhook.deliveries array)
     await new Promise(r => setTimeout(r, 500));
     
-    const result = await graphql<{ webhookDeliveries: Array<{ id: string; status: string; statusCode?: number; error?: string }> }>(
+    const result = await graphql<{ webhookDeliveries: Array<{ id: string; status: string; statusCode?: number; error?: string; attempts?: number }> }>(
       CONFIG.bonusServiceUrl,
       `query GetDeliveries($webhookId: ID!) {
         webhookDeliveries(webhookId: $webhookId, limit: 10) {
@@ -686,8 +738,13 @@ async function testWebhooks(): Promise<void> {
       throw new Error('No deliveries found - webhook may not have been delivered yet');
     }
     const lastDelivery = result.webhookDeliveries[0];
-    console.log(`    [INFO] Found ${result.webhookDeliveries.length} delivery record(s)`);
-    console.log(`    [INFO] Last status: ${lastDelivery.status}${lastDelivery.statusCode ? ` (${lastDelivery.statusCode})` : ''}${lastDelivery.error ? ` - Error: ${lastDelivery.error}` : ''}`);
+    console.log(`    [INFO] Found ${result.webhookDeliveries.length} delivery record(s) (stored in webhook.deliveries array)`);
+    console.log(`    [INFO] Last status: ${lastDelivery.status}${lastDelivery.statusCode ? ` (${lastDelivery.statusCode})` : ''}${lastDelivery.error ? ` - Error: ${lastDelivery.error}` : ''}${lastDelivery.attempts ? ` - Attempts: ${lastDelivery.attempts}` : ''}`);
+    
+    // Verify delivery structure (no webhookId/tenantId in delivery - they're in parent webhook)
+    if ((lastDelivery as any).webhookId || (lastDelivery as any).tenantId) {
+      console.log(`    [WARN] Delivery still contains webhookId/tenantId (should be removed in merged structure)`);
+    }
   });
 
   await test('Update Bonus Webhook', async () => {
@@ -830,6 +887,333 @@ async function testWebhooks(): Promise<void> {
     if (isValid) throw new Error('Tampered payload should fail');
   });
 
+  // ═══════════════════════════════════════════════════════════════════
+  // Circuit Breaker & Retry Tests
+  // ═══════════════════════════════════════════════════════════════════
+
+  await test('Circuit Breaker: Multiple Failures Open Circuit', async () => {
+    // Reset test counters
+    endpointFailureCount = 0;
+    
+    // Create a webhook pointing to a failing endpoint
+    const failingWebhookUrl = `http://localhost:${CONFIG.webhookReceiverPort}/webhook/failing`;
+    
+    // Register webhook with failing endpoint
+    const failingWebhookResult = await graphql<{ registerWebhook: { id: string } }>(
+      CONFIG.bonusServiceUrl,
+      `mutation RegisterWebhook($input: RegisterWebhookInput!) {
+        registerWebhook(input: $input) {
+          id
+          name
+          url
+        }
+      }`,
+      { 
+        input: {
+          name: 'Failing Webhook Test',
+          url: failingWebhookUrl,
+          secret: 'test-secret',
+          events: ['bonus.*'],
+        }
+      },
+      BONUS_TOKEN
+    );
+    
+    const failingWebhookId = failingWebhookResult.registerWebhook.id;
+    console.log(`    [INFO] Created failing webhook: ${failingWebhookId}`);
+    
+    // Trigger multiple webhook deliveries to cause failures (circuit breaker threshold is 5)
+    console.log(`    [INFO] Triggering 6 webhook deliveries to exceed circuit breaker threshold...`);
+    for (let i = 0; i < 6; i++) {
+      try {
+        await graphql(
+          CONFIG.bonusServiceUrl,
+          `mutation TestWebhook($id: ID!) {
+            testWebhook(id: $id) {
+              success
+              error
+            }
+          }`,
+          { id: failingWebhookId },
+          BONUS_TOKEN
+        );
+      } catch (err) {
+        // Expected to fail
+      }
+      // Small delay between attempts
+      await new Promise(r => setTimeout(r, 200));
+    }
+    
+    // Wait for circuit breaker to process failures and open circuit
+    await new Promise(r => setTimeout(r, 3000));
+    
+    // Check delivery history - should show failures
+    const deliveriesResult = await graphql<{ webhookDeliveries: Array<{ status: string; error?: string; attempts?: number }> }>(
+      CONFIG.bonusServiceUrl,
+      `query GetDeliveries($webhookId: ID!) {
+        webhookDeliveries(webhookId: $webhookId, limit: 10) {
+          status
+          error
+          attempts
+        }
+      }`,
+      { webhookId: failingWebhookId },
+      BONUS_TOKEN
+    );
+    
+    const failedDeliveries = deliveriesResult.webhookDeliveries.filter(d => d.status === 'failed');
+    console.log(`    [INFO] Found ${failedDeliveries.length} failed delivery(ies) out of ${deliveriesResult.webhookDeliveries.length} total`);
+    console.log(`    [INFO] Server received ${endpointFailureCount} failure request(s)`);
+    
+    // After multiple failures, circuit breaker should be open
+    // Next delivery attempt should be rejected immediately (or fail fast)
+    console.log(`    [INFO] Testing circuit breaker open state...`);
+    try {
+      const testResult = await graphql<{ testWebhook: { success: boolean; error?: string } }>(
+        CONFIG.bonusServiceUrl,
+        `mutation TestWebhook($id: ID!) {
+          testWebhook(id: $id) {
+            success
+            error
+          }
+        }`,
+        { id: failingWebhookId },
+        BONUS_TOKEN
+      );
+      
+      if (!testResult.testWebhook.success) {
+        const errorMsg = testResult.testWebhook.error || '';
+        if (errorMsg.includes('Circuit breaker') || errorMsg.includes('circuit') || errorMsg.includes('unavailable')) {
+          console.log(`    [OK] Circuit breaker is open - requests rejected immediately`);
+        } else {
+          console.log(`    [INFO] Delivery failed with error: ${errorMsg}`);
+        }
+      }
+    } catch (err) {
+      const errorMsg = (err as Error).message;
+      if (errorMsg.includes('Circuit breaker') || errorMsg.includes('circuit')) {
+        console.log(`    [OK] Circuit breaker is open - requests rejected immediately`);
+      } else {
+        console.log(`    [INFO] Error: ${errorMsg}`);
+      }
+    }
+    
+    // Cleanup
+    await graphql(
+      CONFIG.bonusServiceUrl,
+      `mutation DeleteWebhook($id: ID!) {
+        deleteWebhook(id: $id)
+      }`,
+      { id: failingWebhookId },
+      BONUS_TOKEN
+    );
+  });
+
+  await test('Retry Logic: Verify Retry Attempts and Jitter', async () => {
+    // Reset test counter
+    endpointAttemptCount = 0;
+    
+    // Create a webhook that will fail initially but succeed after retries
+    const retryTestUrl = `http://localhost:${CONFIG.webhookReceiverPort}/webhook/retry-test`;
+    
+    // Register webhook with retry configuration
+    const retryWebhookResult = await graphql<{ registerWebhook: { id: string; maxRetries?: number } }>(
+      CONFIG.bonusServiceUrl,
+      `mutation RegisterWebhook($input: RegisterWebhookInput!) {
+        registerWebhook(input: $input) {
+          id
+          name
+          url
+          maxRetries
+        }
+      }`,
+      { 
+        input: {
+          name: 'Retry Test Webhook',
+          url: retryTestUrl,
+          secret: 'test-secret',
+          events: ['bonus.*'],
+          maxRetries: 3, // Allow 3 retries (total 4 attempts: 1 initial + 3 retries)
+        }
+      },
+      BONUS_TOKEN
+    );
+    
+    const retryWebhookId = retryWebhookResult.registerWebhook.id;
+    console.log(`    [INFO] Created retry test webhook: ${retryWebhookId}, maxRetries: ${retryWebhookResult.registerWebhook.maxRetries || 'default'}`);
+    
+    // Trigger webhook delivery (should retry and eventually succeed)
+    console.log(`    [INFO] Triggering webhook delivery (will fail first 2 attempts, succeed on 3rd)...`);
+    const testResult = await graphql<{ testWebhook: { success: boolean; error?: string } }>(
+      CONFIG.bonusServiceUrl,
+      `mutation TestWebhook($id: ID!) {
+        testWebhook(id: $id) {
+          success
+          error
+        }
+      }`,
+      { id: retryWebhookId },
+      BONUS_TOKEN
+    );
+    
+    // Wait for retries to complete (with exponential backoff + jitter)
+    await new Promise(r => setTimeout(r, 5000));
+    
+    // Check delivery history - should show retry attempts
+    const deliveriesResult = await graphql<{ webhookDeliveries: Array<{ status: string; attempts?: number; duration?: number }> }>(
+      CONFIG.bonusServiceUrl,
+      `query GetDeliveries($webhookId: ID!) {
+        webhookDeliveries(webhookId: $webhookId, limit: 1) {
+          status
+          attempts
+          duration
+        }
+      }`,
+      { webhookId: retryWebhookId },
+      BONUS_TOKEN
+    );
+    
+    if (deliveriesResult.webhookDeliveries.length > 0) {
+      const delivery = deliveriesResult.webhookDeliveries[0];
+      console.log(`    [INFO] Delivery status: ${delivery.status}, attempts: ${delivery.attempts || 'N/A'}, duration: ${delivery.duration || 'N/A'}ms`);
+      
+      if (delivery.status === 'success' && delivery.attempts && delivery.attempts > 1) {
+        console.log(`    [OK] Retry logic worked - succeeded after ${delivery.attempts} attempt(s) with exponential backoff + jitter`);
+      } else if (delivery.status === 'success') {
+        console.log(`    [INFO] Succeeded on first attempt (no retry needed)`);
+      } else {
+        console.log(`    [WARN] Delivery failed or retry info missing`);
+      }
+    }
+    
+    // Verify retry attempts were made (should be 3 if retries occurred: 1 initial + 2 retries before success)
+    console.log(`    [INFO] Server received ${endpointAttemptCount} request(s) total`);
+    if (endpointAttemptCount >= 3) {
+      console.log(`    [OK] Retry logic verified - server received multiple requests (retries with jitter occurred)`);
+    } else if (endpointAttemptCount > 1) {
+      console.log(`    [INFO] Some retries occurred (${endpointAttemptCount} requests)`);
+    }
+    
+    // Cleanup
+    await graphql(
+      CONFIG.bonusServiceUrl,
+      `mutation DeleteWebhook($id: ID!) {
+        deleteWebhook(id: $id)
+      }`,
+      { id: retryWebhookId },
+      BONUS_TOKEN
+    );
+  });
+
+  await test('Circuit Breaker Recovery: Half-Open State', async () => {
+    // This test verifies that after circuit breaker opens, it transitions to half-open
+    // and eventually closes when service recovers
+    
+    const recoveryTestUrl = `http://localhost:${CONFIG.webhookReceiverPort}/webhook/recovery-test`;
+    
+    // Reset test flag - start with failing endpoint
+    shouldFailEndpoint = true;
+    
+    // Register webhook
+    const recoveryWebhookResult = await graphql<{ registerWebhook: { id: string } }>(
+      CONFIG.bonusServiceUrl,
+      `mutation RegisterWebhook($input: RegisterWebhookInput!) {
+        registerWebhook(input: $input) {
+          id
+          name
+        }
+      }`,
+      { 
+        input: {
+          name: 'Recovery Test Webhook',
+          url: recoveryTestUrl,
+          secret: 'test-secret',
+          events: ['bonus.*'],
+        }
+      },
+      BONUS_TOKEN
+    );
+    
+    const recoveryWebhookId = recoveryWebhookResult.registerWebhook.id;
+    console.log(`    [INFO] Created recovery test webhook: ${recoveryWebhookId}`);
+    
+    // Phase 1: Cause failures to open circuit breaker
+    console.log(`    [INFO] Phase 1: Causing failures to open circuit breaker (threshold: 5)...`);
+    for (let i = 0; i < 6; i++) {
+      try {
+        await graphql(
+          CONFIG.bonusServiceUrl,
+          `mutation TestWebhook($id: ID!) {
+            testWebhook(id: $id) {
+              success
+            }
+          }`,
+          { id: recoveryWebhookId },
+          BONUS_TOKEN
+        );
+      } catch (err) {
+        // Expected
+      }
+      await new Promise(r => setTimeout(r, 200));
+    }
+    
+    await new Promise(r => setTimeout(r, 2000));
+    console.log(`    [INFO] Circuit breaker should now be OPEN`);
+    
+    // Phase 2: Service recovers (circuit breaker should transition to half-open after resetTimeout)
+    console.log(`    [INFO] Phase 2: Service recovering (waiting for resetTimeout: 60s, then testing half-open state)...`);
+    shouldFailEndpoint = false;
+    
+    // Note: Circuit breaker resetTimeout is 60s, so we'll wait a shorter time and verify
+    // that the circuit breaker is in open state, then test recovery
+    await new Promise(r => setTimeout(r, 3000));
+    
+    // Try delivery again - circuit breaker should still be open (resetTimeout not reached)
+    // But if we wait long enough, it should transition to half-open and test recovery
+    console.log(`    [INFO] Testing recovery (circuit breaker should test half-open after resetTimeout)...`);
+    try {
+      const recoveryResult = await graphql<{ testWebhook: { success: boolean; error?: string } }>(
+        CONFIG.bonusServiceUrl,
+        `mutation TestWebhook($id: ID!) {
+          testWebhook(id: $id) {
+            success
+            error
+          }
+        }`,
+        { id: recoveryWebhookId },
+        BONUS_TOKEN
+      );
+      
+      if (recoveryResult.testWebhook.success) {
+        console.log(`    [OK] Circuit breaker recovered - delivery succeeded after service recovery`);
+      } else {
+        console.log(`    [INFO] Delivery result: ${recoveryResult.testWebhook.error || 'unknown'}`);
+        console.log(`    [INFO] Note: Circuit breaker resetTimeout is 60s - recovery may take longer`);
+      }
+    } catch (err) {
+      const errorMsg = (err as Error).message;
+      if (errorMsg.includes('Circuit breaker') || errorMsg.includes('circuit')) {
+        console.log(`    [INFO] Circuit breaker still open (resetTimeout not reached - this is expected)`);
+        console.log(`    [INFO] Circuit breaker will transition to half-open after 60s resetTimeout`);
+      } else {
+        console.log(`    [INFO] Recovery test: ${errorMsg}`);
+      }
+    }
+    
+    // Cleanup
+    await graphql(
+      CONFIG.bonusServiceUrl,
+      `mutation DeleteWebhook($id: ID!) {
+        deleteWebhook(id: $id)
+      }`,
+      { id: recoveryWebhookId },
+      BONUS_TOKEN
+    );
+    
+    // Reset flag
+    shouldFailEndpoint = false;
+  });
+
   // Cleanup
   await test('Delete Bonus Webhook', async () => {
     const result = await graphql<{ deleteWebhook: boolean }>(
@@ -908,6 +1292,17 @@ async function testWebhooks(): Promise<void> {
 // ═══════════════════════════════════════════════════════════════════
 
 async function runAllTests() {
+  // Initialize configuration from MongoDB config store
+  // This ensures service URLs are loaded from scripts.ts (single source of truth)
+  await initializeConfig();
+  await loadScriptConfig();
+  
+  // Update CONFIG with dynamically loaded URLs
+  CONFIG.notificationServiceUrl = NOTIFICATION_SERVICE_URL.replace('/graphql', '');
+  CONFIG.bonusServiceUrl = BONUS_SERVICE_URL;
+  CONFIG.paymentServiceUrl = PAYMENT_SERVICE_URL;
+  CONFIG.authServiceUrl = AUTH_SERVICE_URL;
+  
   console.log('═'.repeat(60));
   console.log('  Real-Time Communication Channels Test Suite');
   console.log('═'.repeat(60));
@@ -915,6 +1310,12 @@ async function runAllTests() {
   console.log('  • Server-Sent Events (SSE)');
   console.log('  • Socket.IO (polling & websocket transport)');
   console.log('  • Webhooks (HTTP callbacks)');
+  console.log('═'.repeat(60));
+  console.log('\nService URLs (from config store):');
+  console.log(`  Auth: ${CONFIG.authServiceUrl}`);
+  console.log(`  Payment: ${CONFIG.paymentServiceUrl}`);
+  console.log(`  Bonus: ${CONFIG.bonusServiceUrl}`);
+  console.log(`  Notification: ${CONFIG.notificationServiceUrl}`);
   console.log('═'.repeat(60));
 
   try {

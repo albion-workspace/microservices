@@ -12,7 +12,6 @@ import {
   canAny as canAnyEngine,
   canAll as canAllEngine,
   matchUrn,
-  matchAnyUrn,
   parseUrn,
   type User as AccessEngineUser,
 } from 'access-engine';
@@ -77,7 +76,9 @@ export function hasRole(roles: any, roleName: string): boolean {
     roles: roleNames,
     permissions: [],
   };
-  return rule(tempUser);
+  const result = rule(tempUser);
+  // Handle both sync and async results
+  return result instanceof Promise ? false : result;
 }
 
 /**
@@ -97,7 +98,9 @@ export function hasAnyRole(roles: any, roleNames: string[]): boolean {
     roles: userRoles,
     permissions: [],
   };
-  return rule(tempUser);
+  const result = rule(tempUser);
+  // Handle both sync and async results
+  return result instanceof Promise ? false : result;
 }
 
 /**
@@ -114,7 +117,9 @@ export function can(user: User | null | undefined, permissionUrn: string): boole
   const rule = canEngine(permissionUrn);
   const accessUser = toAccessEngineUser(user);
   if (!accessUser) return false;
-  return rule(accessUser);
+  const result = rule(accessUser);
+  // Handle both sync and async results
+  return result instanceof Promise ? false : result;
 }
 
 /**
@@ -130,7 +135,9 @@ export function canAny(user: User | null | undefined, permissionUrns: string[]):
   const rule = canAnyEngine(permissionUrns);
   const accessUser = toAccessEngineUser(user);
   if (!accessUser) return false;
-  return rule(accessUser);
+  const result = rule(accessUser);
+  // Handle both sync and async results
+  return result instanceof Promise ? false : result;
 }
 
 /**
@@ -146,7 +153,9 @@ export function canAll(user: User | null | undefined, permissionUrns: string[]):
   const rule = canAllEngine(permissionUrns);
   const accessUser = toAccessEngineUser(user);
   if (!accessUser) return false;
-  return rule(accessUser);
+  const result = rule(accessUser);
+  // Handle both sync and async results
+  return result instanceof Promise ? false : result;
 }
 
 /**

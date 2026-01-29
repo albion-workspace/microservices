@@ -6,10 +6,11 @@
 import { randomUUID } from 'node:crypto';
 import type { ServiceConfig, SagaContext, SagaOptions } from './types.js';
 import type { Repository, Resolvers, ResolverContext } from '../types/index.js';
-import { createRepository, generateId } from '../common/repository.js';
-import { publish } from '../common/redis.js';
+import { createRepository, generateId } from '../databases/repository.js';
+import { publish } from '../databases/redis.js';
 import { executeSaga } from './engine.js';
 import { logger } from '../common/logger.js';
+import { getClient } from '../databases/mongodb.js';
 
 export function createService<TEntity extends { id: string }, TInput>(
   config: ServiceConfig<TEntity, TInput>
@@ -74,7 +75,8 @@ export function createService<TEntity extends { id: string }, TInput>(
   
   // Generate Query and Mutation extensions
   // Always include plural query - connection type will be resolved from other services if needed
-  const pluralQuery = `      ${entities}(first: Int, skip: Int, filter: JSON): ${connectionTypeName}`;
+  // Cursor-based pagination only (no skip parameter for backward compatibility)
+  const pluralQuery = `      ${entities}(first: Int, after: String, last: Int, before: String, filter: JSON): ${connectionTypeName}`;
   
   const queryType = `
     extend type Query {
@@ -99,18 +101,35 @@ export function createService<TEntity extends { id: string }, TInput>(
       [config.entity.name]: async (args) => repository.findById(args.id as string),
       
       [entities]: async (args) => {
-        const { first = 20, skip = 0, filter } = args as { first?: number; skip?: number; filter?: Record<string, unknown> };
-        // Sort by createdAt descending by default (newest first)
-        const result = await repository.findMany({ 
-          filter: filter ?? {}, 
-          skip, 
-          take: first,
-          sort: { createdAt: -1 } // Sort by createdAt descending
+        // Cursor-based pagination only (O(1) performance, no backward compatibility)
+        const { 
+          first = 20, 
+          after, 
+          last, 
+          before, 
+          filter 
+        } = args as { 
+          first?: number; 
+          after?: string; 
+          last?: number; 
+          before?: string; 
+          filter?: Record<string, unknown> 
+        };
+        
+        // Cursor-based pagination (O(1) performance)
+        const result = await repository.paginate({
+          first: first ? Math.min(Math.max(1, first), 100) : undefined, // Max 100 per page
+          after,
+          last: last ? Math.min(Math.max(1, last), 100) : undefined,
+          before,
+          filter: filter ?? {},
+          sortField: 'createdAt',
+          sortDirection: 'desc',
         });
         return {
-          nodes: result.items,
-          totalCount: result.total,
-          pageInfo: { hasNextPage: skip + first < result.total, hasPreviousPage: skip > 0 },
+          nodes: result.edges.map(edge => edge.node),
+          totalCount: result.totalCount,
+          pageInfo: result.pageInfo,
         };
       },
     },
@@ -132,9 +151,20 @@ export function createService<TEntity extends { id: string }, TInput>(
           transactional: sagaOptions.useTransaction 
         });
 
+        // Get client for transactional sagas (gateway connects to database)
+        let client;
+        try {
+          client = getClient();
+        } catch (error) {
+          // Database not connected yet - this shouldn't happen in normal operation
+          logger.error('Database client not available for saga', { error });
+          throw new Error('Database not connected');
+        }
+        
         const result = await executeSaga(sagaWithDeps, validated as TInput, sagaId, {
           useTransaction: sagaOptions.useTransaction,
           maxRetries: sagaOptions.maxRetries,
+          client, // Pass client for transactional sagas
         });
         
         return {

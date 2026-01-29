@@ -3,11 +3,11 @@
  * Handles TOTP (Time-based One-Time Password) 2FA setup and verification
  */
 
-import { getDatabase, logger, findOneById, updateOneById } from 'core-service';
+import { getDatabase, logger, findOneById, updateOneById, extractDocumentId, normalizeDocument, findById } from 'core-service';
 import speakeasy from 'speakeasy';
 import qrcode from 'qrcode';
 import type { Enable2FAInput, Verify2FAInput, User, TwoFactorSetupResponse } from '../types.js';
-import { generateBackupCodes, hashToken } from '../utils.js';
+import { generateBackupCodes, hashToken, verifyPassword } from '../utils.js';
 
 export class TwoFactorService {
   /**
@@ -25,16 +25,23 @@ export class TwoFactorService {
         } as TwoFactorSetupResponse;
       }
       
-      // Get user
-      const user = await db.collection('users').findOne({
-        id: input.userId,
-        tenantId: input.tenantId,
-      }) as unknown as User | null;
+      // Get user using findById helper (handles both _id and id fields)
+      const userDoc = await findById<User>(db.collection('users'), input.userId, { tenantId: input.tenantId });
       
-      if (!user) {
+      if (!userDoc || !userDoc._id) {
         return {
           success: false,
           message: 'User not found',
+        } as TwoFactorSetupResponse;
+      }
+      
+      // Normalize user document to ensure id field exists
+      const user = normalizeDocument(userDoc);
+      const userId = extractDocumentId(user);
+      if (!user || !userId) {
+        return {
+          success: false,
+          message: 'Invalid user data',
         } as TwoFactorSetupResponse;
       }
       
@@ -46,18 +53,51 @@ export class TwoFactorService {
         } as TwoFactorSetupResponse;
       }
       
-      // Passport.js handles password verification
-      // For 2FA setup, password should be verified via Passport.js authentication flow
-      // Note: Password verification is handled by Passport.js
+      // Verify password before enabling 2FA
+      if (!input.password) {
+        return {
+          success: false,
+          message: 'Password is required to enable 2FA',
+        } as TwoFactorSetupResponse;
+      }
+      
+      const isPasswordValid = await verifyPassword(input.password, user.passwordHash);
+      if (!isPasswordValid) {
+        return {
+          success: false,
+          message: 'Invalid password',
+        } as TwoFactorSetupResponse;
+      }
       
       // Generate 2FA secret
-      const secret = speakeasy.generateSecret({
-        name: `AuthService (${user.email || user.username || user.phone})`,
-        length: 32,
-      });
+      let secret: speakeasy.GeneratedSecret;
+      let qrCodeDataUrl: string;
       
-      // Generate QR code
-      const qrCodeDataUrl = await qrcode.toDataURL(secret.otpauth_url || '');
+      try {
+        secret = speakeasy.generateSecret({
+          name: `AuthService (${user.email || user.username || user.phone})`,
+          length: 32,
+        });
+        
+        if (!secret.otpauth_url) {
+          return {
+            success: false,
+            message: 'Failed to generate 2FA secret URL',
+          } as TwoFactorSetupResponse;
+        }
+        
+        // Generate QR code
+        qrCodeDataUrl = await qrcode.toDataURL(secret.otpauth_url);
+      } catch (error: any) {
+        logger.error('Failed to generate 2FA secret or QR code', {
+          error: error?.message || error,
+          userId: user.id,
+        });
+        return {
+          success: false,
+          message: `Failed to generate 2FA secret: ${error?.message || 'Unknown error'}`,
+        } as TwoFactorSetupResponse;
+      }
       
       // Generate backup codes
       const backupCodes = generateBackupCodes(10);
@@ -66,8 +106,16 @@ export class TwoFactorService {
       );
       
       // Store secret (but don't enable yet - requires verification)
-      await db.collection('users').updateOne(
-        { id: user.id },
+      // Use _id for update (most reliable)
+      if (!user._id) {
+        return {
+          success: false,
+          message: 'User missing _id field',
+        } as TwoFactorSetupResponse;
+      }
+      
+      const updateResult = await db.collection('users').updateOne(
+        { _id: user._id, tenantId: input.tenantId },
         { 
           $set: { 
             twoFactorSecret: secret.base32,
@@ -81,7 +129,19 @@ export class TwoFactorService {
         }
       );
       
-      logger.info('2FA setup initiated', { userId: user.id });
+      if (updateResult.matchedCount === 0) {
+        logger.error('Failed to update user for 2FA setup', {
+          userId: userId,
+          _id: userDoc._id?.toString(),
+          tenantId: input.tenantId,
+        });
+        return {
+          success: false,
+          message: 'Failed to save 2FA configuration',
+        } as TwoFactorSetupResponse;
+      }
+      
+      logger.info('2FA setup initiated', { userId: userId });
       
       return {
         success: true,
@@ -89,11 +149,17 @@ export class TwoFactorService {
         qrCode: qrCodeDataUrl,
         backupCodes, // Return plain codes to user (only shown once)
       };
-    } catch (error) {
-      logger.error('Enable 2FA error', { error });
+    } catch (error: any) {
+      logger.error('Enable 2FA error', { 
+        error: error?.message || error,
+        stack: error?.stack,
+        userId: input.userId,
+        tenantId: input.tenantId,
+      });
       return {
         success: false,
-      };
+        message: error?.message || 'Failed to enable 2FA',
+      } as TwoFactorSetupResponse;
     }
   }
   
@@ -112,16 +178,31 @@ export class TwoFactorService {
         };
       }
       
-      // Get user
-      const user = await db.collection('users').findOne({
-        id: input.userId,
-        tenantId: input.tenantId,
-      }) as unknown as User | null;
+      // Get user using findById helper (handles both _id and id fields)
+      const userDoc = await findById<User>(db.collection('users'), input.userId, { tenantId: input.tenantId });
       
-      if (!user || !user.twoFactorSecret) {
+      if (!userDoc || !userDoc._id) {
         return {
           success: false,
-          message: '2FA not set up for this user',
+          message: 'User not found',
+        };
+      }
+      
+      // Normalize user document to ensure id field exists
+      const user = normalizeDocument(userDoc);
+      const userId = extractDocumentId(user);
+      if (!user || !userId) {
+        return {
+          success: false,
+          message: 'Invalid user data',
+        };
+      }
+      
+      // Check if 2FA secret exists (set by enable2FA)
+      if (!user.twoFactorSecret) {
+        return {
+          success: false,
+          message: '2FA not set up for this user. Please enable 2FA first.',
         };
       }
       
@@ -140,9 +221,9 @@ export class TwoFactorService {
         };
       }
       
-      // Enable 2FA
+      // Enable 2FA (activate it after verification)
       await db.collection('users').updateOne(
-        { id: user.id },
+        { _id: userDoc._id, tenantId: input.tenantId },
         { 
           $set: { 
             twoFactorEnabled: true,
@@ -151,17 +232,22 @@ export class TwoFactorService {
         }
       );
       
-      logger.info('2FA enabled', { userId: user.id });
+      logger.info('2FA enabled', { userId: userId });
       
       return {
         success: true,
         message: '2FA enabled successfully',
       };
-    } catch (error) {
-      logger.error('Verify 2FA error', { error });
+    } catch (error: any) {
+      logger.error('Verify 2FA error', { 
+        error: error?.message || error,
+        stack: error?.stack,
+        userId: input.userId,
+        tenantId: input.tenantId,
+      });
       return {
         success: false,
-        message: 'An error occurred',
+        message: error?.message || 'An error occurred',
       };
     }
   }
@@ -173,16 +259,23 @@ export class TwoFactorService {
     const db = getDatabase();
     
     try {
-      // Get user
-      const user = await db.collection('users').findOne({
-        id: userId,
-        tenantId,
-      }) as unknown as User | null;
+      // Get user using findById helper (handles both _id and id fields)
+      const userDoc = await findById<User>(db.collection('users'), userId, { tenantId });
       
-      if (!user) {
+      if (!userDoc || !userDoc._id) {
         return {
           success: false,
           message: 'User not found',
+        };
+      }
+      
+      // Normalize user document
+      const user = normalizeDocument(userDoc);
+      const extractedUserId = extractDocumentId(user);
+      if (!user || !extractedUserId) {
+        return {
+          success: false,
+          message: 'Invalid user data',
         };
       }
       
@@ -199,7 +292,7 @@ export class TwoFactorService {
       
       // Disable 2FA
       await db.collection('users').updateOne(
-        { id: user.id },
+        { _id: userDoc._id, tenantId },
         { 
           $set: { 
             twoFactorEnabled: false,
@@ -216,11 +309,11 @@ export class TwoFactorService {
       delete newMetadata.backupCodes;
       
       await db.collection('users').updateOne(
-        { id: user.id },
+        { _id: userDoc._id, tenantId },
         { $set: { metadata: newMetadata } }
       );
       
-      logger.info('2FA disabled', { userId: user.id });
+      logger.info('2FA disabled', { userId: extractedUserId });
       
       return {
         success: true,
@@ -274,15 +367,18 @@ export class TwoFactorService {
         // Remove used backup code
         const newBackupCodes = backupCodes.filter((_, i) => i !== backupCodeIndex);
         
-        await db.collection('users').updateOne(
-          { id: userId },
-          { 
-            $set: { 
-              'metadata.backupCodes': newBackupCodes,
-              updatedAt: new Date(),
-            },
-          }
-        );
+        // Update backup codes - user already fetched above, use _id from that
+        if (user && (user as any)._id) {
+          await db.collection('users').updateOne(
+            { _id: (user as any)._id },
+            { 
+              $set: { 
+                'metadata.backupCodes': newBackupCodes,
+                updatedAt: new Date(),
+              },
+            }
+          );
+        }
         
         logger.info('Backup code used', { userId, remainingCodes: newBackupCodes.length });
         
@@ -303,16 +399,23 @@ export class TwoFactorService {
     const db = getDatabase();
     
     try {
-      // Get user
-      const user = await db.collection('users').findOne({
-        id: userId,
-        tenantId,
-      }) as unknown as User | null;
+      // Get user using findById helper (handles both _id and id fields)
+      const userDoc = await findById<User>(db.collection('users'), userId, { tenantId });
       
-      if (!user) {
+      if (!userDoc || !userDoc._id) {
         return {
           success: false,
           message: 'User not found',
+        };
+      }
+      
+      // Normalize user document
+      const user = normalizeDocument(userDoc);
+      const extractedUserId = extractDocumentId(user);
+      if (!user || !extractedUserId) {
+        return {
+          success: false,
+          message: 'Invalid user data',
         };
       }
       
@@ -342,7 +445,7 @@ export class TwoFactorService {
       
       // Update backup codes
       await db.collection('users').updateOne(
-        { id: user.id },
+        { _id: userDoc._id, tenantId },
         { 
           $set: { 
             'metadata.backupCodes': hashedBackupCodes,
@@ -351,7 +454,7 @@ export class TwoFactorService {
         }
       );
       
-      logger.info('Backup codes regenerated', { userId: user.id });
+      logger.info('Backup codes regenerated', { userId: extractedUserId });
       
       return {
         success: true,

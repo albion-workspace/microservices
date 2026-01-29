@@ -8,7 +8,7 @@
  * with both direct queries and saga-based services.
  */
 
-import { logger } from 'core-service';
+import { logger, type DatabaseResolutionOptions } from 'core-service';
 import type { 
   BonusTemplate, 
   UserBonus, 
@@ -26,27 +26,45 @@ import type {
   ActivityEvent,
   WithdrawalEvent,
 } from './types.js';
-import { handlerRegistry, getHandler, createHandler } from './handler-registry.js';
-import { validatorChain } from './validators.js';
+import { handlerRegistry, getHandler } from './handler-registry.js';
+import { createValidatorChain, type ValidatorOptions } from './validators.js';
 import { 
-  templatePersistence, 
-  userBonusPersistence, 
-  transactionPersistence,
+  createBonusPersistence,
+  type BonusPersistenceOptions,
 } from './persistence.js';
 import { emitBonusEvent } from '../../event-dispatcher.js';
-import { 
-  recordBonusConversionTransfer,
-  recordBonusForfeitTransfer,
-} from '../bonus.js';
+import type { BaseHandlerOptions } from './base-handler.js';
+// Event-driven architecture: bonus service emits events, payment service handles wallet operations
+
+// ═══════════════════════════════════════════════════════════════════
+// Bonus Engine Options
+// ═══════════════════════════════════════════════════════════════════
+
+export interface BonusEngineOptions extends DatabaseResolutionOptions {
+  // Can extend with engine-specific options if needed
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // Bonus Engine Facade
 // ═══════════════════════════════════════════════════════════════════
 
 export class BonusEngine {
-  constructor() {
-    // Initialize the handler registry
-    handlerRegistry.initialize();
+  private persistence: ReturnType<typeof createBonusPersistence>;
+  private validatorChain: ReturnType<typeof createValidatorChain>;
+  private handlerOptions: BaseHandlerOptions;
+
+  constructor(options?: BonusEngineOptions) {
+    // Create persistence with database strategy
+    this.persistence = createBonusPersistence(options || {});
+    
+    // Create validator chain with database strategy
+    this.validatorChain = createValidatorChain(options || {});
+    
+    // Store handler options
+    this.handlerOptions = options || {};
+    
+    // Initialize handler registry with database strategy options
+    handlerRegistry.initialize(this.handlerOptions);
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -60,7 +78,7 @@ export class BonusEngine {
     bonusType: BonusType,
     context: BonusContext
   ): Promise<EligibilityResult> {
-    const handler = getHandler(bonusType);
+    const handler = getHandler(bonusType, this.handlerOptions);
     
     if (!handler) {
       return {
@@ -76,7 +94,7 @@ export class BonusEngine {
    * Award a bonus to a user.
    */
   async award(bonusType: BonusType, context: BonusContext): Promise<AwardResult> {
-    const handler = getHandler(bonusType);
+    const handler = getHandler(bonusType, this.handlerOptions);
     
     if (!handler) {
       return {
@@ -105,12 +123,12 @@ export class BonusEngine {
    */
   async findEligibleBonuses(context: BonusContext): Promise<BonusTemplate[]> {
     // Use persistence layer for queries
-    const allTemplates = await templatePersistence.findActive();
+    const allTemplates = await this.persistence.template.findActive(undefined, context.tenantId);
 
     const eligible: BonusTemplate[] = [];
 
     for (const template of allTemplates) {
-      const handler = getHandler(template.type);
+      const handler = getHandler(template.type, this.handlerOptions);
       if (!handler) continue;
 
       const result = await handler.checkEligibility(context);
@@ -136,7 +154,7 @@ export class BonusEngine {
       userId: event.userId,
       tenantId: event.tenantId,
       depositAmount: event.amount,
-      depositId: event.transactionId,
+      transactionId: event.transactionId,
       walletId: event.walletId,
       currency: event.currency,
     };
@@ -157,7 +175,7 @@ export class BonusEngine {
 
     logger.info('Deposit bonuses processed', {
       userId: event.userId,
-      depositId: event.transactionId,
+      transactionId: event.transactionId,
       awarded: awarded.map(b => ({ id: b.id, type: b.type, value: b.currentValue })),
     });
 
@@ -231,16 +249,16 @@ export class BonusEngine {
    */
   async handleActivity(event: ActivityEvent): Promise<void> {
     // Find active bonuses with turnover requirements using persistence
-    const activeBonuses = await userBonusPersistence.findByUserId(event.userId, {
+    const activeBonuses = await this.persistence.userBonus.findByUserId(event.userId, {
       status: { $in: ['active', 'in_progress'] },
       turnoverRequired: { $gt: 0 },
-    });
+    }, event.tenantId);
 
     for (const bonus of activeBonuses) {
       let contribution = event.amount;
       
       // Get category contribution rate using persistence
-      const template = await templatePersistence.findById(bonus.templateId);
+      const template = await this.persistence.template.findById(bonus.templateId, event.tenantId);
 
       if (template?.activityContributions && event.category) {
         const rate = template.activityContributions[event.category] ?? 100;
@@ -256,7 +274,7 @@ export class BonusEngine {
 
       // Record transaction using persistence layer
       // MongoDB will automatically create _id, which will be normalized to id when reading
-      await transactionPersistence.create({
+      await this.persistence.transaction.create({
         userBonusId: bonus.id,
         userId: event.userId,
         tenantId: event.tenantId,
@@ -270,7 +288,7 @@ export class BonusEngine {
         turnoverContribution: contribution,
         relatedTransactionId: event.transactionId,
         activityCategory: event.category,
-      });
+      }, event.tenantId);
 
       // Update bonus using persistence layer
       const historyEntry: BonusHistoryEntry = {
@@ -281,11 +299,12 @@ export class BonusEngine {
         triggeredBy: 'system',
       };
 
-      await userBonusPersistence.updateTurnover(
+      await this.persistence.userBonus.updateTurnover(
         bonus.id,
         newProgress,
         newStatus,
-        historyEntry
+        historyEntry,
+        event.tenantId
       );
 
       // Emit event if requirements met (unified: internal + webhooks)
@@ -319,32 +338,17 @@ export class BonusEngine {
    * Convert bonus to real balance.
    * Uses persistence layer for data operations.
    */
-  async convert(bonusId: string, userId: string): Promise<UserBonus | null> {
+  async convert(bonusId: string, userId: string, tenantId?: string): Promise<UserBonus | null> {
     // Find bonus using persistence
-    const allBonuses = await userBonusPersistence.findByUserId(userId, {
+    const allBonuses = await this.persistence.userBonus.findByUserId(userId, {
       id: bonusId,
       status: 'requirements_met',
-    });
+    }, tenantId);
     const bonus = allBonuses.find(b => b.id === bonusId) || null;
 
     if (!bonus) {
       logger.warn('Bonus not found or not ready for conversion', { bonusId, userId });
       return null;
-    }
-
-    // Record conversion in ledger FIRST
-    try {
-      await recordBonusConversionTransfer(
-        userId,
-        bonus.currentValue,
-        bonus.currency,
-        bonus.tenantId,
-        bonus.id,
-        `Bonus converted: ${bonus.type}`
-      );
-    } catch (ledgerError) {
-      logger.error('Failed to record bonus conversion in ledger', { error: ledgerError, bonusId });
-      throw new Error('Failed to record bonus conversion in ledger');
     }
 
     const now = new Date();
@@ -357,11 +361,12 @@ export class BonusEngine {
     };
 
     // Update using persistence layer
-    await userBonusPersistence.updateStatus(bonusId, 'converted', historyEntry, {
+    await this.persistence.userBonus.updateStatus(bonusId, 'converted', historyEntry, {
       convertedAt: now,
-    });
+    }, tenantId);
 
-    // Emit for payment gateway + webhooks (unified)
+    // Emit bonus.converted event - payment service will handle wallet operations
+    // Payment service will check balance and create transfer when processing the event
     try {
       await emitBonusEvent('bonus.converted', bonus.tenantId, userId, {
         bonusId: bonus.id,
@@ -381,30 +386,14 @@ export class BonusEngine {
    * Forfeit a bonus.
    * Uses persistence layer for data operations.
    */
-  async forfeit(bonusId: string, userId: string, reason: string): Promise<UserBonus | null> {
+  async forfeit(bonusId: string, userId: string, reason: string, tenantId?: string): Promise<UserBonus | null> {
     // Find bonus using persistence
-    const allBonuses = await userBonusPersistence.findByUserId(userId, {
+    const allBonuses = await this.persistence.userBonus.findByUserId(userId, {
       status: { $in: ['active', 'in_progress', 'requirements_met'] },
-    });
+    }, tenantId);
     const bonus = allBonuses.find(b => b.id === bonusId) || null;
 
     if (!bonus) return null;
-
-    // Record forfeiture in ledger FIRST
-    try {
-      await recordBonusForfeitTransfer(
-        userId,
-        bonus.currentValue,
-        bonus.currency,
-        bonus.tenantId,
-        bonus.id,
-        reason,
-        `Bonus forfeited: ${reason}`
-      );
-    } catch (ledgerError) {
-      logger.error('Failed to record bonus forfeiture in ledger', { error: ledgerError, bonusId });
-      throw new Error('Failed to record bonus forfeiture in ledger');
-    }
 
     const now = new Date();
     const historyEntry: BonusHistoryEntry = {
@@ -416,12 +405,13 @@ export class BonusEngine {
     };
 
     // Update using persistence layer
-    await userBonusPersistence.updateStatus(bonusId, 'forfeited', historyEntry, {
+    await this.persistence.userBonus.updateStatus(bonusId, 'forfeited', historyEntry, {
       currentValue: 0,
       forfeitedAt: now,
-    });
+    }, tenantId);
 
-    // Emit for payment gateway + webhooks (unified)
+    // Emit bonus.forfeited event - payment service will handle wallet operations
+    // Payment service will check balance and create transfer when processing the event
     try {
       await emitBonusEvent('bonus.forfeited', bonus.tenantId, userId, {
         bonusId: bonus.id,
@@ -442,12 +432,12 @@ export class BonusEngine {
    * Cancel a bonus (before usage).
    * Uses persistence layer for data operations.
    */
-  async cancel(bonusId: string, userId: string): Promise<UserBonus | null> {
+  async cancel(bonusId: string, userId: string, tenantId?: string): Promise<UserBonus | null> {
     // Find bonus using persistence
-    const allBonuses = await userBonusPersistence.findByUserId(userId, {
+    const allBonuses = await this.persistence.userBonus.findByUserId(userId, {
       status: { $in: ['pending', 'active'] },
       turnoverProgress: 0,
-    });
+    }, tenantId);
     const bonus = allBonuses.find(b => b.id === bonusId) || null;
 
     if (!bonus) return null;
@@ -461,9 +451,9 @@ export class BonusEngine {
     };
 
     // Update using persistence layer
-    await userBonusPersistence.updateStatus(bonusId, 'cancelled', historyEntry, {
+    await this.persistence.userBonus.updateStatus(bonusId, 'cancelled', historyEntry, {
       currentValue: 0,
-    });
+    }, tenantId);
 
     logger.info('Bonus cancelled', { bonusId });
     return { ...bonus, status: 'cancelled', currentValue: 0 };
@@ -473,29 +463,13 @@ export class BonusEngine {
    * Expire old bonuses (call from cron job).
    * Uses persistence layer for data operations.
    */
-  async expireOldBonuses(): Promise<number> {
+  async expireOldBonuses(tenantId?: string): Promise<number> {
     const now = new Date();
     
     // Find expiring bonuses using persistence
-    const expiredBonuses = await userBonusPersistence.findExpiring();
+    const expiredBonuses = await this.persistence.userBonus.findExpiring(tenantId);
 
     for (const bonus of expiredBonuses) {
-      // Record expiration in ledger FIRST (same as forfeiture)
-      try {
-      await recordBonusForfeitTransfer(
-          bonus.userId,
-          bonus.currentValue,
-          bonus.currency,
-          bonus.tenantId,
-          bonus.id,
-          'Bonus expired',
-          `Bonus expired: ${bonus.type}`
-        );
-      } catch (ledgerError) {
-        logger.error('Failed to record bonus expiration in ledger', { error: ledgerError, bonusId: bonus.id });
-        // Continue - don't block expiration
-      }
-
       const historyEntry: BonusHistoryEntry = {
         timestamp: now,
         action: 'expired',
@@ -505,11 +479,12 @@ export class BonusEngine {
       };
 
       // Update using persistence layer
-      await userBonusPersistence.updateStatus(bonus.id, 'expired', historyEntry, {
+      await this.persistence.userBonus.updateStatus(bonus.id, 'expired', historyEntry, {
         currentValue: 0,
-      });
+      }, tenantId);
 
-      // Emit for payment gateway + webhooks (unified)
+      // Emit bonus.expired event - payment service will handle wallet operations
+      // Payment service will check balance and create transfer when processing the event
       try {
         await emitBonusEvent('bonus.expired', bonus.tenantId, bonus.userId, {
           bonusId: bonus.id,
@@ -539,6 +514,7 @@ export class BonusEngine {
    * Get all registered bonus types.
    */
   getSupportedTypes(): BonusType[] {
+    handlerRegistry.initialize();
     return handlerRegistry.getRegisteredTypes();
   }
 
@@ -553,14 +529,20 @@ export class BonusEngine {
    * Add a custom validator.
    */
   addValidator(validator: any): void {
-    validatorChain.add(validator);
+    this.validatorChain.add(validator);
   }
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Default Export
+// Factory Function
 // ═══════════════════════════════════════════════════════════════════
 
-export const bonusEngine = new BonusEngine();
+/**
+ * Factory function to create bonus engine with database strategy
+ */
+export function createBonusEngine(options?: BonusEngineOptions): BonusEngine {
+  return new BonusEngine(options);
+}
+
 export default BonusEngine;
 

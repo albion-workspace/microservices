@@ -208,9 +208,12 @@ export interface UserQueryOptions {
     field: string;
     direction: 'asc' | 'desc';
   };
+  // Cursor-based pagination (O(1) performance, sharding-friendly)
   pagination?: {
-    limit: number;
-    offset: number;
+    first?: number;
+    after?: string;
+    last?: number;
+    before?: string;
   };
 }
 

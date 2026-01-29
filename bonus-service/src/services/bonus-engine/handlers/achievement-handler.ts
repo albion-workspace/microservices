@@ -5,9 +5,9 @@
  *          task_completion, challenge
  */
 
-import { getDatabase, logger } from 'core-service';
+import { logger } from 'core-service';
 import type { BonusTemplate, BonusType, UserBonus } from '../../../types.js';
-import { BaseBonusHandler } from '../base-handler.js';
+import { BaseBonusHandler, type BaseHandlerOptions } from '../base-handler.js';
 import type { BonusContext, EligibilityResult, BonusCalculation } from '../types.js';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -18,22 +18,24 @@ export class AchievementHandler extends BaseBonusHandler {
   readonly type: BonusType = 'achievement';
 
   async checkEligibility(context: BonusContext): Promise<EligibilityResult> {
-    const db = getDatabase();
-    const templates = db.collection('bonus_templates');
-    const userBonuses = db.collection('user_bonuses');
+    const userBonuses = await this.getUserBonusesCollection(context.tenantId);
 
     // Find template by achievement code
     if (!context.achievementCode) {
       return { eligible: false, reason: 'Achievement code required' };
     }
 
-    const template = await templates.findOne({
+    // Use persistence layer to find template
+    const templates = await this.persistence.template.findActive({
       type: 'achievement',
-      isActive: true,
       tags: context.achievementCode,
-      validFrom: { $lte: new Date() },
-      validUntil: { $gte: new Date() },
-    }) as BonusTemplate | null;
+    }, context.tenantId);
+    
+    const template = templates.find(t => 
+      t.tags?.includes(context.achievementCode!) &&
+      t.validFrom <= new Date() &&
+      t.validUntil >= new Date()
+    ) || null;
 
     if (!template) {
       return { eligible: false, reason: 'No bonus for this achievement' };
@@ -87,8 +89,7 @@ export class MilestoneHandler extends BaseBonusHandler {
     template: BonusTemplate,
     context: BonusContext
   ): Promise<EligibilityResult> {
-    const db = getDatabase();
-    const userBonuses = db.collection('user_bonuses');
+    const userBonuses = await this.getUserBonusesCollection(context.tenantId);
 
     // Check milestone thresholds from context metadata
     const milestoneType = context.metadata?.milestoneType as string;
@@ -146,9 +147,6 @@ export class SpecialEventHandler extends BaseBonusHandler {
     template: BonusTemplate,
     context: BonusContext
   ): Promise<EligibilityResult> {
-    const db = getDatabase();
-    const userBonuses = db.collection('user_bonuses');
-
     // Special events typically have specific date ranges
     const now = new Date();
     
@@ -171,9 +169,7 @@ export class PromoCodeHandler extends BaseBonusHandler {
   readonly type: BonusType = 'promo_code';
 
   async checkEligibility(context: BonusContext): Promise<EligibilityResult> {
-    const db = getDatabase();
-    const templates = db.collection('bonus_templates');
-    const userBonuses = db.collection('user_bonuses');
+    const userBonuses = await this.getUserBonusesCollection(context.tenantId);
 
     const promoCode = context.metadata?.promoCode as string;
     
@@ -181,16 +177,15 @@ export class PromoCodeHandler extends BaseBonusHandler {
       return { eligible: false, reason: 'Promo code required' };
     }
 
-    // Find template by promo code
-    const template = await templates.findOne({
-      type: 'promo_code',
-      code: promoCode.toUpperCase(),
-      isActive: true,
-      validFrom: { $lte: new Date() },
-      validUntil: { $gte: new Date() },
-    }) as BonusTemplate | null;
+    // Use persistence layer to find template by code
+    const template = await this.persistence.template.findByCode(promoCode.toUpperCase(), context.tenantId);
 
-    if (!template) {
+    if (!template || template.type !== 'promo_code' || !template.isActive) {
+      return { eligible: false, reason: 'Invalid or expired promo code' };
+    }
+
+    const now = new Date();
+    if (template.validFrom > now || template.validUntil < now) {
       return { eligible: false, reason: 'Invalid or expired promo code' };
     }
 
@@ -227,8 +222,7 @@ export class ConsolationHandler extends BaseBonusHandler {
     template: BonusTemplate,
     context: BonusContext
   ): Promise<EligibilityResult> {
-    const db = getDatabase();
-    const userBonuses = db.collection('user_bonuses');
+    const userBonuses = await this.getUserBonusesCollection(context.tenantId);
 
     // Consolation requires a loss
     if (!context.lossAmount || context.lossAmount <= 0) {
@@ -296,8 +290,7 @@ export class TaskCompletionHandler extends BaseBonusHandler {
     template: BonusTemplate,
     context: BonusContext
   ): Promise<EligibilityResult> {
-    const db = getDatabase();
-    const userBonuses = db.collection('user_bonuses');
+    const userBonuses = await this.getUserBonusesCollection(context.tenantId);
 
     const taskId = context.metadata?.taskId as string;
     
@@ -352,8 +345,7 @@ export class ChallengeHandler extends BaseBonusHandler {
     template: BonusTemplate,
     context: BonusContext
   ): Promise<EligibilityResult> {
-    const db = getDatabase();
-    const userBonuses = db.collection('user_bonuses');
+    const userBonuses = await this.getUserBonusesCollection(context.tenantId);
 
     const challengeId = context.metadata?.challengeId as string;
     

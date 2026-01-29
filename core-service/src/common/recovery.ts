@@ -38,9 +38,10 @@
  * ```
  */
 
-import type { ClientSession } from 'mongodb';
-import { getDatabase, getClient, logger } from '../index.js';
-import { getRedis, scanKeysArray } from './redis.js';
+import type { ClientSession, Db, MongoClient } from 'mongodb';
+import { logger } from '../index.js';
+import { getRedis, scanKeysArray } from '../databases/redis.js';
+import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/strategy.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -381,8 +382,15 @@ export function getOperationStateTracker(): OperationStateTracker {
 export async function recoverOperation<TOperation extends RecoverableOperation>(
   operationId: string,
   handler: RecoveryHandler<TOperation>,
-  session?: ClientSession
+  options?: {
+    database?: Db;
+    databaseStrategy?: DatabaseStrategyResolver;
+    context?: DatabaseContext;
+    session?: ClientSession;
+  }
 ): Promise<RecoveryResult> {
+  const session = options?.session;
+  
   const executeRecovery = async (txSession: ClientSession): Promise<RecoveryResult> => {
     try {
       // 1. Find operation
@@ -464,7 +472,17 @@ export async function recoverOperation<TOperation extends RecoverableOperation>(
     return await executeRecovery(session);
   }
 
-  const client = getClient();
+  let client: MongoClient;
+  
+  if (options?.database) {
+    client = options.database.client;
+  } else if (options?.databaseStrategy && options?.context) {
+    const db = await options.databaseStrategy.resolve(options.context);
+    client = db.client;
+  } else {
+    throw new Error('recoverOperation requires either database or databaseStrategy with context when session is not provided');
+  }
+  
   const internalSession = client.startSession();
 
   try {
