@@ -39,16 +39,16 @@ import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 
 // External packages (core-service)
-import { connectRedis, getRedis, checkRedisHealth, scanKeysArray, connectDatabase, getDatabase } from '../../../core-service/src/index.js';
+import { connectRedis, getRedis, checkRedisHealth, scanKeysArray, connectDatabase } from '../../../core-service/src/index.js';
 import { 
   recoverOperation,
   recoverStuckOperations,
   getOperationStateTracker,
   getRecoveryHandler,
   registerRecoveryHandler,
-} from '../../../core-service/src/common/recovery.js';
-import { createTransferRecoveryHandler } from '../../../core-service/src/common/transfer-recovery.js';
-import { createTransferWithTransactions } from '../../../core-service/src/common/transfer-helper.js';
+} from '../../../core-service/src/common/resilience/recovery.js';
+import { createTransferRecoveryHandler } from '../../../core-service/src/common/wallet/transfer-recovery.js';
+import { createTransferWithTransactions } from '../../../core-service/src/common/wallet/transfer.js';
 
 // Local imports
 import { 
@@ -75,7 +75,7 @@ import {
 } from '../config/scripts.js';
 
 // Type imports
-import type { OperationState, RecoveryResult } from '../../../core-service/src/common/recovery.js';
+import type { OperationState, RecoveryResult } from '../../../core-service/src/common/resilience/recovery.js';
 
 // ES module __dirname equivalent
 const __filename = fileURLToPath(import.meta.url);

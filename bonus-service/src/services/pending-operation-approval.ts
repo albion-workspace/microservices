@@ -20,9 +20,10 @@
  * ```
  */
 
-import { createPendingOperationStore, getRedis, scanKeysIterator } from 'core-service';
+import { createPendingOperationStore, scanKeysIterator } from 'core-service';
 import { logger, requireAuth } from 'core-service';
 import type { ResolverContext } from 'core-service';
+import { redis } from '../redis.js';
 
 export interface PendingOperationData extends Record<string, unknown> {
   requestedAt: number;
@@ -195,23 +196,23 @@ export function createPendingOperationApprovalService<T extends PendingOperation
   async function listPendingOperations(
     filter?: Record<string, unknown>
   ): Promise<Array<PendingOperationListItem<T>>> {
-    const redis = getRedis();
-    if (!redis) {
+    if (!redis.isInitialized()) {
       logger.warn('Redis not available for listing pending operations', { operationType });
       return [];
     }
 
+    const client = redis.getClient();
     const pattern = `${redisKeyPrefix}approval:*`;
     const results: Array<PendingOperationListItem<T>> = [];
 
     for await (const key of scanKeysIterator({ pattern, maxKeys: 10000 })) {
-      const value = await redis.get(key);
+      const value = await client.get(key);
       if (!value) continue;
 
       try {
         const payload = JSON.parse(value);
         const token = key.split(':').pop() || '';
-        const ttl = await redis.ttl(key);
+        const ttl = await client.ttl(key);
         const expiresAt = Date.now() + (ttl > 0 ? ttl * 1000 : 0);
 
         const data = payload.data as T;
@@ -265,14 +266,14 @@ export function createPendingOperationApprovalService<T extends PendingOperation
     ttlSeconds: number;
     createdAt?: number;
   } | null> {
-    const redis = getRedis();
-    if (!redis) {
+    if (!redis.isInitialized()) {
       logger.warn('Redis not available for getting raw operation data', { operationType });
       return null;
     }
 
+    const client = redis.getClient();
     const key = `${redisKeyPrefix}approval:${token}`;
-    const value = await redis.get(key);
+    const value = await client.get(key);
     
     if (!value) {
       return null;
@@ -280,7 +281,7 @@ export function createPendingOperationApprovalService<T extends PendingOperation
 
     try {
       const payload = JSON.parse(value);
-      const ttl = await redis.ttl(key);
+      const ttl = await client.ttl(key);
       const expiresAt = Date.now() + (ttl > 0 ? ttl * 1000 : 0);
 
       return {

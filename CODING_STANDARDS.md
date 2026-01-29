@@ -4,7 +4,7 @@
 
 **Project Status**: Pre-Production - This project has not yet been released to production. Code cleanup rules are simplified (no backward compatibility concerns). After production/release, these rules will be updated to include backward compatibility and legacy code management.
 
-**Last Updated**: 2026-01-28
+**Last Updated**: 2026-01-29
 
 ---
 
@@ -89,7 +89,7 @@ Before making any changes, follow this checklist:
 
 3. **Internal Packages** (core-service, core-service/access, etc.)
    ```typescript
-   import { logger, getDatabase } from 'core-service';
+   import { logger, createServiceDatabaseAccess } from 'core-service';
    import { matchAnyUrn } from 'core-service/access';
    ```
 
@@ -124,7 +124,7 @@ import { Server as SocketIOServer } from 'socket.io';
 import { GraphQLSchema, GraphQLObjectType } from 'graphql';
 
 // Internal packages
-import { logger, getDatabase } from 'core-service';
+import { logger, createServiceDatabaseAccess } from 'core-service';
 import { matchAnyUrn } from 'core-service/access';
 
 // Local imports
@@ -201,12 +201,12 @@ import type { RegisterInput } from './types.js';
 ## 🏗️ Architecture Patterns
 
 ### Core-Service Architecture
-- **Core-Service is Generic Only**: Contains only shared, generic utilities and patterns
+- **Core-Service is the Single Source of Truth**: Provides shared database abstractions, utilities, and patterns
 - **Microservices Extend Core-Service**: Each microservice adds specialized functionality on top
 - **Never**: Add service-specific logic to `core-service`
-- **Never**: Include infrastructure dependencies (MongoDB, Redis) in `core-service` - these belong in microservices
-- **Always**: Keep `core-service` dependency-free from databases and caches
-- **Pattern**: `core-service` provides abstractions (e.g., `createService`, `emit`, `on`), microservices implement specifics
+- **Never**: Import `mongodb` or `redis` directly in microservices - always use `core-service` exports
+- **Always**: Use database types from `core-service` (`Db`, `ClientSession`, `Collection`, etc.)
+- **Pattern**: `core-service` provides database abstractions and utilities, microservices use them for business logic
 
 ### Microservices
 - **Always**: Build services in dependency order
@@ -247,25 +247,156 @@ import type { RegisterInput } from './types.js';
   ```
 - **Event Format**: Follow `IntegrationEvent<T>` structure (eventId, eventType, timestamp, tenantId, userId, data)
 - **Never**: Use direct HTTP calls between services - use events instead
-- **Never**: Include MongoDB or Redis clients in `core-service` - event system uses Redis but is abstracted
 - **Always**: Services define their own event types - `core-service` provides generic pub/sub infrastructure
 
 ### Dependencies & Infrastructure
+- **Core-Service**: Provides (single source of truth):
+  - Database abstractions (`getDatabase`, `getClient`, `connectDatabase`, `createServiceDatabaseAccess`)
+  - Database utilities (`findOneById`, `paginateCollection`, `buildIdQuery`)
+  - Database types (`Db`, `ClientSession`, `Collection`, `Filter`, `MongoClient`)
+  - Redis abstractions (`createServiceRedisAccess`, `configureRedisStrategy`)
+  - Generic utilities (logging, retry, circuit breaker)
+  - Generic patterns (saga, gateway, event system)
+  - Type definitions and interfaces
+  - Shared helpers (pagination, validation, wallet operations)
 - **Core-Service**: Must NOT include:
-  - MongoDB client dependencies
-  - Redis client dependencies
   - Service-specific database schemas
   - Service-specific business logic
-- **Core-Service**: SHOULD include:
-  - Generic utilities (logging, retry, circuit breaker)
-  - Generic patterns (saga, gateway, event system abstractions)
-  - Type definitions and interfaces
-  - Shared helpers (pagination, validation)
-- **Microservices**: Include their own:
-  - MongoDB connections and models
-  - Redis connections (if needed)
-  - Database-specific schemas
-  - Business logic implementations
+  - Domain-specific types (these belong in services)
+- **Microservices**: 
+  - **Always**: Import database types from `core-service`, never from `mongodb` directly
+  - **Always**: Use `core-service` utilities for database operations
+  - Include their own business logic implementations
+  - Define their own domain-specific types and schemas
+
+### MongoDB Best Practices (Driver 7.x)
+
+This project uses **MongoDB Node.js Driver 7.x**. Follow these practices:
+
+**Database Access Pattern**:
+```typescript
+// ✅ Correct: Use ServiceDatabaseAccessor
+import { createServiceDatabaseAccess } from 'core-service';
+export const db = createServiceDatabaseAccess('payment-service');
+
+// Initialize once at startup
+await db.initialize({ brand, tenantId });
+
+// Use in service code
+const database = await db.getDb();
+const collection = database.collection('wallets');
+```
+
+**Connection Pool Monitoring** - Use event-based tracking:
+```typescript
+// ✅ Correct: Event-based stats via accessor
+const stats = getConnectionPoolStats();  // { totalConnections, checkedOut }
+const health = await db.checkHealth();   // includes connections & latency
+
+// ❌ Wrong: Never access internal topology (not a public API)
+// client.topology?.s?.pool?.totalConnectionCount
+```
+
+**Index Creation** - No deprecated options:
+```typescript
+// ✅ Correct: Modern options only
+db.registerIndexes('collection', [
+  { key: { field: 1 }, unique: true },
+  { key: { field: -1 }, sparse: true },
+]);
+
+// ❌ Wrong: 'background' is deprecated in MongoDB 4.2+
+// { key: { field: 1 }, background: true }
+```
+
+**Transactions** - Use `withTransaction`:
+```typescript
+// ✅ Correct: withTransaction helper or session.withTransaction
+import { withTransaction } from 'core-service';
+
+await withTransaction({
+  client: db.getClient(),
+  fn: async (session) => {
+    await col1.updateOne({...}, {...}, { session });
+    await col2.insertOne({...}, { session });
+  },
+});
+```
+
+**Deprecated/Removed Options** - Never use:
+- `useNewUrlParser`, `useUnifiedTopology`, `useFindAndModify`, `useCreateIndex` - Removed in driver 4.0+
+- `background` (index option) - Deprecated in MongoDB 4.2+
+- Internal topology access (`client.topology?.s?.pool`) - Not a public API
+
+### Redis Best Practices (node-redis v5)
+
+This project uses **node-redis v5.10.0+**. Follow these practices:
+
+**Service Redis Accessor Pattern**:
+```typescript
+// ✅ Correct: Use ServiceRedisAccessor
+import { createServiceRedisAccess } from 'core-service';
+export const redis = createServiceRedisAccess('payment-service');
+
+// Initialize with brand context
+await redis.initialize({ brand: 'acme' });
+
+// Keys are auto-prefixed: {brand}:{service}:{key}
+await redis.set('tx:123', { status: 'pending' }, 300);
+const value = await redis.get<T>('tx:123');
+```
+
+**Key Scanning** - Use SCAN iterator, NOT KEYS:
+```typescript
+// ✅ Correct: SCAN iterator (non-blocking, production-safe)
+import { scanKeysIterator, scanKeysArray } from 'core-service';
+const keys = await scanKeysArray({ pattern: 'user:*', maxKeys: 1000 });
+
+// Or use accessor's pattern methods
+const keys = await redis.keys('tx:*');  // Uses SCAN internally
+await redis.deletePattern('expired:*'); // Uses SCAN internally
+
+// ❌ Wrong: KEYS command blocks entire Redis server
+// await client.keys('user:*');  // DO NOT USE - blocks Redis!
+```
+
+**Pattern Deletion** - Use SCAN-based deletion:
+```typescript
+// ✅ Correct: Uses SCAN internally (non-blocking)
+import { deleteCachePattern } from 'core-service';
+await deleteCachePattern('user:*');
+
+// ❌ Wrong: KEYS + DEL blocks Redis
+// const keys = await client.keys('user:*');
+// await client.del(keys);
+```
+
+**Read/Write Splitting** (when infrastructure supports):
+```typescript
+// ✅ Correct: Use dedicated functions
+import { getRedis, getRedisForRead, hasReadReplica } from 'core-service';
+
+const master = getRedis();        // Always use for writes
+const reader = getRedisForRead(); // Use for reads (replica or master fallback)
+
+// Check if replica available
+if (hasReadReplica()) {
+  // Read from replica
+}
+```
+
+**Connection Features** (node-redis v5.10.0+):
+- `keepAlive: true` - TCP keep-alive enabled by default
+- `noDelay: true` - Nagle's algorithm disabled for lower latency
+- Exponential backoff with jitter for reconnection
+- `clientName` - Visible in `CLIENT LIST` for debugging
+- `pingInterval` - Keep-alive for Azure Cache and similar
+
+**Anti-Patterns to Avoid**:
+- ❌ `KEYS *` - Blocks entire Redis server
+- ❌ Large batch operations without pipelining
+- ❌ Storing large values (>100KB) without compression
+- ❌ Using Redis as primary database (use for cache/state only)
 
 ### GraphQL
 - **Always**: Keep GraphQL schemas and TypeScript types in sync
@@ -707,8 +838,7 @@ Before considering work complete:
 
 ## 📚 Additional Resources
 
-- `README.md` - Project overview, architecture, database strategy, dynamic configuration, and future roadmap
-- `ARCHITECTURE_IMPROVEMENTS.md` - Detailed architectural improvements tracking and priorities
+- `README.md` - Project overview, architecture, database layer, caching, Redis, GraphQL gateway, access control, resilience patterns, event system, error handling, configuration, testing, sharding guide, disaster recovery, and roadmap
 
 ---
 

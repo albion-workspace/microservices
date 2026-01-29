@@ -6,7 +6,7 @@
  */
 
 import { getCache, setCache, deleteCache, deleteCachePattern } from '../databases/cache.js';
-import { publish, subscribe } from '../databases/redis.js';
+import { publish, subscribe } from '../databases/redis/connection.js';
 import { matchUrn, parseUrn } from 'access-engine';
 import type { CompiledPermissions, ResolvedAccessConfig, URN } from './types-ext.js';
 

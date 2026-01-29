@@ -330,24 +330,28 @@ export async function getServiceMongoUri(service: string): Promise<string> {
  * Get MongoDB database for a specific service using database strategy
  * Supports per-service, per-brand, per-tenant, and other strategies
  * 
+ * NOTE: This is the scripts-specific function that requires a service name.
+ * It wraps core-service's getServiceDatabase() for use in scripts.
+ * Do NOT confuse with the old core-service getDatabase() (parameterless).
+ * 
  * @param service - Service name (e.g., 'payment-service', 'bonus-service')
  * @param options - Optional context for database resolution
  * @returns Database instance resolved using configured strategy
  * 
  * @example
  * // Per-service strategy (default)
- * const db = await getDatabase('payment-service');
+ * const db = await getServiceDb('payment-service');
  * 
  * // Per-brand strategy
- * const db = await getDatabase('payment-service', { brand: 'brand-a' });
+ * const db = await getServiceDb('payment-service', { brand: 'brand-a' });
  * 
  * // Per-tenant strategy
- * const db = await getDatabase('payment-service', { tenantId: 'tenant-123' });
+ * const db = await getServiceDb('payment-service', { tenantId: 'tenant-123' });
  * 
  * // Per-brand-service strategy
- * const db = await getDatabase('payment-service', { brand: 'brand-a', tenantId: 'tenant-123' });
+ * const db = await getServiceDb('payment-service', { brand: 'brand-a', tenantId: 'tenant-123' });
  */
-export async function getDatabase(
+export async function getServiceDb(
   service: string,
   options?: {
     /** Brand identifier (for per-brand strategies) */
@@ -390,7 +394,7 @@ export async function getMongoClient(
   options?: { brand?: string; tenantId?: string; shardKey?: string | number }
 ): Promise<MongoClient> {
   // Get database first to ensure strategy is resolved
-  const db = await getDatabase(service, options);
+  const db = await getServiceDb(service, options);
   // Extract client from database instance
   return db.client;
 }
@@ -512,7 +516,7 @@ export async function closeAllConnections(): Promise<void> {
  * @param options - Optional context for database resolution
  */
 export async function getAuthDatabase(options?: { brand?: string; tenantId?: string; shardKey?: string | number }): Promise<Db> {
-  return getDatabase('core-service', options);
+  return getServiceDb('core-service', options);
 }
 
 /**
@@ -526,7 +530,7 @@ export async function getAuthClient(options?: { brand?: string; tenantId?: strin
  * Get MongoDB database for core_service (new name)
  */
 export async function getCoreDatabase(options?: { brand?: string; tenantId?: string; shardKey?: string | number }): Promise<Db> {
-  return getDatabase('core-service', options);
+  return getServiceDb('core-service', options);
 }
 
 /**
@@ -543,7 +547,7 @@ export async function getCoreClient(options?: { brand?: string; tenantId?: strin
  * @param options - Optional context for database resolution
  */
 export async function getPaymentDatabase(options?: { brand?: string; tenantId?: string; shardKey?: string | number }): Promise<Db> {
-  return getDatabase('payment-service', options);
+  return getServiceDb('payment-service', options);
 }
 
 /**
@@ -560,7 +564,7 @@ export async function getPaymentClient(options?: { brand?: string; tenantId?: st
  * @param options - Optional context for database resolution
  */
 export async function getBonusDatabase(options?: { brand?: string; tenantId?: string; shardKey?: string | number }): Promise<Db> {
-  return getDatabase('bonus-service', options);
+  return getServiceDb('bonus-service', options);
 }
 
 /**
@@ -577,7 +581,7 @@ export async function getBonusClient(options?: { brand?: string; tenantId?: stri
  * @param options - Optional context for database resolution
  */
 export async function getNotificationDatabase(options?: { brand?: string; tenantId?: string; shardKey?: string | number }): Promise<Db> {
-  return getDatabase('notification-service', options);
+  return getServiceDb('notification-service', options);
 }
 
 /**
@@ -617,7 +621,7 @@ export function clearConfigCache(): void {
  * @example
  * const args = process.argv.slice(2);
  * const { brand, tenantId } = parseBrandTenantArgs(args);
- * const db = await getDatabase('payment-service', { brand, tenantId });
+ * const db = await getServiceDb('payment-service', { brand, tenantId });
  */
 export function parseBrandTenantArgs(args: string[]): { brand?: string; tenantId?: string } {
   let brand: string | undefined;

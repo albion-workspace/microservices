@@ -6,12 +6,12 @@
  */
 
 import { 
-  getDatabase, 
   findOneById,
   logger,
   approveTransfer,
   declineTransfer,
 } from 'core-service';
+import { db } from '../database.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Transfer Approval Resolvers
@@ -23,10 +23,10 @@ export const transferApprovalResolvers = {
       const transferId = args.transferId as string;
       
       try {
-        // GraphQL resolvers use getDatabase() as database strategies are initialized at gateway level
-        const db = getDatabase();
+        // GraphQL resolvers use service database accessor
+        const database = await db.getDb();
         const transfer = await approveTransfer(transferId, {
-          database: db,
+          database,
         });
         
         return {
@@ -47,10 +47,10 @@ export const transferApprovalResolvers = {
       const reason = (args.reason as string) || 'Manually declined';
       
       try {
-        // GraphQL resolvers use getDatabase() as database strategies are initialized at gateway level
-        const db = getDatabase();
+        // GraphQL resolvers use service database accessor
+        const database = await db.getDb();
         const transfer = await declineTransfer(transferId, {
-          database: db,
+          database,
           reason,
         });
         

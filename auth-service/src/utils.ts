@@ -5,6 +5,19 @@
  * Passport.js does NOT automatically hash passwords - we must do it ourselves.
  */
 
+// Node.js built-ins
+import crypto from 'crypto';
+
+// External packages
+import bcrypt from 'bcrypt';
+
+// Internal packages
+import { RoleResolver, type UserRole, type User as AccessEngineUser } from 'core-service/access';
+import { normalizeDocument, logger } from 'core-service';
+
+// Local imports
+import type { AuthConfig, IdentifierType, User } from './types.js';
+
 // ═══════════════════════════════════════════════════════════════════
 // Token Utilities
 // ═══════════════════════════════════════════════════════════════════
@@ -95,12 +108,6 @@ export function buildPendingOperationPatterns(
 export function keyMatchesToken(key: string, token: string): boolean {
   return key.endsWith(`:${token}`) || key.endsWith(token);
 }
-
-import crypto from 'crypto';
-import bcrypt from 'bcrypt';
-import { RoleResolver, type UserRole, type User as AccessEngineUser } from 'core-service/access';
-import { normalizeDocument, logger } from 'core-service';
-import type { AuthConfig, IdentifierType, User } from './types.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Password Hashing & Verification (CRITICAL: Passport.js does NOT hash passwords)

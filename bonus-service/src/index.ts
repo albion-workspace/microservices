@@ -11,6 +11,7 @@
  * - Multi-tenant support
  */
 
+// Internal packages
 import {
   createGateway,
   hasRole,
@@ -20,7 +21,6 @@ import {
   logger,
   on,
   startListening,
-  getRedis,
   getUserId,
   createWebhookService,
   requireAuth,
@@ -30,17 +30,21 @@ import {
   ensureDefaultConfigsCreated,
   resolveContext,
   initializeWebhooks,
+  configureRedisStrategy,
   type IntegrationEvent,
   type ResolverContext,
 } from 'core-service';
+
+// Local Redis accessor
+import { redis } from './redis.js';
 import { hasAnyRole as hasAnyRoleAccess } from 'core-service/access';
+
+// Local imports
 import { BONUS_ERRORS, BONUS_ERROR_CODES } from './error-codes.js';
 import { setupRecovery } from './recovery-setup.js';
 import { createBonusEngine, type BonusEngineOptions } from './services/bonus-engine/index.js';
 import { loadConfig, validateConfig, printConfigSummary, type BonusConfig } from './config.js';
 import { BONUS_CONFIG_DEFAULTS } from './config-defaults.js';
-
-// Import unified event dispatcher (handles both internal events + webhooks)
 import {
   bonusWebhooks,
   emitBonusEvent,
@@ -381,13 +385,11 @@ const bonusApprovalResolvers = {
         return null;
       }
       
-      const redis = getRedis();
-      if (!redis) {
+      if (!redis.isInitialized()) {
         throw new GraphQLError(BONUS_ERRORS.RedisNotAvailable, {});
       }
       
-      const key = `pending:bonus:approval:${token}`;
-      const ttl = await redis.ttl(key);
+      const ttl = await redis.ttl(`pending:bonus:approval:${token}`);
       const expiresAt = Date.now() + (ttl * 1000);
       
       return {
@@ -998,6 +1000,20 @@ async function main() {
 
   // Create gateway (this connects to database and starts accepting requests)
   await createGateway(buildGatewayConfig());
+
+  // Initialize Redis accessor (after gateway connects to Redis)
+  if (process.env.REDIS_URL) {
+    try {
+      await configureRedisStrategy({
+        strategy: 'shared',
+        defaultUrl: process.env.REDIS_URL,
+      });
+      await redis.initialize({ brand: context.brand });
+      logger.info('Redis accessor initialized', { brand: context.brand });
+    } catch (err) {
+      logger.warn('Could not initialize Redis accessor', { error: (err as Error).message });
+    }
+  }
 
   // Ensure all registered default configs are created in database
   // This happens after database connection is established

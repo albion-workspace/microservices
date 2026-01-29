@@ -13,14 +13,14 @@ import {
   normalizeDocument,
   findOneAndUpdateById,
   paginateCollection,
-  getDatabase,
-  getRedis,
   scanKeysIterator,
   createPendingOperationStore,
   GraphQLError,
   type CursorPaginationOptions,
   type CursorPaginationResult,
 } from 'core-service';
+import { db } from './database.js';
+import { redis } from './redis.js';
 import { AUTH_ERRORS } from './error-codes.js';
 import { matchAnyUrn, hasRole, hasAnyRole } from 'core-service/access';
 import { 
@@ -409,12 +409,12 @@ export function createAuthResolvers(
       me: async (args: Record<string, unknown>, ctx: ResolverContext) => {
         requireAuth(ctx);
         
-        const db = getDatabase();
+        const database = await db.getDb();
         const userId = getUserId(ctx);
         const tenantId = getTenantId(ctx);
         
         // Use generic helper function for document lookup with automatic ObjectId handling
-        const user = await findById(db.collection('users'), userId, { tenantId });
+        const user = await findById(database.collection('users'), userId, { tenantId });
         
         // IMPORTANT: If user has valid token but user doesn't exist in DB (e.g., deleted),
         // throw UserNotFound error so frontend can detect and clear auth
@@ -460,7 +460,7 @@ export function createAuthResolvers(
           });
         }
         
-        const db = getDatabase();
+        const database = await db.getDb();
         const userId = (args as any).id;
         const tenantId = (args as any).tenantId;
         
@@ -473,7 +473,7 @@ export function createAuthResolvers(
         }
         
         // Use generic helper function for document lookup with automatic ObjectId handling
-        const user = await findById(db.collection('users'), userId, { tenantId });
+        const user = await findById(database.collection('users'), userId, { tenantId });
         
         if (!user) {
           logger.debug('User not found', { userId, tenantId });
@@ -498,7 +498,7 @@ export function createAuthResolvers(
           });
         }
         
-        const db = getDatabase();
+        const database = await db.getDb();
         const { tenantId, first, after, last, before } = args as any;
         
         const filter: Record<string, unknown> = {};
@@ -509,7 +509,7 @@ export function createAuthResolvers(
         try {
           // Use cursor-based pagination (performance-optimized, sharding-friendly)
           const result = await paginateCollection(
-            db.collection('users'),
+            database.collection('users'),
             {
               first: first ? Math.min(Math.max(1, first), 100) : undefined, // Max 100 per page
               after,
@@ -528,7 +528,7 @@ export function createAuthResolvers(
           // If filters are present, paginateCollection may return undefined, so count manually
           let totalCount = result.totalCount;
           if (totalCount === undefined || totalCount === null) {
-            totalCount = await db.collection('users').countDocuments(filter);
+            totalCount = await database.collection('users').countDocuments(filter);
           }
           
           return {
@@ -562,7 +562,7 @@ export function createAuthResolvers(
           });
         }
         
-        const db = getDatabase();
+        const database = await db.getDb();
         const { role, tenantId, first, after, last, before } = args as any;
         
         if (!role || typeof role !== 'string') {
@@ -588,7 +588,7 @@ export function createAuthResolvers(
         try {
           // Use cursor-based pagination (performance-optimized, sharding-friendly)
           const result = await paginateCollection(
-            db.collection('users'),
+            database.collection('users'),
             {
               first: first ? Math.min(Math.max(1, first), 100) : undefined, // Max 100 per page
               after,
@@ -607,7 +607,7 @@ export function createAuthResolvers(
           // If filters are present, paginateCollection may return undefined, so count manually
           let totalCount = result.totalCount;
           if (totalCount === undefined || totalCount === null) {
-            totalCount = await db.collection('users').countDocuments(filter);
+            totalCount = await database.collection('users').countDocuments(filter);
           }
           
           return {
@@ -630,8 +630,8 @@ export function createAuthResolvers(
       mySessions: async (args: Record<string, unknown>, ctx: ResolverContext) => {
         requireAuth(ctx);
         
-        const db = getDatabase();
-        const sessions = await db.collection('sessions')
+        const database = await db.getDb();
+        const sessions = await database.collection('sessions')
           .find({
             userId: getUserId(ctx),
             tenantId: getTenantId(ctx),
@@ -881,7 +881,7 @@ export function createAuthResolvers(
           });
         }
         
-        const db = getDatabase();
+        const database = await db.getDb();
         const { userId, tenantId, roles } = (args as any).input;
         
         if (!userId) {
@@ -899,7 +899,7 @@ export function createAuthResolvers(
         try {
           // Use optimized helper function for findOneAndUpdate (performance-optimized)
           const result = await findOneAndUpdateById(
-            db.collection('users'),
+            database.collection('users'),
             userId,
             { 
               $set: { 
@@ -952,7 +952,7 @@ export function createAuthResolvers(
           });
         }
         
-        const db = getDatabase();
+        const database = await db.getDb();
         const { userId, tenantId, permissions } = (args as any).input;
         
         if (!userId) {
@@ -970,7 +970,7 @@ export function createAuthResolvers(
         try {
           // Use optimized helper function for findOneAndUpdate (performance-optimized)
           const result = await findOneAndUpdateById(
-            db.collection('users'),
+            database.collection('users'),
             userId,
             { 
               $set: { 
@@ -1021,7 +1021,7 @@ export function createAuthResolvers(
           throw new Error('Unauthorized: Insufficient permissions to update user status');
         }
         
-        const db = getDatabase();
+        const database = await db.getDb();
         const { userId, tenantId, status } = (args as any).input;
         
         if (!userId) {
@@ -1044,7 +1044,7 @@ export function createAuthResolvers(
         try {
           // Use optimized helper function for findOneAndUpdate (performance-optimized)
           const result = await findOneAndUpdateById(
-            db.collection('users'),
+            database.collection('users'),
             userId,
             { 
               $set: { 
@@ -1094,8 +1094,7 @@ export function createAuthResolvers(
         const isAdmin = checkSystemOrPermission(user, 'user', 'read', '*') || 
                         hasAnyRole(['system', 'admin'])(user);
         
-        const redis = getRedis();
-        if (!redis) {
+        if (!redis.isInitialized()) {
           logger.debug('Redis not available for pending operations query');
           return {
             nodes: [],
@@ -1109,6 +1108,7 @@ export function createAuthResolvers(
           };
         }
         
+        const redisClient = redis.getClient();
         const operationType = (args as any).operationType as string | undefined;
         const recipientFilter = (args as any).recipient as string | undefined;
         
@@ -1116,8 +1116,8 @@ export function createAuthResolvers(
         let userEmail: string | undefined;
         let userPhone: string | undefined;
         if (!isAdmin) {
-          const db = getDatabase();
-          const userDoc = await findById(db.collection('users'), userId, { tenantId });
+          const database = await db.getDb();
+          const userDoc = await findById(database.collection('users'), userId, { tenantId });
           userEmail = userDoc?.email?.toLowerCase();
           userPhone = userDoc?.phone;
         }
@@ -1142,7 +1142,7 @@ export function createAuthResolvers(
         // Scan Redis keys
         for await (const key of scanKeysIterator({ pattern, maxKeys: 1000 })) {
           try {
-            const value = await redis.get(key);
+            const value = await redisClient.get(key);
             if (!value || typeof value !== 'string') continue;
             
             const payload = JSON.parse(value);
@@ -1171,7 +1171,7 @@ export function createAuthResolvers(
             }
             
             // Get TTL (time to live in seconds)
-            const ttl = await redis.ttl(key);
+            const ttl = await redisClient.ttl(key);
             
             // Sanitize metadata (remove sensitive data)
             const sanitizedMetadata = sanitizePendingOperationMetadata(operationData);
@@ -1238,8 +1238,8 @@ export function createAuthResolvers(
                          'shared-jwt-secret-change-in-production';
         
         // Try Redis first
-        const redis = getRedis();
-        if (redis) {
+        if (redis.isInitialized()) {
+          const redisClient = redis.getClient();
           // Try to find in Redis
           const patterns = operationType 
             ? [`pending:${operationType}:${token}`]
@@ -1252,12 +1252,12 @@ export function createAuthResolvers(
               : pattern;
             
             if (key && !key.includes('*')) {
-              const value = await redis.get(key);
+              const value = await redisClient.get(key);
               if (value && typeof value === 'string') {
                 try {
                   const payload = JSON.parse(value);
                   const operationData = payload.data || {};
-                  const ttl = await redis.ttl(key);
+                  const ttl = await redisClient.ttl(key);
                   
                   return {
                     token,
@@ -1319,8 +1319,7 @@ export function createAuthResolvers(
       pendingOperationTypes: async (args: Record<string, unknown>, ctx: ResolverContext) => {
         requireAuth(ctx);
         
-        const redis = getRedis();
-        if (!redis) {
+        if (!redis.isInitialized()) {
           logger.debug('Redis not available for pending operation types query');
           return [];
         }
@@ -1367,10 +1366,11 @@ export function createAuthResolvers(
         const operationType = args.operationType as string | undefined;
         const token = extractToken(originalToken);
         
-        const redis = getRedis();
-        if (!redis) {
+        if (!redis.isInitialized()) {
           throw new GraphQLError(AUTH_ERRORS.RedisNotAvailable, {});
         }
+        
+        const redisClient = redis.getClient();
         
         // Determine if this is an approval operation
         const isApprovalOperation = operationType === 'approval' || 
@@ -1389,13 +1389,13 @@ export function createAuthResolvers(
         });
         
         // Try direct key lookups first (no wildcards) - most efficient
-        const directResult = await tryDirectKeyLookups(redis, patterns, token, originalToken, operationType);
+        const directResult = await tryDirectKeyLookups(redisClient, patterns, token, originalToken, operationType);
         if (directResult) {
           return directResult;
         }
         
         // If direct lookups failed, try scanning with wildcards
-        const scanResult = await tryWildcardScan(redis, patterns, token, originalToken, operationType);
+        const scanResult = await tryWildcardScan(redisClient, patterns, token, originalToken, operationType);
         if (scanResult) {
           return scanResult;
         }
@@ -1427,7 +1427,8 @@ interface RawOperationData {
   createdAt?: number;
 }
 
-type RedisClient = NonNullable<ReturnType<typeof getRedis>>;
+// Redis client type - using ReturnType to avoid importing redis package directly
+type RedisClient = ReturnType<typeof redis.getClient>;
 
 /**
  * Try direct Redis key lookups (no wildcards) - most efficient approach
@@ -1455,7 +1456,7 @@ async function tryDirectKeyLookups(
     if (!value) continue;
     
     try {
-      return await parseRedisPayload(pattern, value, originalToken, operationType);
+      return await parseRedisPayload(pattern, value, originalToken, operationType, redis);
     } catch (error) {
       logger.warn('Error parsing Redis raw data', { pattern, error });
     }
@@ -1497,7 +1498,7 @@ async function tryWildcardScan(
       if (!value) continue;
       
       try {
-        return await parseRedisPayload(key, value, originalToken, operationType);
+        return await parseRedisPayload(key, value, originalToken, operationType, redis);
       } catch (error) {
         logger.warn('Error parsing Redis raw data', { key, error });
       }
@@ -1521,16 +1522,17 @@ async function parseRedisPayload(
   key: string,
   value: string,
   originalToken: string,
-  operationType?: string
+  operationType?: string,
+  redisClient?: RedisClient
 ): Promise<RawOperationData> {
   const payload = JSON.parse(value);
-  const redis = getRedis();
   
-  if (!redis) {
+  if (!redisClient && !redis.isInitialized()) {
     throw new Error('Redis not available');
   }
   
-  const ttl = await redis.ttl(key);
+  const client = redisClient || redis.getClient();
+  const ttl = await client.ttl(key);
   const expiresAt = Date.now() + (ttl > 0 ? ttl * 1000 : 0);
   const extractedOperationType = extractOperationTypeFromKey(key);
   

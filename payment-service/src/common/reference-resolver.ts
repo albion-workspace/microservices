@@ -7,11 +7,12 @@
  * - Microservices (cross-service references)
  * 
  * DATABASE ACCESS PATTERN:
- * - Uses getClient().db(CORE_DATABASE_NAME) to access other service databases
- * - Uses getDatabase() for same-service database access
+ * - Uses db.getClient().db(CORE_DATABASE_NAME) to access other service databases
+ * - Uses service database accessor (db.getDb()) for same-service database access
  */
 
-import { getDatabase, getClient, logger, findOneById, CORE_DATABASE_NAME } from 'core-service';
+import { logger, findOneById, CORE_DATABASE_NAME } from 'core-service';
+import { db } from '../database.js';
 
 /**
  * Collection mapping for reference types
@@ -59,7 +60,7 @@ export async function resolveReference(
   // All other references come from payment_service database
   if (refType === 'user' || refType === 'player') {
     try {
-      const client = getClient();
+      const client = db.getClient();
       const coreDb = client.db(CORE_DATABASE_NAME);
       const usersCollection = coreDb.collection('users');
       // Use optimized findOneById utility (performance-optimized)
@@ -77,9 +78,9 @@ export async function resolveReference(
   }
   
   // All other references come from payment_service database
-  const db = getDatabase();
+  const database = await db.getDb();
   const collectionName = COLLECTION_MAP[refType] || refType;
-  const collection = db.collection(collectionName);
+  const collection = database.collection(collectionName);
   
   try {
     // Use optimized findOneById utility (performance-optimized)
@@ -139,7 +140,7 @@ export async function batchResolveReferences<T extends Record<string, any>>(
 ): Promise<(T & { _ref?: any })[]> {
   if (!documents.length) return [];
   
-  const db = getDatabase();
+  const database = await db.getDb();
   
   // Group by refType
   const grouped = new Map<string, Array<{ doc: T; refId: string }>>();
@@ -167,7 +168,7 @@ export async function batchResolveReferences<T extends Record<string, any>>(
       
       // CRITICAL: User references must come from core_service database
       if (refType === 'user' || refType === 'player') {
-        const client = getClient();
+        const client = db.getClient();
         const coreDb = client.db(CORE_DATABASE_NAME);
         const usersCollection = coreDb.collection('users');
         // Batch lookup: use $in query (efficient for multiple IDs)
@@ -178,7 +179,7 @@ export async function batchResolveReferences<T extends Record<string, any>>(
       } else {
         // All other references come from payment_service database
         const collectionName = COLLECTION_MAP[refType] || refType;
-        const collection = db.collection(collectionName);
+        const collection = database.collection(collectionName);
         // Batch lookup: use $in query (efficient for multiple IDs)
         const docs = await collection
           .find({ id: { $in: ids } }, { projection: { _id: 0 } })
@@ -223,7 +224,7 @@ export async function referenceExists(
   try {
     // CRITICAL: User references must come from core_service database
     if (refType === 'user' || refType === 'player') {
-      const client = getClient();
+      const client = db.getClient();
       const coreDb = client.db(CORE_DATABASE_NAME);
       const usersCollection = coreDb.collection('users');
       // Use optimized findOneById utility (performance-optimized)
@@ -232,9 +233,9 @@ export async function referenceExists(
     }
     
     // All other references come from payment_service database
-    const db = getDatabase();
+    const database = await db.getDb();
     const collectionName = COLLECTION_MAP[refType] || refType;
-    const collection = db.collection(collectionName);
+    const collection = database.collection(collectionName);
     // Use optimized findOneById utility (performance-optimized)
     const doc = await findOneById(collection, refId, {});
     return doc !== null;

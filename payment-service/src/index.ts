@@ -12,43 +12,38 @@
  * It only knows about users, amounts, currencies, and permissions.
  */
 
+// Internal packages
 import {
   createGateway,
-  // Permission helpers (native, no graphql-shield)
   hasRole,
   hasAnyRole,
   isAuthenticated,
   allow,
   logger,
-  // Cross-service integration
   on,
   startListening,
-  getDatabase,
-  getClient,
   extractDocumentId,
   GraphQLError,
   registerServiceErrorCodes,
   registerServiceConfigDefaults,
   ensureDefaultConfigsCreated,
   resolveContext,
-  initializeServiceDatabase,
   initializeWebhooks,
-  // Webhooks - plug-and-play service
   createWebhookService,
   findOneById,
   generateMongoId,
   isDuplicateKeyError,
   createObjectModelQueryResolver,
   findUserIdByRole,
+  createTransferWithTransactions,
   type IntegrationEvent,
   type ResolverContext,
   type DatabaseStrategyResolver,
   type DatabaseContext,
 } from 'core-service';
-// Ledger service imports removed - wallets are updated atomically via createTransferWithTransactions
-import { createTransferWithTransactions } from 'core-service';
+import { db } from './database.js';
 
-// Import unified event dispatcher (handles both internal events + webhooks)
+// Local imports
 import {
   paymentWebhooks,
   emitPaymentEvent,
@@ -56,8 +51,6 @@ import {
   type PaymentWebhookEvents,
 } from './event-dispatcher.js';
 import { PAYMENT_ERROR_CODES, PAYMENT_ERRORS } from './error-codes.js';
-
-// Import configuration
 import { loadConfig, validateConfig, printConfigSummary, type PaymentConfig } from './config.js';
 import { PAYMENT_CONFIG_DEFAULTS } from './config-defaults.js';
 
@@ -91,22 +84,18 @@ import {
   transactionsQueryResolver,
 } from './services/transaction.js';
 import { transferApprovalResolvers } from './services/transfer-approval.js';
-
 import { transferService } from './services/transfer.js';
 import { setupRecovery } from './recovery-setup.js';
-
-
 import {
   walletService,
   walletResolvers,
   walletTypes,
 } from './services/wallet.js';
+import { SYSTEM_ROLE, SYSTEM_CURRENCY } from './constants.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Configuration
 // ═══════════════════════════════════════════════════════════════════
-
-import { SYSTEM_ROLE, SYSTEM_CURRENCY } from './constants.js';
 export { SYSTEM_ROLE };
 
 /**
@@ -232,14 +221,14 @@ const buildGatewayConfig = (): Parameters<typeof createGateway>[0] => {
             
             // Wallets are updated atomically via createTransferWithTransactions - no sync needed
             if (result && result.nodes && Array.isArray(result.nodes)) {
-              const db = getDatabase();
+              const database = await db.getDb();
               const syncPromises = result.nodes.map(async (wallet: any) => {
                 const isProviderWallet = wallet.userId?.startsWith('provider-');
                 
                 // Check if wallet belongs to a user with 'system' role (optimized: only fetch roles)
                 let isSystemWallet = false;
                 if (!isProviderWallet && wallet.userId) {
-                  const user = await db.collection('users').findOne(
+                  const user = await database.collection('users').findOne(
                     { id: wallet.userId },
                     { projection: { roles: 1 } } // Only fetch roles field for performance
                   );
@@ -459,8 +448,8 @@ function setupBonusEventHandlers() {
     const userId = event.userId;
     
     try {
-      const db = getDatabase();
-      const walletsCollection = db.collection('wallets');
+      const database = await db.getDb();
+      const walletsCollection = database.collection('wallets');
       
       // Find user's wallet (use provided walletId or find by user/currency)
       let walletId: string | undefined = event.data.walletId;
@@ -498,7 +487,7 @@ function setupBonusEventHandlers() {
       // Create transfer: system (bonus) -> user (bonus)
       // Uses system user's bonusBalance as the bonus pool
       try {
-        const db = getDatabase();
+        const database2 = await db.getDb();
         const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
           fromUserId: systemUserId,
           toUserId: userId,
@@ -515,7 +504,7 @@ function setupBonusEventHandlers() {
           bonusType: event.data.type,
           fromBalanceType: 'bonus',  // Debit from system user's bonusBalance (bonus pool)
           toBalanceType: 'bonus',    // Credit to user bonus balance
-        }, { database: db });
+        }, { database: database2 });
         
         logger.info('Bonus awarded via transfer', {
           transferId: transfer.id,
@@ -562,8 +551,8 @@ function setupBonusEventHandlers() {
     });
     
     try {
-      const db = getDatabase();
-      const walletsCollection = db.collection('wallets');
+      const database = await db.getDb();
+      const walletsCollection = database.collection('wallets');
       
       // Find wallet
       // Use optimized findOneById utility (performance-optimized)
@@ -586,7 +575,6 @@ function setupBonusEventHandlers() {
       
       // Create transfer: user (bonus) -> user (real) - same user, different balance types
       try {
-        const db = getDatabase();
         const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
           fromUserId: event.userId!,
           toUserId: event.userId!,  // Same user
@@ -602,7 +590,7 @@ function setupBonusEventHandlers() {
           objectId: event.data.bonusId,  // Transactions reference bonus, not transfer
           objectModel: 'bonus',
           bonusId: event.data.bonusId,
-        }, { database: db });
+        }, { database });
         
         logger.info('Bonus converted via transfer', {
           transferId: transfer.id,
@@ -662,7 +650,7 @@ function setupBonusEventHandlers() {
       // Create transfer: user (bonus) -> system (bonus)
       // Returns forfeited bonus to system user's bonusBalance (bonus pool)
       try {
-        const db = getDatabase();
+        const database = await db.getDb();
         const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
           fromUserId: event.userId!,
           toUserId: systemUserId,
@@ -679,7 +667,7 @@ function setupBonusEventHandlers() {
           objectModel: 'bonus',
           bonusId: event.data.bonusId,
           reason: event.data.reason,
-        }, { database: db });
+        }, { database });
         
         logger.info('Bonus forfeited via transfer', {
           transferId: transfer.id,
@@ -736,7 +724,7 @@ function setupBonusEventHandlers() {
       
       // Create transfer: user (bonus) -> system (bonus)
       // Returns expired bonus to system user's bonusBalance (bonus pool)
-      const db = getDatabase();
+      const database = await db.getDb();
       const { transfer } = await createTransferWithTransactions({
         fromUserId: event.userId!,
         toUserId: systemUserId,
@@ -753,7 +741,7 @@ function setupBonusEventHandlers() {
         reason: 'expired',
         fromBalanceType: 'bonus',  // Debit from user bonus balance
         toBalanceType: 'bonus',    // Credit to system user's bonusBalance (bonus pool)
-      }, { database: db });
+      }, { database });
       
       logger.info('Expired bonus removed via transfer', {
         transferId: transfer.id,
@@ -826,14 +814,17 @@ async function main() {
     // Continue - configs will be created on first access
   }
 
+  // Initialize database using service database accessor
+  const { strategy: databaseStrategy, context: dbContext } = await db.initialize({
+    brand: context.brand,
+    tenantId: context.tenantId,
+  });
+  logger.info('Database initialized via service database accessor', {
+    context: dbContext,
+  });
+  
   // Initialize payment webhooks AFTER database connection is established
   try {
-    // Use centralized initializeServiceDatabase from core-service
-    const { strategy: databaseStrategy, context: dbContext } = await initializeServiceDatabase({
-      serviceName: 'payment-service',
-      brand: context.brand,
-      tenantId: context.tenantId,
-    });
     // Use centralized initializeWebhooks helper
     await initializeWebhooks(paymentWebhooks, {
       databaseStrategy,
@@ -848,8 +839,8 @@ async function main() {
   // ✅ CRITICAL: Ensure unique index on metadata.externalRef exists
   // This prevents duplicate transactions at the database level
   try {
-    const db = getDatabase();
-    const transactionsCollection = db.collection('transactions');
+    const database = await db.getDb();
+    const transactionsCollection = database.collection('transactions');
     
     // Check if unique index exists
     const indexes = await transactionsCollection.indexes();

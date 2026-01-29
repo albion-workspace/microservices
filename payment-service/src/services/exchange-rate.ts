@@ -16,7 +16,8 @@
  * - Exchange rates are cached for 5 minutes to reduce API calls
  */
 
-import { getDatabase, logger, CircuitBreaker, GraphQLError } from 'core-service';
+import { logger, CircuitBreaker, GraphQLError } from 'core-service';
+import { db } from '../database.js';
 import { PAYMENT_ERRORS } from '../error-codes.js';
 import { SYSTEM_CURRENCY } from '../constants.js';
 
@@ -168,9 +169,9 @@ async function getManualExchangeRate(
   toCurrency: string
 ): Promise<number | null> {
   try {
-    // GraphQL resolvers use getDatabase() as database strategies are initialized at gateway level
-    const db = getDatabase();
-    const rate = await db.collection('exchange_rates').findOne(
+    // GraphQL resolvers use service database accessor
+    const database = await db.getDb();
+    const rate = await database.collection('exchange_rates').findOne(
       {
         fromCurrency,
         toCurrency,
@@ -197,9 +198,9 @@ async function storeExchangeRate(
   source: 'api' | 'manual'
 ): Promise<void> {
   try {
-    // GraphQL resolvers use getDatabase() as database strategies are initialized at gateway level
-    const db = getDatabase();
-    await db.collection('exchange_rates').insertOne({
+    // GraphQL resolvers use service database accessor
+    const database = await db.getDb();
+    await database.collection('exchange_rates').insertOne({
       fromCurrency,
       toCurrency,
       rate,
@@ -275,11 +276,11 @@ export async function setManualExchangeRate(
   rate: number,
   expiresAt?: Date
 ): Promise<void> {
-  // GraphQL resolvers use getDatabase() as database strategies are initialized at gateway level
-  const db = getDatabase();
+  // GraphQL resolvers use service database accessor
+  const database = await db.getDb();
   
   // Deactivate existing manual rates for this pair
-  await db.collection('exchange_rates').updateMany(
+  await database.collection('exchange_rates').updateMany(
     {
       fromCurrency,
       toCurrency,
@@ -292,7 +293,7 @@ export async function setManualExchangeRate(
   );
   
   // Insert new manual rate
-  await db.collection('exchange_rates').insertOne({
+  await database.collection('exchange_rates').insertOne({
     fromCurrency,
     toCurrency,
     rate,
@@ -314,9 +315,9 @@ export async function setManualExchangeRate(
  * Get all active exchange rates
  */
 export async function getAllExchangeRates(): Promise<ExchangeRate[]> {
-  // GraphQL resolvers use getDatabase() as database strategies are initialized at gateway level
-  const db = getDatabase();
-  const rates = await db.collection('exchange_rates')
+  // GraphQL resolvers use service database accessor
+  const database = await db.getDb();
+  const rates = await database.collection('exchange_rates')
     .find({ isActive: true })
     .sort({ createdAt: -1 })
     .toArray();

@@ -9,12 +9,12 @@
  */
 
 import { 
-  getDatabase, 
   logger, 
   createTokenPair as coreCreateTokenPair,
   findById,
   normalizeDocument,
 } from 'core-service';
+import { db } from '../database.js';
 import type { UserContext } from 'core-service';
 import type { LoginInput, User, AuthResponse, TokenPair, Session, DeviceInfo } from '../types.js';
 import { 
@@ -84,8 +84,8 @@ export class AuthenticationService {
       // Refresh user roles/permissions from database if needed
       if (user.email) {
         try {
-          const db = getDatabase();
-          const dbUser = await db.collection('users').findOne({ _id: user._id }) as any;
+          const database = await db.getDb();
+          const dbUser = await database.collection('users').findOne({ _id: user._id }) as any;
           
           if (dbUser) {
             user.roles = dbUser.roles || user.roles;
@@ -169,8 +169,8 @@ export class AuthenticationService {
       // Users created via registration verification start with status 'pending'
       // This ensures they cannot perform operations until they log in at least once
       if (user.status === 'pending') {
-        const db = getDatabase();
-        await db.collection('users').updateOne(
+        const database = await db.getDb();
+        await database.collection('users').updateOne(
           { _id: user._id },
           {
             $set: {
@@ -316,14 +316,14 @@ export class AuthenticationService {
    * Refresh access token
    */
   async refreshToken(refreshTokenValue: string, tenantId: string): Promise<AuthResponse> {
-    const db = getDatabase();
+    const database = await db.getDb();
     
     try {
       const refreshTokenHash = await hashToken(refreshTokenValue);
       const now = new Date();
       
       // Find session by token hash (unified collection)
-      const session = await db.collection('sessions').findOne({
+      const session = await database.collection('sessions').findOne({
         tokenHash: refreshTokenHash,
         tenantId,
         isValid: true,
@@ -356,7 +356,7 @@ export class AuthenticationService {
       
       // Check if refresh token expired
       if (normalizedSession.refreshTokenExpiresAt < now) {
-        await db.collection('sessions').updateOne(
+        await database.collection('sessions').updateOne(
           { _id: (session as any)._id },
           { $set: { isValid: false, revokedAt: now, revokedReason: 'expired' } }
         );
@@ -369,7 +369,7 @@ export class AuthenticationService {
       
       // Check if session expired
       if (normalizedSession.sessionExpiresAt < now) {
-        await db.collection('sessions').updateOne(
+        await database.collection('sessions').updateOne(
           { _id: (session as any)._id },
           { $set: { isValid: false, revokedAt: now, revokedReason: 'session_expired' } }
         );
@@ -384,7 +384,7 @@ export class AuthenticationService {
       await updateSessionLastUsed(normalizedSession);
       
       // Get user
-      const user = await findById<User>(db.collection('users'), normalizedSession.userId, { tenantId });
+      const user = await findById<User>(database.collection('users'), normalizedSession.userId, { tenantId });
       
       if (!user) {
         logger.error('User not found during token refresh', {
@@ -486,12 +486,12 @@ export class AuthenticationService {
    * Cleanup expired and invalid sessions
    */
   async cleanupExpiredSessions(): Promise<number> {
-    const db = getDatabase();
+    const database = await db.getDb();
     const now = new Date();
     
     try {
       // Delete expired sessions (refresh token or session expired)
-      const expiredResult = await db.collection('sessions').deleteMany({
+      const expiredResult = await database.collection('sessions').deleteMany({
         $or: [
           { refreshTokenExpiresAt: { $lt: now } },
           { sessionExpiresAt: { $lt: now } },
@@ -502,7 +502,7 @@ export class AuthenticationService {
       const thirtyDaysAgo = new Date();
       thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
       
-      const invalidResult = await db.collection('sessions').deleteMany({
+      const invalidResult = await database.collection('sessions').deleteMany({
         isValid: false,
         revokedAt: { $lt: thirtyDaysAgo },
       });

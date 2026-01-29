@@ -143,7 +143,7 @@ const systemUserId = await getUserId('system');
 ✅ **Maintainability** - Update credentials in one place  
 ✅ **Type Safety** - User keys are typed  
 ✅ **Simplicity** - No need to duplicate login/registration logic  
-✅ **Reliability** - Handles retries, verification, and MongoDB fallbacks automatically  
+✅ **Reliability** - Handles retries and verification automatically  
 
 ## Examples
 

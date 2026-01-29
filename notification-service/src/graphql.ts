@@ -2,7 +2,8 @@
  * Notification Service GraphQL Schema & Resolvers
  */
 
-import { logger, requireAuth, getUserId, getErrorMessage, getDatabase, generateMongoId, paginateCollection, GraphQLError, hasRole } from 'core-service';
+import { logger, requireAuth, getUserId, getErrorMessage, generateMongoId, paginateCollection, GraphQLError, hasRole } from 'core-service';
+import { db } from './database.js';
 import { NOTIFICATION_ERRORS } from './error-codes.js';
 import type { ResolverContext } from 'core-service';
 import type { NotificationService } from './notification-service.js';
@@ -125,12 +126,12 @@ export function createNotificationResolvers(notificationService: NotificationSer
       ) => {
         requireAuth(context);
         
-        const db = getDatabase();
+        const database = await db.getDb();
         const userId = getUserId(context);
         const { first = 20, after } = args;
         
         const result = await paginateCollection(
-          db.collection('notifications'),
+          database.collection('notifications'),
           {
             first: Math.min(Math.max(1, first || 20), 100),
             after,
@@ -163,14 +164,14 @@ export function createNotificationResolvers(notificationService: NotificationSer
           throw new GraphQLError(NOTIFICATION_ERRORS.SystemAccessRequired, {});
         }
         
-        const db = getDatabase();
+        const database = await db.getDb();
         
-        const total = await db.collection('notifications').countDocuments();
-        const sent = await db.collection('notifications').countDocuments({ status: 'sent' });
-        const failed = await db.collection('notifications').countDocuments({ status: 'failed' });
+        const total = await database.collection('notifications').countDocuments();
+        const sent = await database.collection('notifications').countDocuments({ status: 'sent' });
+        const failed = await database.collection('notifications').countDocuments({ status: 'failed' });
         
         // Aggregate by channel
-        const byChannel = await db
+        const byChannel = await database
           .collection('notifications')
           .aggregate([
             { $group: { _id: '$channel', count: { $sum: 1 } } },
@@ -178,7 +179,7 @@ export function createNotificationResolvers(notificationService: NotificationSer
           .toArray();
         
         // Aggregate by status
-        const byStatus = await db
+        const byStatus = await database
           .collection('notifications')
           .aggregate([
             { $group: { _id: '$status', count: { $sum: 1 } } },
@@ -189,8 +190,8 @@ export function createNotificationResolvers(notificationService: NotificationSer
           total,
           sent,
           failed,
-          byChannel: Object.fromEntries(byChannel.map(c => [c._id, c.count])),
-          byStatus: Object.fromEntries(byStatus.map(s => [s._id, s.count])),
+          byChannel: Object.fromEntries(byChannel.map((c: any) => [c._id, c.count])),
+          byStatus: Object.fromEntries(byStatus.map((s: any) => [s._id, s.count])),
         };
       },
       

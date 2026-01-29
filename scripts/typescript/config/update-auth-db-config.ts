@@ -6,8 +6,8 @@
  * This fixes the issue where auth-service was using auth_service database
  */
 
-import { loadScriptConfig, closeAllConnections } from './scripts.js';
-import { getDatabase, resolveContext, createConfigStore } from '../../../core-service/src/index.js';
+import { loadScriptConfig, closeAllConnections, getCoreDatabase } from './scripts.js';
+import { resolveContext, createConfigStore } from '../../../core-service/src/index.js';
 
 async function main() {
   console.log('🔧 Updating auth-service database config...\n');
@@ -19,11 +19,11 @@ async function main() {
     // Get context
     const context = await resolveContext();
     
-    // Get database
-    const db = getDatabase();
+    // Get database using script utilities
+    const database = await getCoreDatabase();
     
     // Create config store
-    const configStore = createConfigStore({ database: db });
+    const configStore = createConfigStore({ database });
     
     // Update auth-service database config to use core_service
     console.log('📝 Updating database config for auth-service...');

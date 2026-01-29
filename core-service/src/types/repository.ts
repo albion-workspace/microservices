@@ -5,10 +5,10 @@
  */
 
 import type { ClientSession, Db } from 'mongodb';
-import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/strategy.js';
+import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/mongodb/strategy.js';
 
 // Re-export for convenience
-export type { DatabaseContext } from '../databases/strategy.js';
+export type { DatabaseContext } from '../databases/mongodb/strategy.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Write Options (transactions)

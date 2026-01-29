@@ -6,7 +6,8 @@
  * This eliminates database writes for temporary reset operations
  */
 
-import { getDatabase, logger, normalizeDocument, findById, createPendingOperationStore, getRedis } from 'core-service';
+import { logger, normalizeDocument, findById, createPendingOperationStore } from 'core-service';
+import { db } from '../database.js';
 import type { 
   ForgotPasswordInput, 
   ResetPasswordInput, 
@@ -114,7 +115,7 @@ export class PasswordService {
    * Token is verified from JWT, not database
    */
   async resetPassword(input: ResetPasswordInput): Promise<{ success: boolean; message: string }> {
-    const db = getDatabase();
+    const database = await db.getDb();
     
     try {
       // Validate new password
@@ -198,7 +199,7 @@ export class PasswordService {
       const hashedPassword = await hashPassword(input.newPassword);
       
       // Find user first to ensure they exist and get the correct _id
-      const user = await findById<User>(db.collection('users'), resetData.userId, { tenantId: input.tenantId });
+      const user = await findById<User>(database.collection('users'), resetData.userId, { tenantId: input.tenantId });
       
       if (!user || !user._id) {
         logger.error('User not found for password reset', { 
@@ -225,7 +226,7 @@ export class PasswordService {
       }
       
       // Update user password using _id (most reliable)
-      const updateResult = await db.collection('users').updateOne(
+      const updateResult = await database.collection('users').updateOne(
         { _id: normalizedUser._id, tenantId: input.tenantId },
         { 
           $set: { 
@@ -259,7 +260,7 @@ export class PasswordService {
       });
       
       // Invalidate all existing sessions (unified collection)
-      await db.collection('sessions').updateMany(
+      await database.collection('sessions').updateMany(
         { userId: resetData.userId, tenantId: input.tenantId, isValid: true },
         { $set: { isValid: false, revokedAt: new Date(), revokedReason: 'password_reset' } }
       );
@@ -283,11 +284,11 @@ export class PasswordService {
    * Change password (requires current password)
    */
   async changePassword(input: ChangePasswordInput): Promise<{ success: boolean; message: string }> {
-    const db = getDatabase();
+    const database = await db.getDb();
     
     try {
       // Get user
-      const user = await db.collection('users').findOne({
+      const user = await database.collection('users').findOne({
         id: input.userId,
         tenantId: input.tenantId,
       }) as unknown as User | null;
@@ -338,7 +339,7 @@ export class PasswordService {
       const hashedPassword = await hashPassword(input.newPassword);
       
       // Update password
-      await db.collection('users').updateOne(
+      await database.collection('users').updateOne(
         { id: user.id },
         { 
           $set: { 
@@ -497,7 +498,7 @@ export class PasswordService {
    * Find user by identifier
    */
   private async findUserByIdentifier(identifier: string, tenantId: string): Promise<User | null> {
-    const db = getDatabase();
+    const database = await db.getDb();
     
     const identifierType = detectIdentifierType(identifier);
     
@@ -515,7 +516,7 @@ export class PasswordService {
         break;
     }
     
-    const user = await db.collection('users').findOne(query) as unknown as User | null;
+    const user = await database.collection('users').findOne(query) as unknown as User | null;
     return user ? normalizeDocument(user) : null;
   }
   
@@ -524,10 +525,10 @@ export class PasswordService {
    * Note: New tokens are JWT-based and self-expiring, this cleans up any remaining DB entries
    */
   async cleanupExpiredTokens(): Promise<number> {
-    const db = getDatabase();
+    const database = await db.getDb();
     
     try {
-      const result = await db.collection('password_reset_tokens').deleteMany({
+      const result = await database.collection('password_reset_tokens').deleteMany({
         expiresAt: { $lt: new Date() },
         isUsed: true,
       });
