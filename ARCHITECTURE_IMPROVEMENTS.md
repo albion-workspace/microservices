@@ -26,16 +26,18 @@
 
 **Fixed Date**: 2026-01-29
 
-### 1. ✅ @deprecated Code Removed (21 occurrences) - FIXED
+### 1. ✅ @deprecated Code Removed + Domain Types Cleanup - FIXED
 
 | File | Items Removed |
 |------|---------------|
-| `core-service/src/types/events.ts` | Legacy event interfaces (BaseEvent, DepositCompletedEvent, etc.) - kept only Data types |
+| `core-service/src/types/events.ts` | **DELETED** - Domain-specific types don't belong in core-service per CODING_STANDARDS |
 | `core-service/src/common/integration.ts` | Removed `publishEvent`, `subscribeToEvents`, `startEventListener` aliases |
 | `core-service/src/databases/mongodb-utils.ts` | Removed `findUserById()` |
 | `core-service/src/databases/redis.ts` | Removed `scanKeys()` (use `scanKeysIterator` or `scanKeysArray`) |
-| `core-service/src/index.ts` | Updated exports to remove deprecated items |
-| `core-service/src/types/index.ts` | Updated exports to remove deprecated items |
+| `core-service/src/index.ts` | Updated exports, removed domain-specific event types |
+| `core-service/src/types/index.ts` | Updated exports, removed events.ts imports |
+
+**CODING_STANDARDS Compliance**: Domain-specific types (`DepositCompletedData`, `BonusCreditedData`, etc.) should be defined in their respective services, not core-service. Services already define their own types (e.g., `payment-service/src/event-dispatcher.ts`).
 
 ### 2. 🟡 TODO/FIXME Comments (5 remain) - PENDING
 
@@ -239,8 +241,8 @@ Some files don't follow strict import grouping (blank lines between groups).
 - ✅ Removed backward compatibility from OTP verification (requires `otpToken`, no optional fields)
 - ✅ Removed backward compatibility comments from GraphQL schema
 - ✅ Created `extractDocumentId()` helper to replace manual patterns
-- ✅ **@deprecated code removed** (2026-01-29):
-  - `core-service/src/types/events.ts` - Removed legacy event interfaces, kept only Data types
+- ✅ **@deprecated code + domain types removed** (2026-01-29):
+  - `core-service/src/types/events.ts` - **DELETED** (domain-specific types belong in services)
   - `core-service/src/common/integration.ts` - Removed deprecated aliases
   - `core-service/src/databases/mongodb-utils.ts` - Removed `findUserById()`
   - `core-service/src/databases/redis.ts` - Removed `scanKeys()`

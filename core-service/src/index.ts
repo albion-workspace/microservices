@@ -507,19 +507,9 @@ export {
   formatCurrency,
 } from './types/index.js';
 
-// Event Data Types (example structures for common events)
-export type {
-  // Example data types (services can define their own)
-  DepositCompletedData,
-  WithdrawalCompletedData,
-  BonusCreditedData,
-  BonusConvertedData,
-  BonusForfeitedData,
-  UserRegisteredData,
-  UserVerifiedData,
-} from './types/index.js';
-
-// Legacy event types removed - use emit<T>() with your own types instead
+// Note: Event data types should be defined in each service (domain-specific)
+// Use IntegrationEvent<T> from integration.ts with your own types:
+//   emit('deposit.completed', tenantId, userId, { transactionId, amount, ... });
 
 // References (cross-service linking)
 export type {

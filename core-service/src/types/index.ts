@@ -101,24 +101,6 @@ export {
 } from './currency.js';
 
 // ═══════════════════════════════════════════════════════════════════
-// Events (cross-service communication)
-// Use these with IntegrationEvent<T> from integration.ts
-// ═══════════════════════════════════════════════════════════════════
-
-export type {
-  DepositCompletedData,
-  WithdrawalCompletedData,
-  WithdrawalRequestedData,
-  BonusCreditedData,
-  BonusConvertedData,
-  BonusForfeitedData,
-  TurnoverCompletedData,
-  TurnoverProgressData,
-  UserRegisteredData,
-  UserVerifiedData,
-} from './events.js';
-
-// ═══════════════════════════════════════════════════════════════════
 // References (cross-service linking)
 // ═══════════════════════════════════════════════════════════════════
 
