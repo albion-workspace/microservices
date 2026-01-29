@@ -22,7 +22,6 @@ import {
   logger,
   on,
   startListening,
-  getClient,
   extractDocumentId,
   GraphQLError,
   registerServiceErrorCodes,

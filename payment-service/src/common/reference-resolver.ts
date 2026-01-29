@@ -7,11 +7,11 @@
  * - Microservices (cross-service references)
  * 
  * DATABASE ACCESS PATTERN:
- * - Uses getClient().db(CORE_DATABASE_NAME) to access other service databases
+ * - Uses db.getClient().db(CORE_DATABASE_NAME) to access other service databases
  * - Uses service database accessor (db.getDb()) for same-service database access
  */
 
-import { getClient, logger, findOneById, CORE_DATABASE_NAME } from 'core-service';
+import { logger, findOneById, CORE_DATABASE_NAME } from 'core-service';
 import { db } from '../database.js';
 
 /**
@@ -60,7 +60,7 @@ export async function resolveReference(
   // All other references come from payment_service database
   if (refType === 'user' || refType === 'player') {
     try {
-      const client = getClient();
+      const client = db.getClient();
       const coreDb = client.db(CORE_DATABASE_NAME);
       const usersCollection = coreDb.collection('users');
       // Use optimized findOneById utility (performance-optimized)
@@ -168,7 +168,7 @@ export async function batchResolveReferences<T extends Record<string, any>>(
       
       // CRITICAL: User references must come from core_service database
       if (refType === 'user' || refType === 'player') {
-        const client = getClient();
+        const client = db.getClient();
         const coreDb = client.db(CORE_DATABASE_NAME);
         const usersCollection = coreDb.collection('users');
         // Batch lookup: use $in query (efficient for multiple IDs)
@@ -224,7 +224,7 @@ export async function referenceExists(
   try {
     // CRITICAL: User references must come from core_service database
     if (refType === 'user' || refType === 'player') {
-      const client = getClient();
+      const client = db.getClient();
       const coreDb = client.db(CORE_DATABASE_NAME);
       const usersCollection = coreDb.collection('users');
       // Use optimized findOneById utility (performance-optimized)

@@ -16,23 +16,24 @@
  * (same pattern as payment-service) since both services share MongoDB.
  */
 
-import { resolveDatabase, getClient, findById, logger, type DatabaseResolutionOptions, type Db, CORE_DATABASE_NAME } from 'core-service';
+import { resolveDatabase, findById, logger, type DatabaseResolutionOptions, type Db, CORE_DATABASE_NAME } from 'core-service';
+import { db } from '../../database.js';
 
 export interface UserStatusOptions extends DatabaseResolutionOptions {
   // Can extend with user-status-specific options if needed
 }
 
 // Helper to resolve core-service database for cross-service access to users
-// Uses getClient().db(CORE_DATABASE_NAME) pattern for cross-service database access
+// Uses db.getClient().db(CORE_DATABASE_NAME) pattern for cross-service database access
 async function resolveCoreServiceDatabase(options: UserStatusOptions, tenantId?: string): Promise<Db> {
   // Option 1: Use database strategy if provided
   if (options.databaseStrategy || options.database) {
     return await resolveDatabase(options, 'auth-service', tenantId);
   }
   
-  // Option 2: Cross-service access using getClient()
-  // Use getClient().db(CORE_DATABASE_NAME) for accessing other service databases
-  const client = getClient();
+  // Option 2: Cross-service access using db.getClient()
+  // Use db.getClient().db(CORE_DATABASE_NAME) for accessing other service databases
+  const client = db.getClient();
   return client.db(CORE_DATABASE_NAME);
 }
 
@@ -47,7 +48,7 @@ async function getUserFromAuthService(
 ): Promise<any> {
   try {
     // Resolve core-service database for cross-service access to users
-    // Uses getClient().db(CORE_DATABASE_NAME) pattern for cross-service database access
+    // Uses db.getClient().db(CORE_DATABASE_NAME) pattern for cross-service database access
     const coreDb = await resolveCoreServiceDatabase(options, tenantId);
     const coreUsersCollection = coreDb.collection('users');
     

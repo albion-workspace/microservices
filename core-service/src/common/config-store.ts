@@ -7,20 +7,21 @@
  * - Dynamic reloading
  * - Caching layer
  * - Automatic default creation (get-or-create pattern)
- * - Uses createRepository for automatic timestamp management
+ * - Uses ServiceDatabaseAccessor for consistent database access
  * 
  * Following CODING_STANDARDS.md:
  * - Generic only (no service-specific logic)
- * - Uses abstractions (getDatabase, getRedis) - services provide connections
+ * - Uses ServiceDatabaseAccessor pattern for database access
  * - Static imports (not require)
  * - Uses hasRole/hasAnyRole from core-service/access
+ * - No backward compatibility / legacy fallbacks
  */
 
 // External packages (type imports)
 import type { Collection, Document, Filter, Db } from 'mongodb';
 
 // Local imports
-import { getDatabase, getClient } from '../databases/mongodb.js';
+import { getClient } from '../databases/mongodb.js';
 import { CORE_DATABASE_NAME } from '../databases/core-database.js';
 import { getCache, setCache, deleteCache, deleteCachePattern } from '../databases/cache.js';
 import { resolveDatabaseStrategyFromConfig } from '../databases/strategy-config.js';
@@ -31,6 +32,7 @@ import { generateMongoId } from '../databases/mongodb-utils.js';
 // Local type imports
 import type { UserContext } from '../types/index.js';
 import type { DatabaseStrategyResolver, DatabaseContext } from '../databases/strategy.js';
+import type { ServiceDatabaseAccessor } from '../databases/service-database.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Module-level State (Config Store Caches)
@@ -76,45 +78,35 @@ export interface ConfigStoreOptions {
   cacheEnabled?: boolean;
   /** Cache TTL in seconds (default: 300) */
   cacheTtl?: number;
+  
+  /**
+   * Service database accessor (RECOMMENDED)
+   * Use this for consistent database access following the standard pattern.
+   * 
+   * @example
+   * // Use service's database accessor
+   * import { db } from './database.js';
+   * const configStore = createConfigStore({ accessor: db });
+   */
+  accessor?: ServiceDatabaseAccessor;
+  
   /** 
-   * Database instance to use (optional)
-   * If not provided, uses getDatabase() (default database connection)
-   * This allows config to be stored in:
-   * - Service's own database (e.g., auth-service database)
-   * - Shared database (default)
-   * - Any other database instance
-   * 
-   * @example
-   * // Store config in auth-service's database
-   * const authDb = getDatabase(); // auth-service's database
-   * const configStore = createConfigStore({ database: authDb });
-   * 
-   * @example
-   * // Store config in shared database (default)
-   * const configStore = createConfigStore(); // Uses getDatabase()
+   * Database instance to use directly (alternative to accessor)
+   * Use this when you have a specific Db instance.
    */
   database?: Db;
+  
   /**
-   * Database strategy resolver (optional)
-   * If provided, uses strategy to resolve database dynamically based on context
-   * Takes precedence over `database` option
-   * 
-   * @example
-   * // Use per-service strategy
-   * const resolver = createPerServiceDatabaseStrategy();
-   * const configStore = createConfigStore({ databaseStrategy: resolver });
-   * 
-   * @example
-   * // Use per-brand strategy
-   * const resolver = createPerBrandDatabaseStrategy();
-   * const configStore = createConfigStore({ databaseStrategy: resolver });
+   * Database strategy resolver (advanced)
+   * Use this for dynamic database resolution based on context.
+   * Takes precedence over `database` option.
    */
   databaseStrategy?: DatabaseStrategyResolver;
+  
   /**
-   * Force use of core_service database (for bootstrap config store)
-   * When true, always uses core_service database regardless of current connection
-   * This solves the issue where getDatabase() might return a different database
-   * after scripts/services connect to other databases
+   * Force use of core_service database (INTERNAL - for bootstrap only)
+   * When true, always uses core_service database.
+   * This is used internally for the bootstrap config store.
    */
   useCoreDatabase?: boolean;
 }
@@ -379,12 +371,19 @@ function filterConfigsByPermission(
  * - Dynamic reloading
  * - Caching layer
  * - Automatic default creation (get-or-create pattern)
- * - Uses MongoDB directly (services provide connection via getDatabase)
+ * - Uses ServiceDatabaseAccessor for consistent database access
+ * 
+ * Database access priority:
+ * 1. databaseStrategy (if provided with context)
+ * 2. accessor.getDb() (recommended for services)
+ * 3. database (direct Db instance)
+ * 4. useCoreDatabase (internal bootstrap only)
  */
 export class ConfigStore {
   private collectionName: string;
   private cacheEnabled: boolean;
   private cacheTtl: number;
+  private accessor: ServiceDatabaseAccessor | null;
   private database: Db | null;
   private databaseStrategy: DatabaseStrategyResolver | null;
   private useCoreDatabase: boolean;
@@ -394,38 +393,51 @@ export class ConfigStore {
     this.collectionName = options.collectionName || 'service_configs';
     this.cacheEnabled = options.cacheEnabled !== false;
     this.cacheTtl = options.cacheTtl || 300; // 5 minutes default
-    this.database = options.database || null; // If not provided, will use getDatabase() lazily
-    this.databaseStrategy = options.databaseStrategy || null; // Strategy takes precedence
-    this.useCoreDatabase = options.useCoreDatabase || false; // Force core_service database
+    this.accessor = options.accessor || null;
+    this.database = options.database || null;
+    this.databaseStrategy = options.databaseStrategy || null;
+    this.useCoreDatabase = options.useCoreDatabase || false;
+    
+    // Validate: at least one database source must be provided
+    if (!options.accessor && !options.database && !options.databaseStrategy && !options.useCoreDatabase) {
+      logger.warn('ConfigStore created without database source. Provide accessor, database, databaseStrategy, or useCoreDatabase.');
+    }
   }
 
   /**
    * Get MongoDB database instance
-   * Uses strategy resolver, provided database, or falls back to getDatabase()
-   * This abstraction allows config to be stored in any database:
-   * - Service's own database (e.g., auth-service database)
-   * - Shared database (default)
-   * - Per-brand database
-   * - Per-tenant database
-   * - Any other database instance via strategy
+   * 
+   * Priority:
+   * 1. databaseStrategy (with context) - for dynamic resolution
+   * 2. accessor.getDb() - recommended for services
+   * 3. database - direct Db instance
+   * 4. useCoreDatabase - internal bootstrap only
    * 
    * Returns null if database is not connected yet (allows graceful fallback to defaults)
    */
   private async getDatabaseInstance(context?: DatabaseContext): Promise<Db | null> {
     try {
-      // Strategy resolver takes precedence
+      // 1. Strategy resolver takes precedence (for multi-tenant/brand scenarios)
       if (this.databaseStrategy && context) {
         return await this.databaseStrategy.resolve(context);
       }
       
-      // Use provided database instance
+      // 2. Use service database accessor (RECOMMENDED pattern)
+      if (this.accessor) {
+        if (!this.accessor.isInitialized()) {
+          logger.debug('ConfigStore accessor not yet initialized, returning null');
+          return null;
+        }
+        return await this.accessor.getDb();
+      }
+      
+      // 3. Use provided database instance directly
       if (this.database) {
         return this.database;
       }
       
-      // If useCoreDatabase is enabled, ALWAYS use core_service database
-      // This is critical for bootstrapConfigStore to avoid using the wrong database
-      // when scripts/services connect to different databases
+      // 4. Bootstrap mode: use core_service database directly
+      // This is internal for getCentralConfigStore() only
       if (this.useCoreDatabase) {
         try {
           const client = getClient();
@@ -441,23 +453,9 @@ export class ConfigStore {
         }
       }
       
-      // Fallback to default database connection
-      // Check if database is connected before accessing
-      try {
-        const db = getDatabase();
-        // Verify connection by pinging the database
-        // This will throw if client is disconnected
-        await db.admin().ping();
-        return db;
-      } catch (dbError: any) {
-        // Database not connected - return null to allow fallback to defaults
-        // This handles both "Database not connected" and "Client must be connected" errors
-        if (dbError?.message?.includes('not connected') || dbError?.message?.includes('Client must be connected')) {
-          return null;
-        }
-        // Re-throw other errors (e.g., network errors)
-        throw dbError;
-      }
+      // No database source configured - return null
+      // This allows graceful fallback to defaults
+      return null;
     } catch (error) {
       // Database not connected yet - return null to allow fallback to defaults
       return null;

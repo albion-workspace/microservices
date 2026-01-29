@@ -41,7 +41,12 @@
 //
 export {
   createServiceDatabaseAccess,
-  type ServiceDatabaseAccessor,
+} from './databases/service-database.js';
+export type {
+  ServiceDatabaseAccessor,
+  DatabaseIndexConfig,
+  HealthCheckResult,
+  DatabaseStats,
 } from './databases/service-database.js';
 
 // ═══════════════════════════════════════════════════════════════════
