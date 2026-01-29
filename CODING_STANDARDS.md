@@ -398,6 +398,70 @@ if (hasReadReplica()) {
 - ❌ Storing large values (>100KB) without compression
 - ❌ Using Redis as primary database (use for cache/state only)
 
+### Caching Best Practices (Multi-Level Cache)
+
+This project uses a **multi-level cache** (Memory → Redis → Database). Follow these practices:
+
+**Cache Layers**:
+```
+L1: Memory (~0.001ms) → L2: Redis (~0.5-2ms) → Database (~5-50ms)
+```
+
+**Cache API Usage**:
+```typescript
+// ✅ Correct: Use core-service cache functions
+import { cached, getCache, setCache, getCacheMany, setCacheMany, warmCache } from 'core-service';
+
+// Cache-aside pattern (preferred)
+const user = await cached('user:123', 300, () => fetchUser('123'));
+
+// Batch operations (use for multiple keys)
+const values = await getCacheMany<User>(['user:1', 'user:2', 'user:3']);
+await setCacheMany([
+  { key: 'user:1', value: user1, ttl: 300 },
+  { key: 'user:2', value: user2, ttl: 300 },
+]);
+
+// Cache warming (startup or periodic)
+await warmCache([
+  { key: 'config:app', fetchFn: () => loadConfig(), ttl: 3600 },
+]);
+```
+
+**Pattern Deletion** - Use SCAN-based deletion:
+```typescript
+// ✅ Correct: Uses SCAN internally (non-blocking)
+import { deleteCachePattern } from 'core-service';
+await deleteCachePattern('user:*');
+
+// ❌ Wrong: Manual pattern matching is inefficient
+// for (const key of allKeys) { if (key.startsWith('user:')) await deleteCache(key); }
+```
+
+**Cache Key Conventions**:
+```typescript
+// ✅ Correct: Use createCacheKeys factory
+import { createCacheKeys } from 'core-service';
+
+const UserCache = createCacheKeys('user');
+UserCache.one('123');      // 'user:123'
+UserCache.list('active');  // 'users:active'
+UserCache.pattern();       // 'user*'
+```
+
+**Best Practices**:
+- ✅ Use `cached()` for cache-aside pattern (checks cache, fetches if miss, stores)
+- ✅ Use batch operations (`getCacheMany`, `setCacheMany`) for multiple keys
+- ✅ Use `deleteCachePattern()` for pattern-based invalidation (uses SCAN)
+- ✅ Set appropriate TTLs (default: 300s, adjust based on data volatility)
+- ✅ Use `warmCache()` for frequently accessed data at startup
+
+**Anti-Patterns to Avoid**:
+- ❌ Direct Redis access for caching (bypasses memory layer)
+- ❌ Very long TTLs without invalidation strategy
+- ❌ Caching user-specific data without proper key namespacing
+- ❌ Forgetting to invalidate cache after data changes
+
 ### GraphQL
 - **Always**: Keep GraphQL schemas and TypeScript types in sync
 - **Always**: Use cursor-based pagination (not offset)
