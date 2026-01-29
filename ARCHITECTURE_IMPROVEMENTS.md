@@ -30,14 +30,18 @@
 
 | File | Items Removed |
 |------|---------------|
-| `core-service/src/types/events.ts` | **DELETED** - Domain-specific types don't belong in core-service per CODING_STANDARDS |
+| `core-service/src/types/events.ts` | **DELETED** - Domain-specific types don't belong in core-service |
+| `core-service/src/types/references.ts` | Removed `WalletReference`, `BonusReference`, `WalletBalanceSnapshot`, `WalletBonusSummary`, `TransactionReference` (kept generic `UserReference`, `ServiceResponse`) |
 | `core-service/src/common/integration.ts` | Removed `publishEvent`, `subscribeToEvents`, `startEventListener` aliases |
 | `core-service/src/databases/mongodb-utils.ts` | Removed `findUserById()` |
 | `core-service/src/databases/redis.ts` | Removed `scanKeys()` (use `scanKeysIterator` or `scanKeysArray`) |
-| `core-service/src/index.ts` | Updated exports, removed domain-specific event types |
-| `core-service/src/types/index.ts` | Updated exports, removed events.ts imports |
+| `core-service/src/index.ts` | Updated exports, removed domain-specific types |
+| `core-service/src/types/index.ts` | Updated exports |
 
-**CODING_STANDARDS Compliance**: Domain-specific types (`DepositCompletedData`, `BonusCreditedData`, etc.) should be defined in their respective services, not core-service. Services already define their own types (e.g., `payment-service/src/event-dispatcher.ts`).
+**CODING_STANDARDS Compliance**: Domain-specific types should be defined in their respective services:
+- `DepositCompletedData`, `WalletReference` → payment-service
+- `BonusCreditedData`, `BonusReference` → bonus-service
+- Generic types (`UserReference`, `ServiceResponse`, `IntegrationEvent<T>`) remain in core-service
 
 ### 2. 🟡 TODO/FIXME Comments (5 remain) - PENDING
 

@@ -101,15 +101,12 @@ export {
 } from './currency.js';
 
 // ═══════════════════════════════════════════════════════════════════
-// References (cross-service linking)
+// References (cross-service linking) - Generic types only
+// Domain-specific types (WalletReference, BonusReference, etc.) 
+// should be defined in their respective services
 // ═══════════════════════════════════════════════════════════════════
 
 export type {
-  WalletReference,
-  WalletBalanceSnapshot,
-  BonusReference,
-  WalletBonusSummary,
-  TransactionReference,
   UserReference,
   ServiceResponse,
 } from './references.js';

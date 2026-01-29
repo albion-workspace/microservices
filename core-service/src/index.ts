@@ -511,13 +511,9 @@ export {
 // Use IntegrationEvent<T> from integration.ts with your own types:
 //   emit('deposit.completed', tenantId, userId, { transactionId, amount, ... });
 
-// References (cross-service linking)
+// References (cross-service linking) - Generic types only
+// Domain-specific types should be defined in their respective services
 export type {
-  WalletReference,
-  WalletBalanceSnapshot,
-  BonusReference,
-  WalletBonusSummary,
-  TransactionReference,
   UserReference,
   ServiceResponse,
 } from './types/index.js';
