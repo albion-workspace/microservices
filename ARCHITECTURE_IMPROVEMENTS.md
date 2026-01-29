@@ -779,17 +779,19 @@ After refactoring access control to use `RoleResolver` from `access-engine`, the
 
 ### Phase 1: High Priority (Next Steps)
 
-1. ⏳ **Distributed Tracing (OpenTelemetry)** - HIGH PRIORITY
+1. 📋 **Distributed Tracing (OpenTelemetry)** - MOVED TO README TODO
    - Integrate OpenTelemetry SDK
    - Add tracing spans to critical operations
    - Export traces to collector
    - **Estimated Time**: 8-12 hours
+   - **Status**: Tracked in README.md as TODO
 
-2. ⏳ **Performance Metrics (Prometheus)** - HIGH PRIORITY
+2. 📋 **Performance Metrics (Prometheus)** - MOVED TO README TODO
    - Add Prometheus-compatible metrics endpoint
    - Track response times, throughput, error rates
    - Export metrics for monitoring
    - **Estimated Time**: 6-8 hours
+   - **Status**: Tracked in README.md as TODO
 
 3. ✅ **Batch Operations Optimization** - COMPLETED (2026-01-29)
    - ✅ Batch cache operations (getCacheMany, setCacheMany, deleteCacheMany)
@@ -816,27 +818,34 @@ After refactoring access control to use `RoleResolver` from `access-engine`, the
 
 ### Phase 2: Medium Priority
 
-7. ⏳ **Database Sharding Strategy Documentation** - MEDIUM PRIORITY
-   - Document sharding strategy
-   - Shard key selection guidelines
-   - Cross-shard query patterns
-   - **Estimated Time**: 4-6 hours
+7. ✅ **Database Sharding Strategy Documentation** - COMPLETED (2026-01-29)
+   - ✅ Documented below in "Database Sharding Guide" section
+   - ✅ When to shard vs when not to
+   - ✅ Shard key selection guidelines
+   - ✅ Examples and scenarios
 
 8. ⏳ **Service Independence** - MEDIUM PRIORITY
    - Split `core-service` into smaller packages
    - Interface segregation
    - **Estimated Time**: 16-24 hours (significant refactoring)
 
-9. ⏳ **API Gateway Improvements** - MEDIUM PRIORITY
-   - Rate limiting per user/service
-   - Request/response caching
-   - GraphQL query complexity analysis
-   - **Estimated Time**: 8-12 hours
+9. ✅ **API Gateway Improvements** - COMPLETED (2026-01-29)
+   - ✅ Request/response caching (multi-level cache already implemented)
+   - ✅ GraphQL query complexity analysis (generic, configurable)
+   - ⚠️ **Rate Limiting Note**: Recommended at infrastructure level (nginx, Cloudflare, AWS WAF) for better performance and DDoS protection
+   
+   **Complexity Features**:
+   - Configurable max complexity (default: 1000)
+   - Configurable max depth (default: 10)
+   - Custom field complexities
+   - Presets: STRICT, STANDARD, RELAXED
+   - Works on HTTP and Socket.IO transports
 
-10. ⏳ **Read Replicas Support** - MEDIUM PRIORITY
-    - Use MongoDB read preferences
-    - Route read queries to replicas
-    - **Estimated Time**: 4-6 hours
+10. ✅ **Read Replicas Support** - COMPLETED (2026-01-29)
+    - ✅ `readPreference: 'nearest'` configured by default
+    - ✅ Reads automatically routed to closest node (primary or secondary)
+    - ✅ Works automatically when deployed with MongoDB replica set
+    - **Note**: Infrastructure ready, no code changes needed
 
 ### Phase 3: Low Priority / Future
 
@@ -857,6 +866,124 @@ After refactoring access control to use `RoleResolver` from `access-engine`, the
 
 ---
 
+## 📚 Database Sharding Guide
+
+### When to Shard vs When NOT to Shard
+
+#### ❌ Do NOT Shard If:
+| Condition | Why |
+|-----------|-----|
+| Data < 100GB | Single server handles this easily |
+| < 10,000 ops/sec | Replica set is sufficient |
+| Simple queries | Sharding adds complexity |
+| Small team | Operational overhead is high |
+| Can scale vertically | Bigger server is simpler |
+
+#### ✅ Consider Sharding If:
+| Condition | Why |
+|-----------|-----|
+| Data > 500GB | Too large for single server |
+| > 50,000 ops/sec | Need horizontal write scaling |
+| Write-heavy workload | Replica sets don't scale writes |
+| Geographic distribution | Data locality requirements |
+| Multi-tenant at scale | 1000+ tenants with isolation needs |
+
+### Shard Key Selection
+
+#### Good Shard Keys for This System
+
+| Collection | Recommended Shard Key | Why |
+|------------|----------------------|-----|
+| `wallets` | `{ odsi: 1 }` (userId) | Queries always include user |
+| `transactions` | `{ odsi: 1, createdAt: 1 }` | User + time range queries |
+| `transfers` | `{ fromUserId: 1 }` or `{ odsi: 1 }` | Queries by sender |
+| `users` | `{ tenantId: 1, _id: 1 }` | Multi-tenant isolation |
+| `roles` | `{ tenantId: 1 }` | Tenant-scoped queries |
+
+#### Shard Key Rules
+1. **High cardinality** - Many unique values (userId ✅, status ❌)
+2. **Query isolation** - Queries should target one shard
+3. **Write distribution** - Avoid hotspots (timestamp alone ❌)
+4. **Immutable** - Cannot change after insert
+
+### Sharding Scenarios
+
+#### Scenario 1: Single Brand, Growing Users (Recommended: NO Sharding)
+```
+Users: 100,000
+Transactions/day: 50,000
+Data size: 20GB
+
+→ Use: Replica Set (1 primary + 2 secondaries)
+→ Why: Well within single server capacity
+→ Config: readPreference: 'nearest' (already configured)
+```
+
+#### Scenario 2: Multi-Brand Platform (Recommended: NO Sharding, use per-brand DBs)
+```
+Brands: 50
+Users per brand: 10,000
+Total data: 100GB
+
+→ Use: Per-brand databases (current strategy supports this)
+→ Why: Isolation without sharding complexity
+→ Config: DatabaseStrategy = 'per-brand'
+```
+
+#### Scenario 3: Large Scale Platform (Recommended: SHARD)
+```
+Users: 10,000,000
+Transactions/day: 5,000,000
+Data size: 2TB
+
+→ Use: Sharded cluster
+→ Shard key: { odsi: "hashed" } for even distribution
+→ Why: Write throughput exceeds single server
+```
+
+### Implementation Steps (If Sharding Needed)
+
+#### Step 1: Enable Sharding on Database
+```javascript
+sh.enableSharding("payment_service")
+```
+
+#### Step 2: Create Shard Key Index
+```javascript
+db.wallets.createIndex({ odsi: "hashed" })
+db.transactions.createIndex({ odsi: 1, createdAt: 1 })
+```
+
+#### Step 3: Shard Collections
+```javascript
+sh.shardCollection("payment_service.wallets", { odsi: "hashed" })
+sh.shardCollection("payment_service.transactions", { odsi: 1, createdAt: 1 })
+```
+
+### What to Avoid
+
+| Anti-Pattern | Problem | Solution |
+|--------------|---------|----------|
+| Shard by `_id` only | Random distribution, scatter-gather | Use business key (userId) |
+| Shard by `createdAt` only | Hotspot on latest shard | Compound key with userId |
+| Cross-shard transactions | 2PC overhead, failures | Design to avoid or use saga |
+| Scatter-gather queries | Hits all shards | Include shard key in queries |
+| Small shard key cardinality | Jumbo chunks | Use high-cardinality field |
+
+### Current System: Sharding-Ready
+
+Our current implementation is **sharding-ready** without code changes:
+
+1. ✅ **Queries include userId** - All wallet/transaction queries use `odsi`
+2. ✅ **Cursor pagination** - Works across shards (no offset)
+3. ✅ **No cross-collection joins** - Each collection independent
+4. ✅ **Saga pattern** - Handles distributed operations
+5. ✅ **Per-brand strategy** - Can isolate before sharding
+
+**Recommendation**: Start with replica sets. Shard only when metrics show need.
+
+---
+
 ## 📊 Progress Summary
 
 ### ✅ CODING_STANDARDS Compliance (4 items) - COMPLETED (2026-01-29)
@@ -865,7 +992,7 @@ After refactoring access control to use `RoleResolver` from `access-engine`, the
 - ✅ Fix auth-service/ARCHITECTURE.md pagination example
 - 🟡 auth-service TODO comments (5 items - documented as intentional placeholders)
 
-### ✅ Completed (19 items)
+### ✅ Completed (22 items)
 - Remove legacy code (ledger.ts deleted, extractDocumentId helper created)
 - Remove @deprecated code (events.ts, integration.ts, mongodb-utils.ts, redis.ts)
 - Add core-service versioning
@@ -881,23 +1008,26 @@ After refactoring access control to use `RoleResolver` from `access-engine`, the
 - React app enhancements
 - Documentation fixes (ARCHITECTURE.md pagination)
 - Redis Strategy Pattern (ServiceRedisAccessor with multi-tenant key prefixing)
-- **Multi-level caching** (Memory → Redis, batch ops, cache warming) ✅ NEW
-- **Connection pool optimization** (waitQueueTimeoutMS, monitoring, health status) ✅ NEW
-- **Batch cache operations** (getCacheMany, setCacheMany, deleteCacheMany) ✅ NEW
-- **Redis read replica support** (Sentinel, read/write splitting infrastructure) ✅ NEW
+- **Multi-level caching** (Memory → Redis, batch ops, cache warming)
+- **Connection pool optimization** (waitQueueTimeoutMS, monitoring, health status)
+- **Batch cache operations** (getCacheMany, setCacheMany, deleteCacheMany)
+- **Redis read replica support** (Sentinel, read/write splitting infrastructure)
+- **MongoDB read replicas** (readPreference: 'nearest' already configured)
+- **Database sharding documentation** (guide with scenarios added)
+- **GraphQL query complexity** (generic, configurable, with presets) ✅ NEW
 
-### ⏳ In Progress / Next Priority (3 items)
-- Distributed tracing (OpenTelemetry)
-- Performance metrics (Prometheus)
+### 📋 Moved to README TODO (2 items)
+- Distributed tracing (OpenTelemetry) - tracked in README.md
+- Performance metrics (Prometheus) - tracked in README.md
+
+### ⏳ In Progress / Next Priority (1 item)
 - TypeScript `any` reduction (409 occurrences - documented as acceptable where justified)
 
-### ⏳ Future Enhancements (6 items)
-- Database sharding strategy documentation
-- Service independence (split core-service)
-- API Gateway improvements
-- Plugin system
-- Event-driven architecture expansion
-- Advanced type safety
+### ⏳ Future Enhancements (4 items)
+- Service independence (split core-service) - 16-24h, major refactor
+- Plugin system - 12-16h
+- Event-driven architecture expansion - 16-24h
+- Advanced type safety - 8-12h
 
 ### ⏳ Testing Improvements (3 items)
 - Add tests for circular inheritance protection

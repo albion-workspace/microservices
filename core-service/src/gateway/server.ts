@@ -54,6 +54,11 @@ import { logger, subscribeToLogs, type LogEntry, setCorrelationId, generateCorre
 import { createResolverBuilder, type ServiceResolvers } from '../common/graphql/builder.js';
 import { formatGraphQLError, getAllErrorCodes, getErrorMessage } from '../common/errors.js';
 import { configGraphQLTypes, configResolvers } from '../common/config/graphql.js';
+import { 
+  createComplexityConfig, 
+  analyzeQueryComplexity,
+  type ComplexityConfig,
+} from '../common/graphql/complexity.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -89,6 +94,17 @@ export interface GatewayConfig {
   mongoUri?: string;
   redisUrl?: string;
   defaultPermission?: 'deny' | 'allow' | 'authenticated';
+  /** Query complexity configuration (optional, enables complexity limiting) */
+  complexity?: {
+    /** Maximum allowed query complexity (default: 1000) */
+    maxComplexity?: number;
+    /** Maximum query depth (default: 10) */
+    maxDepth?: number;
+    /** Log complexity for all queries (default: false) */
+    logComplexity?: boolean;
+    /** Enable complexity validation (default: true if complexity config provided) */
+    enabled?: boolean;
+  };
 }
 
 // Context type used across all transports
@@ -805,6 +821,18 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
   }
 
   // ─────────────────────────────────────────────────────────────────
+  // Query Complexity Configuration
+  // ─────────────────────────────────────────────────────────────────
+  
+  const complexityConfig: ComplexityConfig | null = config.complexity?.enabled !== false && config.complexity
+    ? createComplexityConfig({
+        maxComplexity: config.complexity.maxComplexity ?? 1000,
+        maxDepth: config.complexity.maxDepth ?? 10,
+        logComplexity: config.complexity.logComplexity ?? false,
+      })
+    : null;
+
+  // ─────────────────────────────────────────────────────────────────
   // graphql-http: Queries & Mutations
   // ─────────────────────────────────────────────────────────────────
   
@@ -813,6 +841,71 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
     // Note: Using any for context function - graphql-http expects specific context type
     context: ((req: { raw: IncomingMessage }) => createContext(req.raw)) as any,
   });
+
+  /**
+   * Wrapper handler that validates query complexity before execution
+   */
+  async function handleGraphQLWithComplexity(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    // If complexity checking is disabled, pass through directly
+    if (!complexityConfig) {
+      return httpHandler(req, res);
+    }
+
+    // Only check POST requests (queries/mutations)
+    if (req.method !== 'POST') {
+      return httpHandler(req, res);
+    }
+
+    // Parse request body to get the query
+    try {
+      const body = await parseRequestBody(req);
+      
+      if (body && body.query) {
+        const result = analyzeQueryComplexity(
+          schema,
+          body.query,
+          body.variables || {},
+          complexityConfig,
+          body.operationName
+        );
+
+        if (!result.allowed && result.error) {
+          // Return complexity error
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            errors: [{
+              message: result.error.message,
+              extensions: result.error.extensions,
+            }],
+          }));
+          return;
+        }
+      }
+    } catch {
+      // If parsing fails, let the HTTP handler deal with it
+    }
+
+    // Pass through to the original handler
+    return httpHandler(req, res);
+  }
+
+  /**
+   * Parse request body for complexity checking
+   */
+  async function parseRequestBody(req: IncomingMessage): Promise<{ query?: string; variables?: Record<string, unknown>; operationName?: string } | null> {
+    return new Promise((resolve) => {
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        try {
+          resolve(JSON.parse(body));
+        } catch {
+          resolve(null);
+        }
+      });
+      req.on('error', () => resolve(null));
+    });
+  }
 
   // ─────────────────────────────────────────────────────────────────
   // graphql-sse: Subscriptions via SSE
@@ -960,9 +1053,9 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
       return handleSSEEvents(req, res);
     }
 
-    // GraphQL queries/mutations
+    // GraphQL queries/mutations (with complexity validation)
     if (url.pathname === '/graphql') {
-      return httpHandler(req, res);
+      return handleGraphQLWithComplexity(req, res);
     }
 
     res.writeHead(404);
@@ -1056,6 +1149,27 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
     // ─── GraphQL Query/Mutation via Socket.IO ───
     socket.on('graphql', async (payload: { query: string; variables?: Record<string, unknown>; operationName?: string }, callback) => {
       try {
+        // Validate query complexity if enabled
+        if (complexityConfig) {
+          const complexityResult = analyzeQueryComplexity(
+            schema,
+            payload.query,
+            payload.variables || {},
+            complexityConfig,
+            payload.operationName
+          );
+          
+          if (!complexityResult.allowed && complexityResult.error) {
+            callback({
+              errors: [{
+                message: complexityResult.error.message,
+                extensions: complexityResult.error.extensions,
+              }],
+            });
+            return;
+          }
+        }
+
         const result = await execute({
           schema,
           document: (await import('graphql')).parse(payload.query),

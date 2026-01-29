@@ -1,6 +1,6 @@
 # Microservices Payment System - Complete Documentation
 
-**Last Updated**: 2026-01-28  
+**Last Updated**: 2026-01-29  
 **Status**: ✅ Production Ready
 
 ---
@@ -1715,18 +1715,22 @@ All error handling is unified in `core-service/src/common/errors.ts`:
 
 ## 🛣️ Future Roadmap
 
-### High Priority
-- **Distributed Tracing**: OpenTelemetry integration for request tracing
-- **Performance Metrics**: Prometheus-compatible metrics endpoint
-- **Multi-Level Caching**: Memory → Redis → Database caching strategy
-- **Connection Pool Optimization**: Auto-scale MongoDB pools based on load
+### 📋 TODO - Observability
+- [ ] **Distributed Tracing (OpenTelemetry)** - Integrate OpenTelemetry SDK, add tracing spans to critical operations, export to collector
+- [ ] **Performance Metrics (Prometheus)** - Add `/metrics` endpoint, track response times, throughput, error rates
 
 ### Medium Priority
-- **API Gateway Improvements**: Rate limiting, request caching, query complexity analysis
-- **Database Sharding Strategy**: Shard key selection, cross-shard query patterns
-- **Read Replicas Support**: MongoDB read preferences for scaling reads
+- **Database Sharding Strategy**: Shard key selection, cross-shard query patterns (documentation)
+- **Service Independence**: Split `core-service` into smaller focused packages
 
-### Completed Improvements
+### Low Priority
+- **Plugin System**: Make recovery system more plugin-based
+- **Event-Driven Architecture**: More async communication, event sourcing for audit
+
+### ⚠️ Rate Limiting Note
+> **Recommendation**: Implement rate limiting at infrastructure level (nginx, Cloudflare, AWS WAF, API Gateway) rather than application level. Infrastructure-level rate limiting provides better performance, DDoS protection, and centralized management. Application-level rate limiting can be added as a fallback if needed.
+
+### ✅ Completed Improvements
 - ✅ Cursor pagination (O(1) performance)
 - ✅ Circuit breaker pattern (prevents cascading failures)
 - ✅ Enhanced retry logic (exponential backoff, jitter)
@@ -1734,6 +1738,14 @@ All error handling is unified in `core-service/src/common/errors.ts`:
 - ✅ Correlation IDs (request tracing)
 - ✅ Dynamic configuration (MongoDB config store)
 - ✅ Design patterns (Registry, Factory, Builder, Chain of Responsibility)
+- ✅ **Multi-level caching** - Memory → Redis (memory checked first, ~0.001ms vs ~0.5-2ms)
+- ✅ **Batch cache operations** - `getCacheMany`, `setCacheMany`, `deleteCacheMany`, `warmCache`
+- ✅ **Connection pool optimization** - `waitQueueTimeoutMS`, pool monitoring, health status
+- ✅ **Redis read replica support** - Sentinel config, read/write splitting infrastructure ready
+- ✅ **MongoDB read replicas** - `readPreference: 'nearest'` configured by default
+- ✅ **node-redis v5.10.0** - Latest features (keepAlive, noDelay, exponential backoff with jitter)
+- ✅ **Sharding-ready** - See ARCHITECTURE_IMPROVEMENTS.md for sharding guide
+- ✅ **GraphQL query complexity** - Configurable limits, presets (STRICT/STANDARD/RELAXED)
 
 ---
 
@@ -1747,4 +1759,4 @@ All error handling is unified in `core-service/src/common/errors.ts`:
 
 ---
 
-**Last Updated**: 2026-01-28
+**Last Updated**: 2026-01-29

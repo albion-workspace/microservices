@@ -433,6 +433,20 @@ export {
 } from './common/graphql/builder.js';
 export type { ResolverFunction, ServiceResolvers } from './common/graphql/builder.js';
 
+// GraphQL Query Complexity
+export {
+  createComplexityConfig,
+  calculateComplexity,
+  analyzeQueryComplexity,
+  validateQueryComplexity,
+  createComplexityMiddleware,
+  // Presets
+  STRICT_COMPLEXITY_CONFIG,
+  STANDARD_COMPLEXITY_CONFIG,
+  RELAXED_COMPLEXITY_CONFIG,
+} from './common/graphql/complexity.js';
+export type { ComplexityConfig, ComplexityResult } from './common/graphql/complexity.js';
+
 // ═══════════════════════════════════════════════════════════════════
 // Repository (with caching)
 // ═══════════════════════════════════════════════════════════════════
