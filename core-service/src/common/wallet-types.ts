@@ -25,6 +25,20 @@ export const COLLECTION_NAMES = {
 export type CollectionName = typeof COLLECTION_NAMES[keyof typeof COLLECTION_NAMES];
 
 // ═══════════════════════════════════════════════════════════════════
+// Transaction Options (Single source of truth)
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Default transaction options for MongoDB transactions
+ * Ensures consistency across all transactional operations
+ */
+export const DEFAULT_TRANSACTION_OPTIONS = {
+  readConcern: { level: 'snapshot' as const },
+  writeConcern: { w: 'majority' as const },
+  readPreference: 'primary' as const,
+};
+
+// ═══════════════════════════════════════════════════════════════════
 // Collection Getters (Centralized collection access)
 // ═══════════════════════════════════════════════════════════════════
 
@@ -306,11 +320,7 @@ export async function withTransaction<T>(
   try {
     return await session.withTransaction(
       () => fn(session),
-      {
-        readConcern: { level: 'snapshot' },
-        writeConcern: { w: 'majority' },
-        readPreference: 'primary',
-      }
+      DEFAULT_TRANSACTION_OPTIONS
     );
   } finally {
     await session.endSession();

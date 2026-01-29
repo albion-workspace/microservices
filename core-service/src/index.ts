@@ -54,6 +54,8 @@ export {
   getWalletsCollection,
   getTransfersCollection,
   getTransactionsCollection,
+  // Transaction options
+  DEFAULT_TRANSACTION_OPTIONS,
   // Wallet utilities
   getWalletId,
   getWalletBalance,

@@ -52,6 +52,7 @@ import {
   getWalletsCollection,
   getTransfersCollection,
   getTransactionsCollection,
+  DEFAULT_TRANSACTION_OPTIONS,
 } from './wallet-types.js';
 
 
@@ -792,11 +793,7 @@ export async function createTransferWithTransactions(
       await stateTracker.updateHeartbeat(operationId, 'transfer');
       
       return transferResult;
-    }, {
-      readConcern: { level: 'snapshot' },
-      writeConcern: { w: 'majority' },
-      readPreference: 'primary',
-    });
+    }, DEFAULT_TRANSACTION_OPTIONS);
     
     // Mark as completed
     await stateTracker.markCompleted(operationId, 'transfer');
@@ -1052,11 +1049,7 @@ export async function approveTransfer(
   try {
     const result = await internalSession.withTransaction(async () => {
       return await executeApproval(internalSession);
-    }, {
-      readConcern: { level: 'snapshot' },
-      writeConcern: { w: 'majority' },
-      readPreference: 'primary',
-    });
+    }, DEFAULT_TRANSACTION_OPTIONS);
     
     // Invalidate wallet cache after successful transaction commit
     try {
@@ -1187,11 +1180,7 @@ export async function declineTransfer(
   try {
     const result = await internalSession.withTransaction(async () => {
       return await executeDecline(internalSession);
-    }, {
-      readConcern: { level: 'snapshot' },
-      writeConcern: { w: 'majority' },
-      readPreference: 'primary',
-    });
+    }, DEFAULT_TRANSACTION_OPTIONS);
     
     // Invalidate wallet cache after transaction (even though wallets weren't updated for declined transfers)
     // This ensures consistency

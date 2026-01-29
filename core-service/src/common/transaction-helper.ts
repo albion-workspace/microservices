@@ -33,6 +33,7 @@ import {
   withTransaction,
   getWalletsCollection,
   getTransactionsCollection,
+  DEFAULT_TRANSACTION_OPTIONS,
 } from './wallet-types.js';
 
 // Re-export transaction state types from transaction-state.ts
@@ -313,11 +314,7 @@ export async function createTransaction(
   try {
     return await internalSession.withTransaction(async () => {
       return await executeTransaction(internalSession);
-    }, {
-      readConcern: { level: 'snapshot' },
-      writeConcern: { w: 'majority' },
-      readPreference: 'primary',
-    });
+    }, DEFAULT_TRANSACTION_OPTIONS);
   } catch (error) {
     logger.error('Failed to create transaction', {
       error,
@@ -463,11 +460,7 @@ export async function createTransactions(
   try {
     return await internalSession.withTransaction(async () => {
       return await executeTransactions(internalSession);
-    }, {
-      readConcern: { level: 'snapshot' },
-      writeConcern: { w: 'majority' },
-      readPreference: 'primary',
-    });
+    }, DEFAULT_TRANSACTION_OPTIONS);
   } catch (error) {
     logger.error('Failed to create transactions', {
       error,

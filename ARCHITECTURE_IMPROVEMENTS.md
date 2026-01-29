@@ -815,6 +815,16 @@ After implementing remaining improvements:
     - `transfer-recovery.ts` - 4 occurrences
   - Benefits: Type-safe collection access, single source of truth for collection names, easier refactoring
 
+- **Transaction Options Consolidation** (2026-01-29):
+  - Created `DEFAULT_TRANSACTION_OPTIONS` constant in `wallet-types.ts`
+  - Replaced 7 duplicated transaction option blocks across:
+    - `wallet-types.ts` (withTransaction helper)
+    - `transfer-helper.ts` (3 occurrences)
+    - `transaction-helper.ts` (2 occurrences)
+    - `saga/engine.ts` (1 occurrence)
+    - `recovery.ts` (1 occurrence)
+  - Benefits: Single source of truth for MongoDB transaction settings, consistent behavior across all transactional operations
+
 - **CODING_STANDARDS Documentation Update** (2026-01-29):
   - Updated to reflect actual architecture where core-service provides database abstractions
   - Changed from "Never include MongoDB in core-service" to "core-service is single source of truth for database operations"
