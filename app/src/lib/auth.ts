@@ -15,8 +15,8 @@ export const JWT_SECRETS = {
 
 // Service URLs
 export const SERVICE_URLS = {
-  payment: 'http://localhost:3004/graphql',
-  bonus: 'http://localhost:3005/graphql',
+  payment: 'http://localhost:9002/graphql',
+  bonus: 'http://localhost:9003/graphql',
 }
 
 /**

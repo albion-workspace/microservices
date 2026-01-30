@@ -6,15 +6,12 @@
  */
 
 import type {
-  KYCProfile,
   KYCTier,
-  KYCDocument,
   DocumentType,
   DocumentVerificationResult,
   AMLCheck,
   PEPScreening,
   SanctionScreening,
-  VerificationResult,
   ExtractedDocumentData,
 } from './kyc-types.js';
 
@@ -280,8 +277,8 @@ export interface UploadDocumentToProviderInput {
   applicantId: string;
   type: DocumentType;
   
-  // File
-  file: Buffer;
+  // File - use Uint8Array for cross-platform compatibility
+  file: Uint8Array;
   filename: string;
   mimeType: string;
   

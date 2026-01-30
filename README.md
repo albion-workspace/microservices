@@ -90,8 +90,9 @@ tst/
 ├── app/                        # React frontend
 ├── auth-service/               # Authentication & authorization
 ├── bonus-service/              # Bonus & rewards
-├── bonus-shared/               # Shared bonus types
 ├── core-service/               # Shared library
+├── kyc-service/                # KYC/Identity verification
+├── shared-validators/          # Client-safe validators (bonus, KYC)
 │   └── src/
 │       ├── access/             # Access control integration
 │       ├── common/
@@ -683,7 +684,7 @@ await redis.deletePattern('session:*');
 import { createGateway } from 'core-service';
 
 const gateway = await createGateway({
-  port: 3003,
+  port: 9001,
   services: [authService, paymentService, bonusService],
   context: async (req) => ({
     user: await extractUser(req),
@@ -995,6 +996,21 @@ const jwtConfig = await getConfigWithDefault<JwtConfig>('auth-service', 'jwt');
 
 ---
 
+## Service Ports
+
+All services use the 9000 port range for consistency:
+
+| Service | Port | GraphQL Endpoint |
+|---------|------|------------------|
+| auth-service | 9001 | http://localhost:9001/graphql |
+| payment-service | 9002 | http://localhost:9002/graphql |
+| bonus-service | 9003 | http://localhost:9003/graphql |
+| notification-service | 9004 | http://localhost:9004/graphql |
+| kyc-service | 9005 | http://localhost:9005/graphql |
+| React App | 5173 | http://localhost:5173 |
+
+---
+
 ## Quick Start
 
 ### Prerequisites
@@ -1012,7 +1028,7 @@ const jwtConfig = await getConfigWithDefault<JwtConfig>('auth-service', 'jwt');
 ### Environment Variables
 
 ```bash
-PORT=3003
+PORT=9001
 MONGO_URI=mongodb://localhost:27017/core_service
 REDIS_URL=redis://localhost:6379
 JWT_SECRET=your-secret

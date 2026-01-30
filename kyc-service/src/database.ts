@@ -1,16 +1,13 @@
 /**
- * KYC Service Database Accessor
+ * KYC Service Database Access
  * 
- * Uses core-service database patterns for consistency
+ * Uses createServiceDatabaseAccess from core-service for consistent database access.
+ * KYC-service uses per-service strategy (kyc_service database).
  */
 
 import { createServiceDatabaseAccess } from 'core-service';
 
-/**
- * KYC Service Database Accessor
- * 
- * Follows per-service database strategy (kyc_service database)
- */
+// Create database accessor for kyc-service
 export const db = createServiceDatabaseAccess('kyc-service');
 
 /**

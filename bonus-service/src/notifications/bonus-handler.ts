@@ -8,11 +8,42 @@
  * 
  * This handler is registered with notification-service to enable
  * bonus-related notifications.
+ * 
+ * Note: Types are defined locally per CODING_STANDARDS - services
+ * should not depend on each other directly.
  */
 
 import { logger, on } from 'core-service';
 import type { IntegrationEvent } from 'core-service';
-import type { NotificationHandlerPlugin, HandlerContext } from 'notification-service/plugins';
+
+// ═══════════════════════════════════════════════════════════════════
+// Local Plugin Types (per CODING_STANDARDS - no service dependencies)
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Handler plugin interface - matches notification-service plugin system
+ */
+interface NotificationHandlerPlugin {
+  name: string;
+  description: string;
+  channels: string[];
+  eventTypes: string[];
+  initialize(notificationService: any): void;
+  isAvailable(): boolean;
+}
+
+/**
+ * Handler context passed to handler functions
+ */
+interface HandlerContext {
+  notificationService: any;
+  event: IntegrationEvent<any>;
+  logger: typeof logger;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Event Types
+// ═══════════════════════════════════════════════════════════════════
 
 interface BonusEventData {
   type: string;

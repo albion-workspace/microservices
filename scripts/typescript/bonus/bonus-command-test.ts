@@ -33,8 +33,8 @@ import {
 import { createTransferRecoveryHandler } from '../../../core-service/src/common/wallet/transfer-recovery.js';
 import { createTransferWithTransactions } from '../../../core-service/src/common/wallet/transfer.js';
 
-// External packages (bonus-shared)
-import { BonusEligibility } from '../../../bonus-shared/src/BonusEligibility.js';
+// External packages (shared-validators)
+import { BonusEligibility } from '../../../shared-validators/src/BonusEligibility.js';
 
 // Local imports
 import { 
@@ -63,7 +63,7 @@ import {
 } from '../config/scripts.js';
 
 // Type imports
-import type { BonusTemplate as ClientBonusTemplate, EligibilityContext } from '../../../bonus-shared/src/BonusEligibility.js';
+import type { BonusTemplate as ClientBonusTemplate, BonusEligibilityContext as EligibilityContext } from '../../../shared-validators/src/BonusEligibility.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Configuration

@@ -1,18 +1,17 @@
 /**
  * Document Repository
  * 
- * Data access layer for KYC documents
+ * Data access layer for KYC documents.
+ * Extends BaseRepository from core-service for common CRUD operations.
  */
 
 import { 
-  generateId, 
-  paginateCollection,
+  BaseRepository,
   logger,
-} from 'core-service';
-import type { 
-  ClientSession, 
-  Filter,
-  Collection,
+  generateId,
+  type RepositoryPaginationInput as PaginationInput,
+  type PaginationResult,
+  type WriteOptions,
 } from 'core-service';
 
 import { db, COLLECTIONS } from '../database.js';
@@ -38,98 +37,93 @@ export interface DocumentFilter {
   providerId?: string;
 }
 
+export interface CreateDocumentInput {
+  tenantId: string;
+  profileId: string;
+  type: DocumentType;
+  category: DocumentCategory;
+  files: DocumentFile[];
+  documentNumber?: string;
+  issuingCountry?: string;
+  issuedAt?: Date;
+  expiresAt?: Date;
+  uploadedBy: string;
+  metadata?: Record<string, unknown>;
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Repository Class
 // ═══════════════════════════════════════════════════════════════════
 
-export class DocumentRepository {
-  private getCollection(): Promise<Collection<KYCDocument>> {
-    return db.getDb().then(database => database.collection<KYCDocument>(COLLECTIONS.DOCUMENTS));
+export class DocumentRepository extends BaseRepository<KYCDocument> {
+  constructor() {
+    super(COLLECTIONS.DOCUMENTS, db, {
+      timestamps: false, // We use uploadedAt instead
+      defaultSortField: 'uploadedAt',
+      defaultSortDirection: 'desc',
+      indexes: [
+        { key: { profileId: 1 } },
+        { key: { profileId: 1, type: 1 } },
+        { key: { status: 1 } },
+        { key: { expiresAt: 1 }, sparse: true },
+        { key: { providerDocumentId: 1 }, sparse: true },
+      ],
+    });
   }
   
   // ───────────────────────────────────────────────────────────────────
-  // Create
+  // Domain-Specific Create
   // ───────────────────────────────────────────────────────────────────
   
   /**
    * Create a new document record
    */
-  async create(
-    input: {
-      profileId: string;
-      type: DocumentType;
-      category: DocumentCategory;
-      files: DocumentFile[];
-      documentNumber?: string;
-      issuingCountry?: string;
-      issuedAt?: Date;
-      expiresAt?: Date;
-      uploadedBy: string;
-      metadata?: Record<string, unknown>;
-    },
-    session?: ClientSession
+  async createDocument(
+    input: CreateDocumentInput,
+    options?: WriteOptions
   ): Promise<KYCDocument> {
-    const collection = await this.getCollection();
     const now = new Date();
     
-    const document: KYCDocument = {
-      id: generateId(),
+    const doc = await this.create({
+      tenantId: input.tenantId,
       profileId: input.profileId,
       type: input.type,
       category: input.category,
-      
       documentNumber: input.documentNumber,
       issuingCountry: input.issuingCountry,
       issuedAt: input.issuedAt,
       expiresAt: input.expiresAt,
-      
       files: input.files,
-      
       status: 'pending',
-      
       uploadedAt: now,
       uploadedBy: input.uploadedBy,
-      
       metadata: input.metadata,
-    };
-    
-    await collection.insertOne(document as any, { session });
+    } as any, options);
     
     logger.info('KYC document created', {
-      documentId: document.id,
-      profileId: document.profileId,
-      type: document.type,
+      documentId: doc.id,
+      profileId: doc.profileId,
+      type: doc.type,
     });
     
-    return document;
+    return doc;
   }
   
   // ───────────────────────────────────────────────────────────────────
-  // Read
+  // Domain-Specific Queries
   // ───────────────────────────────────────────────────────────────────
-  
-  /**
-   * Find document by ID
-   */
-  async findById(
-    id: string,
-    session?: ClientSession
-  ): Promise<KYCDocument | null> {
-    const collection = await this.getCollection();
-    return collection.findOne({ id }, { session }) as Promise<KYCDocument | null>;
-  }
   
   /**
    * Find documents by profile ID
    */
   async findByProfileId(
     profileId: string,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCDocument[]> {
-    const collection = await this.getCollection();
-    return collection.find({ profileId }, { session })
-      .sort({ uploadedAt: -1 })
-      .toArray() as Promise<KYCDocument[]>;
+    return this.findMany({ profileId } as any, {
+      sort: { uploadedAt: -1 },
+      session: options?.session,
+    });
   }
   
   /**
@@ -138,12 +132,12 @@ export class DocumentRepository {
   async findByType(
     profileId: string,
     type: DocumentType,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCDocument[]> {
-    const collection = await this.getCollection();
-    return collection.find({ profileId, type }, { session })
-      .sort({ uploadedAt: -1 })
-      .toArray() as Promise<KYCDocument[]>;
+    return this.findMany({ profileId, type } as any, {
+      sort: { uploadedAt: -1 },
+      session: options?.session,
+    });
   }
   
   /**
@@ -151,10 +145,9 @@ export class DocumentRepository {
    */
   async findVerifiedIdentityDocument(
     profileId: string,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCDocument | null> {
-    const collection = await this.getCollection();
-    return collection.findOne({
+    return this.findOne({
       profileId,
       category: 'identity',
       status: 'verified',
@@ -162,7 +155,7 @@ export class DocumentRepository {
         { expiresAt: { $exists: false } },
         { expiresAt: { $gt: new Date() } },
       ],
-    }, { session }) as Promise<KYCDocument | null>;
+    } as any, options);
   }
   
   /**
@@ -170,41 +163,24 @@ export class DocumentRepository {
    */
   async findVerifiedAddressDocument(
     profileId: string,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCDocument | null> {
-    const collection = await this.getCollection();
-    return collection.findOne({
+    return this.findOne({
       profileId,
       category: 'address',
       status: 'verified',
-    }, { session }) as Promise<KYCDocument | null>;
+    } as any, options);
   }
   
   /**
-   * Query documents with filters
+   * Query documents with complex filters
    */
   async query(
     filter: DocumentFilter,
-    pagination?: { first?: number; after?: string }
-  ): Promise<{
-    nodes: KYCDocument[];
-    pageInfo: {
-      hasNextPage: boolean;
-      hasPreviousPage: boolean;
-      startCursor?: string;
-      endCursor?: string;
-    };
-    totalCount: number;
-  }> {
-    const collection = await this.getCollection();
-    const mongoFilter = this.buildFilter(filter);
-    
-    return paginateCollection(collection as any, {
-      filter: mongoFilter,
-      first: pagination?.first ?? 20,
-      after: pagination?.after,
-      sort: { uploadedAt: -1 },
-    });
+    pagination?: PaginationInput
+  ): Promise<PaginationResult<KYCDocument>> {
+    const mongoFilter = this.buildDocumentFilter(filter);
+    return this.paginate(mongoFilter as any, pagination);
   }
   
   /**
@@ -214,15 +190,13 @@ export class DocumentRepository {
     beforeDate: Date,
     limit: number = 100
   ): Promise<KYCDocument[]> {
-    const collection = await this.getCollection();
-    
-    return collection.find({
+    return this.findMany({
       status: 'verified',
       expiresAt: { $lte: beforeDate },
-    })
-      .sort({ expiresAt: 1 })
-      .limit(limit)
-      .toArray() as Promise<KYCDocument[]>;
+    } as any, {
+      sort: { expiresAt: 1 },
+      limit,
+    });
   }
   
   /**
@@ -231,14 +205,10 @@ export class DocumentRepository {
   async countByStatus(
     profileId: string
   ): Promise<Record<DocumentStatus, number>> {
-    const collection = await this.getCollection();
-    
-    const pipeline = [
+    const results = await this.aggregate<{ _id: DocumentStatus; count: number }>([
       { $match: { profileId } },
       { $group: { _id: '$status', count: { $sum: 1 } } },
-    ];
-    
-    const results = await collection.aggregate(pipeline).toArray();
+    ]);
     
     const counts: Record<DocumentStatus, number> = {
       pending: 0,
@@ -249,14 +219,14 @@ export class DocumentRepository {
     };
     
     for (const result of results) {
-      counts[result._id as DocumentStatus] = result.count;
+      counts[result._id] = result.count;
     }
     
     return counts;
   }
   
   // ───────────────────────────────────────────────────────────────────
-  // Update
+  // Domain-Specific Updates
   // ───────────────────────────────────────────────────────────────────
   
   /**
@@ -265,25 +235,15 @@ export class DocumentRepository {
   async updateStatus(
     id: string,
     status: DocumentStatus,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCDocument | null> {
-    const collection = await this.getCollection();
-    
-    const update: any = {
-      status,
-    };
+    const update: any = { status };
     
     if (status === 'processing') {
       update.processedAt = new Date();
     }
     
-    const result = await collection.findOneAndUpdate(
-      { id },
-      { $set: update },
-      { returnDocument: 'after', session }
-    );
-    
-    return result as KYCDocument | null;
+    return this.update(id, update, options);
   }
   
   /**
@@ -294,30 +254,24 @@ export class DocumentRepository {
     result: DocumentVerificationResult,
     newStatus: DocumentStatus,
     verifiedBy: string,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCDocument | null> {
-    const collection = await this.getCollection();
-    
-    const updateResult = await collection.findOneAndUpdate(
-      { id },
-      {
-        $set: {
-          verificationResult: result,
-          status: newStatus,
-          verifiedAt: new Date(),
-          verifiedBy,
-        },
-      },
-      { returnDocument: 'after', session }
-    );
-    
-    logger.info('Document verification result set', {
-      documentId: id,
+    const updateResult = await this.update(id, {
+      verificationResult: result,
       status: newStatus,
-      isAuthentic: result.isAuthentic,
-    });
+      verifiedAt: new Date(),
+      verifiedBy,
+    } as any, options);
     
-    return updateResult as KYCDocument | null;
+    if (updateResult) {
+      logger.info('Document verification result set', {
+        documentId: id,
+        status: newStatus,
+        isAuthentic: result.isAuthentic,
+      });
+    }
+    
+    return updateResult;
   }
   
   /**
@@ -327,28 +281,22 @@ export class DocumentRepository {
     id: string,
     reason: string,
     details?: string[],
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCDocument | null> {
-    const collection = await this.getCollection();
+    const result = await this.update(id, {
+      status: 'rejected',
+      rejectionReason: reason,
+      rejectionDetails: details,
+    } as any, options);
     
-    const result = await collection.findOneAndUpdate(
-      { id },
-      {
-        $set: {
-          status: 'rejected',
-          rejectionReason: reason,
-          rejectionDetails: details,
-        },
-      },
-      { returnDocument: 'after', session }
-    );
+    if (result) {
+      logger.info('Document rejected', {
+        documentId: id,
+        reason,
+      });
+    }
     
-    logger.info('Document rejected', {
-      documentId: id,
-      reason,
-    });
-    
-    return result as KYCDocument | null;
+    return result;
   }
   
   /**
@@ -358,22 +306,12 @@ export class DocumentRepository {
     id: string,
     providerId: string,
     providerDocumentId: string,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCDocument | null> {
-    const collection = await this.getCollection();
-    
-    const result = await collection.findOneAndUpdate(
-      { id },
-      {
-        $set: {
-          providerId,
-          providerDocumentId,
-        },
-      },
-      { returnDocument: 'after', session }
-    );
-    
-    return result as KYCDocument | null;
+    return this.update(id, {
+      providerId,
+      providerDocumentId,
+    } as any, options);
   }
   
   /**
@@ -381,29 +319,23 @@ export class DocumentRepository {
    */
   async markExpired(
     beforeDate: Date,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<number> {
-    const collection = await this.getCollection();
+    const count = await this.updateMany({
+      status: 'verified',
+      expiresAt: { $lte: beforeDate },
+    } as any, {
+      status: 'expired',
+    } as any, options);
     
-    const result = await collection.updateMany(
-      {
-        status: 'verified',
-        expiresAt: { $lte: beforeDate },
-      },
-      {
-        $set: { status: 'expired' },
-      },
-      { session }
-    );
-    
-    if (result.modifiedCount > 0) {
+    if (count > 0) {
       logger.info('Documents marked as expired', {
-        count: result.modifiedCount,
+        count,
         beforeDate: beforeDate.toISOString(),
       });
     }
     
-    return result.modifiedCount;
+    return count;
   }
   
   // ───────────────────────────────────────────────────────────────────
@@ -411,35 +343,21 @@ export class DocumentRepository {
   // ───────────────────────────────────────────────────────────────────
   
   /**
-   * Delete document (hard delete - for GDPR)
-   */
-  async delete(
-    id: string,
-    session?: ClientSession
-  ): Promise<boolean> {
-    const collection = await this.getCollection();
-    const result = await collection.deleteOne({ id }, { session });
-    return result.deletedCount > 0;
-  }
-  
-  /**
    * Delete all documents for profile (GDPR)
    */
   async deleteByProfileId(
     profileId: string,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<number> {
-    const collection = await this.getCollection();
-    const result = await collection.deleteMany({ profileId }, { session });
-    return result.deletedCount;
+    return this.deleteMany({ profileId } as any, options);
   }
   
   // ───────────────────────────────────────────────────────────────────
   // Helpers
   // ───────────────────────────────────────────────────────────────────
   
-  private buildFilter(filter: DocumentFilter): Filter<KYCDocument> {
-    const mongoFilter: Filter<KYCDocument> = {};
+  private buildDocumentFilter(filter: DocumentFilter): Record<string, unknown> {
+    const mongoFilter: Record<string, unknown> = {};
     
     if (filter.profileId) {
       mongoFilter.profileId = filter.profileId;
@@ -462,7 +380,7 @@ export class DocumentRepository {
     }
     
     if (filter.expiringBefore) {
-      mongoFilter.expiresAt = { $lte: filter.expiringBefore } as any;
+      mongoFilter.expiresAt = { $lte: filter.expiringBefore };
     }
     
     if (filter.providerId) {

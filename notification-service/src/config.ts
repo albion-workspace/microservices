@@ -34,7 +34,7 @@ const SERVICE_NAME = 'notification-service';
  * 3. Registered defaults (auto-created if missing)
  */
 export async function loadConfig(brand?: string, tenantId?: string): Promise<NotificationConfig> {
-  const port = parseInt(process.env.PORT || '3006');
+  const port = parseInt(process.env.PORT || '9004');
   
   // Load from MongoDB config store (core_service.service_configs) with automatic default creation
   const corsOrigins = await getConfigWithDefault<string[]>(SERVICE_NAME, 'corsOrigins', { brand, tenantId }) ?? [

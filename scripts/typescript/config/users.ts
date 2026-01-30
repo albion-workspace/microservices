@@ -19,7 +19,7 @@ import { findUserIdByRole, findUserIdsByRole } from '../../../core-service/src/i
 // Configuration (loaded dynamically from MongoDB config store)
 // ═══════════════════════════════════════════════════════════════════
 
-let AUTH_SERVICE_URL: string = process.env.AUTH_SERVICE_URL || 'http://localhost:3003/graphql';
+let AUTH_SERVICE_URL: string = process.env.AUTH_SERVICE_URL || 'http://localhost:9001/graphql';
 let DEFAULT_TENANT_ID: string = 'default-tenant';
 
 // Export DEFAULT_TENANT_ID for backward compatibility

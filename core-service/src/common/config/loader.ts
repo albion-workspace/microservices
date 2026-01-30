@@ -274,7 +274,7 @@ async function loadConfigFromUrl(url: string): Promise<Record<string, unknown>> 
  * - SERVICE_NAME_CONFIG_KEY__NESTED__KEY -> configKey.nested.key
  * 
  * @example
- * AUTH_SERVICE_PORT=3003 -> { port: 3003 }
+ * AUTH_SERVICE_PORT=9001 -> { port: 9001 }
  * AUTH_SERVICE_DB__HOST=localhost -> { db: { host: 'localhost' } }
  */
 function loadConfigFromEnv(serviceName: string): Record<string, unknown> {

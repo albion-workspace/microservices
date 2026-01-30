@@ -250,10 +250,10 @@ export async function graphql<T = any>(
 
 // Service URL helpers (optional - you can pass URLs directly)
 export const SERVICE_URLS = {
-  auth: (import.meta.env as any).VITE_AUTH_SERVICE_URL || 'http://localhost:3003/graphql',
-  payment: (import.meta.env as any).VITE_PAYMENT_SERVICE_URL || 'http://localhost:3004/graphql',
-  bonus: (import.meta.env as any).VITE_BONUS_SERVICE_URL || 'http://localhost:3005/graphql',
-  notification: (import.meta.env as any).VITE_NOTIFICATION_SERVICE_URL || 'http://localhost:3006/graphql',
+  auth: (import.meta.env as any).VITE_AUTH_SERVICE_URL || 'http://localhost:9001/graphql',
+  payment: (import.meta.env as any).VITE_PAYMENT_SERVICE_URL || 'http://localhost:9002/graphql',
+  bonus: (import.meta.env as any).VITE_BONUS_SERVICE_URL || 'http://localhost:9003/graphql',
+  notification: (import.meta.env as any).VITE_NOTIFICATION_SERVICE_URL || 'http://localhost:9004/graphql',
 }
 
 // Convenience wrappers (optional - you can use graphql() directly)

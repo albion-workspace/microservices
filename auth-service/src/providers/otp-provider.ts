@@ -19,7 +19,7 @@ export interface IOTPProvider {
 // Notification Service Client
 // ═══════════════════════════════════════════════════════════════════
 
-const NOTIFICATION_SERVICE_URL = process.env.NOTIFICATION_SERVICE_URL || 'http://localhost:3006/graphql';
+const NOTIFICATION_SERVICE_URL = process.env.NOTIFICATION_SERVICE_URL || 'http://localhost:9004/graphql';
 
 /**
  * Send notification via notification service GraphQL API

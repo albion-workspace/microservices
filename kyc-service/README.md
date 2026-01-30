@@ -1,8 +1,15 @@
 # KYC Service
 
-**Version**: 1.0.0  
-**Status**: Development Ready  
+**Version**: 1.0.1  
+**Status**: Running  
+**Port**: 9005  
 **Last Updated**: 2026-01-30
+
+> **IMPORTANT**: Before making any changes to this service, always review [CODING_STANDARDS.md](../CODING_STANDARDS.md) to ensure consistency with project patterns, especially:
+> - Package & Dependency Conventions (no duplicate tsx/typescript, use core-service)
+> - GraphQL handling (use createService pattern, not raw graphql imports)
+> - Event-driven communication (use emit/on from core-service)
+> - Repository patterns (extend BaseRepository from core-service)
 
 ---
 
@@ -61,22 +68,24 @@ Generic KYC (Know Your Customer) / Identity Verification Service supporting:
 ```
 kyc-service/
 ├── src/
-│   ├── index.ts                 # Service entry point
-│   ├── database.ts              # Database accessor
-│   ├── graphql.ts               # GraphQL schema & resolvers
+│   ├── index.ts                 # Service entry point (uses createGateway)
+│   ├── database.ts              # MongoDB database accessor
+│   ├── redis.ts                 # Redis accessor
 │   ├── error-codes.ts           # Error codes
-│   ├── event-dispatcher.ts      # Event handling
+│   ├── event-dispatcher.ts      # Event handling (IntegrationEvent pattern)
 │   ├── config-defaults.ts       # Configuration defaults
 │   │
 │   ├── config/
 │   │   └── default-jurisdictions.ts    # Pre-configured jurisdictions
 │   │
 │   ├── types/
+│   │   ├── index.ts             # Type exports
 │   │   ├── kyc-types.ts         # Core KYC types
 │   │   ├── jurisdiction-config.ts
 │   │   └── provider-types.ts
 │   │
 │   ├── services/
+│   │   ├── kyc.ts               # GraphQL services (createService pattern)
 │   │   └── kyc-engine/
 │   │       ├── engine.ts        # Main orchestration
 │   │       ├── tier-config.ts   # Tier requirements
@@ -88,11 +97,12 @@ kyc-service/
 │   │   └── mock-provider.ts
 │   │
 │   └── repositories/
-│       ├── kyc-repository.ts
-│       ├── document-repository.ts
-│       └── verification-repository.ts
+│       ├── index.ts             # Repository exports
+│       ├── kyc-repository.ts    # Extends UserScopedRepository
+│       ├── document-repository.ts # Extends BaseRepository
+│       └── verification-repository.ts # Extends BaseRepository
 │
-├── package.json
+├── package.json                 # Only core-service dependency
 └── tsconfig.json
 ```
 
@@ -112,6 +122,24 @@ kyc-service/
 ---
 
 ## Quick Start
+
+### Running the Service
+
+```bash
+# Development (watch mode)
+npm run dev
+
+# Production
+npm run build && npm start
+```
+
+### Endpoints
+
+| Endpoint | URL |
+|----------|-----|
+| Health | http://localhost:9005/health |
+| GraphQL | http://localhost:9005/graphql |
+| GraphQL Playground | http://localhost:9005/graphql (browser) |
 
 ### Initialize Service
 
@@ -379,40 +407,37 @@ Risk score is calculated based on:
 
 ---
 
-## Client-Side Package (kyc-shared)
+## Client-Side Package (shared-validators)
 
-For frontend eligibility checking:
+For frontend eligibility checking, use the `shared-validators` package:
 
 ```typescript
-import { KYCEligibility } from 'kyc-shared';
-
-const eligibility = new KYCEligibility({
-  currentTier: 'basic',
-  status: 'approved',
-  expiresAt: new Date('2027-01-01'),
-});
+import { KYCEligibility } from 'shared-validators';
 
 // Check tier requirement
-const tierCheck = eligibility.check({
-  type: 'tier',
-  requiredTier: 'standard',
-});
+const tierCheck = KYCEligibility.checkTier('basic', 'standard');
 
 if (!tierCheck.eligible) {
-  console.log('Upgrade needed:', tierCheck.upgradeUrl);
+  console.log('Upgrade needed:', tierCheck.requiredTier);
 }
 
-// Check transaction
-const txCheck = eligibility.check({
-  type: 'transaction',
-  transactionType: 'withdrawal',
-  amount: 5000,
-  currency: 'EUR',
-});
+// Check transaction limits
+const txCheck = KYCEligibility.checkTransactionLimit(
+  'basic',         // currentTier
+  'withdrawal',    // transactionType
+  5000,           // amount
+  'EUR'           // currency
+);
 
-if (!txCheck.eligible) {
+if (!txCheck.allowed) {
   console.log('Limit exceeded:', txCheck.reason);
   console.log('Required tier:', txCheck.requiredTier);
+}
+
+// Validate KYC status
+const statusCheck = KYCEligibility.validateStatus('approved', new Date('2027-01-01'));
+if (!statusCheck.valid) {
+  console.log('Status issue:', statusCheck.reason);
 }
 ```
 
@@ -454,6 +479,146 @@ if (!txCheck.eligible) {
 | `kyc_risk_assessments` | Risk assessment history |
 | `kyc_source_of_funds` | Source of funds declarations |
 | `kyc_business` | Corporate KYC (KYB) |
+
+---
+
+## Roadmap
+
+### Phase 0: Fix TypeScript Errors & Apply Patterns ✅
+> **Completed**: Service builds and runs successfully.
+
+- [x] **Fix KYC Engine** (`src/services/kyc-engine/engine.ts`)
+  - [x] Change `ClientSession` parameters to `WriteOptions` pattern
+  - [x] Add missing required fields when creating entities (tenantId, status, etc.)
+  - [x] Fix `ArrayBuffer.length` to use `byteLength`
+
+- [x] **Fix Base Provider** (`src/providers/base-provider.ts`)
+  - [x] Update retry config to use correct property names (`maxRetries`, `baseDelay`)
+  - [x] Fix return type of `retry` method (extract `.result`)
+
+- [x] **Fix KYC Services** (`src/services/kyc.ts`)
+  - [x] Use domain-specific create methods for default values
+  - [x] GraphQL type names match `createService` convention (`CreateKycDocumentResult`, etc.)
+
+- [x] **Fix Custom Resolvers** (`src/index.ts`)
+  - [x] Adjust resolver signatures to `(args, ctx)` pattern
+  - [x] Rename duplicate `kycProfile` to `kycProfileByUserId`
+
+- [x] **Fix Infrastructure**
+  - [x] Created Redis accessor (`src/redis.ts`)
+  - [x] Fixed MongoDB index options (filter null/undefined values)
+  - [x] Proper initialization order (gateway → Redis → event handlers)
+
+### Phase 0.1: Apply BaseRepository Pattern Across Services
+> **New Pattern**: All repositories now extend `BaseRepository` from `core-service` for common CRUD operations.
+
+- [x] **Core Service** (done)
+  - [x] Created `BaseRepository` class in `core-service/src/databases/mongodb/base-repository.ts`
+  - [x] Created `TenantRepository` for tenant-scoped entities
+  - [x] Created `UserScopedRepository` for user-owned entities
+  - [x] Exported from `core-service` main index
+- [x] **KYC Service** (structure done, needs TypeScript fixes above)
+  - [x] Refactored `KYCRepository` to extend `UserScopedRepository<KYCProfile>`
+  - [x] Refactored `DocumentRepository` to extend `BaseRepository<KYCDocument>`
+  - [x] Refactored `VerificationRepository` to extend `BaseRepository<KYCVerification>`
+- [ ] **Auth Service** (pending)
+  - [ ] Refactor `UserRepository` to extend `TenantRepository<User>`
+  - [ ] Move common methods to base class
+- [ ] **Payment Service** (pending)
+  - [ ] Refactor `WalletRepository` to extend `UserScopedRepository<Wallet>`
+  - [ ] Refactor `TransactionRepository` to extend `BaseRepository<Transaction>`
+- [ ] **Bonus Service** (pending)
+  - [ ] Refactor `BonusTemplateRepository` to extend `TenantRepository`
+  - [ ] Refactor `UserBonusRepository` to extend `UserScopedRepository`
+
+### Phase 1: Integration Setup ✅
+- [x] Complete Phase 0 TypeScript fixes
+- [x] Service runs standalone on port 9005
+- [x] GraphQL gateway operational at `/graphql`
+- [x] Health endpoint at `/health`
+- [ ] Configure environment variables for production
+
+### Phase 2: Database & Configuration
+- [ ] Configure MongoDB connection for `kyc_service` database
+- [ ] Run index creation on first startup
+- [ ] Seed default jurisdiction configurations (US, EU, MT, GB)
+- [ ] Configure service defaults in config store
+- [ ] Set up document storage (S3/Azure Blob/local)
+
+### Phase 3: Provider Integration
+- [ ] Configure mock provider for development/testing
+- [ ] Implement Onfido provider (`providers/onfido-provider.ts`)
+- [ ] Implement Sumsub provider (`providers/sumsub-provider.ts`)
+- [ ] Set up provider API keys in secure config
+- [ ] Configure webhook endpoints for provider callbacks
+- [ ] Test end-to-end verification flow with mock provider
+
+### Phase 4: Service Integration
+- [ ] **Auth Service**
+  - [ ] Add KYC profile creation on user registration
+  - [ ] Sync `kycTier` and `kycStatus` to user metadata
+  - [ ] Add KYC tier to JWT claims (optional)
+- [ ] **Payment Service**
+  - [ ] Pre-transaction limit checks via KYC service
+  - [ ] Block withdrawals for unverified users
+  - [ ] Emit high-value transaction events
+- [ ] **Bonus Service**
+  - [ ] Add KYC tier eligibility to bonus templates
+  - [ ] Check eligibility before bonus award
+
+### Phase 5: Event System
+- [ ] Register KYC event handlers in event dispatcher
+- [ ] Configure webhook manager for external notifications
+- [ ] Set up event consumers in dependent services
+- [ ] Test event flow: registration → profile creation
+- [ ] Test event flow: tier upgrade → metadata sync
+
+### Phase 6: Admin Dashboard
+- [ ] Create admin queries for pending verifications
+- [ ] Create admin queries for high-risk profiles
+- [ ] Implement manual approval/rejection mutations
+- [ ] Add verification history view
+- [ ] Add document review interface
+
+### Phase 7: Compliance Features
+- [ ] Implement periodic AML re-screening job
+- [ ] Implement verification expiry notifications
+- [ ] Implement auto-downgrade on expiry
+- [ ] Add SAR (Suspicious Activity Report) generation
+- [ ] Implement audit log export for regulators
+
+### Phase 8: Advanced Features
+- [ ] Implement real-time risk scoring with transaction data
+- [ ] Add video identification support
+- [ ] Implement NFC document reading (mobile)
+- [ ] Add travel rule compliance for crypto
+- [ ] Implement corporate KYC (KYB) workflow
+- [ ] Add beneficial owner verification chain
+
+### Phase 9: Testing & QA
+- [ ] Unit tests for KYC engine
+- [ ] Unit tests for risk calculator
+- [ ] Integration tests with mock provider
+- [ ] E2E tests for verification flow
+- [ ] Load testing for limit checks
+- [ ] Security audit for PII handling
+
+### Phase 10: Production Readiness
+- [ ] Enable document encryption at rest
+- [ ] Configure KMS for encryption keys
+- [ ] Set up monitoring and alerting
+- [ ] Configure rate limiting for API endpoints
+- [ ] Document operational runbook
+- [ ] Create disaster recovery procedures
+
+---
+
+## Version History
+
+| Version | Date | Changes |
+|---------|------|---------|
+| 1.0.1 | 2026-01-30 | Fixed TypeScript errors, resolver signatures, GraphQL schema types, Redis/MongoDB initialization |
+| 1.0.0 | 2026-01-30 | Initial implementation |
 
 ---
 

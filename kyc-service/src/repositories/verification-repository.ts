@@ -1,18 +1,16 @@
 /**
  * Verification Repository
  * 
- * Data access layer for KYC verifications
+ * Data access layer for KYC verifications.
+ * Extends BaseRepository from core-service for common CRUD operations.
  */
 
 import { 
-  generateId, 
-  paginateCollection,
+  BaseRepository,
   logger,
-} from 'core-service';
-import type { 
-  ClientSession, 
-  Filter,
-  Collection,
+  type RepositoryPaginationInput as PaginationInput,
+  type PaginationResult,
+  type WriteOptions,
 } from 'core-service';
 
 import { db, COLLECTIONS } from '../database.js';
@@ -50,27 +48,36 @@ export interface CreateVerificationInput {
 // Repository Class
 // ═══════════════════════════════════════════════════════════════════
 
-export class VerificationRepository {
-  private getCollection(): Promise<Collection<KYCVerification>> {
-    return db.getDb().then(database => database.collection<KYCVerification>(COLLECTIONS.VERIFICATIONS));
+export class VerificationRepository extends BaseRepository<KYCVerification> {
+  constructor() {
+    super(COLLECTIONS.VERIFICATIONS, db, {
+      timestamps: false, // We use startedAt/completedAt instead
+      defaultSortField: 'startedAt',
+      defaultSortDirection: 'desc',
+      indexes: [
+        { key: { profileId: 1 } },
+        { key: { profileId: 1, status: 1 } },
+        { key: { 'providerSession.sessionId': 1 }, sparse: true },
+        { key: { expiresAt: 1 } },
+        { key: { status: 1, expiresAt: 1 } },
+      ],
+    });
   }
   
   // ───────────────────────────────────────────────────────────────────
-  // Create
+  // Domain-Specific Create
   // ───────────────────────────────────────────────────────────────────
   
   /**
    * Create a new verification
    */
-  async create(
+  async createVerification(
     input: CreateVerificationInput,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCVerification> {
-    const collection = await this.getCollection();
     const now = new Date();
     
-    const verification: KYCVerification = {
-      id: generateId(),
+    const verification = await this.create({
       profileId: input.profileId,
       targetTier: input.targetTier,
       fromTier: input.fromTier,
@@ -80,9 +87,7 @@ export class VerificationRepository {
       expiresAt: input.expiresAt,
       initiatedBy: input.initiatedBy,
       initiatedByUserId: input.initiatedByUserId,
-    };
-    
-    await collection.insertOne(verification as any, { session });
+    } as any, options);
     
     logger.info('KYC verification created', {
       verificationId: verification.id,
@@ -94,31 +99,19 @@ export class VerificationRepository {
   }
   
   // ───────────────────────────────────────────────────────────────────
-  // Read
+  // Domain-Specific Queries
   // ───────────────────────────────────────────────────────────────────
-  
-  /**
-   * Find verification by ID
-   */
-  async findById(
-    id: string,
-    session?: ClientSession
-  ): Promise<KYCVerification | null> {
-    const collection = await this.getCollection();
-    return collection.findOne({ id }, { session }) as Promise<KYCVerification | null>;
-  }
   
   /**
    * Find verification by provider session ID
    */
   async findBySessionId(
     sessionId: string,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCVerification | null> {
-    const collection = await this.getCollection();
-    return collection.findOne({
+    return this.findOne({
       'providerSession.sessionId': sessionId,
-    }, { session }) as Promise<KYCVerification | null>;
+    } as any, options);
   }
   
   /**
@@ -126,14 +119,13 @@ export class VerificationRepository {
    */
   async findActiveForProfile(
     profileId: string,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCVerification | null> {
-    const collection = await this.getCollection();
-    return collection.findOne({
+    return this.findOne({
       profileId,
       status: { $in: ['pending', 'in_progress'] },
       expiresAt: { $gt: new Date() },
-    }, { session }) as Promise<KYCVerification | null>;
+    } as any, options);
   }
   
   /**
@@ -141,12 +133,12 @@ export class VerificationRepository {
    */
   async findByProfileId(
     profileId: string,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCVerification[]> {
-    const collection = await this.getCollection();
-    return collection.find({ profileId }, { session })
-      .sort({ startedAt: -1 })
-      .toArray() as Promise<KYCVerification[]>;
+    return this.findMany({ profileId } as any, {
+      sort: { startedAt: -1 },
+      session: options?.session,
+    });
   }
   
   /**
@@ -154,43 +146,29 @@ export class VerificationRepository {
    */
   async findLatestCompleted(
     profileId: string,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCVerification | null> {
-    const collection = await this.getCollection();
-    return collection.findOne({
+    const results = await this.findMany({
       profileId,
       status: 'completed',
-    }, {
+    } as any, {
       sort: { completedAt: -1 },
-      session,
-    }) as Promise<KYCVerification | null>;
+      limit: 1,
+      session: options?.session,
+    });
+    
+    return results[0] ?? null;
   }
   
   /**
-   * Query verifications with filters
+   * Query verifications with complex filters
    */
   async query(
     filter: VerificationFilter,
-    pagination?: { first?: number; after?: string }
-  ): Promise<{
-    nodes: KYCVerification[];
-    pageInfo: {
-      hasNextPage: boolean;
-      hasPreviousPage: boolean;
-      startCursor?: string;
-      endCursor?: string;
-    };
-    totalCount: number;
-  }> {
-    const collection = await this.getCollection();
-    const mongoFilter = this.buildFilter(filter);
-    
-    return paginateCollection(collection as any, {
-      filter: mongoFilter,
-      first: pagination?.first ?? 20,
-      after: pagination?.after,
-      sort: { startedAt: -1 },
-    });
+    pagination?: PaginationInput
+  ): Promise<PaginationResult<KYCVerification>> {
+    const mongoFilter = this.buildVerificationFilter(filter);
+    return this.paginate(mongoFilter as any, pagination);
   }
   
   /**
@@ -199,14 +177,12 @@ export class VerificationRepository {
   async findExpired(
     limit: number = 100
   ): Promise<KYCVerification[]> {
-    const collection = await this.getCollection();
-    
-    return collection.find({
+    return this.findMany({
       status: { $in: ['pending', 'in_progress'] },
       expiresAt: { $lte: new Date() },
-    })
-      .limit(limit)
-      .toArray() as Promise<KYCVerification[]>;
+    } as any, {
+      limit,
+    });
   }
   
   /**
@@ -215,19 +191,17 @@ export class VerificationRepository {
   async findPendingManualReviews(
     limit: number = 100
   ): Promise<KYCVerification[]> {
-    const collection = await this.getCollection();
-    
-    return collection.find({
+    return this.findMany({
       status: 'in_progress',
       'result.decision': 'manual_review',
-    })
-      .sort({ startedAt: 1 })
-      .limit(limit)
-      .toArray() as Promise<KYCVerification[]>;
+    } as any, {
+      sort: { startedAt: 1 },
+      limit,
+    });
   }
   
   // ───────────────────────────────────────────────────────────────────
-  // Update
+  // Domain-Specific Updates
   // ───────────────────────────────────────────────────────────────────
   
   /**
@@ -236,23 +210,15 @@ export class VerificationRepository {
   async updateStatus(
     id: string,
     status: KYCVerification['status'],
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCVerification | null> {
-    const collection = await this.getCollection();
-    
     const update: any = { status };
     
     if (status === 'completed' || status === 'failed') {
       update.completedAt = new Date();
     }
     
-    const result = await collection.findOneAndUpdate(
-      { id },
-      { $set: update },
-      { returnDocument: 'after', session }
-    );
-    
-    return result as KYCVerification | null;
+    return this.update(id, update, options);
   }
   
   /**
@@ -261,22 +227,12 @@ export class VerificationRepository {
   async setProviderSession(
     id: string,
     providerSession: ProviderSession,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCVerification | null> {
-    const collection = await this.getCollection();
-    
-    const result = await collection.findOneAndUpdate(
-      { id },
-      {
-        $set: {
-          providerSession,
-          status: 'in_progress',
-        },
-      },
-      { returnDocument: 'after', session }
-    );
-    
-    return result as KYCVerification | null;
+    return this.update(id, {
+      providerSession,
+      status: 'in_progress',
+    } as any, options);
   }
   
   /**
@@ -285,26 +241,18 @@ export class VerificationRepository {
   async setResult(
     id: string,
     result: VerificationResult,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCVerification | null> {
-    const collection = await this.getCollection();
-    
     const status: KYCVerification['status'] = 
       result.decision === 'approved' ? 'completed' :
       result.decision === 'rejected' ? 'failed' :
       'in_progress'; // manual_review
     
-    const updateResult = await collection.findOneAndUpdate(
-      { id },
-      {
-        $set: {
-          result,
-          status,
-          completedAt: status !== 'in_progress' ? new Date() : undefined,
-        },
-      },
-      { returnDocument: 'after', session }
-    );
+    const updateResult = await this.update(id, {
+      result,
+      status,
+      completedAt: status !== 'in_progress' ? new Date() : undefined,
+    } as any, options);
     
     logger.info('Verification result set', {
       verificationId: id,
@@ -312,7 +260,7 @@ export class VerificationRepository {
       status,
     });
     
-    return updateResult as KYCVerification | null;
+    return updateResult;
   }
   
   /**
@@ -323,7 +271,7 @@ export class VerificationRepository {
     requirementId: string,
     status: VerificationRequirement['status'],
     satisfiedBy?: string,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCVerification | null> {
     const collection = await this.getCollection();
     
@@ -339,10 +287,13 @@ export class VerificationRepository {
     const result = await collection.findOneAndUpdate(
       { id, 'requirements.id': requirementId },
       { $set: update },
-      { returnDocument: 'after', session }
+      { 
+        returnDocument: 'after',
+        session: options?.session,
+      }
     );
     
-    return result as KYCVerification | null;
+    return result ? this.normalize(result) : null;
   }
   
   /**
@@ -350,22 +301,12 @@ export class VerificationRepository {
    */
   async markWebhookReceived(
     id: string,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCVerification | null> {
-    const collection = await this.getCollection();
-    
-    const result = await collection.findOneAndUpdate(
-      { id },
-      {
-        $set: {
-          'providerSession.webhookReceived': true,
-          'providerSession.webhookReceivedAt': new Date(),
-        },
-      },
-      { returnDocument: 'after', session }
-    );
-    
-    return result as KYCVerification | null;
+    return this.update(id, {
+      'providerSession.webhookReceived': true,
+      'providerSession.webhookReceivedAt': new Date(),
+    } as any, options);
   }
   
   /**
@@ -374,59 +315,45 @@ export class VerificationRepository {
   async cancel(
     id: string,
     reason: string,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCVerification | null> {
-    const collection = await this.getCollection();
+    const result = await this.update(id, {
+      status: 'cancelled',
+      completedAt: new Date(),
+      notes: reason,
+    } as any, options);
     
-    const result = await collection.findOneAndUpdate(
-      { id },
-      {
-        $set: {
-          status: 'cancelled',
-          completedAt: new Date(),
-          notes: reason,
-        },
-      },
-      { returnDocument: 'after', session }
-    );
+    if (result) {
+      logger.info('Verification cancelled', {
+        verificationId: id,
+        reason,
+      });
+    }
     
-    logger.info('Verification cancelled', {
-      verificationId: id,
-      reason,
-    });
-    
-    return result as KYCVerification | null;
+    return result;
   }
   
   /**
    * Mark expired verifications
    */
   async markExpired(
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<number> {
-    const collection = await this.getCollection();
+    const count = await this.updateMany({
+      status: { $in: ['pending', 'in_progress'] },
+      expiresAt: { $lte: new Date() },
+    } as any, {
+      status: 'expired',
+      completedAt: new Date(),
+    } as any, options);
     
-    const result = await collection.updateMany(
-      {
-        status: { $in: ['pending', 'in_progress'] },
-        expiresAt: { $lte: new Date() },
-      },
-      {
-        $set: {
-          status: 'expired',
-          completedAt: new Date(),
-        },
-      },
-      { session }
-    );
-    
-    if (result.modifiedCount > 0) {
+    if (count > 0) {
       logger.info('Verifications marked as expired', {
-        count: result.modifiedCount,
+        count,
       });
     }
     
-    return result.modifiedCount;
+    return count;
   }
   
   /**
@@ -436,27 +363,18 @@ export class VerificationRepository {
     id: string,
     note: string,
     isInternal: boolean,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCVerification | null> {
-    const collection = await this.getCollection();
-    
     const field = isInternal ? 'internalNotes' : 'notes';
-    
-    const result = await collection.findOneAndUpdate(
-      { id },
-      { $set: { [field]: note } },
-      { returnDocument: 'after', session }
-    );
-    
-    return result as KYCVerification | null;
+    return this.update(id, { [field]: note } as any, options);
   }
   
   // ───────────────────────────────────────────────────────────────────
   // Helpers
   // ───────────────────────────────────────────────────────────────────
   
-  private buildFilter(filter: VerificationFilter): Filter<KYCVerification> {
-    const mongoFilter: Filter<KYCVerification> = {};
+  private buildVerificationFilter(filter: VerificationFilter): Record<string, unknown> {
+    const mongoFilter: Record<string, unknown> = {};
     
     if (filter.profileId) {
       mongoFilter.profileId = filter.profileId;
@@ -473,7 +391,7 @@ export class VerificationRepository {
     }
     
     if (filter.expiredBefore) {
-      mongoFilter.expiresAt = { $lte: filter.expiredBefore } as any;
+      mongoFilter.expiresAt = { $lte: filter.expiredBefore };
     }
     
     return mongoFilter;

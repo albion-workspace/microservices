@@ -70,12 +70,13 @@ export abstract class BaseKYCProvider implements KYCProvider {
     fn: () => Promise<T>
   ): Promise<T> {
     return this.circuitBreaker.execute(async () => {
-      return retry(fn, {
-        maxAttempts: this.config.retryConfig?.maxRetries ?? 3,
+      const result = await retry(fn, {
+        maxRetries: this.config.retryConfig?.maxRetries ?? 3,
         strategy: 'exponential',
-        initialDelay: this.config.retryConfig?.initialDelayMs ?? 100,
+        baseDelay: this.config.retryConfig?.initialDelayMs ?? 100,
         maxDelay: this.config.retryConfig?.maxDelayMs ?? 5000,
       });
+      return result.result as T;
     });
   }
   

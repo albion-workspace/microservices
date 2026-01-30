@@ -2,10 +2,11 @@ import { useState } from 'react'
 import { Play, Copy, Check, Server } from 'lucide-react'
 
 const SERVICES = [
-  { name: 'Auth Service', url: 'http://localhost:3003/graphql' },
-  { name: 'Payment Service', url: 'http://localhost:3004/graphql' },
-  { name: 'Bonus Service', url: 'http://localhost:3005/graphql' },
-  { name: 'Notification Service', url: 'http://localhost:3006/graphql' },
+  { name: 'Auth Service', url: 'http://localhost:9001/graphql' },
+  { name: 'Payment Service', url: 'http://localhost:9002/graphql' },
+  { name: 'Bonus Service', url: 'http://localhost:9003/graphql' },
+  { name: 'Notification Service', url: 'http://localhost:9004/graphql' },
+  { name: 'KYC Service', url: 'http://localhost:9005/graphql' },
 ]
 
 const EXAMPLE_QUERIES = {

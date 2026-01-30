@@ -81,10 +81,10 @@ export interface MongoConfig {
  * These are initialized when loadScriptConfig() is called
  * Use these directly in scripts instead of hardcoded URLs
  */
-export let AUTH_SERVICE_URL = 'http://localhost:3003/graphql';
-export let PAYMENT_SERVICE_URL = 'http://localhost:3004/graphql';
-export let BONUS_SERVICE_URL = 'http://localhost:3005/graphql';
-export let NOTIFICATION_SERVICE_URL = 'http://localhost:3006/graphql';
+export let AUTH_SERVICE_URL = 'http://localhost:9001/graphql';
+export let PAYMENT_SERVICE_URL = 'http://localhost:9002/graphql';
+export let BONUS_SERVICE_URL = 'http://localhost:9003/graphql';
+export let NOTIFICATION_SERVICE_URL = 'http://localhost:9004/graphql';
 
 // ═══════════════════════════════════════════════════════════════════
 // Configuration Cache
@@ -202,36 +202,36 @@ export async function loadScriptConfig(): Promise<ScriptConfig> {
   try {
     authUrl = await getConfigWithDefault<string>('auth-service', 'serviceUrl', { brand, tenantId })
       ?? process.env.AUTH_URL 
-      ?? 'http://localhost:3003/graphql';
+      ?? 'http://localhost:9001/graphql';
   } catch {
-    authUrl = process.env.AUTH_URL ?? 'http://localhost:3003/graphql';
+    authUrl = process.env.AUTH_URL ?? 'http://localhost:9001/graphql';
   }
 
   let paymentUrl: string;
   try {
     paymentUrl = await getConfigWithDefault<string>('payment-service', 'serviceUrl', { brand, tenantId })
       ?? process.env.PAYMENT_URL 
-      ?? 'http://localhost:3004/graphql';
+      ?? 'http://localhost:9002/graphql';
   } catch {
-    paymentUrl = process.env.PAYMENT_URL ?? 'http://localhost:3004/graphql';
+    paymentUrl = process.env.PAYMENT_URL ?? 'http://localhost:9002/graphql';
   }
 
   let bonusUrl: string;
   try {
     bonusUrl = await getConfigWithDefault<string>('bonus-service', 'serviceUrl', { brand, tenantId })
       ?? process.env.BONUS_URL 
-      ?? 'http://localhost:3005/graphql';
+      ?? 'http://localhost:9003/graphql';
   } catch {
-    bonusUrl = process.env.BONUS_URL ?? 'http://localhost:3005/graphql';
+    bonusUrl = process.env.BONUS_URL ?? 'http://localhost:9003/graphql';
   }
 
   let notificationUrl: string;
   try {
     notificationUrl = await getConfigWithDefault<string>('notification-service', 'serviceUrl', { brand, tenantId })
       ?? process.env.NOTIFICATION_URL 
-      ?? 'http://localhost:3006/graphql';
+      ?? 'http://localhost:9004/graphql';
   } catch {
-    notificationUrl = process.env.NOTIFICATION_URL ?? 'http://localhost:3006/graphql';
+    notificationUrl = process.env.NOTIFICATION_URL ?? 'http://localhost:9004/graphql';
   }
 
   // Load Redis URL from config store (try core-service first, then any service)

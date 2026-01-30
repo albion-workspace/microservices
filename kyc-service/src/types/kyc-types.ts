@@ -8,7 +8,18 @@
  * - E-commerce (marketplaces)
  */
 
-import type { StatusHistoryEntry, TriggeredBy, BaseEntity, UserEntity } from 'core-service';
+// Import shared types from core-service (single source of truth)
+import type { 
+  StatusHistoryEntry as CoreStatusHistoryEntry, 
+  TriggeredBy as CoreTriggeredBy, 
+  BaseEntity,
+  UserEntity as CoreUserEntity,
+} from 'core-service';
+
+// Re-export for consumers
+export type StatusHistoryEntry<T = string> = CoreStatusHistoryEntry;
+export type TriggeredBy = CoreTriggeredBy;
+export type UserEntity = CoreUserEntity;
 
 // ═══════════════════════════════════════════════════════════════════
 // KYC Tiers & Status
@@ -99,7 +110,7 @@ export type DocumentStatus = 'pending' | 'processing' | 'verified' | 'rejected' 
 /**
  * Main KYC profile for a user
  */
-export interface KYCProfile extends UserEntity {
+export interface KYCProfile extends CoreUserEntity {
   // Current State
   currentTier: KYCTier;
   status: KYCStatus;
@@ -149,7 +160,7 @@ export interface KYCProfile extends UserEntity {
   requiresEnhancedDueDiligence: boolean;
   
   // Status History (audit trail)
-  statusHistory: StatusHistoryEntry<KYCStatus>[];
+  statusHistory: CoreStatusHistoryEntry[];
 }
 
 /**
@@ -224,8 +235,7 @@ export interface KYCAddress {
 /**
  * KYC Document
  */
-export interface KYCDocument {
-  id: string;
+export interface KYCDocument extends BaseEntity {
   profileId: string;
   
   // Document Classification
@@ -372,8 +382,7 @@ export interface ExtractedDocumentData {
 /**
  * A verification attempt/session
  */
-export interface KYCVerification {
-  id: string;
+export interface KYCVerification extends BaseEntity {
   profileId: string;
   
   // Target
@@ -420,7 +429,7 @@ export interface VerificationRequirement {
   documentCategory?: DocumentCategory;
   
   // For check requirements
-  checkType?: 'aml' | 'pep' | 'sanctions' | 'liveness' | 'face_match';
+  checkType?: 'aml' | 'pep' | 'sanctions' | 'liveness' | 'face_match' | 'address_verification';
   
   // For information requirements
   fields?: string[];
@@ -951,7 +960,7 @@ export interface UploadDocumentInput {
   profileId?: string;
   type: DocumentType;
   files: {
-    data: Buffer | string; // Buffer or base64
+    data: ArrayBuffer | string; // ArrayBuffer or base64
     filename: string;
     mimeType: string;
   }[];

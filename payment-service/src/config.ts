@@ -68,7 +68,7 @@ const SERVICE_NAME = 'payment-service';
  * Load configuration from MongoDB config store with environment variable overrides
  */
 export async function loadConfig(brand?: string, tenantId?: string): Promise<PaymentConfig> {
-  const port = parseInt(process.env.PORT || '3002');
+  const port = parseInt(process.env.PORT || '9002');
   
   // Load from MongoDB config store (core_service.service_configs) with automatic default creation
   const corsOrigins = await getConfigWithDefault<string[]>(SERVICE_NAME, 'corsOrigins', { brand, tenantId }) ?? [

@@ -448,9 +448,30 @@ export {
 export type { ComplexityConfig, ComplexityResult } from './common/graphql/complexity.js';
 
 // ═══════════════════════════════════════════════════════════════════
-// Repository (with caching)
+// Repository (with caching) - Functional style
 // ═══════════════════════════════════════════════════════════════════
 export { createRepository, generateId as generateUUID, bulkInsert, bulkUpdate } from './databases/mongodb/repository.js';
+
+// ═══════════════════════════════════════════════════════════════════
+// Base Repository (class-based) - For microservices
+// ═══════════════════════════════════════════════════════════════════
+// 
+// Extend these classes in your microservices for domain-specific repositories:
+//   class MyRepository extends BaseRepository<MyEntity> { ... }
+//   class MyUserRepo extends UserScopedRepository<MyUserEntity> { ... }
+//
+export {
+  BaseRepository,
+  TenantRepository,
+  UserScopedRepository,
+} from './databases/mongodb/base-repository.js';
+export type {
+  MinimalEntity,
+  QueryOptions,
+  PaginationInput as RepositoryPaginationInput,
+  DatabaseAccessor,
+  RepositoryConfig,
+} from './databases/mongodb/base-repository.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Pagination (cursor-based, sharding-optimized)
@@ -460,6 +481,7 @@ export {
   convertOffsetToCursor,
   type CursorPaginationOptions,
   type CursorPaginationResult,
+  type PaginationResult,
 } from './databases/mongodb/pagination.js';
 
 // ═══════════════════════════════════════════════════════════════════

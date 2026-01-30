@@ -5,8 +5,8 @@ import { useToast } from '../lib/toast-context'
 import { io, Socket } from 'socket.io-client'
 import { graphql } from '../lib/graphql-utils'
 
-const NOTIFICATION_SOCKET_URL = 'http://localhost:3006'
-const NOTIFICATION_SERVICE_URL = 'http://localhost:3006/graphql'
+const NOTIFICATION_SOCKET_URL = 'http://localhost:9004'
+const NOTIFICATION_SERVICE_URL = 'http://localhost:9004/graphql'
 
 interface Notification {
   id: string

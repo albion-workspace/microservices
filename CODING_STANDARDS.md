@@ -4,7 +4,7 @@
 
 **Project Status**: Pre-Production - This project has not yet been released to production. Code cleanup rules are simplified (no backward compatibility concerns). After production/release, these rules will be updated to include backward compatibility and legacy code management.
 
-**Last Updated**: 2026-01-29
+**Last Updated**: 2026-01-30
 
 ---
 
@@ -159,6 +159,155 @@ import type { RegisterInput } from './types.js';
 
 ---
 
+## 📦 Package & Dependency Conventions
+
+### Core-Service as Dependency Provider
+
+**Principle**: `core-service` provides shared dependencies for all microservices. This avoids duplication and ensures version consistency.
+
+**Core-Service Dependencies** (provided to all services):
+- `tsx` - TypeScript execution runtime
+- `typescript` - TypeScript compiler
+- `graphql` - GraphQL runtime
+- `mongodb` - MongoDB driver
+- `redis` - Redis client
+- `jsonwebtoken` - JWT handling
+- And other shared infrastructure
+
+### Microservice package.json Pattern
+
+**Microservices** (auth-service, payment-service, bonus-service, kyc-service, notification-service):
+
+```json
+{
+  "name": "service-name",
+  "version": "1.0.0",
+  "description": "Service description",
+  "type": "module",
+  "scripts": {
+    "start": "node ../core-service/node_modules/tsx/dist/cli.mjs src/index.ts",
+    "dev": "node ../core-service/node_modules/tsx/dist/cli.mjs watch src/index.ts",
+    "build": "node ../core-service/node_modules/typescript/bin/tsc",
+    "build:run": "npm run build && npm start",
+    "test": "node ../core-service/node_modules/tsx/dist/cli.mjs src/test.ts",
+    "infra:generate": "service-infra generate -c infra.config.json --all",
+    "infra:preview": "service-infra generate -c infra.config.json --all --dry-run",
+    "infra:docker": "service-infra generate -c infra.config.json --dockerfile --compose",
+    "infra:k8s": "service-infra generate -c infra.config.json --k8s"
+  },
+  "dependencies": {
+    "core-service": "file:../core-service"
+    // Only add service-specific dependencies (e.g., bcrypt, passport)
+  },
+  "devDependencies": {
+    // Only @types/* for service-specific dependencies
+    // NO tsx, typescript - these come from core-service
+  }
+}
+```
+
+**Key Rules**:
+- ✅ **Always**: Depend on `core-service` via `file:../core-service`
+- ✅ **Always**: Include infra scripts for Docker/K8s generation
+- ✅ **Always**: Only add service-specific dependencies
+- ❌ **Never**: Add `tsx` or `typescript` to devDependencies (they come from core-service)
+- ❌ **Never**: Add `graphql`, `mongodb`, `redis` directly (they come from core-service)
+- ❌ **Never**: Depend on other microservices directly (use event-driven communication)
+
+### Standalone/Shared Package Pattern
+
+**Standalone packages** (access-engine, shared-validators) that need to work independently or in browser:
+
+```json
+{
+  "name": "package-name",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "typescript": "^5.x.x"
+    // Own typescript since not depending on core-service
+  }
+}
+```
+
+**Key Rules**:
+- ✅ These packages keep their own `typescript` in devDependencies
+- ✅ They do NOT depend on `core-service` (to stay client-safe/standalone)
+- ✅ They can be used in React apps, other projects, etc.
+
+### shared-validators Package
+
+**Purpose**: Client-safe eligibility validators for bonus and KYC validation. Pure functions with no database dependencies.
+
+**Usage**:
+```typescript
+import { BonusEligibility, KYCEligibility } from 'shared-validators';
+
+// Bonus eligibility
+const result = BonusEligibility.check(template, { kycTier: 'standard' });
+
+// KYC transaction limits
+const txResult = KYCEligibility.checkTransaction(limits, {
+  currentTier: 'basic',
+  transactionType: 'withdrawal',
+  amount: 500,
+  currency: 'EUR',
+});
+
+// Tier requirements
+const requirements = KYCEligibility.getTierRequirements('enhanced');
+```
+
+**Classes**:
+- `BonusEligibility` - Check bonus template eligibility (active, date range, tier, country, KYC tier)
+- `KYCEligibility` - Check transaction limits, tier requirements, action permissions
+
+**Key Principles**:
+- All types are self-contained (no external dependencies)
+- Static classes with pure functions
+- No database calls - validation only
+- Same code runs on client and server
+
+
+### Inter-Service Communication
+
+**Services do NOT depend on each other**. Communication is event-driven:
+
+```typescript
+// ✅ Correct: Event-driven communication
+import { emit, on } from 'core-service';
+
+// Emit event from payment-service
+await emit('payment.completed', tenantId, userId, { paymentId, amount });
+
+// Listen in bonus-service
+on('payment.completed', async (event) => {
+  // Handle payment completion
+});
+
+// ❌ Wrong: Direct service dependency
+// "notification-service": "file:../notification-service"  // DON'T DO THIS
+```
+
+### When to Create Shared Packages
+
+Only create a shared package (like `shared-validators`) when:
+1. **Client-side validation is needed** - Logic must run in browser
+2. **Types are shared across client and server** - Need same types in React app
+3. **The code is truly platform-agnostic** - No Node.js dependencies
+
+**Don't create shared packages for**:
+- Server-only code (keep in the service)
+- Types only used by one service
+- Code that could use event-driven communication instead
+
+---
+
 ## 🔧 TypeScript Best Practices
 
 ### Type Safety
@@ -214,6 +363,352 @@ import type { RegisterInput } from './types.js';
 - **Always**: Check for circular dependencies
 - **Never**: Import services directly (use through `core-service`)
 - **Always**: Extend `core-service` patterns rather than duplicating code
+
+### Service Ports
+
+| Service | Port | GraphQL Endpoint |
+|---------|------|------------------|
+| auth-service | 9001 | http://localhost:9001/graphql |
+| payment-service | 9002 | http://localhost:9002/graphql |
+| bonus-service | 9003 | http://localhost:9003/graphql |
+| notification-service | 9004 | http://localhost:9004/graphql |
+| kyc-service | 9005 | http://localhost:9005/graphql |
+
+**Next available port**: 9006
+
+---
+
+## 🚀 Creating a New Microservice
+
+### Service Structure
+
+Every microservice follows this standard structure:
+
+```
+service-name/
+├── src/
+│   ├── index.ts           # Entry point with createGateway
+│   ├── database.ts        # MongoDB accessor
+│   ├── redis.ts           # Redis accessor
+│   ├── config.ts          # Service configuration
+│   ├── services/
+│   │   └── feature.ts     # createService definitions
+│   ├── repositories/
+│   │   └── feature-repository.ts  # Extends BaseRepository
+│   └── types/
+│       └── feature-types.ts
+├── package.json
+└── tsconfig.json
+```
+
+### Step 1: Create package.json
+
+```json
+{
+  "name": "service-name",
+  "version": "1.0.0",
+  "description": "Service description",
+  "type": "module",
+  "scripts": {
+    "start": "node ../core-service/node_modules/tsx/dist/cli.mjs src/index.ts",
+    "dev": "node ../core-service/node_modules/tsx/dist/cli.mjs watch src/index.ts",
+    "build": "node ../core-service/node_modules/typescript/bin/tsc",
+    "build:run": "npm run build && npm start",
+    "test": "node ../core-service/node_modules/tsx/dist/cli.mjs src/test.ts"
+  },
+  "dependencies": {
+    "core-service": "file:../core-service"
+  }
+}
+```
+
+### Step 2: Create Database Accessor (`database.ts`)
+
+```typescript
+import { createServiceDatabaseAccess } from 'core-service';
+
+// Create the database accessor for this service
+export const db = createServiceDatabaseAccess('service-name');
+
+// Usage in service code:
+// await db.initialize({ brand: 'default', tenantId: 'default' });
+// const database = await db.getDb();
+// const collection = database.collection('my_collection');
+```
+
+### Step 3: Create Redis Accessor (`redis.ts`)
+
+```typescript
+import { createServiceRedisAccess } from 'core-service';
+
+// Create the Redis accessor for this service
+export const redis = createServiceRedisAccess('service-name');
+
+// Usage in service code:
+// await redis.initialize({ brand: 'default' });
+// await redis.set('key', value, ttlSeconds);
+// const value = await redis.get<T>('key');
+```
+
+### Step 4: Create Service with GraphQL (`services/feature.ts`)
+
+```typescript
+import { createService, type SagaContext, type Repository } from 'core-service';
+import { type } from 'arktype';
+
+// Define input validation schema
+const createFeatureSchema = type({
+  name: 'string',
+  'description?': 'string',
+});
+
+// Define TypeScript types
+interface Feature {
+  id: string;
+  tenantId: string;
+  name: string;
+  description?: string;
+  status: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+interface CreateFeatureInput {
+  name: string;
+  description?: string;
+}
+
+// Define saga steps
+type FeatureCtx = SagaContext<Feature, CreateFeatureInput>;
+
+const featureSaga = [
+  {
+    name: 'createFeature',
+    critical: true,
+    execute: async ({ input, data, ...ctx }: FeatureCtx): Promise<FeatureCtx> => {
+      const repo = data._repository as Repository<Feature>;
+      
+      const feature = {
+        tenantId: 'default',
+        name: input.name,
+        description: input.description,
+        status: 'active',
+      };
+      
+      const created = await repo.create(feature as any);
+      return { ...ctx, input, data, entity: created };
+    },
+    compensate: async ({ entity, data }: FeatureCtx) => {
+      if (entity) {
+        const repo = data._repository as Repository<Feature>;
+        await repo.delete(entity.id);
+      }
+    },
+  },
+];
+
+// Create the service
+export const featureService = createService<Feature, CreateFeatureInput>({
+  name: 'feature',
+  entity: {
+    name: 'feature',
+    collection: 'features',
+    graphqlType: `
+      type Feature {
+        id: ID!
+        tenantId: String!
+        name: String!
+        description: String
+        status: String!
+        createdAt: String
+        updatedAt: String
+      }
+      
+      type FeatureConnection { nodes: [Feature!]! totalCount: Int! pageInfo: PageInfo! }
+      type CreateFeatureResult { success: Boolean! feature: Feature sagaId: ID! errors: [String!] executionTimeMs: Int }
+    `,
+    graphqlInput: `input CreateFeatureInput { name: String! description: String }`,
+    validateInput: (input) => {
+      const result = createFeatureSchema(input);
+      if (result instanceof type.errors) {
+        return { errors: result.summary.split('\n') };
+      }
+      return result as CreateFeatureInput;
+    },
+    indexes: [
+      { fields: { tenantId: 1 } },
+      { fields: { name: 1, tenantId: 1 }, options: { unique: true } },
+      { fields: { status: 1, tenantId: 1 } },
+    ],
+  },
+  saga: featureSaga,
+});
+```
+
+### Step 5: Create Entry Point (`index.ts`)
+
+```typescript
+import {
+  createGateway,
+  logger,
+  configureRedisStrategy,
+  type ResolverContext,
+  type GatewayConfig,
+} from 'core-service';
+
+import { db } from './database.js';
+import { redis } from './redis.js';
+import { featureService } from './services/feature.js';
+
+// Configuration
+const config = {
+  port: parseInt(process.env.PORT || '9006', 10),
+  mongoUri: process.env.MONGODB_URI || 'mongodb://localhost:27017/service_name',
+  redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
+};
+
+// Helper functions for resolvers
+function getUserId(ctx: ResolverContext): string {
+  const userId = ctx.user?.id || ctx.user?.userId;
+  if (!userId) throw new Error('Unauthorized');
+  return userId;
+}
+
+function getTenantId(ctx: ResolverContext): string {
+  return ctx.user?.tenantId || 'default';
+}
+
+// Custom type definitions (extend the service types)
+const customTypeDefs = `
+  extend type Query {
+    myFeatures: [Feature!]!
+  }
+`;
+
+// Custom resolvers (signature: (args, ctx) - NO parent parameter)
+const customResolvers = {
+  Query: {
+    myFeatures: async (args: Record<string, unknown>, ctx: ResolverContext) => {
+      const userId = getUserId(ctx);
+      const tenantId = getTenantId(ctx);
+      // Custom query logic here
+      return [];
+    },
+  },
+};
+
+// Build gateway configuration
+function buildGatewayConfig(): GatewayConfig {
+  return {
+    port: config.port,
+    serviceName: 'service-name',
+    mongoUri: config.mongoUri,
+    typeDefs: customTypeDefs,
+    resolvers: customResolvers,
+    services: [featureService],
+    contextBuilder: (req) => ({
+      user: (req as any).user,
+      tenantId: (req as any).user?.tenantId || 'default',
+    }),
+  };
+}
+
+// Main startup
+async function main() {
+  logger.info('Starting service-name...');
+
+  // Start gateway (handles MongoDB connection)
+  await createGateway(buildGatewayConfig());
+
+  logger.info(`Service started on port ${config.port}`);
+
+  // Initialize Redis accessor (after gateway)
+  if (config.redisUrl) {
+    try {
+      await configureRedisStrategy({
+        strategy: 'shared',
+        defaultUrl: config.redisUrl,
+      });
+      await redis.initialize({ brand: 'default' });
+      logger.info('Redis accessor initialized');
+    } catch (err) {
+      logger.warn('Could not initialize Redis', {
+        error: err instanceof Error ? err.message : 'Unknown error'
+      });
+    }
+  }
+}
+
+main().catch((err) => {
+  logger.error('Failed to start service', { error: err.message });
+  process.exit(1);
+});
+```
+
+### GraphQL Resolver Signature
+
+**Critical**: Custom resolvers use `(args, ctx)` signature, NOT `(parent, args, ctx)`.
+
+```typescript
+// ✅ Correct: (args, ctx) signature
+const customResolvers = {
+  Query: {
+    myQuery: async (args: Record<string, unknown>, ctx: ResolverContext) => {
+      const userId = args.userId as string;
+      return result;
+    },
+  },
+  Mutation: {
+    myMutation: async (args: Record<string, unknown>, ctx: ResolverContext) => {
+      const input = args.input as MyInput;
+      return result;
+    },
+  },
+};
+
+// ❌ Wrong: (parent, args, ctx) signature - causes type errors
+const wrongResolvers = {
+  Query: {
+    myQuery: async (_parent: unknown, args: Record<string, unknown>, ctx: ResolverContext) => {
+      // This will NOT work with core-service!
+    },
+  },
+};
+```
+
+### GraphQL Type Naming Convention
+
+When using `createService`, the result type must follow this naming convention:
+
+```typescript
+// Entity name: "feature" → Result type: "CreateFeatureResult"
+// Entity name: "kycDocument" → Result type: "CreateKycDocumentResult" (note: Kyc not KYC)
+// Entity name: "kycVerification" → Result type: "CreateKycVerificationResult"
+
+graphqlType: `
+  type Feature { ... }
+  type FeatureConnection { ... }
+  type CreateFeatureResult { success: Boolean! feature: Feature sagaId: ID! errors: [String!] }
+`,
+```
+
+### Avoiding Duplicate Query Names
+
+If `createService` generates a query (e.g., `feature(id: ID!)`) and you need a custom query with similar purpose, use a different name:
+
+```typescript
+// ❌ Wrong: Duplicate query name
+extend type Query {
+  feature(userId: String!): Feature  # Conflicts with auto-generated feature(id: ID!)
+}
+
+// ✅ Correct: Use unique name
+extend type Query {
+  featureByUserId(userId: String!): Feature  # No conflict
+}
+```
+
+---
 
 ### Access Engine Usage (RBAC/HBAC/URN)
 - **React App**: Import directly from `access-engine` package
@@ -957,7 +1452,37 @@ for (const key of keys) { /* check if stuck */ }
 - ✅ **Right**: Review design patterns section and reference repository before implementing
 - ✅ **Right**: Search codebase for existing pattern usage before creating new implementations
 
-### 12. External Provider Calls Without Protection ⚠️
+### 12. Wrong Resolver Signature ⚠️
+- ❌ **Wrong**: `async (_parent, args, ctx) => { }` - Three-parameter signature
+- ✅ **Right**: `async (args, ctx) => { }` - Two-parameter signature (core-service pattern)
+- **Risk**: TypeScript errors and runtime failures
+
+### 13. GraphQL Type Name Mismatch ⚠️
+- ❌ **Wrong**: `CreateKYCDocumentResult` when entity name is `kycDocument`
+- ✅ **Right**: `CreateKycDocumentResult` - matches entity name casing
+- **Risk**: Schema extension errors on startup
+
+### 14. Duplicate GraphQL Query Names ⚠️
+- ❌ **Wrong**: Defining `kycProfile(userId: String!)` when `createService` generates `kycProfile(id: ID!)`
+- ✅ **Right**: Use unique names like `kycProfileByUserId(userId: String!)`
+- **Risk**: "Field can only be defined once" errors
+
+### 15. Missing Redis/MongoDB Accessor ⚠️
+- ❌ **Wrong**: Using `getRedis()` directly without accessor initialization
+- ✅ **Right**: Create `redis.ts` with `createServiceRedisAccess()` and initialize after gateway
+- **Risk**: "Redis not connected" errors
+
+### 16. Wrong Initialization Order ⚠️
+- ❌ **Wrong**: Initialize event handlers before Redis is connected
+- ✅ **Right**: Order: `createGateway()` → `configureRedisStrategy()` → `redis.initialize()` → `initializeEventHandlers()`
+- **Risk**: Event handlers fail with connection errors
+
+### 17. Index Options with Null Values ⚠️
+- ❌ **Wrong**: `{ fields: { userId: 1 }, options: { sparse: someVar } }` where `someVar` might be `null`
+- ✅ **Right**: Only include options with explicit boolean values, or omit optional options
+- **Risk**: MongoDB error "sparse: null is not convertible to bool"
+
+### 18. External Provider Calls Without Protection ⚠️
 - ❌ **Wrong**: Calling external APIs (Twilio, SMTP, etc.) directly without circuit breaker
 - ❌ **Wrong**: Fan-out to multiple channels without backpressure
 - ✅ **Right**: Wrap external calls with `CircuitBreaker` from core-service
@@ -1090,6 +1615,26 @@ Before considering work complete:
 4. **Partial Context**: Fixed errors without understanding full context
    - **Lesson**: Always read entire file/component before changes
    - **Prevention**: Follow holistic review checklist
+
+5. **Wrong Resolver Signature** (KYC Service): Used `(parent, args, ctx)` instead of `(args, ctx)`
+   - **Lesson**: `core-service`'s `createGateway` expects resolvers with `(args, ctx)` signature
+   - **Prevention**: Always check existing services for resolver patterns
+
+6. **GraphQL Type Naming Mismatch** (KYC Service): Used `UploadKYCDocumentResult` when `createService` expected `CreateKycDocumentResult`
+   - **Lesson**: `createService` generates types based on entity name with specific casing
+   - **Prevention**: Follow the naming convention: `Create{EntityName}Result` where `EntityName` matches entity name casing
+
+7. **Duplicate Query Names** (KYC Service): Defined custom `kycProfile` query conflicting with auto-generated one
+   - **Lesson**: `createService` generates default queries; custom queries need unique names
+   - **Prevention**: Use descriptive names like `kycProfileByUserId` for custom queries
+
+8. **Redis Not Connected** (KYC Service): Called `startListening()` before Redis was initialized
+   - **Lesson**: Redis accessor must be initialized before event handlers
+   - **Prevention**: Follow initialization order: gateway → Redis config → Redis init → event handlers
+
+9. **MongoDB Index Null Values** (KYC Service): Index options had `sparse: null` instead of omitting the option
+   - **Lesson**: MongoDB doesn't accept `null` for boolean index options
+   - **Prevention**: Only include index options with explicit boolean values
 
 ---
 

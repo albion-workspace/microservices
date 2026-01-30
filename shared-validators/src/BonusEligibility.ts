@@ -6,7 +6,7 @@
  * 
  * Usage:
  * ```typescript
- * import { BonusEligibility } from './BonusEligibility';
+ * import { BonusEligibility } from 'shared-validators';
  * 
  * // Check single template
  * const result = BonusEligibility.check(template, context);
@@ -26,10 +26,10 @@
  */
 
 // ═══════════════════════════════════════════════════════════════════════════
-// TYPES (Self-contained - copy these to your project)
+// TYPES (Self-contained)
 // ═══════════════════════════════════════════════════════════════════════════
 
-export type Currency = 'USD' | 'EUR' | 'GBP' | 'BTC' | 'ETH' | 'USDT' | string;
+export type BonusCurrency = 'USD' | 'EUR' | 'GBP' | 'BTC' | 'ETH' | 'USDT' | string;
 
 export type BonusType = 
   // Onboarding
@@ -82,8 +82,8 @@ export interface BonusTemplate {
   // Value
   valueType: BonusValueType;
   value: number;
-  currency: Currency;
-  supportedCurrencies?: Currency[];
+  currency: BonusCurrency;
+  supportedCurrencies?: BonusCurrency[];
   maxValue?: number;
   minDeposit?: number;
   
@@ -109,6 +109,7 @@ export interface BonusTemplate {
   minAccountAgeDays?: number;
   requiresDeposit?: boolean;
   requiresVerification?: boolean;
+  requiredKYCTier?: string;
   
   // Stacking
   stackable?: boolean;
@@ -117,10 +118,10 @@ export interface BonusTemplate {
   // Selection-specific
   minSelections?: number;
   maxSelections?: number;
-  min?: number;            // Minimum value per selection (odds, price, etc.)
-  max?: number;            // Maximum value per selection
-  minTotal?: number;       // Minimum combined total (total odds, cart total, etc.)
-  maxTotal?: number;       // Maximum combined total
+  min?: number;
+  max?: number;
+  minTotal?: number;
+  maxTotal?: number;
   
   // Combo-specific
   minActions?: number;
@@ -139,12 +140,16 @@ export interface BonusTemplate {
  * Context for eligibility checking.
  * Populate with user's current state.
  */
-export interface EligibilityContext {
+export interface BonusEligibilityContext {
   userId?: string;
   tenantId?: string;
-  currency?: Currency;
+  currency?: BonusCurrency;
   userTier?: string;
   country?: string;
+  
+  // KYC context
+  kycTier?: string;
+  kycStatus?: string;
   
   // Deposit context
   depositAmount?: number;
@@ -155,10 +160,10 @@ export interface EligibilityContext {
   selectionCount?: number;
   selections?: Array<{ 
     id: string; 
-    value?: number;      // Generic value (odds, price, amount, etc.)
+    value?: number;
     category?: string; 
   }>;
-  selectionsTotal?: number;  // Pre-calculated total (sum of selection values)
+  selectionsTotal?: number;
   
   // Activity context
   activityCategory?: string;
@@ -176,20 +181,18 @@ export interface EligibilityContext {
   metadata?: Record<string, unknown>;
 }
 
-export interface EligibilityResult {
+export interface BonusEligibilityResult {
   template: BonusTemplate;
   eligible: boolean;
   reasons: string[];
-  /** Calculated bonus value (if eligible) */
   calculatedValue?: number;
-  /** Turnover required (if eligible) */
   turnoverRequired?: number;
 }
 
-export interface ValidationRule {
+export interface BonusValidationRule {
   name: string;
-  check: (template: BonusTemplate, context: EligibilityContext) => boolean;
-  message: (template: BonusTemplate, context: EligibilityContext) => string;
+  check: (template: BonusTemplate, context: BonusEligibilityContext) => boolean;
+  message: (template: BonusTemplate, context: BonusEligibilityContext) => string;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -198,11 +201,7 @@ export interface ValidationRule {
 
 export class BonusEligibility {
   
-  // ─────────────────────────────────────────────────────────────────────────
-  // VALIDATION RULES (Pure functions - no DB)
-  // ─────────────────────────────────────────────────────────────────────────
-  
-  private static readonly rules: ValidationRule[] = [
+  private static readonly rules: BonusValidationRule[] = [
     // Active check
     {
       name: 'is_active',
@@ -243,7 +242,7 @@ export class BonusEligibility {
       name: 'min_deposit',
       check: (t, c) => {
         if (!t.minDeposit) return true;
-        if (!c.depositAmount) return true; // No deposit to check
+        if (!c.depositAmount) return true;
         return c.depositAmount >= t.minDeposit;
       },
       message: (t) => `Minimum deposit of ${t.minDeposit} ${t.currency} required`,
@@ -258,6 +257,25 @@ export class BonusEligibility {
         return t.eligibleTiers.includes(c.userTier);
       },
       message: (t) => `Required tier: ${t.eligibleTiers?.join(' or ')}`,
+    },
+    
+    // KYC Tier
+    {
+      name: 'kyc_tier',
+      check: (t, c) => {
+        if (!t.requiredKYCTier) return true;
+        if (!c.kycTier) return false;
+        // Import KYCEligibility for tier comparison would create circular dep
+        // Use simple tier level comparison
+        const tierLevels: Record<string, number> = {
+          'none': 0, 'basic': 1, 'standard': 2, 
+          'enhanced': 3, 'full': 4, 'professional': 5
+        };
+        const required = tierLevels[t.requiredKYCTier] ?? 0;
+        const current = tierLevels[c.kycTier] ?? 0;
+        return current >= required;
+      },
+      message: (t) => `KYC tier '${t.requiredKYCTier}' or higher required`,
     },
     
     // Country
@@ -313,7 +331,7 @@ export class BonusEligibility {
       message: () => 'Only available for first purchase',
     },
     
-    // Selection count (for combo/selection bonuses)
+    // Selection count
     {
       name: 'selection_count',
       check: (t, c) => {
@@ -332,7 +350,7 @@ export class BonusEligibility {
       },
     },
     
-    // Selection value range (min/max per selection)
+    // Selection value range
     {
       name: 'selection_value_range',
       check: (t, c) => {
@@ -361,17 +379,15 @@ export class BonusEligibility {
       },
     },
     
-    // Selection total range (minTotal/maxTotal for combined value)
+    // Selection total range
     {
       name: 'selection_total_range',
       check: (t, c) => {
         if (!['selection', 'combo', 'bundle'].includes(t.type)) return true;
         
-        // Calculate total from selections or use provided total
         let total = c.selectionsTotal;
         if (total === undefined && c.selections?.length) {
-          // For odds: multiply; for prices: sum (configurable via metadata)
-          const isMultiplicative = t.type === 'combo'; // Combo = multiply odds
+          const isMultiplicative = t.type === 'combo';
           if (isMultiplicative) {
             total = c.selections.reduce((acc, s) => acc * (s.value ?? 1), 1);
           } else {
@@ -416,7 +432,7 @@ export class BonusEligibility {
       message: (t) => `Activity category not eligible. Allowed: ${t.eligibleCategories?.join(', ')}`,
     },
     
-    // Total uses limit (client can check if provided)
+    // Total uses limit
     {
       name: 'total_uses',
       check: (t) => {
@@ -434,7 +450,7 @@ export class BonusEligibility {
   /**
    * Check eligibility for a single bonus template.
    */
-  static check(template: BonusTemplate, context: EligibilityContext = {}): EligibilityResult {
+  static check(template: BonusTemplate, context: BonusEligibilityContext = {}): BonusEligibilityResult {
     const reasons: string[] = [];
     
     for (const rule of this.rules) {
@@ -460,8 +476,8 @@ export class BonusEligibility {
    */
   static checkMany(
     templates: BonusTemplate[], 
-    context: EligibilityContext = {}
-  ): EligibilityResult[] {
+    context: BonusEligibilityContext = {}
+  ): BonusEligibilityResult[] {
     return templates
       .map(t => this.check(t, context))
       .sort((a, b) => (b.template.priority ?? 0) - (a.template.priority ?? 0));
@@ -472,28 +488,26 @@ export class BonusEligibility {
    */
   static getEligible(
     templates: BonusTemplate[], 
-    context: EligibilityContext = {}
-  ): EligibilityResult[] {
+    context: BonusEligibilityContext = {}
+  ): BonusEligibilityResult[] {
     return this.checkMany(templates, context).filter(r => r.eligible);
   }
 
   /**
    * Find the best bonus for a deposit amount.
-   * Returns the one with highest calculated value.
    */
   static findBestForDeposit(
     templates: BonusTemplate[],
     amount: number,
-    currency: Currency,
-    context: Partial<EligibilityContext> = {}
-  ): EligibilityResult | null {
-    const ctx: EligibilityContext = {
+    currency: BonusCurrency,
+    context: Partial<BonusEligibilityContext> = {}
+  ): BonusEligibilityResult | null {
+    const ctx: BonusEligibilityContext = {
       ...context,
       depositAmount: amount,
       currency,
     };
     
-    // Filter to deposit-related types
     const depositTypes: BonusType[] = ['first_deposit', 'reload', 'welcome', 'top_up'];
     const depositTemplates = templates.filter(t => depositTypes.includes(t.type));
     
@@ -501,7 +515,6 @@ export class BonusEligibility {
     
     if (eligible.length === 0) return null;
     
-    // Sort by calculated value (highest first)
     return eligible.sort((a, b) => 
       (b.calculatedValue ?? 0) - (a.calculatedValue ?? 0)
     )[0];
@@ -513,9 +526,9 @@ export class BonusEligibility {
   static findForSelections(
     templates: BonusTemplate[],
     selectionCount: number,
-    context: Partial<EligibilityContext> = {}
-  ): EligibilityResult[] {
-    const ctx: EligibilityContext = {
+    context: Partial<BonusEligibilityContext> = {}
+  ): BonusEligibilityResult[] {
+    const ctx: BonusEligibilityContext = {
       ...context,
       selectionCount,
     };
@@ -532,8 +545,8 @@ export class BonusEligibility {
   static hasEligibleOfType(
     templates: BonusTemplate[],
     type: BonusType,
-    context: EligibilityContext = {}
-  ): EligibilityResult | null {
+    context: BonusEligibilityContext = {}
+  ): BonusEligibilityResult | null {
     const typeTemplates = templates.filter(t => t.type === type);
     const eligible = this.getEligible(typeTemplates, context);
     return eligible[0] ?? null;
@@ -544,10 +557,10 @@ export class BonusEligibility {
    */
   static groupByType(
     templates: BonusTemplate[],
-    context: EligibilityContext = {}
-  ): Map<BonusType, EligibilityResult[]> {
+    context: BonusEligibilityContext = {}
+  ): Map<BonusType, BonusEligibilityResult[]> {
     const results = this.checkMany(templates, context);
-    const grouped = new Map<BonusType, EligibilityResult[]>();
+    const grouped = new Map<BonusType, BonusEligibilityResult[]>();
     
     for (const result of results) {
       const type = result.template.type;
@@ -564,10 +577,7 @@ export class BonusEligibility {
   // CALCULATION HELPERS
   // ─────────────────────────────────────────────────────────────────────────
 
-  /**
-   * Calculate bonus value based on template and context.
-   */
-  static calculateValue(template: BonusTemplate, context: EligibilityContext): number {
+  static calculateValue(template: BonusTemplate, context: BonusEligibilityContext): number {
     const baseAmount = context.depositAmount ?? context.activityAmount ?? 0;
     
     switch (template.valueType) {
@@ -580,13 +590,11 @@ export class BonusEligibility {
       }
       
       case 'tiered': {
-        // For tiered, value is the base, multiplied by context factors
         const multiplier = this.getTierMultiplier(template, context);
         return template.value * multiplier;
       }
       
       case 'dynamic': {
-        // Dynamic calculation based on context
         return this.calculateDynamicValue(template, context);
       }
       
@@ -595,25 +603,16 @@ export class BonusEligibility {
     }
   }
 
-  /**
-   * Calculate turnover requirement.
-   */
-  static calculateTurnover(template: BonusTemplate, context: EligibilityContext): number {
+  static calculateTurnover(template: BonusTemplate, context: BonusEligibilityContext): number {
     const bonusValue = this.calculateValue(template, context);
     return bonusValue * template.turnoverMultiplier;
   }
 
-  /**
-   * Calculate contribution rate for an activity category.
-   */
   static getContributionRate(template: BonusTemplate, category: string): number {
     if (!template.activityContributions) return 100;
     return template.activityContributions[category] ?? 0;
   }
 
-  /**
-   * Calculate effective turnover contribution for an activity.
-   */
   static calculateTurnoverContribution(
     template: BonusTemplate,
     amount: number,
@@ -627,8 +626,7 @@ export class BonusEligibility {
   // PRIVATE HELPERS
   // ─────────────────────────────────────────────────────────────────────────
 
-  private static getTierMultiplier(template: BonusTemplate, context: EligibilityContext): number {
-    // Example: VIP tiers get higher multipliers
+  private static getTierMultiplier(_template: BonusTemplate, context: BonusEligibilityContext): number {
     const tierMultipliers: Record<string, number> = {
       'bronze': 1.0,
       'silver': 1.25,
@@ -640,8 +638,7 @@ export class BonusEligibility {
     return tierMultipliers[context.userTier?.toLowerCase() ?? ''] ?? 1.0;
   }
 
-  private static calculateDynamicValue(template: BonusTemplate, context: EligibilityContext): number {
-    // Combo bonus: value increases with selection count
+  private static calculateDynamicValue(template: BonusTemplate, context: BonusEligibilityContext): number {
     if (template.type === 'combo' && context.selectionCount) {
       const baseValue = template.value;
       const multiplier = template.comboMultiplier ?? 1.1;
@@ -650,7 +647,6 @@ export class BonusEligibility {
       return baseValue * Math.pow(multiplier, extraSelections);
     }
     
-    // Streak bonus: value increases with consecutive days
     if (template.type === 'streak' && context.consecutiveDays) {
       return template.value * Math.min(context.consecutiveDays, 7);
     }
@@ -662,17 +658,10 @@ export class BonusEligibility {
   // CUSTOM RULE EXTENSION
   // ─────────────────────────────────────────────────────────────────────────
 
-  /**
-   * Add a custom validation rule.
-   * Use this to extend the validator with domain-specific rules.
-   */
-  static addRule(rule: ValidationRule): void {
+  static addRule(rule: BonusValidationRule): void {
     this.rules.push(rule);
   }
 
-  /**
-   * Remove a rule by name.
-   */
   static removeRule(name: string): void {
     const index = this.rules.findIndex(r => r.name === name);
     if (index !== -1) {
@@ -680,9 +669,6 @@ export class BonusEligibility {
     }
   }
 
-  /**
-   * Get all rule names.
-   */
   static getRuleNames(): string[] {
     return this.rules.map(r => r.name);
   }
@@ -692,10 +678,8 @@ export class BonusEligibility {
 // CONVENIENCE EXPORTS
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Shorthand functions for common operations
-export const checkEligibility = BonusEligibility.check.bind(BonusEligibility);
-export const checkManyEligibility = BonusEligibility.checkMany.bind(BonusEligibility);
+export const checkBonusEligibility = BonusEligibility.check.bind(BonusEligibility);
+export const checkManyBonusEligibility = BonusEligibility.checkMany.bind(BonusEligibility);
 export const getEligibleBonuses = BonusEligibility.getEligible.bind(BonusEligibility);
 export const findBestDepositBonus = BonusEligibility.findBestForDeposit.bind(BonusEligibility);
 export const findSelectionBonuses = BonusEligibility.findForSelections.bind(BonusEligibility);
-

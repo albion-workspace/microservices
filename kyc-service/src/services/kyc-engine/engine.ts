@@ -9,8 +9,8 @@ import {
   generateId,
   GraphQLError,
   emit,
+  type WriteOptions,
 } from 'core-service';
-import type { ClientSession } from 'core-service';
 
 import { kycRepository } from '../../repositories/kyc-repository.js';
 import { documentRepository } from '../../repositories/document-repository.js';
@@ -57,18 +57,18 @@ export class KYCEngine {
     userId: string,
     tenantId: string,
     jurisdictionCode: string,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCProfile> {
     // Try to find existing
-    let profile = await kycRepository.findByUserId(userId, tenantId, session);
+    let profile = await kycRepository.findByUserId(userId, tenantId, options);
     
     if (!profile) {
-      // Create new profile
-      profile = await kycRepository.create({
+      // Create new profile using domain-specific method with defaults
+      profile = await kycRepository.createProfile({
         userId,
         tenantId,
         jurisdictionCode,
-      }, session);
+      }, options);
       
       // Emit event
       await emit('kyc.profile.created', tenantId, userId, {
@@ -83,8 +83,8 @@ export class KYCEngine {
   /**
    * Get profile by ID
    */
-  async getProfile(profileId: string, session?: ClientSession): Promise<KYCProfile | null> {
-    return kycRepository.findById(profileId, session);
+  async getProfile(profileId: string, options?: WriteOptions): Promise<KYCProfile | null> {
+    return kycRepository.findById(profileId, options);
   }
   
   /**
@@ -93,9 +93,9 @@ export class KYCEngine {
   async getProfileByUserId(
     userId: string,
     tenantId: string,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCProfile | null> {
-    return kycRepository.findByUserId(userId, tenantId, session);
+    return kycRepository.findByUserId(userId, tenantId, options);
   }
   
   /**
@@ -105,11 +105,11 @@ export class KYCEngine {
     input: UpdatePersonalInfoInput,
     userId: string,
     tenantId: string,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCProfile> {
     const profile = input.profileId
-      ? await kycRepository.findById(input.profileId, session)
-      : await kycRepository.findByUserId(userId, tenantId, session);
+      ? await kycRepository.findById(input.profileId, options)
+      : await kycRepository.findByUserId(userId, tenantId, options);
     
     if (!profile) {
       throw new GraphQLError(KYC_ERRORS.ProfileNotFound);
@@ -123,7 +123,7 @@ export class KYCEngine {
     
     const updated = await kycRepository.update(profile.id, {
       personalInfo: updatedPersonalInfo as KYCProfile['personalInfo'],
-    }, session);
+    }, options);
     
     if (!updated) {
       throw new GraphQLError(KYC_ERRORS.InternalError);
@@ -144,11 +144,11 @@ export class KYCEngine {
     input: AddAddressInput,
     userId: string,
     tenantId: string,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCProfile> {
     const profile = input.profileId
-      ? await kycRepository.findById(input.profileId, session)
-      : await kycRepository.findByUserId(userId, tenantId, session);
+      ? await kycRepository.findById(input.profileId, options)
+      : await kycRepository.findByUserId(userId, tenantId, options);
     
     if (!profile) {
       throw new GraphQLError(KYC_ERRORS.ProfileNotFound);
@@ -162,7 +162,7 @@ export class KYCEngine {
       updatedAt: new Date(),
     };
     
-    const updated = await kycRepository.addAddress(profile.id, address, session);
+    const updated = await kycRepository.addAddress(profile.id, address, options);
     
     if (!updated) {
       throw new GraphQLError(KYC_ERRORS.InternalError);
@@ -182,13 +182,13 @@ export class KYCEngine {
     input: StartVerificationInput,
     userId: string,
     tenantId: string,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCVerification> {
     // Get or create profile
-    const profile = await this.getOrCreateProfile(userId, tenantId, 'US', session); // Default to US
+    const profile = await this.getOrCreateProfile(userId, tenantId, 'US', options); // Default to US
     
     // Check if there's already an active verification
-    const activeVerification = await verificationRepository.findActiveForProfile(profile.id, session);
+    const activeVerification = await verificationRepository.findActiveForProfile(profile.id, options);
     if (activeVerification) {
       throw new GraphQLError(KYC_ERRORS.VerificationAlreadyInProgress, {
         verificationId: activeVerification.id,
@@ -210,7 +210,7 @@ export class KYCEngine {
     // Create verification record
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
     
-    const verification = await verificationRepository.create({
+    const verification = await verificationRepository.createVerification({
       profileId: profile.id,
       targetTier,
       fromTier: profile.currentTier,
@@ -218,7 +218,7 @@ export class KYCEngine {
       expiresAt,
       initiatedBy: 'user',
       initiatedByUserId: userId,
-    }, session);
+    }, options);
     
     // Create provider session
     const provider = getProviderOrDefault(input.preferredProvider);
@@ -244,7 +244,7 @@ export class KYCEngine {
         externalId: result.applicantId,
         applicantId: result.applicantId,
         createdAt: new Date(),
-      }, session);
+      }, options);
     }
     
     // Create provider verification session
@@ -263,7 +263,7 @@ export class KYCEngine {
       sdkToken: providerSession.sdkToken,
       expiresAt: providerSession.expiresAt,
       webhookReceived: false,
-    }, session);
+    }, options);
     
     // Emit event
     await emit('kyc.verification.started', tenantId, userId, {
@@ -281,7 +281,7 @@ export class KYCEngine {
     });
     
     // Return updated verification
-    return (await verificationRepository.findById(verification.id, session))!;
+    return (await verificationRepository.findById(verification.id, options))!;
   }
   
   /**
@@ -494,11 +494,11 @@ export class KYCEngine {
     input: UploadDocumentInput,
     userId: string,
     tenantId: string,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCDocument> {
     const profile = input.profileId
-      ? await kycRepository.findById(input.profileId, session)
-      : await kycRepository.findByUserId(userId, tenantId, session);
+      ? await kycRepository.findById(input.profileId, options)
+      : await kycRepository.findByUserId(userId, tenantId, options);
     
     if (!profile) {
       throw new GraphQLError(KYC_ERRORS.ProfileNotFound);
@@ -513,15 +513,16 @@ export class KYCEngine {
       filename: `${profile.id}_${input.type}_${index}_${Date.now()}`,
       originalFilename: file.filename,
       mimeType: file.mimeType,
-      size: typeof file.data === 'string' ? file.data.length : file.data.length,
+      size: typeof file.data === 'string' ? file.data.length : file.data.byteLength,
       storageRef: `kyc-documents/${profile.tenantId}/${profile.id}/${generateId()}`,
       checksum: '', // TODO: Calculate checksum
       checksumAlgorithm: 'sha256',
       uploadedAt: new Date(),
     }));
     
-    // Create document record
-    const document = await documentRepository.create({
+    // Create document record using domain-specific method
+    const document = await documentRepository.createDocument({
+      tenantId: profile.tenantId,
       profileId: profile.id,
       type: input.type,
       category,
@@ -531,7 +532,7 @@ export class KYCEngine {
       issuedAt: input.issuedAt,
       expiresAt: input.expiresAt,
       uploadedBy: userId,
-    }, session);
+    }, options);
     
     // TODO: Upload files to storage
     // TODO: Upload to provider

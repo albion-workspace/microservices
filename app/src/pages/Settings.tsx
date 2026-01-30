@@ -17,29 +17,29 @@ import { getToken, SERVICE_URLS } from '../lib/auth'
 const SERVICES = {
   auth: {
     name: 'Auth Service',
-    url: 'http://localhost:3003',
-    graphqlUrl: 'http://localhost:3003/graphql',
+    url: 'http://localhost:9001',
+    graphqlUrl: 'http://localhost:9001/graphql',
     color: 'var(--accent-purple)',
     description: 'Authentication, authorization, OAuth, and user management',
   },
   payment: {
     name: 'Payment Service',
-    url: 'http://localhost:3004',
+    url: 'http://localhost:9002',
     graphqlUrl: SERVICE_URLS.payment,
     color: 'var(--accent-cyan)',
     description: 'Handles wallets, deposits, withdrawals, and payment providers',
   },
   bonus: {
     name: 'Bonus Service',
-    url: 'http://localhost:3005',
+    url: 'http://localhost:9003',
     graphqlUrl: SERVICE_URLS.bonus,
     color: 'var(--accent-orange)',
     description: 'Manages bonuses, eligibility, wagering, and promotions',
   },
   notification: {
     name: 'Notification Service',
-    url: 'http://localhost:3006',
-    graphqlUrl: 'http://localhost:3006/graphql',
+    url: 'http://localhost:9004',
+    graphqlUrl: 'http://localhost:9004/graphql',
     color: 'var(--accent-yellow)',
     description: 'Multi-channel notifications (Email, SMS, WhatsApp, SSE, Socket.IO)',
   },
@@ -207,10 +207,10 @@ function ServicesTab() {
         </div>
 
         <div className="grid grid-cols-4 gap-3">
-          <button className="btn btn-secondary" onClick={() => window.open('http://localhost:3004/graphql', '_blank')}>
+          <button className="btn btn-secondary" onClick={() => window.open('http://localhost:9002/graphql', '_blank')}>
             Payment Service API
           </button>
-          <button className="btn btn-secondary" onClick={() => window.open('http://localhost:3005/graphql', '_blank')}>
+          <button className="btn btn-secondary" onClick={() => window.open('http://localhost:9003/graphql', '_blank')}>
             Bonus Service API
           </button>
           <button className="btn btn-secondary" onClick={async () => {
@@ -236,11 +236,11 @@ function ServicesTab() {
         <div className="console">
           <pre className="m-0 text-text-secondary">
 {`# Payment Service
-PAYMENT_URL=http://localhost:3004/graphql
+PAYMENT_URL=http://localhost:9002/graphql
 PAYMENT_JWT_SECRET=payment-service-secret-change-in-production
 
 # Bonus Service  
-BONUS_URL=http://localhost:3005/graphql
+BONUS_URL=http://localhost:9003/graphql
 BONUS_JWT_SECRET=bonus-service-secret-change-in-production
 
 # MongoDB

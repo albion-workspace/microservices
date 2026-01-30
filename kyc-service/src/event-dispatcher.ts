@@ -11,11 +11,45 @@ import {
   logger,
   createUnifiedEmitter,
   createWebhookManager,
+  type IntegrationEvent,
 } from 'core-service';
 
 import { kycEngine } from './services/kyc-engine/engine.js';
 import { kycRepository } from './repositories/kyc-repository.js';
-import { db } from './database.js';
+
+// ═══════════════════════════════════════════════════════════════════
+// KYC Webhook Event Types
+// ═══════════════════════════════════════════════════════════════════
+
+export type KYCWebhookEvents =
+  | 'kyc.profile.created'
+  | 'kyc.tier.upgraded'
+  | 'kyc.tier.downgraded'
+  | 'kyc.verification.started'
+  | 'kyc.verification.completed'
+  | 'kyc.verification.failed'
+  | 'kyc.document.uploaded'
+  | 'kyc.document.verified'
+  | 'kyc.document.rejected'
+  | 'kyc.risk.updated'
+  | 'kyc.limit.exceeded'
+  | 'kyc.eligibility.failed'
+  | 'kyc.*';
+
+// ═══════════════════════════════════════════════════════════════════
+// Webhook Manager
+// ═══════════════════════════════════════════════════════════════════
+
+export const kycWebhooks = createWebhookManager<KYCWebhookEvents>({
+  serviceName: 'kyc',
+  apiVersion: '2024-01-01',
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// Unified Event Emitter
+// ═══════════════════════════════════════════════════════════════════
+
+export const emitKYCEvent = createUnifiedEmitter(kycWebhooks);
 
 // ═══════════════════════════════════════════════════════════════════
 // Event Handlers
@@ -24,16 +58,17 @@ import { db } from './database.js';
 /**
  * Handle user registration - create KYC profile
  */
-async function handleUserRegistered(event: {
-  tenantId: string;
+async function handleUserRegistered(event: IntegrationEvent<{
   userId: string;
-  data: {
-    userId: string;
-    email?: string;
-  };
-}) {
+  email?: string;
+}>) {
   try {
     const { tenantId, userId, data } = event;
+    
+    if (!userId) {
+      logger.warn('user.registered event missing userId');
+      return;
+    }
     
     logger.info('Creating KYC profile for new user', { userId, tenantId });
     
@@ -52,17 +87,18 @@ async function handleUserRegistered(event: {
 /**
  * Handle deposit initiated - check limits
  */
-async function handleDepositInitiated(event: {
-  tenantId: string;
-  userId: string;
-  data: {
-    amount: number;
-    currency: string;
-    transactionId: string;
-  };
-}) {
+async function handleDepositInitiated(event: IntegrationEvent<{
+  amount: number;
+  currency: string;
+  transactionId: string;
+}>) {
   try {
     const { tenantId, userId, data } = event;
+    
+    if (!userId) {
+      logger.warn('wallet.deposit.initiated event missing userId');
+      return;
+    }
     
     const check = await kycEngine.checkTransactionLimit(
       userId,
@@ -81,7 +117,7 @@ async function handleDepositInitiated(event: {
       });
       
       // Emit limit exceeded event
-      await emit('kyc.limit.exceeded', tenantId, userId, {
+      await emitKYCEvent('kyc.limit.exceeded', tenantId, userId, {
         operationType: 'deposit',
         amount: data.amount,
         currency: data.currency,
@@ -101,17 +137,18 @@ async function handleDepositInitiated(event: {
 /**
  * Handle withdrawal initiated - check limits and tier
  */
-async function handleWithdrawalInitiated(event: {
-  tenantId: string;
-  userId: string;
-  data: {
-    amount: number;
-    currency: string;
-    transactionId: string;
-  };
-}) {
+async function handleWithdrawalInitiated(event: IntegrationEvent<{
+  amount: number;
+  currency: string;
+  transactionId: string;
+}>) {
   try {
     const { tenantId, userId, data } = event;
+    
+    if (!userId) {
+      logger.warn('wallet.withdrawal.initiated event missing userId');
+      return;
+    }
     
     const check = await kycEngine.checkTransactionLimit(
       userId,
@@ -129,7 +166,7 @@ async function handleWithdrawalInitiated(event: {
         requiredTier: check.requiredTier,
       });
       
-      await emit('kyc.limit.exceeded', tenantId, userId, {
+      await emitKYCEvent('kyc.limit.exceeded', tenantId, userId, {
         operationType: 'withdrawal',
         amount: data.amount,
         currency: data.currency,
@@ -149,17 +186,18 @@ async function handleWithdrawalInitiated(event: {
 /**
  * Handle high-value transaction - trigger risk assessment
  */
-async function handleHighValueTransaction(event: {
-  tenantId: string;
-  userId: string;
-  data: {
-    amount: number;
-    currency: string;
-    type: string;
-  };
-}) {
+async function handleHighValueTransaction(event: IntegrationEvent<{
+  amount: number;
+  currency: string;
+  type: string;
+}>) {
   try {
     const { tenantId, userId, data } = event;
+    
+    if (!userId) {
+      logger.warn('wallet.transaction.completed event missing userId');
+      return;
+    }
     
     // Threshold for triggering risk assessment (EUR 10,000)
     const threshold = 10000;
@@ -188,16 +226,17 @@ async function handleHighValueTransaction(event: {
 /**
  * Handle bonus claim - check tier eligibility
  */
-async function handleBonusClaimRequested(event: {
-  tenantId: string;
-  userId: string;
-  data: {
-    bonusId: string;
-    requiredTier?: string;
-  };
-}) {
+async function handleBonusClaimRequested(event: IntegrationEvent<{
+  bonusId: string;
+  requiredTier?: string;
+}>) {
   try {
     const { tenantId, userId, data } = event;
+    
+    if (!userId) {
+      logger.warn('bonus.claim.requested event missing userId');
+      return;
+    }
     
     if (data.requiredTier) {
       const eligibility = await kycEngine.checkEligibility(
@@ -214,7 +253,7 @@ async function handleBonusClaimRequested(event: {
           requiredTier: data.requiredTier,
         });
         
-        await emit('kyc.eligibility.failed', tenantId, userId, {
+        await emitKYCEvent('kyc.eligibility.failed', tenantId, userId, {
           operation: 'bonus_claim',
           bonusId: data.bonusId,
           currentTier: eligibility.currentTier,
@@ -235,24 +274,11 @@ async function handleBonusClaimRequested(event: {
 // Setup
 // ═══════════════════════════════════════════════════════════════════
 
-let webhookManager: any = null;
-let unifiedEmitter: any = null;
-
 /**
  * Initialize event handlers
  */
 export async function initializeEventHandlers(): Promise<void> {
   logger.info('Initializing KYC event handlers');
-  
-  // Initialize webhook manager
-  const database = await db.getDb();
-  webhookManager = createWebhookManager({
-    db: database,
-    serviceName: 'kyc-service',
-  });
-  
-  // Create unified emitter
-  unifiedEmitter = createUnifiedEmitter(webhookManager);
   
   // Register event handlers
   
@@ -274,24 +300,8 @@ export async function initializeEventHandlers(): Promise<void> {
 }
 
 /**
- * Emit KYC event (with webhook support)
- */
-export async function emitKYCEvent(
-  eventType: string,
-  tenantId: string,
-  userId: string,
-  data: Record<string, unknown>
-): Promise<void> {
-  if (unifiedEmitter) {
-    await unifiedEmitter.emit(eventType, { tenantId, userId, ...data });
-  } else {
-    await emit(eventType, tenantId, userId, data);
-  }
-}
-
-/**
  * Get webhook manager
  */
 export function getWebhookManager() {
-  return webhookManager;
+  return kycWebhooks;
 }

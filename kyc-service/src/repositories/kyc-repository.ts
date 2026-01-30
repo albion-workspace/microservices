@@ -1,21 +1,16 @@
 /**
  * KYC Repository
  * 
- * Data access layer for KYC profiles
+ * Data access layer for KYC profiles.
+ * Extends BaseRepository from core-service for common CRUD operations.
  */
 
 import { 
-  generateId, 
-  paginateCollection,
-  findOneById,
+  UserScopedRepository,
   logger,
-} from 'core-service';
-import type { 
-  Db, 
-  ClientSession, 
-  Filter,
-  UpdateFilter,
-  Collection,
+  type PaginationResult,
+  type WriteOptions,
+  type RepositoryPaginationInput as PaginationInput,
 } from 'core-service';
 
 import { db, COLLECTIONS } from '../database.js';
@@ -35,6 +30,7 @@ import type {
 
 export interface KYCProfileFilter {
   tenantId?: string;
+  userId?: string;
   status?: KYCStatus | KYCStatus[];
   currentTier?: KYCTier | KYCTier[];
   riskLevel?: RiskLevel | RiskLevel[];
@@ -45,45 +41,55 @@ export interface KYCProfileFilter {
   nextReviewBefore?: Date;
 }
 
-export interface PaginationInput {
-  first?: number;
-  after?: string;
-  last?: number;
-  before?: string;
-}
-
 // ═══════════════════════════════════════════════════════════════════
 // Repository Class
 // ═══════════════════════════════════════════════════════════════════
 
-export class KYCRepository {
-  private getCollection(): Promise<Collection<KYCProfile>> {
-    return db.getDb().then(database => database.collection<KYCProfile>(COLLECTIONS.PROFILES));
+export class KYCRepository extends UserScopedRepository<KYCProfile> {
+  constructor() {
+    super(COLLECTIONS.PROFILES, db, {
+      timestamps: true,
+      defaultSortField: 'createdAt',
+      defaultSortDirection: 'desc',
+      indexes: [
+        // Primary lookups
+        { key: { userId: 1, tenantId: 1 }, unique: true },
+        { key: { tenantId: 1 } },
+        // Status queries
+        { key: { status: 1, tenantId: 1 } },
+        { key: { currentTier: 1, tenantId: 1 } },
+        { key: { riskLevel: 1, tenantId: 1 } },
+        // Expiration
+        { key: { expiresAt: 1 }, sparse: true },
+        { key: { nextReviewAt: 1 }, sparse: true },
+        // Provider sync
+        { key: { 'providerReferences.provider': 1, 'providerReferences.externalId': 1 } },
+        // Flags
+        { key: { isPEP: 1, tenantId: 1 }, sparse: true },
+        { key: { isHighRisk: 1, tenantId: 1 }, sparse: true },
+      ],
+    });
   }
   
   // ───────────────────────────────────────────────────────────────────
-  // Create
+  // Domain-Specific Create
   // ───────────────────────────────────────────────────────────────────
   
   /**
-   * Create a new KYC profile
+   * Create a new KYC profile with defaults
    */
-  async create(
+  async createProfile(
     input: CreateKYCProfileInput,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCProfile> {
-    const collection = await this.getCollection();
-    const now = new Date();
-    
-    const profile: KYCProfile = {
-      id: generateId(),
+    const profileData = {
       userId: input.userId,
       tenantId: input.tenantId,
       
       // Initial state
-      currentTier: 'none',
-      status: 'pending',
-      riskLevel: 'low',
+      currentTier: 'none' as KYCTier,
+      status: 'pending' as KYCStatus,
+      riskLevel: 'low' as RiskLevel,
       riskScore: 0,
       
       // Personal info
@@ -107,13 +113,9 @@ export class KYCRepository {
       isPEP: false,
       isHighRisk: false,
       requiresEnhancedDueDiligence: false,
-      
-      // Timestamps
-      createdAt: now,
-      updatedAt: now,
     };
     
-    await collection.insertOne(profile as any, { session });
+    const profile = await this.create(profileData as any, options);
     
     logger.info('KYC profile created', {
       profileId: profile.id,
@@ -125,31 +127,8 @@ export class KYCRepository {
   }
   
   // ───────────────────────────────────────────────────────────────────
-  // Read
+  // Domain-Specific Queries
   // ───────────────────────────────────────────────────────────────────
-  
-  /**
-   * Find profile by ID
-   */
-  async findById(
-    id: string,
-    session?: ClientSession
-  ): Promise<KYCProfile | null> {
-    const collection = await this.getCollection();
-    return collection.findOne({ id }, { session }) as Promise<KYCProfile | null>;
-  }
-  
-  /**
-   * Find profile by user ID
-   */
-  async findByUserId(
-    userId: string,
-    tenantId: string,
-    session?: ClientSession
-  ): Promise<KYCProfile | null> {
-    const collection = await this.getCollection();
-    return collection.findOne({ userId, tenantId }, { session }) as Promise<KYCProfile | null>;
-  }
   
   /**
    * Find profile by provider reference
@@ -157,40 +136,23 @@ export class KYCRepository {
   async findByProviderReference(
     provider: string,
     externalId: string,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCProfile | null> {
-    const collection = await this.getCollection();
-    return collection.findOne({
+    return this.findOne({
       'providerReferences.provider': provider,
       'providerReferences.externalId': externalId,
-    }, { session }) as Promise<KYCProfile | null>;
+    } as any, options);
   }
   
   /**
-   * Query profiles with filters and pagination
+   * Query profiles with complex filters
    */
   async query(
     filter: KYCProfileFilter,
     pagination?: PaginationInput
-  ): Promise<{
-    nodes: KYCProfile[];
-    pageInfo: {
-      hasNextPage: boolean;
-      hasPreviousPage: boolean;
-      startCursor?: string;
-      endCursor?: string;
-    };
-    totalCount: number;
-  }> {
-    const collection = await this.getCollection();
-    const mongoFilter = this.buildFilter(filter);
-    
-    return paginateCollection(collection as any, {
-      filter: mongoFilter,
-      first: pagination?.first ?? 20,
-      after: pagination?.after,
-      sort: { createdAt: -1 },
-    });
+  ): Promise<PaginationResult<KYCProfile>> {
+    const mongoFilter = this.buildKYCFilter(filter);
+    return this.paginate(mongoFilter as any, pagination);
   }
   
   /**
@@ -200,15 +162,13 @@ export class KYCRepository {
     beforeDate: Date,
     limit: number = 100
   ): Promise<KYCProfile[]> {
-    const collection = await this.getCollection();
-    
-    return collection.find({
+    return this.findMany({
       expiresAt: { $lte: beforeDate },
       status: 'approved',
-    })
-      .sort({ expiresAt: 1 })
-      .limit(limit)
-      .toArray() as Promise<KYCProfile[]>;
+    } as any, {
+      sort: { expiresAt: 1 },
+      limit,
+    });
   }
   
   /**
@@ -218,15 +178,13 @@ export class KYCRepository {
     beforeDate: Date,
     limit: number = 100
   ): Promise<KYCProfile[]> {
-    const collection = await this.getCollection();
-    
-    return collection.find({
+    return this.findMany({
       nextReviewAt: { $lte: beforeDate },
       status: 'approved',
-    })
-      .sort({ nextReviewAt: 1 })
-      .limit(limit)
-      .toArray() as Promise<KYCProfile[]>;
+    } as any, {
+      sort: { nextReviewAt: 1 },
+      limit,
+    });
   }
   
   /**
@@ -236,48 +194,22 @@ export class KYCRepository {
     tenantId: string,
     limit: number = 100
   ): Promise<KYCProfile[]> {
-    const collection = await this.getCollection();
-    
-    return collection.find({
+    return this.findMany({
       tenantId,
       $or: [
         { riskLevel: { $in: ['high', 'critical'] } },
         { isHighRisk: true },
         { isPEP: true },
       ],
-    })
-      .sort({ riskScore: -1 })
-      .limit(limit)
-      .toArray() as Promise<KYCProfile[]>;
+    } as any, {
+      sort: { riskScore: -1 },
+      limit,
+    });
   }
   
   // ───────────────────────────────────────────────────────────────────
-  // Update
+  // Domain-Specific Updates
   // ───────────────────────────────────────────────────────────────────
-  
-  /**
-   * Update profile
-   */
-  async update(
-    id: string,
-    update: Partial<KYCProfile>,
-    session?: ClientSession
-  ): Promise<KYCProfile | null> {
-    const collection = await this.getCollection();
-    
-    const result = await collection.findOneAndUpdate(
-      { id },
-      {
-        $set: {
-          ...update,
-          updatedAt: new Date(),
-        },
-      },
-      { returnDocument: 'after', session }
-    );
-    
-    return result as KYCProfile | null;
-  }
   
   /**
    * Update status with history
@@ -287,34 +219,25 @@ export class KYCRepository {
     newStatus: KYCStatus,
     reason: string,
     triggeredBy: 'user' | 'system' | 'admin' | 'provider',
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCProfile | null> {
-    const collection = await this.getCollection();
-    const profile = await this.findById(id, session);
-    
+    const profile = await this.findById(id, options);
     if (!profile) return null;
     
-    const now = new Date();
-    
-    const result = await collection.findOneAndUpdate(
-      { id },
-      {
-        $set: {
-          status: newStatus,
-          updatedAt: now,
-        },
-        $push: {
-          statusHistory: {
-            timestamp: now,
-            previousStatus: profile.status,
-            newStatus,
-            reason,
-            triggeredBy,
-          },
-        },
+    const result = await this.updateWithOperators(id, {
+      $set: {
+        status: newStatus,
       },
-      { returnDocument: 'after', session }
-    );
+      $push: {
+        statusHistory: {
+          timestamp: new Date(),
+          previousStatus: profile.status,
+          newStatus,
+          reason,
+          triggeredBy,
+        },
+      } as any,
+    }, options);
     
     logger.info('KYC profile status updated', {
       profileId: id,
@@ -323,7 +246,7 @@ export class KYCRepository {
       reason,
     });
     
-    return result as KYCProfile | null;
+    return result;
   }
   
   /**
@@ -333,30 +256,22 @@ export class KYCRepository {
     id: string,
     newTier: KYCTier,
     reason: string,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCProfile | null> {
-    const collection = await this.getCollection();
-    const now = new Date();
+    const result = await this.update(id, {
+      currentTier: newTier,
+      lastVerifiedAt: new Date(),
+    } as any, options);
     
-    const result = await collection.findOneAndUpdate(
-      { id },
-      {
-        $set: {
-          currentTier: newTier,
-          lastVerifiedAt: now,
-          updatedAt: now,
-        },
-      },
-      { returnDocument: 'after', session }
-    );
+    if (result) {
+      logger.info('KYC profile tier updated', {
+        profileId: id,
+        newTier,
+        reason,
+      });
+    }
     
-    logger.info('KYC profile tier updated', {
-      profileId: id,
-      newTier,
-      reason,
-    });
-    
-    return result as KYCProfile | null;
+    return result;
   }
   
   /**
@@ -366,26 +281,15 @@ export class KYCRepository {
     id: string,
     riskLevel: RiskLevel,
     riskScore: number,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCProfile | null> {
-    const collection = await this.getCollection();
-    
     const isHighRisk = riskLevel === 'high' || riskLevel === 'critical';
     
-    const result = await collection.findOneAndUpdate(
-      { id },
-      {
-        $set: {
-          riskLevel,
-          riskScore,
-          isHighRisk,
-          updatedAt: new Date(),
-        },
-      },
-      { returnDocument: 'after', session }
-    );
-    
-    return result as KYCProfile | null;
+    return this.update(id, {
+      riskLevel,
+      riskScore,
+      isHighRisk,
+    } as any, options);
   }
   
   /**
@@ -394,29 +298,21 @@ export class KYCRepository {
   async addAddress(
     id: string,
     address: KYCAddress,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCProfile | null> {
-    const collection = await this.getCollection();
-    
-    // If primary, unset other primary addresses
+    // If primary, unset other primary addresses first
     if (address.isPrimary) {
+      const collection = await this.getCollection();
       await collection.updateOne(
         { id, 'addresses.isPrimary': true },
         { $set: { 'addresses.$.isPrimary': false } },
-        { session }
+        { session: options?.session }
       );
     }
     
-    const result = await collection.findOneAndUpdate(
-      { id },
-      {
-        $push: { addresses: address },
-        $set: { updatedAt: new Date() },
-      },
-      { returnDocument: 'after', session }
-    );
-    
-    return result as KYCProfile | null;
+    return this.updateWithOperators(id, {
+      $push: { addresses: address } as any,
+    }, options);
   }
   
   /**
@@ -425,20 +321,11 @@ export class KYCRepository {
   async addProviderReference(
     id: string,
     reference: ProviderReference,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCProfile | null> {
-    const collection = await this.getCollection();
-    
-    const result = await collection.findOneAndUpdate(
-      { id },
-      {
-        $push: { providerReferences: reference },
-        $set: { updatedAt: new Date() },
-      },
-      { returnDocument: 'after', session }
-    );
-    
-    return result as KYCProfile | null;
+    return this.updateWithOperators(id, {
+      $push: { providerReferences: reference } as any,
+    }, options);
   }
   
   /**
@@ -448,23 +335,12 @@ export class KYCRepository {
     id: string,
     isPEP: boolean,
     requiresEDD: boolean,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCProfile | null> {
-    const collection = await this.getCollection();
-    
-    const result = await collection.findOneAndUpdate(
-      { id },
-      {
-        $set: {
-          isPEP,
-          requiresEnhancedDueDiligence: requiresEDD,
-          updatedAt: new Date(),
-        },
-      },
-      { returnDocument: 'after', session }
-    );
-    
-    return result as KYCProfile | null;
+    return this.update(id, {
+      isPEP,
+      requiresEnhancedDueDiligence: requiresEDD,
+    } as any, options);
   }
   
   /**
@@ -474,30 +350,18 @@ export class KYCRepository {
     id: string,
     expiresAt: Date,
     nextReviewAt?: Date,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<KYCProfile | null> {
-    const collection = await this.getCollection();
-    
-    const update: any = {
-      expiresAt,
-      updatedAt: new Date(),
-    };
-    
+    const update: any = { expiresAt };
     if (nextReviewAt) {
       update.nextReviewAt = nextReviewAt;
     }
     
-    const result = await collection.findOneAndUpdate(
-      { id },
-      { $set: update },
-      { returnDocument: 'after', session }
-    );
-    
-    return result as KYCProfile | null;
+    return this.update(id, update, options);
   }
   
   // ───────────────────────────────────────────────────────────────────
-  // Delete
+  // GDPR / Soft Delete
   // ───────────────────────────────────────────────────────────────────
   
   /**
@@ -505,44 +369,41 @@ export class KYCRepository {
    */
   async softDelete(
     id: string,
-    session?: ClientSession
+    options?: WriteOptions
   ): Promise<boolean> {
-    const collection = await this.getCollection();
-    
-    const result = await collection.updateOne(
-      { id },
-      {
-        $set: {
-          status: 'deleted' as any,
-          personalInfo: undefined,
-          addresses: [],
-          documents: [],
-          updatedAt: new Date(),
-        },
-        $push: {
-          statusHistory: {
-            timestamp: new Date(),
-            newStatus: 'deleted',
-            reason: 'GDPR deletion request',
-            triggeredBy: 'system',
-          },
-        },
+    const result = await this.updateWithOperators(id, {
+      $set: {
+        status: 'deleted' as any,
+        personalInfo: undefined,
+        addresses: [],
+        documents: [],
       },
-      { session }
-    );
+      $push: {
+        statusHistory: {
+          timestamp: new Date(),
+          newStatus: 'deleted',
+          reason: 'GDPR deletion request',
+          triggeredBy: 'system',
+        },
+      } as any,
+    }, options);
     
-    return result.modifiedCount > 0;
+    return result !== null;
   }
   
   // ───────────────────────────────────────────────────────────────────
   // Helpers
   // ───────────────────────────────────────────────────────────────────
   
-  private buildFilter(filter: KYCProfileFilter): Filter<KYCProfile> {
-    const mongoFilter: Filter<KYCProfile> = {};
+  private buildKYCFilter(filter: KYCProfileFilter): Record<string, unknown> {
+    const mongoFilter: Record<string, unknown> = {};
     
     if (filter.tenantId) {
       mongoFilter.tenantId = filter.tenantId;
+    }
+    
+    if (filter.userId) {
+      mongoFilter.userId = filter.userId;
     }
     
     if (filter.status) {
@@ -576,11 +437,11 @@ export class KYCRepository {
     }
     
     if (filter.expiringBefore) {
-      mongoFilter.expiresAt = { $lte: filter.expiringBefore } as any;
+      mongoFilter.expiresAt = { $lte: filter.expiringBefore };
     }
     
     if (filter.nextReviewBefore) {
-      mongoFilter.nextReviewAt = { $lte: filter.nextReviewBefore } as any;
+      mongoFilter.nextReviewAt = { $lte: filter.nextReviewBefore };
     }
     
     return mongoFilter;

@@ -135,25 +135,25 @@ export default function Dashboard() {
         <ServiceCard 
           name="Auth Service" 
           icon={Shield}
-          url="http://localhost:3003/health"
+          url="http://localhost:9001/health"
           color="var(--accent-purple)"
         />
         <ServiceCard 
           name="Payment Service" 
           icon={CreditCard}
-          url="http://localhost:3004/health"
+          url="http://localhost:9002/health"
           color="var(--accent-cyan)"
         />
         <ServiceCard 
           name="Bonus Service" 
           icon={Gift}
-          url="http://localhost:3005/health"
+          url="http://localhost:9003/health"
           color="var(--accent-orange)"
         />
         <ServiceCard 
           name="Notification Service" 
           icon={Bell}
-          url="http://localhost:3006/health"
+          url="http://localhost:9004/health"
           color="var(--accent-yellow)"
         />
       </div>

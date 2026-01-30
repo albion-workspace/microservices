@@ -53,7 +53,7 @@ export default function RealtimeTest() {
     
     // GraphQL subscription query for health updates
     const query = encodeURIComponent('subscription { health { timestamp service status uptime database { latencyMs } } }')
-    const url = `http://localhost:3004/graphql/stream?query=${query}`
+    const url = `http://localhost:9002/graphql/stream?query=${query}`
     
     const eventSource = new EventSource(url)
     
@@ -104,7 +104,7 @@ export default function RealtimeTest() {
     
     addLog('info', 'socketio', 'Connecting to Socket.IO...')
     
-    const socket = io('http://localhost:3004', {
+    const socket = io('http://localhost:9002', {
       transports: ['websocket', 'polling'],
       auth: {
         token: 'Bearer dev-token',
@@ -205,7 +205,7 @@ export default function RealtimeTest() {
     }, ...prev])
     
     const query = encodeURIComponent('subscription { logs { timestamp level service message data } }')
-    const url = `http://localhost:3004/graphql/stream?query=${query}`
+    const url = `http://localhost:9002/graphql/stream?query=${query}`
     
     console.log('[Logs] Connecting to:', url)
     

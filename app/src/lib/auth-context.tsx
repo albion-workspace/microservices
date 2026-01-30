@@ -65,7 +65,7 @@ export interface RegisterData {
 // ═══════════════════════════════════════════════════════════════════
 
 const TENANT_ID = 'default-tenant'; // Change this per your app
-const AUTH_SERVICE_URL = (import.meta.env as any).VITE_AUTH_SERVICE_URL || 'http://localhost:3003/graphql';
+const AUTH_SERVICE_URL = (import.meta.env as any).VITE_AUTH_SERVICE_URL || 'http://localhost:9001/graphql';
 const STORAGE_KEYS = {
   ACCESS_TOKEN: 'auth_access_token',
   REFRESH_TOKEN: 'auth_refresh_token',

@@ -40,12 +40,13 @@
     "jsonwebtoken": "^9.0.3",
     "mongodb": "^7.0.0",
     "redis": "^5.10.0",
-    "socket.io": "^4.8.1"
+    "socket.io": "^4.8.1",
+    "tsx": "^4.7.0",
+    "typescript": "^5.9.3"
   },
   "devDependencies": {
     "@types/jsonwebtoken": "^9.0.10",
-    "@types/node": "^25.0.3",
-    "typescript": "^5.9.3"
+    "@types/node": "^25.0.3"
   },
   "engines": {
     "node": ">=18.0.0"

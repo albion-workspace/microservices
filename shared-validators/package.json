@@ -1,7 +1,7 @@
 {
-  "name": "bonus-shared",
+  "name": "shared-validators",
   "version": "1.0.0",
-  "description": "Shared bonus types and client-safe eligibility validators",
+  "description": "Shared client-safe validators for eligibility checking (bonus, KYC, limits). No database dependencies - pure functions only.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -10,13 +10,13 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
-    "./types": {
-      "types": "./dist/types/index.d.ts",
-      "import": "./dist/types/index.js"
+    "./bonus": {
+      "types": "./dist/BonusEligibility.d.ts",
+      "import": "./dist/BonusEligibility.js"
     },
-    "./validators": {
-      "types": "./dist/validators/index.d.ts",
-      "import": "./dist/validators/index.js"
+    "./kyc": {
+      "types": "./dist/KYCEligibility.d.ts",
+      "import": "./dist/KYCEligibility.js"
     }
   },
   "scripts": {
@@ -27,15 +27,15 @@
   "devDependencies": {
     "typescript": "^5.3.0"
   },
-  "peerDependencies": {},
   "keywords": [
     "bonus",
+    "kyc",
     "eligibility",
     "validation",
+    "limits",
     "shared",
     "client",
     "server"
   ],
   "license": "MIT"
 }
-

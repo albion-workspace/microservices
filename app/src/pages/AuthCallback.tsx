@@ -42,7 +42,7 @@ export default function AuthCallback() {
         localStorage.setItem('auth_refresh_token', refreshToken);
 
         // Fetch user data using auth context's graphqlRequest
-        const authServiceUrl = (import.meta.env as any).VITE_AUTH_SERVICE_URL || 'http://localhost:3003/graphql';
+        const authServiceUrl = (import.meta.env as any).VITE_AUTH_SERVICE_URL || 'http://localhost:9001/graphql';
         const response = await fetch(authServiceUrl, {
           method: 'POST',
           headers: {

@@ -10,10 +10,11 @@ interface HealthLog {
 }
 
 const services = [
-  { name: 'auth-service', baseUrl: 'http://localhost:3003' },
-  { name: 'payment-service', baseUrl: 'http://localhost:3004' },
-  { name: 'bonus-service', baseUrl: 'http://localhost:3005' },
-  { name: 'notification-service', baseUrl: 'http://localhost:3006' },
+  { name: 'auth-service', baseUrl: 'http://localhost:9001' },
+  { name: 'payment-service', baseUrl: 'http://localhost:9002' },
+  { name: 'bonus-service', baseUrl: 'http://localhost:9003' },
+  { name: 'notification-service', baseUrl: 'http://localhost:9004' },
+  { name: 'kyc-service', baseUrl: 'http://localhost:9005' },
 ]
 
 interface HealthResponse {

@@ -8,8 +8,8 @@ import {
   Hash, MessageCircle, LogIn, Zap
 } from 'lucide-react'
 
-const NOTIFICATION_SERVICE_URL = 'http://localhost:3006/graphql'
-const NOTIFICATION_SOCKET_URL = 'http://localhost:3006'
+const NOTIFICATION_SERVICE_URL = 'http://localhost:9004/graphql'
+const NOTIFICATION_SOCKET_URL = 'http://localhost:9004'
 
 interface Notification {
   id: string
