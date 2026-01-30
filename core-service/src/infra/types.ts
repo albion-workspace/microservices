@@ -80,6 +80,9 @@ export interface DockerConfig extends ServiceConfig {
   
   /** Service-core package name as it appears in node_modules (e.g., '@myorg/service-core') */
   serviceCorePackageName?: string;
+  
+  /** Core service folder name in project root (default: core-service) */
+  coreServiceFolderName?: string;
 }
 
 export interface DockerComposeConfig extends ServiceConfig {

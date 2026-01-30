@@ -1,0 +1,96 @@
+{
+  "mode": "shared",
+  "description": "Shared/Production mode - Redis Sentinel, MongoDB Replica Set, gateway routing",
+  "gateway": {
+    "port": 9999,
+    "defaultService": "auth",
+    "rateLimit": 100
+  },
+  "services": [
+    {
+      "name": "auth",
+      "host": "auth-service",
+      "port": 9001,
+      "database": "auth_service",
+      "healthPath": "/health",
+      "graphqlPath": "/graphql",
+      "replicas": 2
+    },
+    {
+      "name": "payment",
+      "host": "payment-service",
+      "port": 9002,
+      "database": "payment_service",
+      "healthPath": "/health",
+      "graphqlPath": "/graphql",
+      "replicas": 2
+    },
+    {
+      "name": "bonus",
+      "host": "bonus-service",
+      "port": 9003,
+      "database": "bonus_service",
+      "healthPath": "/health",
+      "graphqlPath": "/graphql",
+      "replicas": 2
+    },
+    {
+      "name": "notification",
+      "host": "notification-service",
+      "port": 9004,
+      "database": "notification_service",
+      "healthPath": "/health",
+      "graphqlPath": "/graphql",
+      "replicas": 2
+    },
+    {
+      "name": "kyc",
+      "host": "kyc-service",
+      "port": 9005,
+      "database": "kyc_service",
+      "healthPath": "/health",
+      "graphqlPath": "/graphql",
+      "replicas": 2
+    }
+  ],
+  "infrastructure": {
+    "mongodb": {
+      "mode": "replicaSet",
+      "host": "mongo-primary",
+      "port": 27017,
+      "replicaSet": "rs0",
+      "members": [
+        { "host": "mongo-primary", "port": 27017, "priority": 2 },
+        { "host": "mongo-secondary-1", "port": 27017, "priority": 1 },
+        { "host": "mongo-secondary-2", "port": 27017, "priority": 1 }
+      ]
+    },
+    "redis": {
+      "mode": "sentinel",
+      "host": "redis-master",
+      "port": 6379,
+      "sentinel": {
+        "name": "mymaster",
+        "hosts": [
+          { "host": "redis-sentinel-1", "port": 26379 },
+          { "host": "redis-sentinel-2", "port": 26379 },
+          { "host": "redis-sentinel-3", "port": 26379 }
+        ]
+      }
+    }
+  },
+  "environments": {
+    "local": {
+      "mongoUri": "mongodb://mongo-primary:27017,mongo-secondary-1:27017,mongo-secondary-2:27017/?replicaSet=rs0",
+      "redisUrl": "redis://redis-master:6379"
+    },
+    "docker": {
+      "mongoUri": "mongodb://mongo-primary:27017,mongo-secondary-1:27017,mongo-secondary-2:27017/?replicaSet=rs0",
+      "redisUrl": "redis://redis-master:6379"
+    },
+    "prod": {
+      "mongoUri": "${MONGODB_URI}",
+      "redisUrl": "${REDIS_URL}"
+    }
+  }
+}

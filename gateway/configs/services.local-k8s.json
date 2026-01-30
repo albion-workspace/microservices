@@ -1,0 +1,94 @@
+{
+  "mode": "local-k8s",
+  "description": "Local Kubernetes testing (Docker Desktop K8s)",
+  "gateway": {
+    "port": 9999,
+    "defaultService": "auth",
+    "rateLimit": 100
+  },
+  "services": [
+    {
+      "name": "auth",
+      "host": "auth-service.microservices.svc.cluster.local",
+      "port": 9001,
+      "database": "auth_service",
+      "healthPath": "/health",
+      "graphqlPath": "/graphql",
+      "replicas": 1
+    },
+    {
+      "name": "payment",
+      "host": "payment-service.microservices.svc.cluster.local",
+      "port": 9002,
+      "database": "payment_service",
+      "healthPath": "/health",
+      "graphqlPath": "/graphql",
+      "replicas": 1
+    },
+    {
+      "name": "bonus",
+      "host": "bonus-service.microservices.svc.cluster.local",
+      "port": 9003,
+      "database": "bonus_service",
+      "healthPath": "/health",
+      "graphqlPath": "/graphql",
+      "replicas": 1
+    },
+    {
+      "name": "notification",
+      "host": "notification-service.microservices.svc.cluster.local",
+      "port": 9004,
+      "database": "notification_service",
+      "healthPath": "/health",
+      "graphqlPath": "/graphql",
+      "replicas": 1
+    },
+    {
+      "name": "kyc",
+      "host": "kyc-service.microservices.svc.cluster.local",
+      "port": 9005,
+      "database": "kyc_service",
+      "healthPath": "/health",
+      "graphqlPath": "/graphql",
+      "replicas": 1
+    }
+  ],
+  "infrastructure": {
+    "mongodb": {
+      "mode": "single",
+      "host": "mongodb.microservices.svc.cluster.local",
+      "port": 27017,
+      "replicaSet": null
+    },
+    "redis": {
+      "mode": "single",
+      "host": "redis.microservices.svc.cluster.local",
+      "port": 6379,
+      "sentinel": null
+    }
+  },
+  "kubernetes": {
+    "namespace": "microservices",
+    "imagePullPolicy": "IfNotPresent",
+    "resources": {
+      "requests": {
+        "cpu": "100m",
+        "memory": "128Mi"
+      },
+      "limits": {
+        "cpu": "500m",
+        "memory": "512Mi"
+      }
+    }
+  },
+  "environments": {
+    "local": {
+      "mongoUri": "mongodb://mongodb.microservices.svc.cluster.local:27017",
+      "redisUrl": "redis://redis.microservices.svc.cluster.local:6379"
+    },
+    "docker": {
+      "mongoUri": "mongodb://mongodb:27017",
+      "redisUrl": "redis://redis:6379"
+    }
+  }
+}

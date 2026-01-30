@@ -10,41 +10,28 @@
  * Cross-platform (Windows, Linux, Mac)
  * 
  * Usage:
- *   npm run docker:build        # Build all images
- *   npm run docker:up           # Start containers
- *   npm run docker:down         # Stop containers
- *   npm run docker:logs         # View logs
- *   npm run docker:status       # Check status
+ *   npm run docker:build                  # Build all images
+ *   npm run docker:up                     # Start containers (dev config)
+ *   npm run docker:up -- --config=shared  # Start with shared config
+ *   npm run docker:down                   # Stop containers
+ *   npm run docker:logs                   # View logs
+ *   npm run docker:status                 # Check status
  */
 
 import { spawn, execSync } from 'node:child_process';
-import { readFile, access } from 'node:fs/promises';
+import { access } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { loadConfigFromArgs, logConfigSummary, type ServicesConfig } from './config-loader.js';
+import { runScript, runLongRunningScript, printHeader } from './script-runner.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = join(__dirname, '..', '..');
 const GATEWAY_DIR = join(__dirname, '..');
 const GENERATED_DIR = join(GATEWAY_DIR, 'generated');
-const CONFIGS_DIR = join(GATEWAY_DIR, 'configs');
-
-interface ServiceConfig {
-  name: string;
-  port: number;
-}
-
-interface ServicesConfig {
-  gateway: { port: number };
-  services: ServiceConfig[];
-}
 
 type DockerCommand = 'build' | 'up' | 'down' | 'logs' | 'status' | 'ps';
-
-async function loadConfig(): Promise<ServicesConfig> {
-  const configPath = join(CONFIGS_DIR, 'services.json');
-  const content = await readFile(configPath, 'utf-8');
-  return JSON.parse(content);
-}
 
 function parseArgs(): { command: DockerCommand; env: 'dev' | 'prod' } {
   const args = process.argv.slice(2);
@@ -107,21 +94,19 @@ async function generateConfigs(): Promise<void> {
 }
 
 async function dockerBuild(config: ServicesConfig): Promise<void> {
-  console.log('');
-  console.log('═══════════════════════════════════════════════════════════════════');
-  console.log(' Building Docker Images');
-  console.log('═══════════════════════════════════════════════════════════════════');
-  console.log('');
+  printHeader('Building Docker Images');
 
   for (const service of config.services) {
-    const serviceDir = join(ROOT_DIR, `${service.name}-service`);
-    const imageName = `${service.name}-service:latest`;
+    const serviceName = `${service.name}-service`;
+    const imageName = `${serviceName}:latest`;
+    const dockerfilePath = `${serviceName}/Dockerfile`;
     
     console.log(`Building ${imageName}...`);
     
     try {
-      execSync(`docker build -t ${imageName} .`, {
-        cwd: serviceDir,
+      // Build from project root with -f flag (as Dockerfile expects)
+      execSync(`docker build -f ${dockerfilePath} -t ${imageName} .`, {
+        cwd: ROOT_DIR,
         stdio: 'inherit',
       });
       console.log(`✅ Built ${imageName}`);
@@ -136,11 +121,7 @@ async function dockerBuild(config: ServicesConfig): Promise<void> {
 }
 
 async function dockerUp(env: 'dev' | 'prod'): Promise<void> {
-  console.log('');
-  console.log('═══════════════════════════════════════════════════════════════════');
-  console.log(` Starting Docker Compose (${env})`);
-  console.log('═══════════════════════════════════════════════════════════════════');
-  console.log('');
+  printHeader(`Starting Docker Compose (${env})`);
 
   if (!(await checkComposeFileExists(env))) {
     await generateConfigs();
@@ -206,11 +187,7 @@ async function dockerLogs(env: 'dev' | 'prod'): Promise<void> {
 }
 
 async function dockerStatus(env: 'dev' | 'prod', config: ServicesConfig): Promise<void> {
-  console.log('');
-  console.log('═══════════════════════════════════════════════════════════════════');
-  console.log(' Docker Status');
-  console.log('═══════════════════════════════════════════════════════════════════');
-  console.log('');
+  printHeader('Docker Status');
 
   // Check Docker
   if (!checkDockerRunning()) {
@@ -252,12 +229,13 @@ async function dockerStatus(env: 'dev' | 'prod', config: ServicesConfig): Promis
 
 async function main(): Promise<void> {
   const { command, env } = parseArgs();
-  const config = await loadConfig();
+  const { config, mode } = await loadConfigFromArgs();
+
+  console.log('');
+  logConfigSummary(config, mode);
 
   if (!checkDockerRunning() && command !== 'status') {
-    console.error('❌ Docker is not running. Please start Docker Desktop.');
-    process.exitCode = 1;
-    return;
+    throw new Error('Docker is not running. Please start Docker Desktop.');
   }
 
   switch (command) {
@@ -280,7 +258,10 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  console.error('Docker script failed:', err.message);
-  process.exitCode = 1;
-});
+// Logs command is long-running, others complete and exit
+const isLogsCommand = process.argv.includes('logs');
+if (isLogsCommand) {
+  runLongRunningScript(main, { name: 'Docker' });
+} else {
+  runScript(main, { name: 'Docker' });
+}

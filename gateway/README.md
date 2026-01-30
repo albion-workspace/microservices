@@ -23,14 +23,27 @@ npm run health
 
 ## Available Commands
 
+All commands support `--config=dev` (default) or `--config=shared` to switch configuration profiles.
+
 ### Development
 
 | Command | Description |
 |---------|-------------|
-| `npm run dev` | Start all services (per-service mode) |
-| `npm run dev:shared` | Start in shared mode (single gateway) |
+| `npm run dev` | Start all services (dev config) |
+| `npm run dev:shared` | Start all services (shared config) |
 | `npm run dev:docker` | Start using Docker Compose |
-| `npm run health` | Check health of all services |
+| `npm run dev:docker:shared` | Docker Compose with shared config |
+
+### Health Check
+
+| Command | Description |
+|---------|-------------|
+| `npm run health` | Check localhost (local dev) |
+| `npm run health:docker` | Check Docker containers |
+| `npm run health:k8s` | Check K8s pods |
+| `npm run health:shared` | Check shared config (localhost) |
+| `npm run health:shared:docker` | Check shared config (Docker) |
+| `npm run health:shared:k8s` | Check shared config (K8s) |
 
 ### Docker Operations
 
@@ -38,34 +51,43 @@ npm run health
 |---------|-------------|
 | `npm run docker:status` | Check Docker and container status |
 | `npm run docker:build` | Build all service images |
-| `npm run docker:up` | Start containers (dev mode) |
+| `npm run docker:up` | Start containers (dev config) |
+| `npm run docker:up:shared` | Start containers (shared config) |
 | `npm run docker:down` | Stop containers |
 | `npm run docker:logs` | Stream container logs |
-| `npm run docker:up:prod` | Start containers (prod mode with gateway) |
+| `npm run docker:up:prod` | Start prod mode with gateway |
 | `npm run docker:down:prod` | Stop prod containers |
 
 ### Kubernetes Operations
 
 | Command | Description |
 |---------|-------------|
-| `npm run k8s:status` | Check cluster and pod status |
-| `npm run k8s:apply` | Apply all manifests |
+| `npm run k8s:status` | Check cluster/pod status (dev) |
+| `npm run k8s:status:local` | Check status (local-k8s config) |
+| `npm run k8s:status:shared` | Check status (shared config) |
+| `npm run k8s:apply` | Apply manifests (dev) |
+| `npm run k8s:apply:local` | Apply manifests (local-k8s) |
+| `npm run k8s:apply:shared` | Apply manifests (shared config) |
 | `npm run k8s:delete` | Delete all resources |
-| `npm run k8s:forward` | Port forward all services |
+| `npm run k8s:forward` | Port forward (dev) |
+| `npm run k8s:forward:local` | Port forward (local-k8s) |
+| `npm run k8s:forward:shared` | Port forward (shared config) |
 | `npm run k8s:logs` | Stream logs from all pods |
-| `npm run k8s:secrets` | Create secrets (default: docker env) |
-| `npm run k8s:secrets:dev` | Create secrets for dev |
-| `npm run k8s:secrets:docker` | Create secrets for docker |
+| `npm run k8s:secrets` | Create secrets |
+| `npm run k8s:secrets:local` | Create secrets (local-k8s) |
+| `npm run k8s:secrets:shared` | Create secrets (shared config) |
 
 ### Infrastructure Generation
 
 | Command | Description |
 |---------|-------------|
-| `npm run generate` | Generate all configs |
+| `npm run generate` | Generate all (dev config) |
+| `npm run generate:shared` | Generate all (shared config) |
+| `npm run generate:all` | Generate everything (dev) |
+| `npm run generate:all:shared` | Generate everything (shared) |
 | `npm run generate:nginx` | Generate nginx config |
 | `npm run generate:docker` | Generate docker-compose files |
 | `npm run generate:k8s` | Generate Kubernetes manifests |
-| `npm run generate:all` | Generate everything |
 
 ---
 
@@ -74,12 +96,15 @@ npm run health
 ```
 gateway/
 ├── configs/
-│   └── services.json         # All services definition (single source of truth)
+│   ├── services.dev.json     # Development config (single MongoDB/Redis)
+│   └── services.shared.json  # Production config (Sentinel, ReplicaSet)
 ├── scripts/
+│   ├── config-loader.ts      # Config loading utility
 │   ├── dev.ts                # Unified development script
 │   ├── docker.ts             # Docker orchestration
 │   ├── generate.ts           # Infrastructure generator
-│   └── health-check.ts       # Service health checker
+│   ├── health-check.ts       # Service health checker
+│   └── k8s.ts                # Kubernetes orchestration
 ├── generated/                # Generated configs (gitignored)
 │   ├── nginx/
 │   │   └── nginx.conf
@@ -92,6 +117,40 @@ gateway/
 ```
 
 **Note**: All scripts are TypeScript for cross-platform compatibility (Windows, Linux, Mac).
+
+---
+
+## Configuration Profiles
+
+Configuration files follow the pattern `services.{mode}.json`. Use `--config={mode}` to select.
+
+### Built-in Profiles
+
+| Mode | File | Description |
+|------|------|-------------|
+| `dev` | `services.dev.json` | Single MongoDB/Redis, local development (default) |
+| `shared` | `services.shared.json` | MongoDB Replica Set, Redis Sentinel |
+| `local-k8s` | `services.local-k8s.json` | Docker Desktop Kubernetes testing |
+
+### Custom Profiles (Brands)
+
+Create your own config by copying an existing one:
+
+```bash
+# Create a brand-specific config
+cp configs/services.dev.json configs/services.acme.json
+
+# Edit with brand-specific settings
+# Then use it:
+npm run dev -- --config=acme
+npm run generate -- --config=acme
+npm run docker:up -- --config=acme
+```
+
+Example use cases:
+- `services.brand-a.json` - Brand A configuration
+- `services.staging.json` - Staging environment
+- `services.local-k8s.json` - Local Kubernetes testing
 
 ---
 

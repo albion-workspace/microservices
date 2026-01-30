@@ -9,46 +9,27 @@
  * Cross-platform (Windows, Linux, Mac)
  * 
  * Usage:
- *   npm run dev                 # Per-service mode (default)
- *   npm run dev -- --mode=shared    # Shared mode
- *   npm run dev -- --mode=docker    # Docker mode
+ *   npm run dev                          # Per-service mode (default, dev config)
+ *   npm run dev -- --config=shared       # Per-service with shared config
+ *   npm run dev -- --mode=docker         # Docker mode
+ *   npm run dev:shared                   # Alias for --config=shared
  */
 
 import { spawn, ChildProcess } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { access } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { loadConfigFromArgs, logConfigSummary, type ServicesConfig } from './config-loader.js';
+import { runLongRunningScript, printHeader, printFooter } from './script-runner.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = join(__dirname, '..', '..');
 const GATEWAY_DIR = join(__dirname, '..');
-const CONFIGS_DIR = join(GATEWAY_DIR, 'configs');
-
-interface ServiceConfig {
-  name: string;
-  host: string;
-  port: number;
-  database: string;
-  healthPath: string;
-}
-
-interface ServicesConfig {
-  gateway: {
-    port: number;
-    defaultService: string;
-  };
-  services: ServiceConfig[];
-}
 
 type DevMode = 'per-service' | 'shared' | 'docker';
 
 const processes: ChildProcess[] = [];
-
-async function loadConfig(): Promise<ServicesConfig> {
-  const configPath = join(CONFIGS_DIR, 'services.json');
-  const content = await readFile(configPath, 'utf-8');
-  return JSON.parse(content);
-}
 
 function parseArgs(): { mode: DevMode } {
   const args = process.argv.slice(2);
@@ -111,11 +92,7 @@ function startService(serviceName: string, config: ServicesConfig): ChildProcess
 }
 
 async function runPerServiceMode(config: ServicesConfig): Promise<void> {
-  console.log('');
-  console.log('═══════════════════════════════════════════════════════════════════');
-  console.log(' Development Mode: Per-Service');
-  console.log('═══════════════════════════════════════════════════════════════════');
-  console.log('');
+  printHeader('Development Mode: Per-Service');
   console.log('Starting services:');
   
   for (const service of config.services) {
@@ -123,11 +100,7 @@ async function runPerServiceMode(config: ServicesConfig): Promise<void> {
     processes.push(child);
   }
 
-  console.log('');
-  console.log('═══════════════════════════════════════════════════════════════════');
-  console.log(' All services starting...');
-  console.log('═══════════════════════════════════════════════════════════════════');
-  console.log('');
+  printFooter('All services starting...');
   console.log('Endpoints:');
   for (const service of config.services) {
     console.log(`  ${service.name.padEnd(15)} http://localhost:${service.port}/graphql`);
@@ -139,48 +112,37 @@ async function runPerServiceMode(config: ServicesConfig): Promise<void> {
 }
 
 async function runSharedMode(config: ServicesConfig): Promise<void> {
-  console.log('');
-  console.log('═══════════════════════════════════════════════════════════════════');
-  console.log(' Development Mode: Shared (Single Gateway)');
-  console.log('═══════════════════════════════════════════════════════════════════');
-  console.log('');
+  printHeader('Development Mode: Shared (Single Gateway)');
   console.log(`Gateway port: ${config.gateway.port}`);
   console.log('');
-  console.log('⚠️  Shared mode not yet implemented.');
-  console.log('    This will run all services in a single process.');
-  console.log('    For now, use per-service mode: npm run dev');
+  console.log('Shared mode not yet implemented.');
+  console.log('This will run all services in a single process.');
+  console.log('For now, use per-service mode: npm run dev');
   console.log('');
-  
-  // TODO: Implement shared mode
-  // This would require:
-  // 1. Each service to export its modules
-  // 2. A unified entry point that loads all modules
-  // 3. Single createGateway call with all services
 }
 
 async function runDockerMode(config: ServicesConfig): Promise<void> {
-  console.log('');
-  console.log('═══════════════════════════════════════════════════════════════════');
-  console.log(' Development Mode: Docker Compose');
-  console.log('═══════════════════════════════════════════════════════════════════');
-  console.log('');
+  printHeader('Development Mode: Docker Compose');
 
   // Check if docker-compose file exists
   const composeFile = join(GATEWAY_DIR, 'generated', 'docker', 'docker-compose.dev.yml');
   
+  let fileExists = false;
   try {
-    await readFile(composeFile);
+    await access(composeFile);
+    fileExists = true;
   } catch {
+    fileExists = false;
+  }
+  
+  if (!fileExists) {
     console.log('Docker Compose file not found. Generating...');
     console.log('');
     
     // Generate configs first
     const generateScript = join(__dirname, 'generate.ts');
-    const generateProcess = spawn('node', [
-      join(ROOT_DIR, 'core-service', 'node_modules', 'tsx', 'dist', 'cli.mjs'),
-      generateScript,
-      '--docker'
-    ], {
+    const tsxPath = join(ROOT_DIR, 'core-service', 'node_modules', 'tsx', 'dist', 'cli.mjs');
+    const generateProcess = spawn('node', [tsxPath, generateScript, '--docker'], {
       cwd: GATEWAY_DIR,
       stdio: 'inherit',
       shell: true,
@@ -245,7 +207,10 @@ function setupShutdown(): void {
 
 async function main(): Promise<void> {
   const { mode } = parseArgs();
-  const config = await loadConfig();
+  const { config, mode: configMode } = await loadConfigFromArgs();
+
+  console.log('');
+  logConfigSummary(config, configMode);
 
   setupShutdown();
 
@@ -262,7 +227,5 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  console.error('Development script failed:', err);
-  process.exitCode = 1;
-});
+// Dev scripts are always long-running (services keep running)
+runLongRunningScript(main, { name: 'Dev' });

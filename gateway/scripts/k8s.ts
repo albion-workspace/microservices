@@ -10,44 +10,30 @@
  * Cross-platform (Windows, Linux, Mac)
  * 
  * Usage:
- *   npm run k8s:apply        # Apply all manifests
- *   npm run k8s:delete       # Delete all resources
- *   npm run k8s:status       # Check pod status
- *   npm run k8s:forward      # Port forward all services
+ *   npm run k8s:apply                     # Apply all manifests
+ *   npm run k8s:apply -- --config=shared  # Apply with shared config
+ *   npm run k8s:delete                    # Delete all resources
+ *   npm run k8s:status                    # Check pod status
+ *   npm run k8s:forward                   # Port forward all services
  */
 
 import { spawn, execSync } from 'node:child_process';
-import { readFile, access } from 'node:fs/promises';
+import { access } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { loadConfigFromArgs, logConfigSummary, type ServicesConfig } from './config-loader.js';
+import { runScript, runLongRunningScript, printHeader } from './script-runner.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = join(__dirname, '..', '..');
 const GATEWAY_DIR = join(__dirname, '..');
 const GENERATED_DIR = join(GATEWAY_DIR, 'generated');
-const CONFIGS_DIR = join(GATEWAY_DIR, 'configs');
 const K8S_DIR = join(GENERATED_DIR, 'k8s');
 
 const NAMESPACE = 'microservices';
 
-interface ServiceConfig {
-  name: string;
-  port: number;
-}
-
-interface ServicesConfig {
-  gateway: { port: number };
-  services: ServiceConfig[];
-  environments: Record<string, { mongoUri: string; redisUrl: string }>;
-}
-
 type K8sCommand = 'apply' | 'delete' | 'status' | 'forward' | 'logs' | 'secrets';
-
-async function loadConfig(): Promise<ServicesConfig> {
-  const configPath = join(CONFIGS_DIR, 'services.json');
-  const content = await readFile(configPath, 'utf-8');
-  return JSON.parse(content);
-}
 
 function parseArgs(): { command: K8sCommand; env: 'dev' | 'docker' | 'prod' } {
   const args = process.argv.slice(2);
@@ -114,11 +100,7 @@ async function generateManifests(): Promise<void> {
 }
 
 async function k8sApply(): Promise<void> {
-  console.log('');
-  console.log('═══════════════════════════════════════════════════════════════════');
-  console.log(' Applying Kubernetes Manifests');
-  console.log('═══════════════════════════════════════════════════════════════════');
-  console.log('');
+  printHeader('Applying Kubernetes Manifests');
 
   if (!(await checkK8sManifestsExist())) {
     await generateManifests();
@@ -139,11 +121,7 @@ async function k8sApply(): Promise<void> {
 }
 
 async function k8sDelete(): Promise<void> {
-  console.log('');
-  console.log('═══════════════════════════════════════════════════════════════════');
-  console.log(' Deleting Kubernetes Resources');
-  console.log('═══════════════════════════════════════════════════════════════════');
-  console.log('');
+  printHeader('Deleting Kubernetes Resources');
 
   try {
     execSync(`kubectl delete namespace ${NAMESPACE} --ignore-not-found`, { stdio: 'inherit' });
@@ -155,11 +133,7 @@ async function k8sDelete(): Promise<void> {
 }
 
 async function k8sStatus(config: ServicesConfig): Promise<void> {
-  console.log('');
-  console.log('═══════════════════════════════════════════════════════════════════');
-  console.log(' Kubernetes Status');
-  console.log('═══════════════════════════════════════════════════════════════════');
-  console.log('');
+  printHeader('Kubernetes Status');
 
   // Check namespace exists
   try {
@@ -196,11 +170,7 @@ async function k8sStatus(config: ServicesConfig): Promise<void> {
 }
 
 async function k8sForward(config: ServicesConfig): Promise<void> {
-  console.log('');
-  console.log('═══════════════════════════════════════════════════════════════════');
-  console.log(' Port Forwarding Services');
-  console.log('═══════════════════════════════════════════════════════════════════');
-  console.log('');
+  printHeader('Port Forwarding Services');
   console.log('Press Ctrl+C to stop all port forwards.');
   console.log('');
 
@@ -256,11 +226,7 @@ async function k8sForward(config: ServicesConfig): Promise<void> {
 }
 
 async function k8sLogs(config: ServicesConfig): Promise<void> {
-  console.log('');
-  console.log('═══════════════════════════════════════════════════════════════════');
-  console.log(' Streaming Logs from All Services');
-  console.log('═══════════════════════════════════════════════════════════════════');
-  console.log('');
+  printHeader('Streaming Logs from All Services');
   console.log('Press Ctrl+C to stop.');
   console.log('');
 
@@ -292,11 +258,7 @@ async function k8sLogs(config: ServicesConfig): Promise<void> {
 }
 
 async function k8sSecrets(config: ServicesConfig, env: string): Promise<void> {
-  console.log('');
-  console.log('═══════════════════════════════════════════════════════════════════');
-  console.log(' Creating Kubernetes Secrets');
-  console.log('═══════════════════════════════════════════════════════════════════');
-  console.log('');
+  printHeader('Creating Kubernetes Secrets');
 
   const envConfig = config.environments[env];
   if (!envConfig) {
@@ -329,23 +291,19 @@ async function k8sSecrets(config: ServicesConfig, env: string): Promise<void> {
 
 async function main(): Promise<void> {
   const { command, env } = parseArgs();
-  const config = await loadConfig();
+  const { config, mode } = await loadConfigFromArgs();
+
+  console.log('');
+  logConfigSummary(config, mode);
 
   // Check kubectl
   if (!checkKubectlAvailable()) {
-    console.error('❌ kubectl not found. Please install kubectl first.');
-    console.error('   https://kubernetes.io/docs/tasks/tools/');
-    process.exitCode = 1;
-    return;
+    throw new Error('kubectl not found. Please install kubectl first: https://kubernetes.io/docs/tasks/tools/');
   }
 
   // Check cluster (except for status check)
   if (command !== 'status' && !checkK8sCluster()) {
-    console.error('❌ Cannot connect to Kubernetes cluster.');
-    console.error('   Make sure Docker Desktop Kubernetes is enabled,');
-    console.error('   or configure kubectl to point to your cluster.');
-    process.exitCode = 1;
-    return;
+    throw new Error('Cannot connect to Kubernetes cluster. Make sure Docker Desktop Kubernetes is enabled.');
   }
 
   switch (command) {
@@ -370,7 +328,11 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  console.error('K8s script failed:', err.message);
-  process.exitCode = 1;
-});
+// forward and logs are long-running, others complete and exit
+const args = process.argv.slice(2);
+const isLongRunning = args.includes('forward') || args.includes('logs');
+if (isLongRunning) {
+  runLongRunningScript(main, { name: 'K8s' });
+} else {
+  runScript(main, { name: 'K8s' });
+}

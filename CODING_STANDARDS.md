@@ -438,14 +438,60 @@ const gatewayConfig: GatewayRoutingConfig = {
 The `gateway/` folder is the central orchestration point for infrastructure:
 
 ```bash
-# Generate all infrastructure configs
-cd gateway && npm run generate:all
+cd gateway
+
+# Start all services (dev config)
+npm run dev
 
 # Check service health
-cd gateway && npm run health
+npm run health
 
-# Start development mode
-cd gateway && npm run deploy:dev
+# Generate all infrastructure configs
+npm run generate:all
+```
+
+#### Configuration Profiles
+
+Configuration files follow the pattern `gateway/configs/services.{mode}.json`:
+
+| Mode | File | Description |
+|------|------|-------------|
+| `dev` | `services.dev.json` | Single MongoDB/Redis, local development (default) |
+| `shared` | `services.shared.json` | MongoDB Replica Set, Redis Sentinel |
+| `{brand}` | `services.{brand}.json` | Custom brand-specific config |
+
+**Using different configs:**
+```bash
+# Default (dev config)
+npm run dev
+npm run health
+npm run generate
+
+# Shared/production config
+npm run dev:shared
+npm run health:shared
+npm run generate:shared
+
+# Custom brand config (copy from existing, then use)
+cp configs/services.dev.json configs/services.acme.json
+npm run dev -- --config=acme
+npm run health -- --config=acme
+npm run generate -- --config=acme
+```
+
+**Config structure:**
+```json
+{
+  "mode": "per-service",
+  "description": "Description for logging",
+  "gateway": { "port": 9999, "defaultService": "auth", "rateLimit": 100 },
+  "services": [...],
+  "infrastructure": {
+    "mongodb": { "mode": "single|replicaSet", ... },
+    "redis": { "mode": "single|sentinel", ... }
+  },
+  "environments": { "local": {...}, "docker": {...}, "prod": {...} }
+}
 ```
 
 **Key files:**
