@@ -1,0 +1,15 @@
+# Generated infrastructure files
+generated/
+
+# Node modules
+node_modules/
+
+# SSL certificates
+ssl/
+*.pem
+*.key
+*.crt
+
+# Environment files with secrets
+.env.local
+.env.*.local

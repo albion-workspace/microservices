@@ -1,0 +1,77 @@
+{
+  "gateway": {
+    "port": 9999,
+    "defaultService": "auth",
+    "rateLimit": 100
+  },
+  "services": [
+    {
+      "name": "auth",
+      "host": "auth-service",
+      "port": 9001,
+      "database": "auth_service",
+      "healthPath": "/health",
+      "graphqlPath": "/graphql"
+    },
+    {
+      "name": "payment",
+      "host": "payment-service",
+      "port": 9002,
+      "database": "payment_service",
+      "healthPath": "/health",
+      "graphqlPath": "/graphql"
+    },
+    {
+      "name": "bonus",
+      "host": "bonus-service",
+      "port": 9003,
+      "database": "bonus_service",
+      "healthPath": "/health",
+      "graphqlPath": "/graphql"
+    },
+    {
+      "name": "notification",
+      "host": "notification-service",
+      "port": 9004,
+      "database": "notification_service",
+      "healthPath": "/health",
+      "graphqlPath": "/graphql"
+    },
+    {
+      "name": "kyc",
+      "host": "kyc-service",
+      "port": 9005,
+      "database": "kyc_service",
+      "healthPath": "/health",
+      "graphqlPath": "/graphql"
+    }
+  ],
+  "infrastructure": {
+    "mongodb": {
+      "mode": "single",
+      "host": "localhost",
+      "port": 27017,
+      "replicaSet": null
+    },
+    "redis": {
+      "mode": "single",
+      "host": "localhost",
+      "port": 6379,
+      "sentinel": null
+    }
+  },
+  "environments": {
+    "dev": {
+      "mongoUri": "mongodb://localhost:27017",
+      "redisUrl": "redis://localhost:6379"
+    },
+    "docker": {
+      "mongoUri": "mongodb://ms-mongo:27017",
+      "redisUrl": "redis://ms-redis:6379"
+    },
+    "prod": {
+      "mongoUri": "${MONGODB_URI}",
+      "redisUrl": "${REDIS_URL}"
+    }
+  }
+}

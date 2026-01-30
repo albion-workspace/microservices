@@ -1,0 +1,40 @@
+{
+  "name": "gateway",
+  "version": "1.0.0",
+  "description": "Infrastructure orchestration - generates configs, manages deployment modes",
+  "type": "module",
+  "scripts": {
+    "dev": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/dev.ts",
+    "dev:shared": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/dev.ts --mode=shared",
+    "dev:docker": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/dev.ts --mode=docker",
+    "health": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/health-check.ts",
+    "generate": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/generate.ts",
+    "generate:nginx": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/generate.ts --nginx",
+    "generate:docker": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/generate.ts --docker",
+    "generate:k8s": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/generate.ts --k8s",
+    "generate:all": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/generate.ts --all",
+    "docker:build": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/docker.ts build",
+    "docker:up": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/docker.ts up",
+    "docker:down": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/docker.ts down",
+    "docker:logs": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/docker.ts logs",
+    "docker:status": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/docker.ts status",
+    "docker:up:prod": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/docker.ts up --prod",
+    "docker:down:prod": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/docker.ts down --prod",
+    "k8s:apply": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/k8s.ts apply",
+    "k8s:delete": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/k8s.ts delete",
+    "k8s:status": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/k8s.ts status",
+    "k8s:forward": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/k8s.ts forward",
+    "k8s:logs": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/k8s.ts logs",
+    "k8s:secrets": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/k8s.ts secrets",
+    "k8s:secrets:dev": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/k8s.ts secrets --env=dev",
+    "k8s:secrets:docker": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/k8s.ts secrets --env=docker"
+  },
+  "dependencies": {
+    "core-service": "file:../core-service",
+    "auth-service": "file:../auth-service",
+    "payment-service": "file:../payment-service",
+    "bonus-service": "file:../bonus-service",
+    "notification-service": "file:../notification-service",
+    "kyc-service": "file:../kyc-service"
+  }
+}

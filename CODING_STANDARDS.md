@@ -421,7 +421,7 @@ await generateMultiServiceInfra(createDefaultGatewayRoutingConfig(), {
 ```typescript
 const gatewayConfig: GatewayRoutingConfig = {
   strategy: 'per-service',
-  port: 80,
+  port: 9999,
   defaultService: 'auth',
   services: [
     { name: 'auth', host: 'auth-service', port: 9001 },
@@ -432,6 +432,28 @@ const gatewayConfig: GatewayRoutingConfig = {
   ],
 };
 ```
+
+#### Gateway Orchestration Folder
+
+The `gateway/` folder is the central orchestration point for infrastructure:
+
+```bash
+# Generate all infrastructure configs
+cd gateway && npm run generate:all
+
+# Check service health
+cd gateway && npm run health
+
+# Start development mode
+cd gateway && npm run deploy:dev
+```
+
+**Key files:**
+- `gateway/configs/services.json` - Single source of truth for all services
+- `gateway/scripts/generate.ts` - Generates nginx, docker, k8s configs
+- `gateway/generated/` - Output folder (gitignored)
+
+See `gateway/README.md` for full documentation.
 
 ---
 

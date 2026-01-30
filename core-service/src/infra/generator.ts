@@ -356,7 +356,7 @@ volumes:
 export function createDefaultGatewayRoutingConfig(): GatewayRoutingConfig {
   return {
     strategy: 'per-service',
-    port: 80,
+    port: 9999,
     defaultService: 'auth',
     rateLimit: 100,
     services: [
