@@ -74,15 +74,27 @@ export interface ServiceConfig {
   nodeVersion?: string;
 }
 
+/**
+ * Local dependency info extracted from package.json
+ */
+export interface LocalDependency {
+  /** Package name as it appears in package.json */
+  name: string;
+  /** Folder path relative to project root */
+  folderPath: string;
+  /** Dependencies of this package (for build order) */
+  dependsOn?: string[];
+}
+
 export interface DockerConfig extends ServiceConfig {
   /** Entry point file (default: dist/index.js) */
   entryPoint?: string;
   
-  /** Service-core package name as it appears in node_modules (e.g., '@myorg/service-core') */
-  serviceCorePackageName?: string;
-  
-  /** Core service folder name in project root (default: core-service) */
-  coreServiceFolderName?: string;
+  /** 
+   * Local dependencies to build (from package.json `file:` references)
+   * Each will get its own Docker build stage
+   */
+  localDependencies?: LocalDependency[];
 }
 
 export interface DockerComposeConfig extends ServiceConfig {

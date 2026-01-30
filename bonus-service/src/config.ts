@@ -15,8 +15,7 @@
 
 import { 
   logger, 
-  getConfigWithDefault, 
-  resolveRedisUrlFromConfig,
+  getConfigWithDefault,
 } from 'core-service';
 
 /**
@@ -28,8 +27,8 @@ export interface BonusConfig {
   nodeEnv: string;
   serviceName: string;
   
-  // Database
-  mongoUri: string;
+  // Database - optional, gateway handles defaults from environment
+  mongoUri?: string;
   redisUrl?: string;
   
   // CORS
@@ -70,20 +69,14 @@ export async function loadConfig(brand?: string, tenantId?: string): Promise<Bon
     refreshSecret: '',
   };
   
-  // Load database config (for MongoDB URI and Redis URL resolution)
-  const dbConfig = await getConfigWithDefault<{ strategy: string; mongoUri?: string; redisUrl?: string }>(SERVICE_NAME, 'database', { brand, tenantId });
+  // NOTE: Database config is handled by core-service strategy-config.ts
+  // Uses MONGO_URI and REDIS_URL from environment variables
+  // See CODING_STANDARDS.md for database access patterns
   
-  // Resolve MongoDB URI from config or env
-  const mongoUri = process.env.MONGO_URI 
-    || (dbConfig?.mongoUri 
-      ? dbConfig.mongoUri.replace(/{service}/g, 'bonus_service')
-      : 'mongodb://localhost:27017/bonus_service?directConnection=true');
-  
-  // Resolve Redis URL from config or env
-  const resolvedRedisUrl = await resolveRedisUrlFromConfig(SERVICE_NAME, { brand, tenantId });
-  const redisUrl = process.env.REDIS_URL 
-    || resolvedRedisUrl
-    || `redis://:${process.env.REDIS_PASSWORD || 'redis123'}@localhost:6379`;
+  // MongoDB URI and Redis URL come from environment
+  // The gateway scripts (docker/k8s) set these based on services.*.json config
+  const mongoUri = process.env.MONGO_URI;
+  const redisUrl = process.env.REDIS_URL;
   
   // Build config object (env vars override MongoDB configs)
   return {
@@ -117,9 +110,8 @@ export function validateConfig(config: BonusConfig): void {
     errors.push('PORT must be between 1 and 65535');
   }
   
-  if (!config.mongoUri) {
-    errors.push('MONGO_URI is required');
-  }
+  // Note: mongoUri validation removed - gateway handles defaults
+  // See CODING_STANDARDS.md for database access patterns
   
   if (errors.length > 0) {
     throw new Error(`Configuration errors:\n${errors.join('\n')}`);

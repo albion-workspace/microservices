@@ -61,13 +61,18 @@ export async function resolveDatabaseStrategyFromConfig(
   
   let dbConfig = await getConfigWithDefault<DatabaseConfig>(service, 'database', { brand, tenantId });
   
+  // Build base MongoDB URI from environment or localhost fallback
+  const baseMongoHost = process.env.MONGO_URI 
+    ? process.env.MONGO_URI.replace(/\/[^\/]+(\?.*)?$/, '') // Extract host part (mongodb://host:port)
+    : 'mongodb://localhost:27017';
+  
   if (!dbConfig) {
     const isSharedService = service === 'core-service' || service === 'auth-service';
     dbConfig = {
       strategy: (isSharedService ? 'shared' : 'per-service') as DatabaseStrategy,
       mongoUri: isSharedService 
-        ? `mongodb://localhost:27017/${CORE_DATABASE_NAME}?directConnection=true`
-        : 'mongodb://localhost:27017/{service}?directConnection=true',
+        ? `${baseMongoHost}/${CORE_DATABASE_NAME}?directConnection=true`
+        : `${baseMongoHost}/{service}?directConnection=true`,
       dbNameTemplate: isSharedService ? CORE_DATABASE_NAME : '{service}',
       redisUrl: process.env.REDIS_URL || `redis://:${process.env.REDIS_PASSWORD || 'redis123'}@localhost:6379`,
     };
@@ -77,10 +82,10 @@ export async function resolveDatabaseStrategyFromConfig(
   let mongoUri = dbConfig.mongoUri;
   
   if (strategy === 'per-service' && mongoUri && !mongoUri.includes('{service}')) {
-    mongoUri = 'mongodb://localhost:27017/{service}?directConnection=true';
+    mongoUri = `${baseMongoHost}/{service}?directConnection=true`;
   }
   if (!mongoUri) {
-    mongoUri = 'mongodb://localhost:27017/{service}?directConnection=true';
+    mongoUri = `${baseMongoHost}/{service}?directConnection=true`;
   }
   
   let uriTemplate = mongoUri;
@@ -96,7 +101,7 @@ export async function resolveDatabaseStrategyFromConfig(
       return createSharedDatabaseStrategy();
     case 'per-service':
       if (!dbNameTemplate.includes('{service}')) dbNameTemplate = '{service}';
-      if (!uriTemplate.includes('{service}')) uriTemplate = 'mongodb://localhost:27017/{service}?directConnection=true';
+      if (!uriTemplate.includes('{service}')) uriTemplate = `${baseMongoHost}/{service}?directConnection=true`;
       return createPerServiceDatabaseStrategy(dbNameTemplate, uriTemplate);
     case 'per-brand':
       return createPerBrandDatabaseStrategy(
@@ -125,7 +130,7 @@ export async function resolveDatabaseStrategyFromConfig(
         uriTemplate,
       });
     default:
-      return createPerServiceDatabaseStrategy('{service}', 'mongodb://localhost:27017/{service}?directConnection=true');
+      return createPerServiceDatabaseStrategy('{service}', `${baseMongoHost}/{service}?directConnection=true`);
   }
 }
 

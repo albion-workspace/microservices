@@ -146,8 +146,8 @@ export interface NotificationConfig {
   port: number;
   nodeEnv: string;
   
-  // Database
-  mongoUri: string;
+  // Database - optional, gateway handles defaults from environment
+  mongoUri?: string;
   redisUrl?: string;
   
   // SMTP (Email)

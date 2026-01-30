@@ -64,7 +64,10 @@ import { verificationRepository } from './repositories/verification-repository.j
 import type { KYCTier } from './types/kyc-types.js';
 
 // ═══════════════════════════════════════════════════════════════════
-// Configuration (will be loaded asynchronously in main())
+// Configuration
+// NOTE: Database config is handled by core-service strategy-config.ts
+// Uses MONGO_URI and REDIS_URL from environment variables
+// See CODING_STANDARDS.md for database access patterns
 // ═══════════════════════════════════════════════════════════════════
 
 interface KYCConfig {
@@ -74,22 +77,16 @@ interface KYCConfig {
   jwtExpiresIn: string;
   jwtRefreshSecret: string;
   jwtRefreshExpiresIn: string;
-  mongoUri: string;
-  redisUrl: string;
 }
 
-let kycConfig: KYCConfig | null = null;
-
-// Default config for development
-const defaultConfig: KYCConfig = {
-  port: 9005,
-  corsOrigins: ['http://localhost:3000', 'http://localhost:5173'],
-  jwtSecret: process.env.JWT_SECRET || 'dev-jwt-secret-change-in-production',
-  jwtExpiresIn: '1h',
-  jwtRefreshSecret: process.env.JWT_REFRESH_SECRET || 'dev-refresh-secret-change-in-production',
-  jwtRefreshExpiresIn: '7d',
-  mongoUri: process.env.MONGODB_URI || 'mongodb://localhost:27017',
-  redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
+// Config loaded from environment variables (no hardcoded localhost fallbacks)
+const kycConfig: KYCConfig = {
+  port: parseInt(process.env.PORT || '9005', 10),
+  corsOrigins: process.env.CORS_ORIGINS?.split(',') || ['http://localhost:3000', 'http://localhost:5173'],
+  jwtSecret: process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || 'shared-jwt-secret-change-in-production',
+  jwtExpiresIn: process.env.JWT_EXPIRES_IN || '1h',
+  jwtRefreshSecret: process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || 'shared-jwt-secret-change-in-production',
+  jwtRefreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -195,23 +192,17 @@ const customResolvers = {
 // ═══════════════════════════════════════════════════════════════════
 
 const buildGatewayConfig = (): Parameters<typeof createGateway>[0] => {
-  if (!kycConfig) {
-    throw new Error('Configuration not loaded yet');
-  }
-  
-  const config = kycConfig;
-  
   return {
     name: 'kyc-service',
-    port: config.port,
+    port: kycConfig.port,
     cors: {
-      origins: config.corsOrigins,
+      origins: kycConfig.corsOrigins,
     },
     jwt: {
-      secret: config.jwtSecret,
-      expiresIn: config.jwtExpiresIn,
-      refreshSecret: config.jwtRefreshSecret,
-      refreshExpiresIn: config.jwtRefreshExpiresIn,
+      secret: kycConfig.jwtSecret,
+      expiresIn: kycConfig.jwtExpiresIn,
+      refreshSecret: kycConfig.jwtRefreshSecret,
+      refreshExpiresIn: kycConfig.jwtRefreshExpiresIn,
     },
     services: [
       { name: 'kycProfile', types: kycProfileService.types, resolvers: kycProfileService.resolvers },
@@ -246,8 +237,10 @@ const buildGatewayConfig = (): Parameters<typeof createGateway>[0] => {
         startKycVerification: isAuthenticated,
       },
     },
-    mongoUri: config.mongoUri,
-    redisUrl: config.redisUrl,
+    // NOTE: mongoUri and redisUrl come from MONGO_URI and REDIS_URL env vars
+    // handled by core-service gateway - no hardcoded values needed
+    mongoUri: process.env.MONGO_URI,
+    redisUrl: process.env.REDIS_URL,
     defaultPermission: 'deny' as const,
   };
 };
@@ -259,9 +252,6 @@ const buildGatewayConfig = (): Parameters<typeof createGateway>[0] => {
 async function main() {
   try {
     logger.info('Starting KYC service');
-    
-    // Load config
-    kycConfig = defaultConfig;
     
     // Register error codes
     registerServiceErrorCodes(KYC_ERROR_CODES);
@@ -288,11 +278,12 @@ async function main() {
     logger.info(`KYC service started on port ${kycConfig.port}`);
     
     // Initialize Redis accessor (after gateway connects to Redis)
-    if (kycConfig.redisUrl) {
+    // Redis URL comes from REDIS_URL environment variable
+    if (process.env.REDIS_URL) {
       try {
         await configureRedisStrategy({
           strategy: 'shared',
-          defaultUrl: kycConfig.redisUrl,
+          defaultUrl: process.env.REDIS_URL,
         });
         await redis.initialize({ brand: 'default' });
         logger.info('Redis accessor initialized');

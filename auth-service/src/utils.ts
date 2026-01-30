@@ -1,15 +1,15 @@
 /**
  * Utility functions for auth service
  * 
- * Includes password hashing/verification using bcrypt.
+ * Includes password hashing/verification using node:crypto (scrypt).
+ * Using built-in crypto instead of bcrypt to avoid native module compilation issues.
  * Passport.js does NOT automatically hash passwords - we must do it ourselves.
  */
 
 // Node.js built-ins
-import crypto from 'crypto';
-
-// External packages
-import bcrypt from 'bcrypt';
+import { scrypt, randomBytes, timingSafeEqual } from 'node:crypto';
+import crypto from 'node:crypto';
+import { promisify } from 'node:util';
 
 // Internal packages
 import { RoleResolver, type UserRole, type User as AccessEngineUser } from 'core-service/access';
@@ -111,31 +111,50 @@ export function keyMatchesToken(key: string, token: string): boolean {
 
 // ═══════════════════════════════════════════════════════════════════
 // Password Hashing & Verification (CRITICAL: Passport.js does NOT hash passwords)
+// Using node:crypto scrypt - secure, built-in, no native compilation needed
 // ═══════════════════════════════════════════════════════════════════
 
-const BCRYPT_ROUNDS = 12; // Recommended rounds for production (balance between security and performance)
+const scryptAsync = promisify(scrypt);
+const SCRYPT_KEYLEN = 64; // 64 bytes = 512 bits (secure key length)
+const SALT_LENGTH = 16; // 16 bytes = 128 bits (secure salt length)
 
 /**
- * Hash a password using bcrypt
+ * Hash a password using node:crypto scrypt
  * CRITICAL: Always hash passwords before storing in database
  * 
+ * Format: salt:derivedKey (both hex encoded)
+ * 
  * @param password - Plain text password
- * @returns Hashed password (bcrypt hash string)
+ * @returns Hashed password (salt:hash format)
  */
 export async function hashPassword(password: string): Promise<string> {
-  return bcrypt.hash(password, BCRYPT_ROUNDS);
+  const salt = randomBytes(SALT_LENGTH).toString('hex');
+  const derivedKey = await scryptAsync(password, salt, SCRYPT_KEYLEN) as Buffer;
+  return `${salt}:${derivedKey.toString('hex')}`;
 }
 
 /**
  * Verify a password against a hash
  * CRITICAL: Always use this to compare passwords, never compare plain text
+ * Uses timing-safe comparison to prevent timing attacks
  * 
  * @param password - Plain text password to verify
- * @param hash - Bcrypt hash from database
+ * @param hash - Hash from database (salt:derivedKey format)
  * @returns True if password matches hash
  */
 export async function verifyPassword(password: string, hash: string): Promise<boolean> {
-  return bcrypt.compare(password, hash);
+  const [salt, storedKey] = hash.split(':');
+  if (!salt || !storedKey) {
+    return false;
+  }
+  const derivedKey = await scryptAsync(password, salt, SCRYPT_KEYLEN) as Buffer;
+  const storedKeyBuffer = Buffer.from(storedKey, 'hex');
+  
+  // Use timing-safe comparison to prevent timing attacks
+  if (derivedKey.length !== storedKeyBuffer.length) {
+    return false;
+  }
+  return timingSafeEqual(derivedKey, storedKeyBuffer);
 }
 
 /**

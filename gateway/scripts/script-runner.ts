@@ -29,12 +29,13 @@ export interface ScriptOptions {
  * Run a script with proper exit handling
  * - Sets exit code appropriately
  * - Forces exit after timeout to avoid hanging
+ * - Uses setTimeout to allow async handles to close gracefully (Windows compatibility)
  */
 export function runScript(
   main: () => Promise<void>,
   options: ScriptOptions = { name: 'Script' }
 ): void {
-  const { name } = options;
+  const { name, exitTimeout = 100 } = options;
 
   main()
     .then(() => {
@@ -45,11 +46,11 @@ export function runScript(
       process.exitCode = 1;
     })
     .finally(() => {
-      // Force immediate exit - don't wait for pending handles
-      // This is necessary because core-service may keep connections alive
-      setImmediate(() => {
+      // Use setTimeout instead of setImmediate for Windows compatibility
+      // This gives async handles time to close gracefully before exit
+      setTimeout(() => {
         process.exit(process.exitCode ?? 0);
-      });
+      }, exitTimeout);
     });
 }
 
@@ -89,10 +90,10 @@ export async function checkHttpHealth(
   url: string,
   timeoutMs: number = 5000
 ): Promise<HealthResult> {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
+  try {
     const response = await fetch(url, { signal: controller.signal });
     clearTimeout(timeout);
 
@@ -106,6 +107,7 @@ export async function checkHttpHealth(
     }
     return { ok: false, error: `HTTP ${response.status}`, url };
   } catch (err) {
+    clearTimeout(timeout); // Always clear timeout on error
     if (err instanceof Error && err.name === 'AbortError') {
       return { ok: false, error: 'Timeout', url };
     }

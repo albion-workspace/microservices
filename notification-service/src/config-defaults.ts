@@ -8,21 +8,13 @@
  */
 
 export const NOTIFICATION_CONFIG_DEFAULTS = {
-  // Database Configuration (fully configurable)
-  database: {
-    value: {
-      strategy: 'per-service',
-      mongoUri: 'mongodb://localhost:27017/{service}?directConnection=true',
-      dbNameTemplate: '{service}',
-      redisUrl: 'redis://:redis123@localhost:6379',
-    },
-    sensitivePaths: ['database.redisUrl'] as string[],
-    description: 'Database strategy and connection configuration',
-  },
+  // NOTE: Database configuration is handled by core-service strategy-config.ts
+  // Do NOT define database config here - it uses MONGO_URI/REDIS_URL from environment
+  // See CODING_STANDARDS.md for database access patterns
   
   // Service Configuration
   port: {
-    value: 3006,
+    value: 9004,
     description: 'Notification service port',
   },
   

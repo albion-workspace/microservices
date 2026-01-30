@@ -240,6 +240,11 @@ export type {
   SetConfigOptions,
 } from './common/config/store.js';
 
+// Shared defaults (simple constants services can optionally use)
+// NOTE: Service defaults removed - database/redis config is handled by strategy-config.ts
+// Services should NOT define their own database config defaults
+// See CODING_STANDARDS.md for database access patterns
+
 export {
   configGraphQLTypes,
   configResolvers,

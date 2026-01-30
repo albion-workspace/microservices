@@ -308,7 +308,7 @@ export class PasswordService {
         };
       }
       
-      // CRITICAL: Verify current password using bcrypt
+      // CRITICAL: Verify current password using node:crypto scrypt
       const isCurrentPasswordValid = await verifyPassword(input.currentPassword, user.passwordHash);
       if (!isCurrentPasswordValid) {
         return {

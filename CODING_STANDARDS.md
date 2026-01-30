@@ -197,7 +197,7 @@ import type { RegisterInput } from './types.js';
   },
   "dependencies": {
     "core-service": "file:../core-service"
-    // Only add service-specific dependencies (e.g., bcrypt, passport)
+    // Only add service-specific dependencies (e.g., passport for auth)
   },
   "devDependencies": {
     // Only @types/* for service-specific dependencies
@@ -210,9 +210,55 @@ import type { RegisterInput } from './types.js';
 - ✅ **Always**: Depend on `core-service` via `file:../core-service`
 - ✅ **Always**: Include infra scripts for Docker/K8s generation
 - ✅ **Always**: Only add service-specific dependencies
+- ✅ **Always**: Prefer Node.js built-in modules over external packages (see below)
 - ❌ **Never**: Add `tsx` or `typescript` to devDependencies (they come from core-service)
 - ❌ **Never**: Add `graphql`, `mongodb`, `redis` directly (they come from core-service)
 - ❌ **Never**: Depend on other microservices directly (use event-driven communication)
+- ❌ **Never**: Add packages with native bindings (e.g., bcrypt) - use built-in alternatives
+
+### Prefer Node.js Built-in Modules
+
+**Principle**: Minimize external dependencies by using Node.js built-in modules. This avoids:
+- Native module compilation issues in Docker/Alpine
+- Version conflicts and security vulnerabilities
+- Unnecessary package bloat
+
+**Common Replacements**:
+
+| Instead of | Use | Reason |
+|------------|-----|--------|
+| `bcrypt` | `node:crypto` (scrypt) | Native compilation issues in Alpine Linux |
+| `uuid` | `node:crypto` (randomUUID) | Built-in since Node 14.17 |
+| `lodash.get` | Optional chaining (`?.`) | ES2020 feature |
+| `moment` | `Intl.DateTimeFormat` / native Date | Built-in |
+
+**Password Hashing with node:crypto**:
+
+```typescript
+import { scrypt, randomBytes, timingSafeEqual } from 'node:crypto';
+import { promisify } from 'node:util';
+
+const scryptAsync = promisify(scrypt);
+const SCRYPT_KEYLEN = 64;
+const SALT_LENGTH = 16;
+
+// Hash password
+export async function hashPassword(password: string): Promise<string> {
+  const salt = randomBytes(SALT_LENGTH).toString('hex');
+  const derivedKey = await scryptAsync(password, salt, SCRYPT_KEYLEN) as Buffer;
+  return `${salt}:${derivedKey.toString('hex')}`;
+}
+
+// Verify password (timing-safe)
+export async function verifyPassword(password: string, hash: string): Promise<boolean> {
+  const [salt, storedKey] = hash.split(':');
+  if (!salt || !storedKey) return false;
+  const derivedKey = await scryptAsync(password, salt, SCRYPT_KEYLEN) as Buffer;
+  const storedKeyBuffer = Buffer.from(storedKey, 'hex');
+  if (derivedKey.length !== storedKeyBuffer.length) return false;
+  return timingSafeEqual(derivedKey, storedKeyBuffer);
+}
+```
 
 ### Standalone/Shared Package Pattern
 
@@ -1699,6 +1745,95 @@ See README "TODO - Testing Infrastructure" for migration plan.
 3. Plan migration path
 4. Execute changes systematically
 5. Verify everything still works
+
+---
+
+## 🐳 Docker & Infrastructure (Gateway)
+
+The `gateway/` folder orchestrates local development, Docker, and Kubernetes deployments.
+
+### Configuration Files (`gateway/configs/`)
+
+```
+services.dev.json      # Development mode (single MongoDB/Redis)
+services.shared.json   # Shared/Production mode (replica sets, sentinel)
+services.local-k8s.json # Local Kubernetes testing
+services.{brand}.json  # Brand-specific configurations
+```
+
+### Key Scripts
+
+```bash
+# Generate infrastructure (Dockerfiles, compose, K8s manifests)
+npm run generate                        # All, dev config
+npm run generate -- --config=shared     # Shared config
+npm run generate:dockerfile             # Only Dockerfiles
+
+# Docker operations (support --service for single service)
+npm run docker:build                    # Build all images
+npm run docker:build -- --service=auth  # Build only auth-service
+npm run docker:up                       # Start all containers
+npm run docker:up -- --service=auth     # Start only auth-service
+npm run docker:status                   # Check status
+
+# Kubernetes operations
+npm run k8s:apply                       # Deploy to K8s
+npm run k8s:apply -- --service=auth     # Deploy only auth-service
+npm run k8s:status                      # Check K8s status
+
+# Health checks
+npm run health                          # Local services
+npm run health:docker                   # Docker services
+npm run health:k8s                      # K8s services
+```
+
+### Dockerfile Generation Patterns
+
+Dockerfiles are **generated dynamically** based on each service's `package.json` dependencies:
+
+```javascript
+// In auth-service/package.json
+{
+  "dependencies": {
+    "core-service": "file:../core-service",  // Local = build stage
+    "express": "^4.18.0"                     // npm = normal install
+  }
+}
+```
+
+The generator:
+1. Reads `file:` dependencies from package.json
+2. Creates Docker build stages only for local dependencies
+3. Handles dependency chains (core-service → access-engine)
+
+**Result**: If tomorrow `core-service` is published to npm, just change `"file:../core-service"` to `"^1.0.0"` and regenerate Dockerfiles.
+
+### Infrastructure Auto-Detection
+
+When generating docker-compose, the script automatically detects:
+- Running MongoDB/Redis containers
+- Existing Docker networks
+
+If infrastructure exists → uses external network
+If not exists → creates infrastructure services
+
+This makes CI/CD bulletproof - works in both scenarios.
+
+### Adding a New Service
+
+1. Create service folder with standard structure
+2. Add to `gateway/configs/services.*.json`:
+   ```json
+   {
+     "name": "new",
+     "port": 9006,
+     "host": "new-service",
+     "healthPath": "/health",
+     "database": "new_service"
+   }
+   ```
+3. Run `npm run generate` from gateway
+4. Dockerfiles and manifests are auto-generated
 
 ---
 

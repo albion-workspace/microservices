@@ -4,6 +4,9 @@
  * Generates infrastructure configurations from services.{mode}.json.
  * All values come from config - no hardcoded defaults or process.env.
  * 
+ * Auto-detects existing Docker infrastructure (mongo, redis, networks).
+ * Creates infrastructure if not exists, uses external if exists.
+ * 
  * Usage:
  *   npm run generate                        # Generate all (dev config)
  *   npm run generate -- --config=shared     # Generate with shared config
@@ -13,6 +16,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execSync } from 'node:child_process';
 
 import {
   generateMultiServiceNginxConf,
@@ -21,6 +25,7 @@ import {
   type ServiceEndpoint,
   type MultiServiceNginxConfig,
   type DockerConfig,
+  type LocalDependency,
 } from 'core-service';
 
 import { loadConfigFromArgs, logConfigSummary, type ServicesConfig, type ConfigMode, getMongoUri, getRedisUrl } from './config-loader.js';
@@ -29,6 +34,68 @@ import { runScript, printHeader, printFooter } from './script-runner.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = join(__dirname, '..');
 const OUTPUT_DIR = join(ROOT_DIR, 'generated');
+
+// ═══════════════════════════════════════════════════════════════════
+// Docker Infrastructure Detection
+// ═══════════════════════════════════════════════════════════════════
+
+interface InfraStatus {
+  dockerAvailable: boolean;
+  mongoRunning: boolean;
+  redisRunning: boolean;
+  networkExists: boolean;
+  networkName: string;
+}
+
+/**
+ * Auto-detect existing Docker infrastructure
+ * Returns info about running containers and networks
+ */
+function detectExistingInfra(config: ServicesConfig): InfraStatus {
+  const mongo = config.infrastructure.mongodb;
+  const redis = config.infrastructure.redis;
+  const mongoContainer = (mongo as any).dockerContainer || 'ms-mongo';
+  const redisContainer = (redis as any).dockerContainer || 'ms-redis';
+  
+  const result: InfraStatus = {
+    dockerAvailable: false,
+    mongoRunning: false,
+    redisRunning: false,
+    networkExists: false,
+    networkName: 'ms-network',
+  };
+  
+  try {
+    execSync('docker info', { stdio: 'ignore' });
+    result.dockerAvailable = true;
+  } catch {
+    return result;  // Docker not running, can't detect
+  }
+  
+  // Check if containers are running
+  try {
+    const containers = execSync('docker ps --format "{{.Names}}"', { encoding: 'utf8' });
+    result.mongoRunning = containers.includes(mongoContainer);
+    result.redisRunning = containers.includes(redisContainer);
+  } catch {
+    // Ignore errors
+  }
+  
+  // Find network if containers are running
+  if (result.mongoRunning) {
+    try {
+      const networkInfo = execSync(`docker inspect ${mongoContainer} --format "{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}"`, { encoding: 'utf8' });
+      if (networkInfo.trim()) {
+        result.networkExists = true;
+        result.networkName = networkInfo.trim().split('\n')[0];
+      }
+    } catch {
+      // Ignore errors
+    }
+  }
+  
+  return result;
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // Nginx Generation
@@ -95,14 +162,35 @@ async function generateDockerCompose(config: ServicesConfig, mode: ConfigMode): 
 function generateDevCompose(config: ServicesConfig, mode: ConfigMode): string {
   const mongo = config.infrastructure.mongodb;
   const redis = config.infrastructure.redis;
-  // Use dockerContainer name for Docker, fallback to host
-  const mongoContainer = (mongo as any).dockerContainer || mongo.host;
-  const redisContainer = (redis as any).dockerContainer || redis.host;
+  // Use dockerContainer name for Docker, fallback to default
+  const mongoContainer = (mongo as any).dockerContainer || 'ms-mongo';
+  const redisContainer = (redis as any).dockerContainer || 'ms-redis';
+  
+  // Auto-detect existing infrastructure
+  const infra = detectExistingInfra(config);
+  const useExistingInfra = infra.mongoRunning && infra.redisRunning;
+  const networkName = useExistingInfra && infra.networkExists ? infra.networkName : 'ms-network';
+  
+  if (infra.dockerAvailable) {
+    console.log(`   Existing infrastructure: ${useExistingInfra ? 'detected' : 'not found'}`);
+    if (useExistingInfra) {
+      console.log(`   Using network: ${networkName}`);
+    }
+  }
 
+  // Build Redis URL with optional password
+  const redisPassword = redis.password;
+  const redisAuth = redisPassword ? `:${redisPassword}@` : '';
+  const redisUrl = `redis://${redisAuth}${redisContainer}:${redis.port}`;
+
+  // Build service blocks
   const serviceBlocks = config.services.map(svc => {
-    const replicas = (svc as any).replicas || 1;
     // Context is relative to docker-compose file at gateway/generated/docker/
     // Need ../../.. to reach project root
+    const dependsBlock = useExistingInfra ? '' : `    depends_on:
+      - ${mongoContainer}
+      - ${redisContainer}
+`;
     return `  ${svc.name}-service:
     build:
       context: ../../..
@@ -112,32 +200,23 @@ function generateDevCompose(config: ServicesConfig, mode: ConfigMode): string {
     environment:
       - PORT=${svc.port}
       - NODE_ENV=development
-      - MONGODB_URI=mongodb://${mongoContainer}:${mongo.port}/${svc.database}
-      - REDIS_URL=redis://${redisContainer}:${redis.port}
-    depends_on:
-      - ${mongoContainer}
-      - ${redisContainer}
-    networks:
-      - ms-network
+      - JWT_SECRET=dev-jwt-secret-change-in-production
+      - MONGO_URI=mongodb://${mongoContainer}:${mongo.port}/${svc.database}
+      - REDIS_URL=${redisUrl}
+${dependsBlock}    networks:
+      - ${networkName}
     volumes:
       - ../../../${svc.name}-service/src:/app/src:ro`;
   }).join('\n\n');
 
-  // Check if using existing infrastructure
-  const dockerConfig = (config as any).docker || {};
-  const useExistingInfra = dockerConfig.useExistingInfra || false;
-  const existingNetwork = dockerConfig.existingNetwork || 'ms-network';
-
-  // Generate MongoDB service based on mode (skip if using existing infra)
+  // Generate infrastructure services (skip if using existing infra)
   const mongoService = useExistingInfra ? '' : generateMongoDockerService(config);
-  
-  // Generate Redis service based on mode (skip if using existing infra)
   const redisService = useExistingInfra ? '' : generateRedisDockerService(config);
 
   // Network configuration
   const networkConfig = useExistingInfra 
     ? `networks:
-  ${existingNetwork}:
+  ${networkName}:
     external: true`
     : `networks:
   ms-network:
@@ -149,19 +228,13 @@ volumes:
   mongo-data:
   redis-data:`;
 
-  // Update depends_on for services when using existing infra
-  const serviceBlocksUpdated = useExistingInfra
-    ? serviceBlocks.replace(/    depends_on:\n      - ms-mongo\n      - ms-redis\n/g, '')
-        .replace(/ms-network/g, existingNetwork)
-    : serviceBlocks;
-
   return `# Docker Compose - Development Mode (${mode})
 # Generated by gateway/scripts/generate.ts
 # MongoDB: ${mongo.mode}, Redis: ${redis.mode}
-# Using existing infrastructure: ${useExistingInfra}
+# Infrastructure: ${useExistingInfra ? 'using existing' : 'will be created'}
 
 services:
-${serviceBlocksUpdated}
+${serviceBlocks}
 ${mongoService}
 ${redisService}
 ${networkConfig}
@@ -292,6 +365,11 @@ function generateProdCompose(config: ServicesConfig, mode: ConfigMode): string {
   // Use dockerContainer name for Docker, fallback to defaults
   const mongoContainer = (mongo as any).dockerContainer || 'ms-mongo';
   const redisContainer = (redis as any).dockerContainer || 'ms-redis';
+  
+  // Build Redis URL with optional password
+  const redisPassword = (redis as any).password;
+  const redisAuth = redisPassword ? `:${redisPassword}@` : '';
+  const redisUrl = `redis://${redisAuth}${redisContainer}:${redis.port}`;
 
   const serviceBlocks = config.services.map(svc => {
     const replicas = (svc as any).replicas || 2;
@@ -301,7 +379,7 @@ function generateProdCompose(config: ServicesConfig, mode: ConfigMode): string {
       - PORT=${svc.port}
       - NODE_ENV=production
       - MONGODB_URI=mongodb://${mongoContainer}:${mongo.port}/${svc.database}
-      - REDIS_URL=redis://${redisContainer}:${redis.port}
+      - REDIS_URL=${redisUrl}
     depends_on:
       - ${mongoContainer}
       - ${redisContainer}
@@ -741,26 +819,102 @@ spec:
 // Dockerfile Generation (using core-service template)
 // ═══════════════════════════════════════════════════════════════════
 
+import { readFile } from 'node:fs/promises';
+import type { LocalDependency } from 'core-service';
+
+/**
+ * Extract local file dependencies from a package.json
+ * Reads `file:` references from dependencies and devDependencies
+ */
+async function extractLocalDependencies(packageJsonPath: string): Promise<LocalDependency[]> {
+  const localDeps: LocalDependency[] = [];
+  const visited = new Set<string>();
+  
+  async function extractFromPackage(pkgPath: string, basePath: string): Promise<void> {
+    if (visited.has(pkgPath)) return;
+    visited.add(pkgPath);
+    
+    try {
+      const content = await readFile(pkgPath, 'utf8');
+      const pkg = JSON.parse(content);
+      const allDeps = { ...pkg.dependencies, ...pkg.devDependencies };
+      
+      for (const [name, version] of Object.entries(allDeps)) {
+        if (typeof version === 'string' && version.startsWith('file:')) {
+          // Extract folder path from file: reference
+          const relativePath = version.replace('file:', '');
+          const folderPath = relativePath.replace(/^\.\.\//, ''); // Remove leading ../
+          
+          // Check if already added
+          if (localDeps.some(d => d.name === name)) continue;
+          
+          // Find dependencies of this local package (recursive)
+          const depPkgPath = join(dirname(pkgPath), relativePath, 'package.json');
+          const dependsOn: string[] = [];
+          
+          try {
+            const depContent = await readFile(depPkgPath, 'utf8');
+            const depPkg = JSON.parse(depContent);
+            const depAllDeps = { ...depPkg.dependencies, ...depPkg.devDependencies };
+            
+            for (const [depName, depVersion] of Object.entries(depAllDeps)) {
+              if (typeof depVersion === 'string' && depVersion.startsWith('file:')) {
+                dependsOn.push(depName);
+              }
+            }
+            
+            // Recursively extract from this dependency
+            await extractFromPackage(depPkgPath, dirname(depPkgPath));
+          } catch {
+            // Ignore if can't read dependency's package.json
+          }
+          
+          localDeps.push({
+            name,
+            folderPath,
+            dependsOn: dependsOn.length > 0 ? dependsOn : undefined,
+          });
+        }
+      }
+    } catch {
+      // Ignore if can't read package.json
+    }
+  }
+  
+  await extractFromPackage(packageJsonPath, dirname(packageJsonPath));
+  return localDeps;
+}
+
 async function generateDockerfiles(config: ServicesConfig): Promise<void> {
   console.log('🔧 Generating Dockerfiles for services...');
   
   const PROJECT_ROOT = join(__dirname, '..', '..');
   
   for (const service of config.services) {
+    const servicePath = join(PROJECT_ROOT, `${service.name}-service`);
+    const packageJsonPath = join(servicePath, 'package.json');
+    
+    // Extract local dependencies from package.json
+    const localDependencies = await extractLocalDependencies(packageJsonPath);
+    
     const dockerConfig: DockerConfig = {
       name: `${service.name}-service`,
       port: service.port,
       healthPath: service.healthPath,
       nodeVersion: '20',
       entryPoint: 'dist/index.js',
-      serviceCorePackageName: 'core-service',
+      localDependencies,
     };
     
     const dockerfile = generateDockerfile(dockerConfig);
-    const outputPath = join(PROJECT_ROOT, `${service.name}-service`, 'Dockerfile');
+    const outputPath = join(servicePath, 'Dockerfile');
     
     await writeFile(outputPath, dockerfile);
-    console.log(`✅ Generated: ${service.name}-service/Dockerfile`);
+    
+    const depsInfo = localDependencies.length > 0 
+      ? ` (deps: ${localDependencies.map(d => d.name).join(', ')})` 
+      : '';
+    console.log(`✅ Generated: ${service.name}-service/Dockerfile${depsInfo}`);
   }
 }
 

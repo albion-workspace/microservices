@@ -40,6 +40,7 @@ export interface RedisConfig {
   mode: 'single' | 'sentinel';
   host: string;
   port: number;
+  password?: string;
   sentinel: {
     name: string;
     hosts: Array<{ host: string; port: number }>;
@@ -143,7 +144,10 @@ export function getRedisUrl(config: ServicesConfig, env: string = 'local'): stri
     return envConfig.redisUrl;
   }
   
-  return `redis://${config.infrastructure.redis.host}:${config.infrastructure.redis.port}`;
+  // Build Redis URL with optional password
+  const redis = config.infrastructure.redis;
+  const redisAuth = redis.password ? `:${redis.password}@` : '';
+  return `redis://${redisAuth}${redis.host}:${redis.port}`;
 }
 
 /**
