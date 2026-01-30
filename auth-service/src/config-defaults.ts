@@ -8,19 +8,10 @@
  */
 
 export const AUTH_CONFIG_DEFAULTS = {
-  // Database Configuration (fully configurable)
-  // IMPORTANT: auth-service uses core_service database for users (not auth_service)
-  // This ensures users are in the same database as GraphQL resolvers
-  database: {
-    value: {
-      strategy: 'shared', // Use shared strategy to ensure core_service is used
-      mongoUri: 'mongodb://localhost:27017/core_service?directConnection=true',
-      dbNameTemplate: 'core_service', // Explicitly use core_service
-      redisUrl: 'redis://:redis123@localhost:6379',
-    },
-    sensitivePaths: ['database.redisUrl'] as string[],
-    description: 'Database strategy and connection configuration. Auth-service uses core_service for users.',
-  },
+  // NOTE: Database configuration is handled by core-service strategy-config.ts
+  // auth-service uses 'shared' strategy (core_service database) - see strategy-config.ts
+  // Do NOT define database config here - it uses MONGO_URI/REDIS_URL from environment
+  // See CODING_STANDARDS.md for database access patterns
   
   // OTP Configuration
   otpLength: {

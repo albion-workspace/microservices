@@ -704,8 +704,12 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
   logger.info(`Starting ${name}...`);
 
   // Connect to databases with error handling
-  // Note: When connecting from localhost, directConnection=true prevents replica set member discovery
-  const dbUri = mongoUri || process.env.MONGO_URI || `mongodb://localhost:27017/${name.replace(/-/g, '_')}?directConnection=true`;
+  // IMPORTANT: No localhost fallbacks - URI must come from config or environment
+  // This follows CODING_STANDARDS: no fallback, no legacy, single source of truth
+  const dbUri = mongoUri || process.env.MONGO_URI;
+  if (!dbUri) {
+    throw new Error(`MONGO_URI environment variable or mongoUri config required for ${name}`);
+  }
   try {
     await connectDatabase(dbUri);
     // Verify connection
@@ -721,8 +725,9 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
     throw error;
   }
   
-  // Redis password: default is redis123 (from Docker container), can be overridden via REDIS_PASSWORD env var
-  const redisUri = redisUrl || process.env.REDIS_URL || `redis://:${process.env.REDIS_PASSWORD || 'redis123'}@localhost:6379`;
+  // Redis connection - URI must come from config or environment
+  // IMPORTANT: No localhost fallbacks per CODING_STANDARDS
+  const redisUri = redisUrl || process.env.REDIS_URL;
   if (redisUri) {
     try {
       await connectRedis(redisUri);

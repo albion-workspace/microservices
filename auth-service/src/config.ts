@@ -16,9 +16,7 @@
 import type { AuthConfig as BaseAuthConfig } from './types.js';
 import { 
   logger, 
-  getConfigWithDefault, 
-  loadConfig as loadConfigFromCore,
-  resolveRedisUrlFromConfig,
+  getConfigWithDefault,
 } from 'core-service';
 import type { AuthConfigDefaults } from './config-defaults.js';
 
@@ -31,8 +29,8 @@ export interface AuthConfig extends BaseAuthConfig {
   nodeEnv: string;
   serviceName: string;
   
-  // Database
-  mongoUri: string;
+  // Database - optional, gateway handles defaults from environment
+  mongoUri?: string;
   redisUrl?: string;
   
   // URLs
@@ -122,25 +120,15 @@ export async function loadConfig(brand?: string, tenantId?: string): Promise<Aut
   // Resolve MongoDB URI from config or env
   // IMPORTANT: Use database strategy to resolve the correct database name
   // For per-service strategy, this will be 'auth_service', but users should be in 'core_service'
-  // So we need to resolve the base URI and use 'core_service' as the database name
-  let mongoUri: string;
-  if (process.env.MONGO_URI) {
-    mongoUri = process.env.MONGO_URI;
-  } else if (dbConfig?.mongoUri) {
-    // Extract base URI (without database name) and use core_service
-    const uriTemplate = dbConfig.mongoUri;
-    // Remove database name from URI if present, keep only host/port/options
-    const baseUri = uriTemplate.replace(/\/[^\/\?]+(\?|$)/, '/core_service$1').replace(/{service}/g, 'core_service');
-    mongoUri = baseUri;
-  } else {
-    mongoUri = 'mongodb://localhost:27017/core_service?directConnection=true';
-  }
+  // NOTE: Database config is handled by core-service strategy-config.ts
+  // auth-service uses 'shared' strategy (core_service database)
+  // Uses MONGO_URI and REDIS_URL from environment variables
+  // See CODING_STANDARDS.md for database access patterns
   
-  // Resolve Redis URL from config or env
-  const resolvedRedisUrl = await resolveRedisUrlFromConfig(SERVICE_NAME, { brand, tenantId });
-  const redisUrl = process.env.REDIS_URL 
-    || resolvedRedisUrl
-    || `redis://:${process.env.REDIS_PASSWORD || 'redis123'}@localhost:6379`;
+  // MongoDB URI and Redis URL come from environment
+  // The gateway scripts (docker/k8s) set these based on services.*.json config
+  const mongoUri = process.env.MONGO_URI;
+  const redisUrl = process.env.REDIS_URL;
   
   // Build config object (env vars override MongoDB configs)
   return {
@@ -252,7 +240,7 @@ export function printConfigSummary(config: AuthConfig): void {
   logger.info('Configuration:', {
     environment: config.nodeEnv,
     port: config.port,
-    mongoUri: config.mongoUri.replace(/:[^:@]+@/, ':***@'), // Hide password
+    mongoUri: config.mongoUri ? config.mongoUri.replace(/:[^:@]+@/, ':***@') : 'using environment default', // Hide password
     redisUrl: config.redisUrl ? 'configured' : 'not configured',
     frontendUrl: config.frontendUrl,
     jwtExpiry: config.jwtExpiresIn,

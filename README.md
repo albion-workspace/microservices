@@ -2,7 +2,7 @@
 
 **Version**: 1.0.0  
 **Status**: Production Ready  
-**Last Updated**: 2026-01-29
+**Last Updated**: 2026-01-30
 
 ---
 
@@ -87,11 +87,14 @@ Microservices-based payment system with:
 ```
 tst/
 ├── access-engine/              # Standalone RBAC/ACL authorization
-├── app/                        # React frontend
-├── auth-service/               # Authentication & authorization
-├── bonus-service/              # Bonus & rewards
+├── app/                        # React frontend (port 9000)
+├── auth-service/               # Authentication & authorization (port 9001)
+├── bonus-service/              # Bonus & rewards (port 9003)
 ├── core-service/               # Shared library
-├── kyc-service/                # KYC/Identity verification
+├── gateway/                    # Infrastructure orchestration (port 9999)
+├── kyc-service/                # KYC/Identity verification (port 9005)
+├── notification-service/       # Notifications (port 9004)
+├── payment-service/            # Payments & wallets (port 9002)
 ├── shared-validators/          # Client-safe validators (bonus, KYC)
 │   └── src/
 │       ├── access/             # Access control integration
@@ -1007,7 +1010,10 @@ All services use the 9000 port range for consistency:
 | bonus-service | 9003 | http://localhost:9003/graphql |
 | notification-service | 9004 | http://localhost:9004/graphql |
 | kyc-service | 9005 | http://localhost:9005/graphql |
-| React App | 5173 | http://localhost:5173 |
+| **gateway** | **9999** | http://localhost:9999/graphql (nginx routing) |
+| React App | 9000 | http://localhost:9000 |
+
+**Gateway Mode**: In production, clients call `http://localhost:9999/graphql` with header `X-Target-Service: payment` to route to appropriate service.
 
 ---
 
@@ -1018,12 +1024,45 @@ All services use the 9000 port range for consistency:
 - Node.js 18+
 - MongoDB 6.0+
 - Redis 6.0+
+- Docker Desktop (optional, for Docker/K8s modes)
 
 ### Start Services
 
-```powershell
-.\scripts\bin\start-service-dev.ps1
+All orchestration is centralized in the `gateway/` folder:
+
+```bash
+# Navigate to gateway
+cd gateway
+
+# Install dependencies (first time)
+npm install
+
+# Start all services (per-service mode)
+npm run dev
+
+# Check health
+npm run health
+
+# Docker mode (requires Docker Desktop)
+npm run docker:status
+npm run docker:build
+npm run docker:up
+
+# Kubernetes mode (requires K8s enabled in Docker Desktop)
+npm run k8s:apply
+npm run k8s:status
+npm run k8s:forward
 ```
+
+### Available Modes
+
+| Mode | Command | Description |
+|------|---------|-------------|
+| Per-Service | `npm run dev` | Each service on own port (default) |
+| Docker | `npm run docker:up` | Services in containers |
+| K8s | `npm run k8s:apply` | Deploy to local Kubernetes |
+
+See `gateway/README.md` for full documentation.
 
 ### Environment Variables
 
@@ -1542,4 +1581,4 @@ await loadTestFixture('baseline-users');  // Immutable snapshot
 
 ---
 
-**Last Updated**: 2026-01-29
+**Last Updated**: 2026-01-30

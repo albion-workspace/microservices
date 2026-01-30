@@ -2,6 +2,55 @@
 // Infrastructure Configuration Types
 // ═══════════════════════════════════════════════════════════════════
 
+// ─────────────────────────────────────────────────────────────────────
+// Gateway Strategy Types
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Gateway deployment strategy
+ * - 'shared': All services in one gateway process (single port, no HTTP between services)
+ * - 'per-service': Each service has own gateway (current default, requires routing)
+ * - 'per-brand': Brand-specific gateways with custom schemas
+ */
+export type GatewayStrategy = 'shared' | 'per-service' | 'per-brand';
+
+/**
+ * Service endpoint configuration for multi-service routing
+ */
+export interface ServiceEndpoint {
+  /** Service identifier (used in X-Target-Service header) */
+  name: string;
+  /** Internal hostname/IP */
+  host: string;
+  /** Service port */
+  port: number;
+  /** GraphQL endpoint path (default: /graphql) */
+  graphqlPath?: string;
+  /** Health check path (default: /health) */
+  healthPath?: string;
+}
+
+/**
+ * Multi-service gateway routing configuration
+ * Used for nginx/infrastructure level routing between services
+ */
+export interface GatewayRoutingConfig {
+  /** Gateway deployment strategy */
+  strategy: GatewayStrategy;
+  /** Port for the unified gateway (shared mode) or nginx (per-service mode) */
+  port: number;
+  /** Default service when no X-Target-Service header (default: first service) */
+  defaultService?: string;
+  /** Service endpoints (required for per-service mode) */
+  services: ServiceEndpoint[];
+  /** Rate limit per second (default: 100) */
+  rateLimit?: number;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Service Configuration Types
+// ─────────────────────────────────────────────────────────────────────
+
 export interface ServiceConfig {
   /** Service name (e.g., 'retail-api', 'payment-service') */
   name: string;
@@ -25,12 +74,27 @@ export interface ServiceConfig {
   nodeVersion?: string;
 }
 
+/**
+ * Local dependency info extracted from package.json
+ */
+export interface LocalDependency {
+  /** Package name as it appears in package.json */
+  name: string;
+  /** Folder path relative to project root */
+  folderPath: string;
+  /** Dependencies of this package (for build order) */
+  dependsOn?: string[];
+}
+
 export interface DockerConfig extends ServiceConfig {
   /** Entry point file (default: dist/index.js) */
   entryPoint?: string;
   
-  /** Service-core package name as it appears in node_modules (e.g., '@myorg/service-core') */
-  serviceCorePackageName?: string;
+  /** 
+   * Local dependencies to build (from package.json `file:` references)
+   * Each will get its own Docker build stage
+   */
+  localDependencies?: LocalDependency[];
 }
 
 export interface DockerComposeConfig extends ServiceConfig {
@@ -126,5 +190,19 @@ export interface FullInfraConfig {
   compose?: Partial<DockerComposeConfig>;
   nginx?: Partial<NginxConfig>;
   k8s?: Partial<K8sConfig>;
+  /** Gateway configuration for multi-service routing */
+  gateway?: GatewayRoutingConfig;
+}
+
+/**
+ * Multi-service nginx configuration (for per-service gateway mode)
+ */
+export interface MultiServiceNginxConfig {
+  /** Gateway routing configuration */
+  gateway: GatewayRoutingConfig;
+  /** Rate limit per second (default: 100) */
+  rateLimit?: number;
+  /** Enable HTTPS config block (commented) */
+  includeHttps?: boolean;
 }
 

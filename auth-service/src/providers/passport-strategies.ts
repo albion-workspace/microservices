@@ -111,13 +111,13 @@ export function configurePassport(config: AuthConfig) {
           
           // Note: 'pending' users can login but will be activated automatically
           
-          // CRITICAL: Password verification using bcrypt
+          // CRITICAL: Password verification using node:crypto scrypt
           // Passport.js does NOT automatically hash/verify passwords - we must do it ourselves
           if (!user.passwordHash) {
             return done(null, false, { message: 'Password authentication not available' });
           }
           
-          // Verify password using bcrypt (secure comparison)
+          // Verify password using scrypt (timing-safe comparison)
           const isPasswordValid = await verifyPassword(password, user.passwordHash);
           if (!isPasswordValid) {
             return done(null, false, { message: 'Invalid credentials' });

@@ -59,73 +59,93 @@ export async function resolveDatabaseStrategyFromConfig(
 ): Promise<DatabaseStrategyResolver> {
   const { brand, tenantId } = options || {};
   
-  let dbConfig = await getConfigWithDefault<DatabaseConfig>(service, 'database', { brand, tenantId });
+  // IMPORTANT: Environment variables take highest priority (Docker/K8s override)
+  // This ensures containers use the correct hosts even if old config exists in MongoDB
+  const envMongoUri = process.env.MONGO_URI;
+  const envRedisUrl = process.env.REDIS_URL;
   
-  if (!dbConfig) {
-    const isSharedService = service === 'core-service' || service === 'auth-service';
-    dbConfig = {
-      strategy: (isSharedService ? 'shared' : 'per-service') as DatabaseStrategy,
-      mongoUri: isSharedService 
-        ? `mongodb://localhost:27017/${CORE_DATABASE_NAME}?directConnection=true`
-        : 'mongodb://localhost:27017/{service}?directConnection=true',
-      dbNameTemplate: isSharedService ? CORE_DATABASE_NAME : '{service}',
-      redisUrl: process.env.REDIS_URL || `redis://:${process.env.REDIS_PASSWORD || 'redis123'}@localhost:6379`,
-    };
+  // Extract base host from environment if available
+  const baseMongoHost = envMongoUri 
+    ? envMongoUri.replace(/\/[^\/]+(\?.*)?$/, '') // Extract host part (mongodb://host:port)
+    : null;
+  
+  // Load strategy from config store (only strategy matters, not the URIs)
+  const dbConfig = await getConfigWithDefault<DatabaseConfig>(service, 'database', { brand, tenantId });
+  const strategy = dbConfig?.strategy || (
+    (service === 'core-service' || service === 'auth-service') ? 'shared' : 'per-service'
+  );
+  const dbNameTemplate = dbConfig?.dbNameTemplate || (
+    (service === 'core-service' || service === 'auth-service') ? CORE_DATABASE_NAME : '{service}'
+  );
+  
+  // Build MongoDB URI: environment takes priority over stored config
+  let mongoUri: string;
+  if (envMongoUri) {
+    // Use environment variable - this is the Docker/K8s case
+    if (strategy === 'per-service') {
+      // Replace database name with service-specific one
+      mongoUri = envMongoUri.replace(/\/[^\/\?]+(\?|$)/, `/{service}$1`);
+    } else {
+      mongoUri = envMongoUri;
+    }
+  } else if (dbConfig?.mongoUri) {
+    // Use stored config (local development case)
+    mongoUri = dbConfig.mongoUri;
+  } else {
+    // No config anywhere - throw error (following CODING_STANDARDS: no silent fallbacks)
+    throw new Error(`MONGO_URI environment variable required for service: ${service}`);
   }
   
-  const strategy = dbConfig.strategy || 'per-service';
-  let mongoUri = dbConfig.mongoUri;
-  
-  if (strategy === 'per-service' && mongoUri && !mongoUri.includes('{service}')) {
-    mongoUri = 'mongodb://localhost:27017/{service}?directConnection=true';
-  }
-  if (!mongoUri) {
-    mongoUri = 'mongodb://localhost:27017/{service}?directConnection=true';
-  }
+  // Build Redis URL: environment takes priority
+  const redisUrl = envRedisUrl || dbConfig?.redisUrl;
   
   let uriTemplate = mongoUri;
-  let dbNameTemplate = dbConfig.dbNameTemplate || '{service}';
+  let resolvedDbNameTemplate = dbNameTemplate;
   
   if (strategy !== 'per-service') {
     uriTemplate = resolveUriTemplate(uriTemplate, { service, brand, tenantId });
-    dbNameTemplate = resolveDbNameTemplate(dbNameTemplate, { service, brand, tenantId });
+    resolvedDbNameTemplate = resolveDbNameTemplate(resolvedDbNameTemplate, { service, brand, tenantId });
   }
   
   switch (strategy) {
     case 'shared':
       return createSharedDatabaseStrategy();
     case 'per-service':
-      if (!dbNameTemplate.includes('{service}')) dbNameTemplate = '{service}';
-      if (!uriTemplate.includes('{service}')) uriTemplate = 'mongodb://localhost:27017/{service}?directConnection=true';
-      return createPerServiceDatabaseStrategy(dbNameTemplate, uriTemplate);
+      if (!resolvedDbNameTemplate.includes('{service}')) resolvedDbNameTemplate = '{service}';
+      if (!uriTemplate.includes('{service}')) {
+        // Add {service} placeholder to URI if missing
+        uriTemplate = uriTemplate.replace(/\/[^\/\?]+(\?|$)/, '/{service}$1');
+      }
+      return createPerServiceDatabaseStrategy(resolvedDbNameTemplate, uriTemplate);
     case 'per-brand':
       return createPerBrandDatabaseStrategy(
-        resolveDbNameTemplate(dbConfig.dbNameTemplate || 'brand_{brand}', { service, brand, tenantId }),
+        resolveDbNameTemplate(dbConfig?.dbNameTemplate || 'brand_{brand}', { service, brand, tenantId }),
         resolveUriTemplate(uriTemplate, { service, brand, tenantId })
       );
     case 'per-brand-service':
       return createPerBrandServiceDatabaseStrategy(
-        resolveDbNameTemplate(dbConfig.dbNameTemplate || 'brand_{brand}_{service}', { service, brand, tenantId }),
+        resolveDbNameTemplate(dbConfig?.dbNameTemplate || 'brand_{brand}_{service}', { service, brand, tenantId }),
         resolveUriTemplate(uriTemplate, { service, brand, tenantId })
       );
     case 'per-tenant':
       return createPerTenantDatabaseStrategy(
-        resolveDbNameTemplate(dbConfig.dbNameTemplate || 'tenant_{tenantId}', { service, brand, tenantId }),
+        resolveDbNameTemplate(dbConfig?.dbNameTemplate || 'tenant_{tenantId}', { service, brand, tenantId }),
         resolveUriTemplate(uriTemplate, { service, brand, tenantId })
       );
     case 'per-tenant-service':
       return createPerTenantServiceDatabaseStrategy(
-        resolveDbNameTemplate(dbConfig.dbNameTemplate || 'tenant_{tenantId}_{service}', { service, brand, tenantId }),
+        resolveDbNameTemplate(dbConfig?.dbNameTemplate || 'tenant_{tenantId}_{service}', { service, brand, tenantId }),
         resolveUriTemplate(uriTemplate, { service, brand, tenantId })
       );
     case 'per-shard':
       return createPerShardDatabaseStrategy({
-        numShards: dbConfig.numShards || 4,
-        dbNameTemplate,
+        numShards: dbConfig?.numShards || 4,
+        dbNameTemplate: resolvedDbNameTemplate,
         uriTemplate,
       });
     default:
-      return createPerServiceDatabaseStrategy('{service}', 'mongodb://localhost:27017/{service}?directConnection=true');
+      // Should not reach here - all cases handled above
+      return createPerServiceDatabaseStrategy('{service}', uriTemplate);
   }
 }
 
@@ -147,10 +167,15 @@ export async function resolveRedisUrlFromConfig(
   service: string,
   options?: { brand?: string; tenantId?: string }
 ): Promise<string | undefined> {
+  // IMPORTANT: Environment variables take highest priority (Docker/K8s override)
+  if (process.env.REDIS_URL) {
+    return process.env.REDIS_URL;
+  }
+  
+  // Fall back to config store
   const { brand, tenantId } = options || {};
   const dbConfig = await getConfigWithDefault<DatabaseConfig>(service, 'database', { brand, tenantId });
-  return dbConfig?.redisUrl || process.env.REDIS_URL || 
-    (process.env.REDIS_PASSWORD ? `redis://:${process.env.REDIS_PASSWORD}@localhost:6379` : undefined);
+  return dbConfig?.redisUrl;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -236,7 +261,11 @@ export async function initializeServiceDatabase(options: ServiceDatabaseOptions)
   try {
     getDatabase();
   } catch {
-    const mongoUri = process.env.MONGO_URI || `mongodb://localhost:27017/${CORE_DATABASE_NAME}?directConnection=true`;
+    // Connect to MongoDB using environment variable (required)
+    const mongoUri = process.env.MONGO_URI;
+    if (!mongoUri) {
+      throw new Error('MONGO_URI environment variable required for database initialization');
+    }
     await connectDatabase(mongoUri);
   }
   

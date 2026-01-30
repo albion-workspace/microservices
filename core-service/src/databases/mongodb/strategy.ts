@@ -247,7 +247,11 @@ export class DatabaseStrategyResolver {
     }
 
     // Build URI from template with support for {service} and {brand}
-    let uri = this.config.uriTemplate || process.env.MONGO_URI || `mongodb://localhost:27017/${dbName}`;
+    // IMPORTANT: process.env.MONGO_URI takes highest priority to allow Docker/K8s override
+    let uri = process.env.MONGO_URI || this.config.uriTemplate;
+    if (!uri) {
+      throw new Error('MONGO_URI environment variable or uriTemplate required for per-service strategy');
+    }
     uri = uri.replace('{service}', context.service.replace(/-/g, '_'));
     if (context.brand) {
       uri = uri.replace('{brand}', context.brand.replace(/-/g, '_'));
@@ -283,7 +287,11 @@ export class DatabaseStrategyResolver {
       : `brand_${context.brand.replace(/-/g, '_')}`;
 
     // Build URI
-    let uri = this.config.uriTemplate || process.env.MONGO_URI || `mongodb://localhost:27017/${dbName}`;
+    // IMPORTANT: process.env.MONGO_URI takes highest priority to allow Docker/K8s override
+    let uri = process.env.MONGO_URI || this.config.uriTemplate;
+    if (!uri) {
+      throw new Error('MONGO_URI environment variable or uriTemplate required');
+    }
     uri = uri.replace('{brand}', context.brand.replace(/-/g, '_'));
 
     // Connect to brand-specific database
@@ -324,7 +332,11 @@ export class DatabaseStrategyResolver {
       : `brand_${context.brand.replace(/-/g, '_')}_${context.service.replace(/-/g, '_')}`;
 
     // Build URI
-    let uri = this.config.uriTemplate || process.env.MONGO_URI || `mongodb://localhost:27017/${dbName}`;
+    // IMPORTANT: process.env.MONGO_URI takes highest priority to allow Docker/K8s override
+    let uri = process.env.MONGO_URI || this.config.uriTemplate;
+    if (!uri) {
+      throw new Error('MONGO_URI environment variable or uriTemplate required');
+    }
     uri = uri
       .replace('{brand}', context.brand.replace(/-/g, '_'))
       .replace('{service}', context.service.replace(/-/g, '_'));
@@ -360,7 +372,11 @@ export class DatabaseStrategyResolver {
       : `tenant_${context.tenantId.replace(/-/g, '_')}`;
 
     // Build URI
-    let uri = this.config.uriTemplate || process.env.MONGO_URI || `mongodb://localhost:27017/${dbName}`;
+    // IMPORTANT: process.env.MONGO_URI takes highest priority to allow Docker/K8s override
+    let uri = process.env.MONGO_URI || this.config.uriTemplate;
+    if (!uri) {
+      throw new Error('MONGO_URI environment variable or uriTemplate required');
+    }
     uri = uri.replace('{tenantId}', context.tenantId.replace(/-/g, '_'));
 
     // Connect to tenant-specific database
@@ -401,7 +417,11 @@ export class DatabaseStrategyResolver {
       : `tenant_${context.tenantId.replace(/-/g, '_')}_${context.service.replace(/-/g, '_')}`;
 
     // Build URI
-    let uri = this.config.uriTemplate || process.env.MONGO_URI || `mongodb://localhost:27017/${dbName}`;
+    // IMPORTANT: process.env.MONGO_URI takes highest priority to allow Docker/K8s override
+    let uri = process.env.MONGO_URI || this.config.uriTemplate;
+    if (!uri) {
+      throw new Error('MONGO_URI environment variable or uriTemplate required');
+    }
     uri = uri
       .replace('{tenantId}', context.tenantId.replace(/-/g, '_'))
       .replace('{service}', context.service.replace(/-/g, '_'));
@@ -451,7 +471,11 @@ export class DatabaseStrategyResolver {
     }
 
     // Build URI
-    let uri = this.config.uriTemplate || process.env.MONGO_URI || `mongodb://localhost:27017/${dbName}`;
+    // IMPORTANT: process.env.MONGO_URI takes highest priority to allow Docker/K8s override
+    let uri = process.env.MONGO_URI || this.config.uriTemplate;
+    if (!uri) {
+      throw new Error('MONGO_URI environment variable or uriTemplate required');
+    }
     uri = uri.replace('{shard}', String(shardNumber));
     if (context.service) {
       uri = uri.replace('{service}', context.service.replace(/-/g, '_'));

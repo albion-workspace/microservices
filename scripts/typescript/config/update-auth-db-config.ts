@@ -26,15 +26,17 @@ async function main() {
     const configStore = createConfigStore({ database });
     
     // Update auth-service database config to use core_service
+    // NOTE: mongoUri and redisUrl are NOT stored here - they come from environment variables
+    // This follows CODING_STANDARDS: single source of truth, no hardcoded localhost
     console.log('📝 Updating database config for auth-service...');
     await configStore.set(
       'auth-service',
       'database',
       {
         strategy: 'shared', // Use shared strategy to ensure core_service is used
-        mongoUri: 'mongodb://localhost:27017/core_service?directConnection=true',
         dbNameTemplate: 'core_service', // Explicitly use core_service
-        redisUrl: 'redis://:redis123@localhost:6379',
+        // NOTE: mongoUri and redisUrl come from MONGO_URI and REDIS_URL env vars
+        // Do NOT hardcode localhost values here - see CODING_STANDARDS.md
       },
       {
         brand: context.brand,
@@ -42,7 +44,6 @@ async function main() {
         metadata: {
           description: 'Database strategy and connection configuration. Auth-service uses core_service for users.',
         },
-        sensitivePaths: ['database.redisUrl'],
       }
     );
     

@@ -109,6 +109,10 @@ out/
 # Turbo (if used)
 .turbo/
 
+# Generated infrastructure files (gateway generates these)
+gateway/generated/
+*-service/Dockerfile
+
 # Misc
 *.pid
 *.seed
