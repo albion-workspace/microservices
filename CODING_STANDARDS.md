@@ -376,6 +376,63 @@ Only create a shared package (like `shared-validators`) when:
 
 **Next available port**: 9006
 
+### Gateway Routing Strategy
+
+The system supports multiple gateway deployment strategies:
+
+| Strategy | Description | Use Case |
+|----------|-------------|----------|
+| `per-service` | Each service has own gateway (default) | Production, independent scaling |
+| `shared` | All services in one gateway process | Development, small projects |
+| `per-brand` | Brand-specific gateways | White-label platforms |
+
+#### Header-Based Routing (per-service mode)
+
+In per-service mode, nginx routes requests based on the `X-Target-Service` header:
+
+```
+Client → /graphql + X-Target-Service: payment → nginx → payment-service:9002
+```
+
+**Client Usage:**
+```typescript
+// GraphQL client sets header for routing
+const client = new GraphQLClient('/graphql', {
+  headers: {
+    'X-Target-Service': 'payment',  // auth|payment|bonus|kyc|notification
+    'Authorization': `Bearer ${token}`,
+  }
+});
+```
+
+**Generating nginx config:**
+```typescript
+import { generateMultiServiceInfra, createDefaultGatewayRoutingConfig } from 'core-service';
+
+// Generate gateway infrastructure
+await generateMultiServiceInfra(createDefaultGatewayRoutingConfig(), {
+  outputDir: './infra',
+  nginx: true,
+  dockerCompose: true,
+});
+```
+
+**Default services configuration:**
+```typescript
+const gatewayConfig: GatewayRoutingConfig = {
+  strategy: 'per-service',
+  port: 80,
+  defaultService: 'auth',
+  services: [
+    { name: 'auth', host: 'auth-service', port: 9001 },
+    { name: 'payment', host: 'payment-service', port: 9002 },
+    { name: 'bonus', host: 'bonus-service', port: 9003 },
+    { name: 'notification', host: 'notification-service', port: 9004 },
+    { name: 'kyc', host: 'kyc-service', port: 9005 },
+  ],
+};
+```
+
 ---
 
 ## 🚀 Creating a New Microservice

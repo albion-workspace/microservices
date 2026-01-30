@@ -577,6 +577,9 @@ export type {
 // ═══════════════════════════════════════════════════════════════════
 export { generateInfra, loadConfig, generateSampleConfig, createDefaultConfig } from './infra/index.js';
 export { generateDockerfile, generateDockerCompose, generateNginxConf, generateK8sManifests } from './infra/index.js';
+// Multi-service gateway infrastructure
+export { generateMultiServiceNginxConf } from './infra/index.js';
+export { generateMultiServiceInfra, createDefaultGatewayRoutingConfig } from './infra/index.js';
 export type { 
   ServiceConfig as InfraServiceConfig, 
   DockerConfig, 
@@ -584,7 +587,13 @@ export type {
   NginxConfig, 
   K8sConfig, 
   FullInfraConfig, 
-  GeneratorOptions 
+  GeneratorOptions,
+  // Gateway routing types (for infrastructure/nginx)
+  GatewayStrategy,
+  GatewayRoutingConfig,
+  ServiceEndpoint,
+  MultiServiceNginxConfig,
+  MultiServiceGeneratorOptions,
 } from './infra/index.js';
 
 // ═══════════════════════════════════════════════════════════════════
