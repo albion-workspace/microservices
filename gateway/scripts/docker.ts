@@ -453,15 +453,43 @@ async function runHealthCheck(config: ServicesConfig, serviceName?: string): Pro
 }
 
 /**
- * Clean up generated Docker files
+ * Clean up generated Docker files (docker-compose and service Dockerfiles)
  */
-async function cleanGeneratedFiles(): Promise<void> {
+async function cleanGeneratedFiles(config?: ServicesConfig, serviceName?: string): Promise<void> {
   const dockerGenDir = join(GENERATED_DIR, 'docker');
+  
+  // Clean generated docker-compose files
   try {
     await rm(dockerGenDir, { recursive: true, force: true });
-    console.log('✅ Cleaned generated Docker files');
+    console.log('  ✅ Cleaned generated docker-compose files');
   } catch {
     // Directory might not exist
+  }
+  
+  // Clean generated Dockerfiles in service directories
+  const services = config ? getTargetServices(config, serviceName) : [];
+  for (const service of services) {
+    const dockerfilePath = join(ROOT_DIR, `${service.name}-service`, 'Dockerfile');
+    try {
+      await rm(dockerfilePath, { force: true });
+      console.log(`  ✅ Cleaned ${service.name}-service/Dockerfile`);
+    } catch {
+      // File might not exist
+    }
+  }
+  
+  // If no config provided, clean all known service Dockerfiles
+  if (!config) {
+    const knownServices = ['auth', 'payment', 'bonus', 'notification', 'kyc'];
+    for (const svc of knownServices) {
+      const dockerfilePath = join(ROOT_DIR, `${svc}-service`, 'Dockerfile');
+      try {
+        await rm(dockerfilePath, { force: true });
+      } catch {
+        // File might not exist
+      }
+    }
+    console.log('  ✅ Cleaned service Dockerfiles');
   }
 }
 
@@ -480,10 +508,9 @@ async function dockerClean(config: ServicesConfig, serviceName?: string): Promis
     removeOldImage(service.name);
   }
 
-  if (!serviceName) {
-    // Only clean generated files if cleaning all services
-    await cleanGeneratedFiles();
-  }
+  // Clean generated files
+  console.log('\nCleaning generated files...');
+  await cleanGeneratedFiles(config, serviceName);
 
   console.log('');
   console.log('✅ Cleanup complete');
@@ -526,10 +553,8 @@ async function dockerFresh(env: 'dev' | 'prod', config: ServicesConfig, serviceN
 
     if (healthy) {
       console.log('\n🎉 Fresh deployment successful!');
-      if (!serviceName) {
-        console.log('Cleaning up generated Docker files...');
-        await cleanGeneratedFiles();
-      }
+      console.log('\nStep 5/5: Cleaning up generated files...');
+      await cleanGeneratedFiles(config, serviceName);
     } else {
       console.log('\n⚠️  Deployment completed but some services are unhealthy');
       console.log('Generated files preserved for debugging.');
