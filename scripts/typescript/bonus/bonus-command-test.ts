@@ -19,8 +19,6 @@
 import { 
   connectRedis, 
   checkRedisHealth, 
-  connectDatabase, 
-  getDatabase,
   getClient,
   findUserIdByRole,
   findUserIdsByRole,
@@ -35,8 +33,8 @@ import {
 import { createTransferRecoveryHandler } from '../../../core-service/src/common/wallet/transfer-recovery.js';
 import { createTransferWithTransactions } from '../../../core-service/src/common/wallet/transfer.js';
 
-// External packages (bonus-shared)
-import { BonusEligibility } from '../../../bonus-shared/src/BonusEligibility.js';
+// External packages (shared-validators)
+import { BonusEligibility } from '../../../shared-validators/src/BonusEligibility.js';
 
 // Local imports
 import { 
@@ -61,19 +59,16 @@ import {
   loadScriptConfig,
   getDatabaseContextFromArgs,
   AUTH_SERVICE_URL,
-  PAYMENT_SERVICE_URL,
   BONUS_SERVICE_URL,
 } from '../config/scripts.js';
 
 // Type imports
-import type { BonusTemplate as ClientBonusTemplate, EligibilityContext } from '../../../bonus-shared/src/BonusEligibility.js';
+import type { BonusTemplate as ClientBonusTemplate, BonusEligibilityContext as EligibilityContext } from '../../../shared-validators/src/BonusEligibility.js';
 
 // ═══════════════════════════════════════════════════════════════════
-// Configuration - Loaded dynamically from MongoDB config store
-// Service URLs are imported from scripts.ts (single source of truth)
+// Configuration
 // ═══════════════════════════════════════════════════════════════════
 
-// Use BONUS_SERVICE_URL from scripts.ts
 const BONUS_URL = BONUS_SERVICE_URL;
 
 const CONFIG = {
@@ -2537,7 +2532,6 @@ async function main() {
   const args = process.argv.slice(2);
   
   // Initialize configuration from MongoDB config store
-  // This will populate AUTH_SERVICE_URL, PAYMENT_SERVICE_URL, BONUS_SERVICE_URL
   await initializeConfig();
   await loadScriptConfig();
   

@@ -16,7 +16,7 @@ if ($nodeProcesses) {
     Write-Host "    [INFO] No Node processes running" -ForegroundColor Gray
 }
 
-$services = @("access-engine", "bonus-shared", "core-service", "auth-service", "payment-service", "bonus-service", "notification-service", "app")
+$services = @("access-engine", "shared-validators", "core-service", "auth-service", "payment-service", "bonus-service", "notification-service", "kyc-service", "app")
 
 foreach ($service in $services) {
     $path = Join-Path $rootDir $service

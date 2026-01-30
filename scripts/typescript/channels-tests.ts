@@ -13,7 +13,7 @@
 
 import http from 'node:http';
 import { createHmac } from 'node:crypto';
-import { loginAs, users, createJWT, createSystemToken, createTokenForUser, decodeJWT, initializeConfig } from './config/users.js';
+import { loginAs, users, createSystemToken, initializeConfig } from './config/users.js';
 import { 
   AUTH_SERVICE_URL, 
   PAYMENT_SERVICE_URL, 
@@ -23,11 +23,9 @@ import {
 } from './config/scripts.js';
 
 // ═══════════════════════════════════════════════════════════════════
-// Configuration (loaded dynamically from MongoDB config store)
+// Configuration
 // ═══════════════════════════════════════════════════════════════════
 
-// Note: Service URLs are loaded from scripts.ts (single source of truth)
-// These will be initialized in runAllTests() before use
 let CONFIG = {
   notificationServiceUrl: NOTIFICATION_SERVICE_URL.replace('/graphql', ''),
   bonusServiceUrl: BONUS_SERVICE_URL,
@@ -43,16 +41,14 @@ let CONFIG = {
 };
 
 // ═══════════════════════════════════════════════════════════════════
-// JWT Token Generation (using centralized utilities)
+// JWT Token Generation
 // ═══════════════════════════════════════════════════════════════════
 
-async function generateToken(secret?: string): Promise<string> {
-  // Use centralized createSystemToken, secret is handled internally
+async function generateToken(): Promise<string> {
   return createSystemToken('1h');
 }
 
-function generateAdminToken(secret?: string): string {
-  // Use centralized createSystemToken with Bearer prefix
+function generateAdminToken(): string {
   return createSystemToken('8h', true);
 }
 
@@ -520,8 +516,8 @@ async function testWebhooks(): Promise<void> {
   } catch {
     console.log('  [WARN] Auth Service not available - using generated tokens (may fail authorization)');
     // Fallback to generated tokens if auth service is not available
-    BONUS_TOKEN = generateAdminToken(CONFIG.jwtSecret);
-    PAYMENT_TOKEN = generateAdminToken(CONFIG.jwtSecret);
+    BONUS_TOKEN = generateAdminToken();
+    PAYMENT_TOKEN = generateAdminToken();
   }
 
   // Get real system tokens from auth service (more reliable than generated tokens)
@@ -1363,6 +1359,10 @@ async function runAllTests() {
     console.log('   ✅ Socket.IO (polling) - Works');
     console.log('   ✅ Socket.IO (websocket transport) - Available via upgrade');
     console.log('   ✅ Webhooks - Works\n');
+
+    // Cleanup and exit on success
+    stopWebhookReceiver();
+    process.exit(0);
 
   } catch (err) {
     console.error('\n❌ Test suite failed:', err);

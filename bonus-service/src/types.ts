@@ -413,7 +413,7 @@ export interface RecordActivityInput {
 
 /**
  * Result of checking user eligibility for bonuses
- * Note: This is different from BonusEligibility class in bonus-shared
+ * Note: This is different from BonusEligibility class in shared-validators
  */
 export interface BonusEligibilityResult {
   eligible: boolean;

@@ -4,6 +4,15 @@
  * Supports two rollback strategies:
  * 1. Compensation-based: Each step has a compensate function (default)
  * 2. MongoDB Transactions: Atomic multi-document operations (for financial data)
+ * 
+ * CRITICAL - Boundary Rules (see README "Saga, Transaction, and Recovery Boundaries"):
+ * - MongoDB Transaction → local atomicity (single service)
+ * - Saga → cross-step coordination
+ * - Recovery System → crash repair only (not for saga compensation)
+ * 
+ * Never retry a saga step inside a MongoDB transaction.
+ * Never recover something a saga already compensated.
+ * Financial operations MUST use useTransaction: true.
  */
 
 import type { ClientSession, MongoClient } from 'mongodb';

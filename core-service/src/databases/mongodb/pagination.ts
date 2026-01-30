@@ -41,6 +41,26 @@ export interface CursorPaginationResult<T> {
 }
 
 /**
+ * Simplified pagination result (nodes instead of edges)
+ * More convenient for simple use cases
+ */
+export interface PaginationResult<T> {
+  nodes: T[];
+  pageInfo: {
+    hasNextPage: boolean;
+    hasPreviousPage: boolean;
+    startCursor: string | null;
+    endCursor: string | null;
+  };
+  totalCount?: number;
+}
+
+/**
+ * Type alias for pagination options (for base repository)
+ */
+export type PaginateOptions = CursorPaginationOptions;
+
+/**
  * Encode cursor from field and value
  */
 function encodeCursor(field: string, value: unknown): string {

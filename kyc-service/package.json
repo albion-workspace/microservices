@@ -1,0 +1,21 @@
+{
+  "name": "kyc-service",
+  "version": "1.0.1",
+  "description": "KYC Service - Generic Know Your Customer verification supporting finance, betting, crypto regulations",
+  "type": "module",
+  "scripts": {
+    "start": "node ../core-service/node_modules/tsx/dist/cli.mjs src/index.ts",
+    "dev": "node ../core-service/node_modules/tsx/dist/cli.mjs watch src/index.ts",
+    "build": "node ../core-service/node_modules/typescript/bin/tsc",
+    "build:run": "npm run build && npm start",
+    "test": "node ../core-service/node_modules/tsx/dist/cli.mjs src/test.ts",
+    "infra:generate": "service-infra generate -c infra.config.json --all",
+    "infra:preview": "service-infra generate -c infra.config.json --all --dry-run",
+    "infra:docker": "service-infra generate -c infra.config.json --dockerfile --compose",
+    "infra:k8s": "service-infra generate -c infra.config.json --k8s"
+  },
+  "dependencies": {
+    "core-service": "file:../core-service",
+    "shared-validators": "file:../shared-validators"
+  }
+}

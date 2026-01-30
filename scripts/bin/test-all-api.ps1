@@ -55,16 +55,16 @@ Write-Host "[WAIT] Waiting for services to initialize..." -ForegroundColor Yello
 Start-Sleep -Seconds 10
 
 # ═══════════════════════════════════════════════════════════════
-# AUTH SERVICE TESTS (Port 3003)
+# AUTH SERVICE TESTS (Port 9001)
 # ═══════════════════════════════════════════════════════════════
 
 Write-Host ""
 Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host "AUTH SERVICE (Port 3003)" -ForegroundColor Cyan
+Write-Host "AUTH SERVICE (Port 9001)" -ForegroundColor Cyan
 Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host ""
 
-$authUrl = "http://localhost:3003/graphql"
+$authUrl = "http://localhost:9001/graphql"
 $testResults = @{}
 
 # Test user for auth operations
@@ -249,16 +249,16 @@ if ($registerResult) {
 }
 
 # ═══════════════════════════════════════════════════════════════
-# PAYMENT SERVICE TESTS (Port 3004)
+# PAYMENT SERVICE TESTS (Port 9002)
 # ═══════════════════════════════════════════════════════════════
 
 Write-Host ""
 Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host "PAYMENT SERVICE (Port 3004)" -ForegroundColor Cyan
+Write-Host "PAYMENT SERVICE (Port 9002)" -ForegroundColor Cyan
 Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host ""
 
-$paymentUrl = "http://localhost:3004/graphql"
+$paymentUrl = "http://localhost:9002/graphql"
 
 Write-Host "QUERIES:" -ForegroundColor Yellow
 $testResults["payment_health"] = Test-GraphQL -ServiceName "Payment" -Url $paymentUrl -Query "query { health { status service } }" -Description "health"
@@ -294,16 +294,16 @@ if ($global:userToken) {
 }
 
 # ═══════════════════════════════════════════════════════════════
-# BONUS SERVICE TESTS (Port 3005)
+# BONUS SERVICE TESTS (Port 9003)
 # ═══════════════════════════════════════════════════════════════
 
 Write-Host ""
 Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host "BONUS SERVICE (Port 3005)" -ForegroundColor Cyan
+Write-Host "BONUS SERVICE (Port 9003)" -ForegroundColor Cyan
 Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host ""
 
-$bonusUrl = "http://localhost:3005/graphql"
+$bonusUrl = "http://localhost:9003/graphql"
 
 Write-Host "QUERIES:" -ForegroundColor Yellow
 $testResults["bonus_health"] = Test-GraphQL -ServiceName "Bonus" -Url $bonusUrl -Query "query { health { status service } }" -Description "health"
@@ -339,16 +339,16 @@ if ($global:userToken) {
 }
 
 # ═══════════════════════════════════════════════════════════════
-# NOTIFICATION SERVICE TESTS (Port 3006)
+# NOTIFICATION SERVICE TESTS (Port 9004)
 # ═══════════════════════════════════════════════════════════════
 
 Write-Host ""
 Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host "NOTIFICATION SERVICE (Port 3006)" -ForegroundColor Cyan
+Write-Host "NOTIFICATION SERVICE (Port 9004)" -ForegroundColor Cyan
 Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host ""
 
-$notificationUrl = "http://localhost:3006/graphql"
+$notificationUrl = "http://localhost:9004/graphql"
 
 Write-Host "QUERIES:" -ForegroundColor Yellow
 $testResults["notification_health"] = Test-GraphQL -ServiceName "Notification" -Url $notificationUrl -Query "query { health { status service } }" -Description "health"

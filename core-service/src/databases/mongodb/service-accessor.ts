@@ -229,9 +229,14 @@ export function createServiceDatabaseAccess(serviceName: string): ServiceDatabas
           await defaultDb!.createCollection(collName);
         }
         const collection = defaultDb!.collection(collName);
-        await collection.createIndexes(indexes.map(idx => ({
-          key: idx.key, unique: idx.unique, sparse: idx.sparse, name: idx.name,
-        })));
+        // Filter out null/undefined values from index options
+        await collection.createIndexes(indexes.map(idx => {
+          const indexSpec: Record<string, unknown> = { key: idx.key };
+          if (idx.unique != null) indexSpec.unique = idx.unique;
+          if (idx.sparse != null) indexSpec.sparse = idx.sparse;
+          if (idx.name != null) indexSpec.name = idx.name;
+          return indexSpec;
+        }) as any);
       }
       logger.info('All indexes ensured', { service: serviceName });
     },

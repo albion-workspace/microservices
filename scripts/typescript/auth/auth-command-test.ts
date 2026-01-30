@@ -21,20 +21,14 @@
  * - Import ordering: Node built-ins → External packages → Local imports → Type imports
  */
 
-// Node built-ins
-import { randomUUID } from 'crypto';
-
 // External packages (core-service)
-import { connectRedis, getRedis, scanKeysIterator, hashToken } from '../../../core-service/src/index.js';
+import { connectRedis, getRedis, scanKeysIterator } from '../../../core-service/src/index.js';
 
 // Local imports
 import { 
   loginAs, 
   registerAs, 
-  users, 
-  DEFAULT_TENANT_ID,
   getUserDefinition,
-  getUserId,
   initializeConfig,
   getDefaultTenantId,
 } from '../config/users.js';
@@ -46,12 +40,7 @@ import {
 } from '../config/scripts.js';
 
 // ═══════════════════════════════════════════════════════════════════
-// Configuration - Loaded dynamically from MongoDB config store
-// Service URLs are imported from scripts.ts (single source of truth)
-// ═══════════════════════════════════════════════════════════════════
-
-// ═══════════════════════════════════════════════════════════════════
-// Shared GraphQL Helper - Single Implementation
+// GraphQL Helper
 // ═══════════════════════════════════════════════════════════════════
 
 async function graphql<T = any>(
@@ -60,11 +49,6 @@ async function graphql<T = any>(
   variables?: Record<string, unknown>,
   token?: string
 ): Promise<T> {
-  // Use AUTH_SERVICE_URL if url matches the old hardcoded value
-  const finalUrl = url === 'http://localhost:3003/graphql' 
-    ? AUTH_SERVICE_URL 
-    : url;
-  
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
@@ -73,7 +57,7 @@ async function graphql<T = any>(
     headers['Authorization'] = `Bearer ${token}`;
   }
 
-  const response = await fetch(finalUrl, {
+  const response = await fetch(url, {
     method: 'POST',
     headers,
     body: JSON.stringify({ query, variables }),
@@ -528,8 +512,8 @@ async function testPasswordReset() {
     logTest('Password Reset Request', true, 'Password reset token received');
     logTest('Reset Token Retrieval', true, `Reset token metadata extracted (channel: ${resetTokenMetadata.otp?.channel || 'email'})`);
     
-    // Step 2: Reset password
-    const newPassword = 'NewPassword123!@#';
+    // Reset password to match users.ts (source of truth)
+    const newPassword = user.password;
     const resetResult = await graphql<{
       resetPassword: {
         success: boolean;

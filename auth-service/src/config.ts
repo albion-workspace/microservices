@@ -55,7 +55,7 @@ const SERVICE_NAME = 'auth-service';
  * 3. Registered defaults (auto-created if missing)
  */
 export async function loadConfig(brand?: string, tenantId?: string): Promise<AuthConfig> {
-  const port = parseInt(process.env.PORT || '3003');
+  const port = parseInt(process.env.PORT || '9001');
   
   // Load from MongoDB config store (core_service.service_configs) with automatic default creation
   // If config doesn't exist in DB, uses registered default and creates it automatically

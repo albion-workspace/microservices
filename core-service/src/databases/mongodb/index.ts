@@ -55,7 +55,7 @@ export {
   type DuplicateKeyErrorOptions,
 } from './errors.js';
 
-// Repository
+// Repository (functional)
 export {
   createRepository,
   bulkInsert,
@@ -66,12 +66,26 @@ export {
   type RepositoryOptions,
 } from './repository.js';
 
+// Base Repository (class-based)
+export {
+  BaseRepository,
+  TenantRepository,
+  UserScopedRepository,
+  type MinimalEntity,
+  type QueryOptions,
+  type PaginationInput,
+  type DatabaseAccessor,
+  type RepositoryConfig,
+} from './base-repository.js';
+
 // Pagination
 export {
   paginateCollection,
   convertOffsetToCursor,
   type CursorPaginationOptions,
   type CursorPaginationResult,
+  type PaginationResult,
+  type PaginateOptions,
 } from './pagination.js';
 
 // Strategy

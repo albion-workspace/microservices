@@ -4,10 +4,14 @@
   "description": "Notification Service - Multi-channel notifications (Email, SMS, WhatsApp, Push, SSE, Socket.IO) with webhook support",
   "type": "module",
   "scripts": {
-    "start": "tsx src/index.ts",
-    "dev": "tsx watch src/index.ts",
-    "build": "tsc",
-    "build:run": "npm run build && npm start"
+    "start": "node ../core-service/node_modules/tsx/dist/cli.mjs src/index.ts",
+    "dev": "node ../core-service/node_modules/tsx/dist/cli.mjs watch src/index.ts",
+    "build": "node ../core-service/node_modules/typescript/bin/tsc",
+    "build:run": "npm run build && npm start",
+    "infra:generate": "service-infra generate -c infra.config.json --all",
+    "infra:preview": "service-infra generate -c infra.config.json --all --dry-run",
+    "infra:docker": "service-infra generate -c infra.config.json --dockerfile --compose",
+    "infra:k8s": "service-infra generate -c infra.config.json --k8s"
   },
   "dependencies": {
     "core-service": "file:../core-service",
@@ -20,9 +24,6 @@
     "./plugins": "./dist/plugins/index.js"
   },
   "devDependencies": {
-    "@types/nodemailer": "^6.4.16",
-    "@types/node": "^20.11.0",
-    "tsx": "^4.7.0",
-    "typescript": "^5.3.3"
+    "@types/nodemailer": "^6.4.16"
   }
 }

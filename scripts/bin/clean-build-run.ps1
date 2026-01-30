@@ -16,7 +16,7 @@ Write-Host ""
 
 # Step 2: Install dependencies
 Write-Host "[STEP 2] Installing dependencies..." -ForegroundColor Yellow
-$allServices = @("access-engine", "bonus-shared", "core-service", "auth-service", "payment-service", "bonus-service", "notification-service", "app")
+$allServices = @("access-engine", "shared-validators", "core-service", "auth-service", "payment-service", "bonus-service", "notification-service", "kyc-service", "app")
 
 foreach ($service in $allServices) {
     $servicePath = Join-Path $rootDir $service
@@ -76,18 +76,18 @@ Pop-Location
 Write-Host "[OK] core-service built successfully" -ForegroundColor Green
 Write-Host ""
 
-# Step 4b: Build bonus-shared (required by bonus-service)
-Write-Host "[STEP 4b] Building bonus-shared..." -ForegroundColor Yellow
-$bonusSharedPath = Join-Path $rootDir "bonus-shared"
-Push-Location $bonusSharedPath
+# Step 4b: Build shared-validators (required by bonus-service, kyc-service)
+Write-Host "[STEP 4b] Building shared-validators..." -ForegroundColor Yellow
+$sharedValidatorsPath = Join-Path $rootDir "shared-validators"
+Push-Location $sharedValidatorsPath
 npm run build
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "[ERROR] Failed to build bonus-shared" -ForegroundColor Red
+    Write-Host "[ERROR] Failed to build shared-validators" -ForegroundColor Red
     Pop-Location
     exit 1
 }
 Pop-Location
-Write-Host "[OK] bonus-shared built successfully" -ForegroundColor Green
+Write-Host "[OK] shared-validators built successfully" -ForegroundColor Green
 Write-Host ""
 
 # Step 5: Set shared JWT secret
@@ -105,24 +105,24 @@ Write-Host ""
 $scriptsDir = Split-Path -Parent $PSScriptRoot
 $startServiceDevScript = Join-Path $scriptsDir "start-service-dev.ps1"
 
-# Notification Service (port 3006) - Watch Mode
-Write-Host "  Starting Notification Service (port 3006) in WATCH MODE..." -ForegroundColor Cyan
-Start-Process powershell -ArgumentList "-ExecutionPolicy", "Bypass", "-File", $startServiceDevScript, "notification-service"
-Start-Sleep -Seconds 3
-
-# Auth Service (port 3003) - Watch Mode
-Write-Host "  Starting Auth Service (port 3003) in WATCH MODE..." -ForegroundColor Cyan
+# Auth Service (port 9001) - Watch Mode
+Write-Host "  Starting Auth Service (port 9001) in WATCH MODE..." -ForegroundColor Cyan
 Start-Process powershell -ArgumentList "-ExecutionPolicy", "Bypass", "-File", $startServiceDevScript, "auth-service"
 Start-Sleep -Seconds 3
 
-# Payment Service (port 3004) - Watch Mode
-Write-Host "  Starting Payment Service (port 3004) in WATCH MODE..." -ForegroundColor Cyan
+# Payment Service (port 9002) - Watch Mode
+Write-Host "  Starting Payment Service (port 9002) in WATCH MODE..." -ForegroundColor Cyan
 Start-Process powershell -ArgumentList "-ExecutionPolicy", "Bypass", "-File", $startServiceDevScript, "payment-service"
 Start-Sleep -Seconds 3
 
-# Bonus Service (port 3005) - Watch Mode
-Write-Host "  Starting Bonus Service (port 3005) in WATCH MODE..." -ForegroundColor Cyan
+# Bonus Service (port 9003) - Watch Mode
+Write-Host "  Starting Bonus Service (port 9003) in WATCH MODE..." -ForegroundColor Cyan
 Start-Process powershell -ArgumentList "-ExecutionPolicy", "Bypass", "-File", $startServiceDevScript, "bonus-service"
+Start-Sleep -Seconds 3
+
+# Notification Service (port 9004) - Watch Mode
+Write-Host "  Starting Notification Service (port 9004) in WATCH MODE..." -ForegroundColor Cyan
+Start-Process powershell -ArgumentList "-ExecutionPolicy", "Bypass", "-File", $startServiceDevScript, "notification-service"
 Start-Sleep -Seconds 3
 
 # React App (port 5173) - Already in watch mode
@@ -137,10 +137,10 @@ Write-Host "           Services Started                                    " -Fo
 Write-Host "================================================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Service URLs:" -ForegroundColor Green
-Write-Host "  - Notification Service: http://localhost:3006" -ForegroundColor Green
-Write-Host "  - Auth Service:         http://localhost:3003" -ForegroundColor Green
-Write-Host "  - Payment Service:      http://localhost:3004" -ForegroundColor Green
-Write-Host "  - Bonus Service:        http://localhost:3005" -ForegroundColor Green
+Write-Host "  - Auth Service:         http://localhost:9001" -ForegroundColor Green
+Write-Host "  - Payment Service:      http://localhost:9002" -ForegroundColor Green
+Write-Host "  - Bonus Service:        http://localhost:9003" -ForegroundColor Green
+Write-Host "  - Notification Service: http://localhost:9004" -ForegroundColor Green
 Write-Host "  - React App:            http://localhost:5173" -ForegroundColor Green
 Write-Host ""
 Write-Host "[WAIT] Waiting 25 seconds for services to initialize..." -ForegroundColor Yellow
@@ -154,10 +154,10 @@ Write-Host "================================================================" -F
 Write-Host ""
 
 $services = @(
-    @{ Name = "Notification Service"; Url = "http://localhost:3006/health" },
-    @{ Name = "Auth Service"; Url = "http://localhost:3003/health" },
-    @{ Name = "Payment Service"; Url = "http://localhost:3004/health" },
-    @{ Name = "Bonus Service"; Url = "http://localhost:3005/health" }
+    @{ Name = "Auth Service"; Url = "http://localhost:9001/health" },
+    @{ Name = "Payment Service"; Url = "http://localhost:9002/health" },
+    @{ Name = "Bonus Service"; Url = "http://localhost:9003/health" },
+    @{ Name = "Notification Service"; Url = "http://localhost:9004/health" }
 )
 
 foreach ($service in $services) {

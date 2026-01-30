@@ -1,0 +1,244 @@
+/**
+ * KYC Provider Factory
+ * 
+ * Factory for creating and managing KYC providers
+ */
+
+import { logger, getConfigWithDefault } from 'core-service';
+
+import type {
+  KYCProvider,
+  ProviderFactory,
+  ProviderCapabilities,
+  ProviderConfig,
+} from '../types/provider-types.js';
+import type { KYCTier } from '../types/kyc-types.js';
+
+import { MockKYCProvider } from './mock-provider.js';
+
+// ═══════════════════════════════════════════════════════════════════
+// Provider Registry
+// ═══════════════════════════════════════════════════════════════════
+
+const providers = new Map<string, KYCProvider>();
+let defaultProviderName: string = 'mock';
+
+// ═══════════════════════════════════════════════════════════════════
+// Provider Factory Implementation
+// ═══════════════════════════════════════════════════════════════════
+
+export const providerFactory: ProviderFactory = {
+  /**
+   * Get provider by name
+   */
+  getProvider(name: string): KYCProvider | null {
+    return providers.get(name) ?? null;
+  },
+  
+  /**
+   * Get all registered providers
+   */
+  getProviders(): KYCProvider[] {
+    return Array.from(providers.values());
+  },
+  
+  /**
+   * Get provider for specific capability
+   */
+  getProviderForCapability(capability: keyof ProviderCapabilities['checks']): KYCProvider | null {
+    for (const provider of providers.values()) {
+      if (provider.capabilities.checks[capability]) {
+        return provider;
+      }
+    }
+    return null;
+  },
+  
+  /**
+   * Get provider for country
+   */
+  getProviderForCountry(countryCode: string): KYCProvider | null {
+    for (const provider of providers.values()) {
+      const { supportedCountries, excludedCountries } = provider.capabilities;
+      
+      // Check if excluded
+      if (excludedCountries?.includes(countryCode)) {
+        continue;
+      }
+      
+      // If supportedCountries is empty, all countries are supported
+      if (supportedCountries.length === 0 || supportedCountries.includes(countryCode)) {
+        return provider;
+      }
+    }
+    return null;
+  },
+  
+  /**
+   * Get preferred provider for tier
+   */
+  getProviderForTier(tier: KYCTier, countryCode?: string): KYCProvider | null {
+    // First try to find a provider for the country
+    if (countryCode) {
+      const countryProvider = this.getProviderForCountry(countryCode);
+      if (countryProvider) {
+        return countryProvider;
+      }
+    }
+    
+    // Fall back to default provider
+    return this.getProvider(defaultProviderName);
+  },
+  
+  /**
+   * Register a provider
+   */
+  registerProvider(provider: KYCProvider): void {
+    providers.set(provider.name, provider);
+    logger.info('KYC provider registered', { 
+      name: provider.name, 
+      displayName: provider.displayName,
+    });
+  },
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// Initialization
+// ═══════════════════════════════════════════════════════════════════
+
+interface ProvidersConfig {
+  defaultProvider: string;
+  providers: Record<string, ProviderConfig>;
+}
+
+/**
+ * Initialize KYC providers from configuration
+ */
+export async function initializeProviders(): Promise<void> {
+  const config = await getConfigWithDefault<ProvidersConfig>('kyc-service', 'providers');
+  
+  if (!config) {
+    logger.warn('No KYC provider configuration found, using mock provider');
+    // Register mock provider as default
+    const mockProvider = new MockKYCProvider({
+      name: 'mock',
+      enabled: true,
+      apiUrl: '',
+      apiKey: '',
+    });
+    providerFactory.registerProvider(mockProvider);
+    return;
+  }
+  
+  defaultProviderName = config.defaultProvider;
+  
+  for (const [name, providerConfig] of Object.entries(config.providers)) {
+    if (!providerConfig.enabled) {
+      continue;
+    }
+    
+    try {
+      const provider = await createProvider(name, providerConfig);
+      if (provider) {
+        providerFactory.registerProvider(provider);
+      }
+    } catch (error) {
+      logger.error('Failed to initialize KYC provider', {
+        provider: name,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  }
+  
+  // Ensure we have at least one provider
+  if (providers.size === 0) {
+    logger.warn('No KYC providers initialized, using mock provider');
+    const mockProvider = new MockKYCProvider({
+      name: 'mock',
+      enabled: true,
+      apiUrl: '',
+      apiKey: '',
+    });
+    providerFactory.registerProvider(mockProvider);
+  }
+  
+  logger.info('KYC providers initialized', {
+    count: providers.size,
+    providers: Array.from(providers.keys()),
+    default: defaultProviderName,
+  });
+}
+
+/**
+ * Create a provider instance
+ */
+async function createProvider(name: string, config: ProviderConfig): Promise<KYCProvider | null> {
+  switch (name) {
+    case 'mock':
+      return new MockKYCProvider(config);
+    
+    case 'onfido':
+      // TODO: Implement OnfidoProvider
+      // return new OnfidoProvider(config);
+      logger.warn('Onfido provider not yet implemented, using mock');
+      return null;
+    
+    case 'sumsub':
+      // TODO: Implement SumsubProvider
+      // return new SumsubProvider(config);
+      logger.warn('Sumsub provider not yet implemented, using mock');
+      return null;
+    
+    case 'jumio':
+      // TODO: Implement JumioProvider
+      // return new JumioProvider(config);
+      logger.warn('Jumio provider not yet implemented, using mock');
+      return null;
+    
+    default:
+      logger.warn('Unknown KYC provider', { name });
+      return null;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Helper Functions
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Get the default provider
+ */
+export function getDefaultProvider(): KYCProvider {
+  const provider = providerFactory.getProvider(defaultProviderName);
+  if (!provider) {
+    throw new Error(`Default KYC provider '${defaultProviderName}' not found`);
+  }
+  return provider;
+}
+
+/**
+ * Get provider or default
+ */
+export function getProviderOrDefault(name?: string): KYCProvider {
+  if (name) {
+    const provider = providerFactory.getProvider(name);
+    if (provider) {
+      return provider;
+    }
+  }
+  return getDefaultProvider();
+}
+
+/**
+ * Check if provider is available
+ */
+export function isProviderAvailable(name: string): boolean {
+  return providers.has(name);
+}
+
+/**
+ * Get provider names
+ */
+export function getProviderNames(): string[] {
+  return Array.from(providers.keys());
+}

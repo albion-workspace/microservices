@@ -19,7 +19,7 @@ import { findUserIdByRole, findUserIdsByRole } from '../../../core-service/src/i
 // Configuration (loaded dynamically from MongoDB config store)
 // ═══════════════════════════════════════════════════════════════════
 
-let AUTH_SERVICE_URL: string = process.env.AUTH_SERVICE_URL || 'http://localhost:3003/graphql';
+let AUTH_SERVICE_URL: string = process.env.AUTH_SERVICE_URL || 'http://localhost:9001/graphql';
 let DEFAULT_TENANT_ID: string = 'default-tenant';
 
 // Export DEFAULT_TENANT_ID for backward compatibility
@@ -371,14 +371,11 @@ export async function registerAs(
     }
   }
 
-  // Check if user already exists in MongoDB (more reliable)
-  // CRITICAL: Check by both email AND tenantId (Passport queries by tenantId)
-  // Also normalize email to match Passport's normalization
-  // Get dbContext from global if available (set by test scripts)
+  // Check if user already exists (by email + tenantId)
   const dbContext = (global as any).__dbContext || {};
   const db = await getAuthDatabase(dbContext);
   const usersCollection = db.collection('users');
-  const normalizedEmail = user.email.toLowerCase().trim(); // Match Passport's normalizeEmail
+  const normalizedEmail = user.email.toLowerCase().trim();
   const existingUser = await usersCollection.findOne({ 
     email: normalizedEmail,
     tenantId: getDefaultTenantId() 
@@ -386,55 +383,20 @@ export async function registerAs(
 
   if (existingUser) {
     const userId = existingUser._id?.toString() || existingUser.id;
+    const permissionsArray = typeof user.permissions === 'object' && !Array.isArray(user.permissions)
+      ? Object.keys(user.permissions).filter(key => user.permissions[key] === true)
+      : Array.isArray(user.permissions) ? user.permissions : [];
     
-    // IMPORTANT: Don't delete/recreate if user exists - just update roles/permissions
-    // This preserves the user ID and prevents creating new wallets each time
-    // Only delete/recreate if we need to update the password (which we don't for system users)
-    if (updateRoles || updatePermissions) {
-      // Convert permissions object to array format
-      const permissionsArray = typeof user.permissions === 'object' && !Array.isArray(user.permissions)
-        ? Object.keys(user.permissions).filter(key => user.permissions[key] === true)
-        : Array.isArray(user.permissions)
-        ? user.permissions
-        : [];
-      
-      // Update roles and permissions without deleting user (preserves user ID)
-      await usersCollection.updateOne(
-        { email: normalizedEmail, tenantId: DEFAULT_TENANT_ID },
-        {
-          $set: {
-            roles: user.roles, // Roles should already be array
-            permissions: permissionsArray, // Convert to array format
-          },
-        }
-      );
-      
-      return {
-        userId,
-        email: normalizedEmail,
-        created: false, // User already existed, just updated
-      };
-    }
+    // Update roles/permissions only (password already set by registration API)
+    await usersCollection.updateOne(
+      { email: normalizedEmail, tenantId: getDefaultTenantId() },
+      { $set: { roles: user.roles, permissions: permissionsArray } }
+    );
     
-    // If no updates needed, just return existing user
-    return {
-      userId,
-      email: normalizedEmail,
-      created: false,
-    };
+    return { userId, email: normalizedEmail, created: false };
   }
 
-  // Try to register via GraphQL
-  // NOTE: For testing/system setup, we use autoVerify: true to bypass OTP verification
-  // In production, regular users would use the new verification flow:
-  //   1. register() returns registrationToken (JWT)
-  //   2. OTP is sent to email/phone
-  //   3. verifyRegistration(registrationToken, otpCode) creates user and returns tokens
-  // System users (system, payment-gateway, payment-provider) can use autoVerify: true
-  const isSystemUser = user.roles.includes('system') || 
-                       user.roles.includes('payment-gateway') || 
-                       user.roles.includes('payment-provider');
-  
+  // Register via GraphQL API with autoVerify: true (bypasses OTP for test setup)
   const registerQuery = `
     mutation Register($input: RegisterInput!) {
       register(input: $input) {
@@ -454,8 +416,6 @@ export async function registerAs(
     }
   `;
 
-  // Use autoVerify for all users in test setup (bypasses OTP verification)
-  // In production, only system users would use autoVerify
   const registerVars = {
     input: {
       tenantId: getDefaultTenantId(),
@@ -481,20 +441,14 @@ export async function registerAs(
       registerVars
     );
 
-    // Handle registration response
     if (data.register.success && data.register.user) {
       const userId = data.register.user.id;
 
-      // Update roles and permissions via MongoDB (more reliable)
-      // CRITICAL: Update by both email AND tenantId, use normalized email
-      // Password hash is already correct (created by registration service)
-      // Re-get database connection in case it was closed during GraphQL call
+      // Update roles/permissions (password already set by registration API)
       const dbContext = (global as any).__dbContext || {};
       const dbUpdate = await getAuthDatabase(dbContext);
       const usersCollectionUpdate = dbUpdate.collection('users');
       
-      // Convert permissions object to array format (GraphQL expects array)
-      // Permissions can be stored as object { '*:*:*': true } or array ['*:*:*']
       const permissionsArray = typeof user.permissions === 'object' && !Array.isArray(user.permissions)
         ? Object.keys(user.permissions).filter(key => user.permissions[key] === true)
         : Array.isArray(user.permissions)
@@ -503,12 +457,7 @@ export async function registerAs(
       
       await usersCollectionUpdate.updateOne(
         { email: normalizedEmail, tenantId: DEFAULT_TENANT_ID },
-        {
-          $set: {
-            roles: user.roles, // Roles should already be array
-            permissions: permissionsArray, // Convert to array format
-          },
-        }
+        { $set: { roles: user.roles, permissions: permissionsArray } }
       );
 
       return {
@@ -520,52 +469,25 @@ export async function registerAs(
 
     throw new Error(`Registration failed: ${data.register.message || 'Unknown error'}`);
   } catch (error: any) {
-    // If registration fails (e.g., user already exists), try to find and update user
-    // CRITICAL: Check by both email AND tenantId, use normalized email
-    // Re-get database connection in case it was closed
+    // Registration failed - check if user exists and update roles/permissions
+    const tenantId = getDefaultTenantId();
     const dbContext = (global as any).__dbContext || {};
     const dbRetry = await getAuthDatabase(dbContext);
     const usersCollectionRetry = dbRetry.collection('users');
-    const foundUser = await usersCollectionRetry.findOne({ 
-      email: normalizedEmail,
-      tenantId: DEFAULT_TENANT_ID 
-    });
+    const foundUser = await usersCollectionRetry.findOne({ email: normalizedEmail, tenantId });
+    
     if (foundUser) {
-      // User exists - update roles and permissions instead of deleting
-      // This avoids race conditions with services that auto-create default users
       const userId = foundUser.id || foundUser._id?.toString();
+      const permissionsArray = typeof user.permissions === 'object' && !Array.isArray(user.permissions)
+        ? Object.entries(user.permissions).filter(([_, v]) => v === true).map(([k]) => k)
+        : Array.isArray(user.permissions) ? user.permissions : [];
       
-      if (options.updateRoles || options.updatePermissions) {
-        const updateFields: Record<string, unknown> = {};
-        
-        if (options.updateRoles) {
-          updateFields.roles = user.roles;
-        }
-        
-        if (options.updatePermissions) {
-          const permissionsArray = typeof user.permissions === 'object' && !Array.isArray(user.permissions)
-            ? Object.entries(user.permissions)
-                .filter(([_, v]) => v === true)
-                .map(([k]) => k)
-            : Array.isArray(user.permissions)
-            ? user.permissions
-            : [];
-          updateFields.permissions = permissionsArray;
-        }
-        
-        if (Object.keys(updateFields).length > 0) {
-          await usersCollectionRetry.updateOne(
-            { email: normalizedEmail, tenantId: DEFAULT_TENANT_ID },
-            { $set: updateFields }
-          );
-        }
-      }
+      await usersCollectionRetry.updateOne(
+        { email: normalizedEmail, tenantId },
+        { $set: { roles: user.roles, permissions: permissionsArray } }
+      );
       
-      return {
-        userId,
-        email: normalizedEmail,
-        created: false, // User already existed
-      };
+      return { userId, email: normalizedEmail, created: false };
     }
 
     throw new Error(`Failed to register ${normalizedEmail}: ${error.message}`);

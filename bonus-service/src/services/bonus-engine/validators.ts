@@ -6,7 +6,7 @@
  * 
  * Architecture:
  * ┌─────────────────────────────────────────────────────────────────┐
- * │  CLIENT (bonus-shared/BonusEligibility) - IMPORTED             │
+ * │  CLIENT (shared-validators/BonusEligibility) - IMPORTED        │
  * │  ─────────────────────────────────────────────────────────────  │
  * │  • Date range     • Currency       • Min deposit               │
  * │  • User tier      • Country        • Selection count           │
@@ -25,7 +25,7 @@
  */
 
 import { resolveDatabase, type DatabaseResolutionOptions, type Collection, type Db } from 'core-service';
-import { BonusEligibility } from 'bonus-shared';
+import { BonusEligibility } from 'shared-validators';
 import type { BonusTemplate, BonusType } from '../../types.js';
 import type { 
   BonusContext, 
@@ -285,14 +285,14 @@ export class ReferralValidator implements IEligibilityValidator {
 // ═══════════════════════════════════════════════════════════════════
 // CLIENT-SAFE VALIDATORS
 // ═══════════════════════════════════════════════════════════════════
-// All client-safe validators are now handled by BonusEligibility from
-// bonus-shared. The ValidatorChain uses BonusEligibility.check()
+// All client-safe validators are handled by BonusEligibility from
+// shared-validators. The ValidatorChain uses BonusEligibility.check()
 // which includes validation for:
 // • Date range, Currency, Min deposit, Max uses total, User tier
 // • Country, Selection count/values, First deposit/purchase checks
-// • Account age, Verification level, Activity category
+// • Account age, Verification level, Activity category, KYC tier
 //
-// See: bonus-shared/src/BonusEligibility.ts for the source of truth.
+// See: shared-validators/src/BonusEligibility.ts for source of truth.
 // ═══════════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════════
@@ -308,7 +308,7 @@ export class ValidatorChain {
 
   constructor(private options?: ValidatorOptions) {
     // Server-only validators (require DB access)
-    // Client-safe validators are handled by BonusEligibility from bonus-shared
+    // Client-safe validators are handled by BonusEligibility from shared-validators
     if (!options?.databaseStrategy) {
       throw new Error('ValidatorChain requires databaseStrategy in options');
     }

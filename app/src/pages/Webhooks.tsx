@@ -89,8 +89,8 @@ type ServiceId = keyof typeof SERVICES
 
 // Service URLs
 const SERVICE_URLS = {
-  payment: 'http://localhost:3004/graphql',
-  bonus: 'http://localhost:3005/graphql',
+  payment: 'http://localhost:9002/graphql',
+  bonus: 'http://localhost:9003/graphql',
 }
 
 export default function Webhooks() {

@@ -24,7 +24,7 @@ if ($ServiceName -eq "all") {
     Write-Host "================================================================" -ForegroundColor Cyan
     Write-Host ""
     
-    $services = @("auth-service", "payment-service", "bonus-service", "notification-service")
+    $services = @("auth-service", "payment-service", "bonus-service", "notification-service", "kyc-service")
     foreach ($svc in $services) {
         Write-Host "[INFO] Starting $svc..." -ForegroundColor Green
         & $scriptPath $svc
@@ -47,25 +47,30 @@ $sharedJwtSecret = if ($env:SHARED_JWT_SECRET) { $env:SHARED_JWT_SECRET } else {
 
 # Service configuration
 $serviceConfig = @{
-    "payment-service" = @{
-        Port = 3004
-        MongoDb = "payment_service"
-        DisplayName = "PAYMENT SERVICE"
-    }
     "auth-service" = @{
-        Port = 3003
+        Port = 9001
         MongoDb = "core_service"
         DisplayName = "AUTH SERVICE"
     }
+    "payment-service" = @{
+        Port = 9002
+        MongoDb = "payment_service"
+        DisplayName = "PAYMENT SERVICE"
+    }
     "bonus-service" = @{
-        Port = 3005
+        Port = 9003
         MongoDb = "bonus_service"
         DisplayName = "BONUS SERVICE"
     }
     "notification-service" = @{
-        Port = 3006
+        Port = 9004
         MongoDb = "notification_service"
         DisplayName = "NOTIFICATION SERVICE"
+    }
+    "kyc-service" = @{
+        Port = 9005
+        MongoDb = "kyc_service"
+        DisplayName = "KYC SERVICE"
     }
 }
 

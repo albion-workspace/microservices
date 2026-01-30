@@ -4,7 +4,7 @@
 # Calculate project root: bin -> scripts -> project root
 $rootDir = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 
-$authUrl = "http://localhost:3003/graphql"
+$authUrl = "http://localhost:9001/graphql"
 $tenantId = "default-tenant"
 
 Write-Host "================================================================" -ForegroundColor Cyan

@@ -7,7 +7,7 @@ import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../lib/auth-context';
 import { UserPlus, Mail, Lock, User, Phone, AlertCircle, Loader2, CheckCircle, Chrome, Facebook as FacebookIcon, Linkedin, Instagram } from 'lucide-react';
 
-const AUTH_SERVICE_URL = (import.meta.env as any).VITE_AUTH_SERVICE_URL?.replace('/graphql', '') || 'http://localhost:3003';
+const AUTH_SERVICE_URL = (import.meta.env as any).VITE_AUTH_SERVICE_URL?.replace('/graphql', '') || 'http://localhost:9001';
 const TENANT_ID = 'default-tenant';
 
 export default function Register() {

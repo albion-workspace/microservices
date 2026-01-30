@@ -128,7 +128,7 @@ export {
   createHandler,
 } from './handler-registry.js';
 
-// Validators (server-only, client-safe validators are in bonus-shared)
+// Validators (server-only, client-safe validators are in shared-validators)
 export { 
   createValidatorChain,
   ValidatorChain,
@@ -141,7 +141,7 @@ export {
 } from './validators.js';
 
 // Re-export BonusEligibility for convenience
-export { BonusEligibility } from 'bonus-shared';
+export { BonusEligibility } from 'shared-validators';
 
 // Handlers (for extension/customization)
 export { 

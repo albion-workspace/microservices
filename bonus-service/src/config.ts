@@ -54,7 +54,7 @@ const SERVICE_NAME = 'bonus-service';
  * 3. Registered defaults (auto-created if missing)
  */
 export async function loadConfig(brand?: string, tenantId?: string): Promise<BonusConfig> {
-  const port = parseInt(process.env.PORT || '3005');
+  const port = parseInt(process.env.PORT || '9003');
   
   // Load from MongoDB config store with automatic default creation
   const corsOrigins = await getConfigWithDefault<string[]>(SERVICE_NAME, 'corsOrigins', { brand, tenantId }) ?? [

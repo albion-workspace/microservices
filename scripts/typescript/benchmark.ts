@@ -6,7 +6,7 @@
  * Usage:
  *   npx tsx benchmark.ts                          # Test all discovered services
  *   npx tsx benchmark.ts --service bonus          # Test specific service
- *   npx tsx benchmark.ts --url http://localhost:3005/graphql
+ *   npx tsx benchmark.ts --url http://localhost:9003/graphql
  * 
  * Environment Variables:
  *   BONUS_URL, PAYMENT_URL, RETAIL_URL - Service URLs
