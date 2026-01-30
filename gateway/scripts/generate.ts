@@ -192,6 +192,7 @@ function generateDevCompose(config: ServicesConfig, mode: ConfigMode): string {
       - ${redisContainer}
 `;
     return `  ${svc.name}-service:
+    image: ${svc.name}-service:latest
     build:
       context: ../../..
       dockerfile: ${svc.name}-service/Dockerfile
