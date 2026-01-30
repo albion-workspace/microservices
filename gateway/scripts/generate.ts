@@ -500,10 +500,19 @@ ${config.services.map(s => `  ${s.name.toUpperCase().replace(/-/g, '_')}_PORT: "
 }
 
 function generateK8sSecrets(config: ServicesConfig, namespace: string, mode: ConfigMode): string {
-  const mongoUri = getMongoUri(config, 'local');
-  const redisUrl = getRedisUrl(config, 'local');
+  const mongoHost = `mongodb.${namespace}.svc.cluster.local`;
+  const mongoPort = config.infrastructure.mongodb.port;
+  const redisHost = `redis.${namespace}.svc.cluster.local`;
+  const redisPort = config.infrastructure.redis.port;
+  const redisPassword = config.infrastructure.redis.password;
+  const redisAuth = redisPassword ? `:${redisPassword}@` : '';
 
-  return `# Secrets - Update these for your environment
+  // Generate per-service MongoDB URIs with database names
+  const perServiceMongoUris = config.services.map(svc => 
+    `  ${svc.name}-mongodb-uri: "mongodb://${mongoHost}:${mongoPort}/${svc.database}"`
+  ).join('\n');
+
+  return `# Database Secrets - Per-service MongoDB URIs
 apiVersion: v1
 kind: Secret
 metadata:
@@ -511,8 +520,17 @@ metadata:
   namespace: ${namespace}
 type: Opaque
 stringData:
-  mongodb-uri: "${mongoUri}"
-  redis-url: "${redisUrl}"
+  redis-url: "redis://${redisAuth}${redisHost}:${redisPort}"
+${perServiceMongoUris}
+---
+# JWT Secrets
+apiVersion: v1
+kind: Secret
+metadata:
+  name: jwt-secrets
+  namespace: ${namespace}
+type: Opaque
+stringData:
   jwt-secret: "change-me-in-production"
 `;
 }
@@ -744,17 +762,17 @@ spec:
           valueFrom:
             secretKeyRef:
               name: db-secrets
-              key: mongodb-uri
-        - name: JWT_SECRET
-          valueFrom:
-            secretKeyRef:
-              name: jwt-secrets
-              key: jwt-secret
+              key: ${svc.name}-mongodb-uri
         - name: REDIS_URL
           valueFrom:
             secretKeyRef:
               name: db-secrets
               key: redis-url
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: jwt-secrets
+              key: jwt-secret
         livenessProbe:
           httpGet:
             path: ${svc.healthPath}
