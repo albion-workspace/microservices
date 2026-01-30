@@ -20,7 +20,7 @@ import { execSync } from 'node:child_process';
 
 import {
   generateMultiServiceNginxConf,
-  generateDockerfile,
+  generateServiceDockerfile,
   type GatewayRoutingConfig,
   type ServiceEndpoint,
   type MultiServiceNginxConfig,
@@ -930,7 +930,8 @@ async function generateDockerfiles(config: ServicesConfig): Promise<void> {
       localDependencies,
     };
     
-    const dockerfile = generateDockerfile(dockerConfig);
+    // Use fast Dockerfile that extends from core-base image
+    const dockerfile = generateServiceDockerfile(dockerConfig);
     const outputPath = join(servicePath, 'Dockerfile');
     
     await writeFile(outputPath, dockerfile);

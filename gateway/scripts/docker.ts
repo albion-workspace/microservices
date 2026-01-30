@@ -131,8 +131,29 @@ async function generateConfigs(): Promise<void> {
   const generateScript = join(__dirname, 'generate.ts');
   const tsxPath = join(ROOT_DIR, 'core-service', 'node_modules', 'tsx', 'dist', 'cli.mjs');
   
+  // Generate both Dockerfiles and docker-compose
   return new Promise((resolve, reject) => {
-    const proc = spawn('node', [tsxPath, generateScript, '--docker'], {
+    const proc = spawn('node', [tsxPath, generateScript, '--dockerfile', '--docker'], {
+      cwd: GATEWAY_DIR,
+      stdio: 'inherit',
+      shell: true,
+    });
+
+    proc.on('exit', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`Generate failed with code ${code}`));
+    });
+  });
+}
+
+async function generateDockerfile(serviceName: string): Promise<void> {
+  console.log(`Generating Dockerfile for ${serviceName}...`);
+  
+  const generateScript = join(__dirname, 'generate.ts');
+  const tsxPath = join(ROOT_DIR, 'core-service', 'node_modules', 'tsx', 'dist', 'cli.mjs');
+  
+  return new Promise((resolve, reject) => {
+    const proc = spawn('node', [tsxPath, generateScript, '--dockerfile'], {
       cwd: GATEWAY_DIR,
       stdio: 'inherit',
       shell: true,
@@ -305,7 +326,59 @@ function removeOldImage(serviceName: string): void {
 }
 
 /**
- * Build a single Docker image - always fresh
+ * Check if core-base image exists
+ */
+function coreBaseExists(): boolean {
+  try {
+    execSync('docker image inspect core-base:latest', { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Build the core-base image (access-engine + core-service)
+ * This is built once and reused by all service builds
+ */
+async function buildCoreBase(forceRebuild = false): Promise<void> {
+  if (!forceRebuild && coreBaseExists()) {
+    console.log('✅ core-base:latest exists (use --rebuild-base to force rebuild)');
+    return;
+  }
+  
+  console.log('🔧 Building core-base:latest (shared dependencies)...');
+  console.log('   This includes: access-engine, core-service');
+  
+  const coreBaseDockerfile = join(ROOT_DIR, 'Dockerfile.core-base');
+  
+  // Generate core-base Dockerfile
+  const { generateCoreBaseDockerfile } = await import('core-service/infra');
+  const { writeFile } = await import('node:fs/promises');
+  await writeFile(coreBaseDockerfile, generateCoreBaseDockerfile());
+  
+  try {
+    execSync('docker build -f Dockerfile.core-base -t core-base:latest .', {
+      cwd: ROOT_DIR,
+      stdio: 'inherit',
+    });
+    console.log('✅ Built core-base:latest');
+  } catch (err) {
+    console.error('❌ Failed to build core-base:latest');
+    throw err;
+  } finally {
+    // Clean up generated Dockerfile
+    try {
+      const { rm } = await import('node:fs/promises');
+      await rm(coreBaseDockerfile, { force: true });
+    } catch {
+      // Ignore cleanup errors
+    }
+  }
+}
+
+/**
+ * Build a single Docker image - uses core-base for fast builds
  */
 async function buildSingleImage(service: ServiceConfig): Promise<void> {
   const svcName = `${service.name}-service`;
@@ -320,9 +393,9 @@ async function buildSingleImage(service: ServiceConfig): Promise<void> {
   removeOldImage(service.name);
   
   try {
-    // Build from project root with -f flag (as Dockerfile expects)
-    // Use --no-cache to ensure truly fresh build
-    execSync(`docker build --no-cache -f ${dockerfilePath} -t ${imageName} .`, {
+    // Build from project root with -f flag
+    // Uses core-base:latest for fast builds (core deps are pre-built)
+    execSync(`docker build -f ${dockerfilePath} -t ${imageName} .`, {
       cwd: ROOT_DIR,
       stdio: 'inherit',
     });
@@ -334,13 +407,18 @@ async function buildSingleImage(service: ServiceConfig): Promise<void> {
 }
 
 /**
- * Build Docker images - always fresh (removes old container and image first)
+ * Build Docker images - builds core-base once, then services fast
  */
-async function dockerBuild(config: ServicesConfig, serviceName?: string): Promise<void> {
+async function dockerBuild(config: ServicesConfig, serviceName?: string, rebuildBase = false): Promise<void> {
   const services = getTargetServices(config, serviceName);
   const count = services.length;
-  printHeader(`Building ${count} Docker Image(s) - Fresh Build`);
+  printHeader(`Building ${count} Docker Image(s) - Fast Build`);
 
+  // Step 1: Ensure core-base exists (build once, reuse for all services)
+  console.log('\n[Base] Checking core-base image...');
+  await buildCoreBase(rebuildBase);
+
+  // Step 2: Build service images (fast - uses pre-built core-base)
   for (let i = 0; i < services.length; i++) {
     console.log(`\n[${i + 1}/${count}] Processing ${services[i].name}...`);
     await buildSingleImage(services[i]);
@@ -637,12 +715,13 @@ async function dockerFresh(env: 'dev' | 'prod', config: ServicesConfig, serviceN
   const targetMsg = serviceName ? ` (${serviceName} only)` : ` (all ${count} services)`;
   printHeader(`Fresh Docker Deployment${targetMsg}`);
 
-  // Step 1: Generate configs only when deploying all services
+  // Step 1: Generate configs (Dockerfile is always needed)
+  console.log('Step 1/5: Generating configurations...');
   if (!serviceName) {
-    console.log('Step 1/5: Generating configurations...');
     await generateConfigs();
   } else {
-    console.log('Step 1/5: Skipping config generation (single service mode)');
+    // For single service, only generate Dockerfile
+    await generateDockerfile(serviceName);
   }
 
   // Step 2: Build fresh images (this also cleans old artifacts)

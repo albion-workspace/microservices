@@ -582,6 +582,7 @@ export type {
 // ═══════════════════════════════════════════════════════════════════
 export { generateInfra, loadConfig, generateSampleConfig, createDefaultConfig } from './infra/index.js';
 export { generateDockerfile, generateDockerCompose, generateNginxConf, generateK8sManifests } from './infra/index.js';
+export { generateServiceDockerfile, generateCoreBaseDockerfile } from './infra/index.js';
 // Multi-service gateway infrastructure
 export { generateMultiServiceNginxConf } from './infra/index.js';
 export { generateMultiServiceInfra, createDefaultGatewayRoutingConfig } from './infra/index.js';
