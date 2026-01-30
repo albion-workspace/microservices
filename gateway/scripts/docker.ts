@@ -158,6 +158,110 @@ async function ensureNetworkExists(): Promise<void> {
 }
 
 /**
+ * Check if a container is running (checks both direct name and docker-compose naming)
+ */
+function isContainerRunning(containerName: string): boolean {
+  // Check for exact name and docker-compose naming convention (docker-{name}-1)
+  const patterns = [containerName, `docker-${containerName}-1`];
+  for (const pattern of patterns) {
+    try {
+      const result = execSync(`docker ps --filter "name=^${pattern}$" --filter "status=running" -q`, { encoding: 'utf8' });
+      if (result.trim().length > 0) {
+        return true;
+      }
+    } catch {
+      // Continue to next pattern
+    }
+  }
+  return false;
+}
+
+/**
+ * Get the running container name (could be direct or docker-compose naming)
+ */
+function getRunningContainerName(baseName: string): string | null {
+  const patterns = [baseName, `docker-${baseName}-1`];
+  for (const pattern of patterns) {
+    try {
+      const result = execSync(`docker ps --filter "name=^${pattern}$" --filter "status=running" --format "{{.Names}}"`, { encoding: 'utf8' });
+      if (result.trim().length > 0) {
+        return result.trim().split('\n')[0];
+      }
+    } catch {
+      // Continue to next pattern
+    }
+  }
+  return null;
+}
+
+/**
+ * Ensure MongoDB and Redis infrastructure containers are running
+ * Creates them if they don't exist (fresh install scenario)
+ */
+async function ensureInfrastructure(config: ServicesConfig): Promise<void> {
+  const mongo = config.infrastructure.mongodb;
+  const redis = config.infrastructure.redis;
+  const mongoContainer = (mongo as any).dockerContainer || 'ms-mongo';
+  const redisContainer = (redis as any).dockerContainer || 'ms-redis';
+  
+  const mongoRunning = isContainerRunning(mongoContainer);
+  const redisRunning = isContainerRunning(redisContainer);
+  
+  if (mongoRunning && redisRunning) {
+    console.log(`✅ Infrastructure running (${mongoContainer}, ${redisContainer})`);
+    return;
+  }
+  
+  console.log('🔧 Starting infrastructure containers...');
+  
+  // Start MongoDB if not running
+  if (!mongoRunning) {
+    console.log(`  Starting ${mongoContainer}...`);
+    try {
+      // Remove old container if exists but not running (cross-platform)
+      try {
+        execSync(`docker rm -f ${mongoContainer}`, { stdio: 'ignore' });
+      } catch {
+        // Container doesn't exist, that's fine
+      }
+      execSync(`docker run -d --name ${mongoContainer} --network ${DOCKER_NETWORK} -p ${mongo.port}:27017 mongo:7`, {
+        stdio: 'inherit',
+      });
+      console.log(`  ✅ ${mongoContainer} started`);
+    } catch (err) {
+      console.error(`  ❌ Failed to start ${mongoContainer}`);
+      throw err;
+    }
+  }
+  
+  // Start Redis if not running
+  if (!redisRunning) {
+    console.log(`  Starting ${redisContainer}...`);
+    try {
+      // Remove old container if exists but not running (cross-platform)
+      try {
+        execSync(`docker rm -f ${redisContainer}`, { stdio: 'ignore' });
+      } catch {
+        // Container doesn't exist, that's fine
+      }
+      const redisPassword = redis.password;
+      const redisCmd = redisPassword 
+        ? `docker run -d --name ${redisContainer} --network ${DOCKER_NETWORK} -p ${redis.port}:6379 redis:7-alpine redis-server --appendonly yes --requirepass ${redisPassword}`
+        : `docker run -d --name ${redisContainer} --network ${DOCKER_NETWORK} -p ${redis.port}:6379 redis:7-alpine redis-server --appendonly yes`;
+      execSync(redisCmd, { stdio: 'inherit' });
+      console.log(`  ✅ ${redisContainer} started`);
+    } catch (err) {
+      console.error(`  ❌ Failed to start ${redisContainer}`);
+      throw err;
+    }
+  }
+  
+  // Wait a moment for containers to be ready
+  console.log('  Waiting for infrastructure to be ready...');
+  await new Promise(resolve => setTimeout(resolve, 3000));
+}
+
+/**
  * Remove old container if exists (by name pattern)
  */
 function removeOldContainer(serviceName: string): void {
@@ -258,6 +362,9 @@ async function dockerUp(env: 'dev' | 'prod', config: ServicesConfig, serviceName
 
   // Ensure network exists
   await ensureNetworkExists();
+  
+  // Ensure MongoDB and Redis are running (creates them if needed - fresh install)
+  await ensureInfrastructure(config);
 
   if (serviceName) {
     // Single service: use docker run directly for full isolation

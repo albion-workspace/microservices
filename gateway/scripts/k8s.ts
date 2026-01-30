@@ -119,7 +119,7 @@ async function checkK8sManifestsExist(): Promise<boolean> {
 }
 
 async function generateManifests(): Promise<void> {
-  console.log('K8s manifests not found. Generating...');
+  console.log('Generating K8s manifests...');
   
   const generateScript = join(__dirname, 'generate.ts');
   const tsxPath = join(ROOT_DIR, 'core-service', 'node_modules', 'tsx', 'dist', 'cli.mjs');
@@ -136,6 +136,114 @@ async function generateManifests(): Promise<void> {
       else reject(new Error(`Generate failed with code ${code}`));
     });
   });
+}
+
+/**
+ * Clean up generated K8s files
+ */
+async function cleanGeneratedK8sFiles(): Promise<void> {
+  const { rm } = await import('node:fs/promises');
+  
+  try {
+    await rm(K8S_DIR, { recursive: true, force: true });
+    console.log('  ✅ Cleaned generated K8s manifests');
+  } catch {
+    // Directory might not exist
+  }
+  
+  // Also clean nginx config if exists
+  const nginxDir = join(GENERATED_DIR, 'nginx');
+  try {
+    await rm(nginxDir, { recursive: true, force: true });
+    console.log('  ✅ Cleaned generated nginx config');
+  } catch {
+    // Directory might not exist
+  }
+}
+
+/**
+ * Wait for pods to be ready
+ */
+async function waitForPodsReady(config: ServicesConfig, serviceName?: string, timeoutSecs = 120): Promise<boolean> {
+  const services = getTargetServices(config, serviceName);
+  
+  console.log(`Waiting for ${services.length} service(s) to be ready (timeout: ${timeoutSecs}s)...`);
+  
+  const startTime = Date.now();
+  const timeoutMs = timeoutSecs * 1000;
+  
+  while (Date.now() - startTime < timeoutMs) {
+    let allReady = true;
+    
+    for (const svc of services) {
+      try {
+        const result = execSync(
+          `kubectl get pods -n ${NAMESPACE} -l app=${svc.name}-service -o jsonpath="{.items[0].status.conditions[?(@.type=='Ready')].status}"`,
+          { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] }
+        );
+        if (result.trim() !== 'True') {
+          allReady = false;
+        }
+      } catch {
+        allReady = false;
+      }
+    }
+    
+    if (allReady) {
+      console.log('✅ All pods ready!');
+      return true;
+    }
+    
+    // Wait 5 seconds before checking again
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    process.stdout.write('.');
+  }
+  
+  console.log('\n⚠️  Timeout waiting for pods');
+  return false;
+}
+
+/**
+ * Fresh K8s deployment workflow:
+ * 1. Generate manifests
+ * 2. Load images (for Kind clusters)
+ * 3. Apply manifests
+ * 4. Wait for pods to be ready
+ * 5. Clean up generated files on success
+ */
+async function k8sFresh(config: ServicesConfig, serviceName?: string): Promise<void> {
+  const services = getTargetServices(config, serviceName);
+  const count = services.length;
+  const targetMsg = serviceName ? ` (${serviceName} only)` : ` (all ${count} services)`;
+  printHeader(`Fresh Kubernetes Deployment${targetMsg}`);
+
+  // Step 1: Generate manifests
+  console.log('Step 1/5: Generating manifests...');
+  await generateManifests();
+
+  // Step 2: Load images for Kind clusters
+  console.log('\nStep 2/5: Loading images...');
+  await k8sLoadImages(config, serviceName);
+
+  // Step 3: Apply manifests
+  console.log('\nStep 3/5: Applying manifests...');
+  await k8sApply(serviceName);
+
+  // Step 4: Wait for pods to be ready
+  console.log('\nStep 4/5: Waiting for pods to be ready...');
+  const allReady = await waitForPodsReady(config, serviceName);
+
+  // Step 5: Cleanup on success
+  if (allReady) {
+    console.log('\n🎉 Fresh K8s deployment successful!');
+    console.log('\nStep 5/5: Cleaning up generated files...');
+    await cleanGeneratedK8sFiles();
+  } else {
+    console.log('\n⚠️  Deployment completed but some pods are not ready');
+    console.log('Generated files preserved for debugging.');
+    console.log('Run "npm run k8s:status" to check pod status');
+    console.log('Run "npm run k8s:logs" to view logs');
+  }
 }
 
 async function k8sApply(serviceName?: string): Promise<void> {
@@ -171,6 +279,28 @@ async function k8sApply(serviceName?: string): Promise<void> {
         } catch {
           // Skip if doesn't exist
         }
+      }
+      
+      // Ensure MongoDB and Redis infrastructure exist (fresh install scenario)
+      console.log('Ensuring infrastructure (MongoDB, Redis)...');
+      const infraFiles = ['05-mongodb.yaml', '06-redis.yaml'];
+      for (const infraFile of infraFiles) {
+        const filePath = join(K8S_DIR, infraFile);
+        try {
+          await access(filePath);
+          execSync(`kubectl apply -f "${filePath}"`, { stdio: 'inherit' });
+        } catch {
+          // Skip if doesn't exist
+        }
+      }
+      
+      // Wait for infrastructure to be ready
+      console.log('Waiting for infrastructure to be ready...');
+      try {
+        execSync(`kubectl wait --for=condition=available deployment/mongodb -n ${NAMESPACE} --timeout=60s`, { stdio: 'ignore' });
+        execSync(`kubectl wait --for=condition=available deployment/redis -n ${NAMESPACE} --timeout=60s`, { stdio: 'ignore' });
+      } catch {
+        console.log('  Infrastructure may already be running or still starting...');
       }
       
       // Apply service manifest
@@ -483,6 +613,9 @@ async function main(): Promise<void> {
       break;
     case 'load-images':
       await k8sLoadImages(config, service);
+      break;
+    case 'fresh':
+      await k8sFresh(config, service);
       break;
   }
 }
