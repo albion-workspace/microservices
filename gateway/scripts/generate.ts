@@ -379,7 +379,7 @@ function generateProdCompose(config: ServicesConfig, mode: ConfigMode): string {
     environment:
       - PORT=${svc.port}
       - NODE_ENV=production
-      - MONGODB_URI=mongodb://${mongoContainer}:${mongo.port}/${svc.database}
+      - MONGO_URI=mongodb://${mongoContainer}:${mongo.port}/${svc.database}
       - REDIS_URL=${redisUrl}
     depends_on:
       - ${mongoContainer}
@@ -740,11 +740,16 @@ spec:
           value: "${svc.port}"
         - name: NODE_ENV
           value: "production"
-        - name: MONGODB_URI
+        - name: MONGO_URI
           valueFrom:
             secretKeyRef:
               name: db-secrets
               key: mongodb-uri
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: jwt-secrets
+              key: jwt-secret
         - name: REDIS_URL
           valueFrom:
             secretKeyRef:

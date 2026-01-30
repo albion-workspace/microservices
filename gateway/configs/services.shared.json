@@ -11,10 +11,11 @@
       "name": "auth",
       "host": "auth-service",
       "port": 9001,
-      "database": "auth_service",
+      "database": "core_service",
       "healthPath": "/health",
       "graphqlPath": "/graphql",
-      "replicas": 2
+      "replicas": 2,
+      "strategy": "shared"
     },
     {
       "name": "payment",

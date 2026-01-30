@@ -9,9 +9,10 @@
       "name": "auth",
       "host": "auth-service",
       "port": 9001,
-      "database": "auth_service",
+      "database": "core_service",
       "healthPath": "/health",
-      "graphqlPath": "/graphql"
+      "graphqlPath": "/graphql",
+      "strategy": "shared"
     },
     {
       "name": "payment",

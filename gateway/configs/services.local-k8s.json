@@ -11,10 +11,11 @@
       "name": "auth",
       "host": "auth-service.microservices.svc.cluster.local",
       "port": 9001,
-      "database": "auth_service",
+      "database": "core_service",
       "healthPath": "/health",
       "graphqlPath": "/graphql",
-      "replicas": 1
+      "replicas": 1,
+      "strategy": "shared"
     },
     {
       "name": "payment",
@@ -69,7 +70,7 @@
   },
   "kubernetes": {
     "namespace": "microservices",
-    "imagePullPolicy": "IfNotPresent",
+    "imagePullPolicy": "Never",
     "resources": {
       "requests": {
         "cpu": "100m",
