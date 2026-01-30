@@ -271,7 +271,9 @@ async function dockerUp(env: 'dev' | 'prod', config: ServicesConfig, serviceName
     removeOldContainer(service.name);
     
     // Get MongoDB and Redis config from services config
-    const mongoUri = `mongodb://ms-mongo:27017/${service.name.replace(/-/g, '_')}_service`;
+    // Use service.database from config (respects shared strategy for auth -> core_service)
+    const database = (service as any).database || `${service.name.replace(/-/g, '_')}_service`;
+    const mongoUri = `mongodb://ms-mongo:27017/${database}`;
     const redisUrl = `redis://:${config.redis?.password || 'redis123'}@ms-redis:6379`;
     
     // Common environment variables needed for all services
