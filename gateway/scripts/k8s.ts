@@ -26,7 +26,7 @@ import { access, readdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { loadConfigFromArgs, logConfigSummary, type ServicesConfig, type ServiceConfig } from './config-loader.js';
+import { loadConfigFromArgs, logConfigSummary, getInfraConfig, type ServicesConfig, type ServiceConfig, type InfraConfig } from './config-loader.js';
 import { runScript, runLongRunningScript, printHeader } from './script-runner.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -34,8 +34,6 @@ const ROOT_DIR = join(__dirname, '..', '..');
 const GATEWAY_DIR = join(__dirname, '..');
 const GENERATED_DIR = join(GATEWAY_DIR, 'generated');
 const K8S_DIR = join(GENERATED_DIR, 'k8s');
-
-const NAMESPACE = 'microservices';
 
 type K8sCommand = 'apply' | 'delete' | 'status' | 'forward' | 'logs' | 'secrets' | 'fresh' | 'load-images';
 
@@ -178,7 +176,7 @@ async function waitForPodsReady(config: ServicesConfig, serviceName?: string, ti
     for (const svc of services) {
       try {
         const result = execSync(
-          `kubectl get pods -n ${NAMESPACE} -l app=${svc.name}-service -o jsonpath="{.items[0].status.conditions[?(@.type=='Ready')].status}"`,
+          `kubectl get pods -n ${getInfraConfig().kubernetes.namespace} -l app=${svc.name}-service -o jsonpath="{.items[0].status.conditions[?(@.type=='Ready')].status}"`,
           { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] }
         );
         if (result.trim() !== 'True') {
@@ -266,7 +264,7 @@ async function k8sApply(serviceName?: string): Promise<void> {
         execSync(`kubectl apply -f "${namespaceFile}"`, { stdio: 'inherit' });
       } catch {
         // Create namespace directly if file doesn't exist
-        execSync(`kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -`, { stdio: 'ignore' });
+        execSync(`kubectl create namespace ${getInfraConfig().kubernetes.namespace} --dry-run=client -o yaml | kubectl apply -f -`, { stdio: 'ignore' });
       }
       
       // Apply configmap and secrets if they exist
@@ -297,8 +295,8 @@ async function k8sApply(serviceName?: string): Promise<void> {
       // Wait for infrastructure to be ready
       console.log('Waiting for infrastructure to be ready...');
       try {
-        execSync(`kubectl wait --for=condition=available deployment/mongodb -n ${NAMESPACE} --timeout=60s`, { stdio: 'ignore' });
-        execSync(`kubectl wait --for=condition=available deployment/redis -n ${NAMESPACE} --timeout=60s`, { stdio: 'ignore' });
+        execSync(`kubectl wait --for=condition=available deployment/mongodb -n ${getInfraConfig().kubernetes.namespace} --timeout=60s`, { stdio: 'ignore' });
+        execSync(`kubectl wait --for=condition=available deployment/redis -n ${getInfraConfig().kubernetes.namespace} --timeout=60s`, { stdio: 'ignore' });
       } catch {
         console.log('  Infrastructure may already be running or still starting...');
       }
@@ -344,7 +342,7 @@ async function k8sDelete(): Promise<void> {
   printHeader('Deleting Kubernetes Resources');
 
   try {
-    execSync(`kubectl delete namespace ${NAMESPACE} --ignore-not-found`, { stdio: 'inherit' });
+    execSync(`kubectl delete namespace ${getInfraConfig().kubernetes.namespace} --ignore-not-found`, { stdio: 'inherit' });
     console.log('');
     console.log('✅ Resources deleted');
   } catch (err) {
@@ -357,17 +355,17 @@ async function k8sStatus(config: ServicesConfig): Promise<void> {
 
   // Check namespace exists
   try {
-    execSync(`kubectl get namespace ${NAMESPACE}`, { stdio: 'ignore' });
-    console.log(`✅ Namespace "${NAMESPACE}" exists`);
+    execSync(`kubectl get namespace ${getInfraConfig().kubernetes.namespace}`, { stdio: 'ignore' });
+    console.log(`✅ Namespace "${getInfraConfig().kubernetes.namespace}" exists`);
   } catch {
-    console.log(`❌ Namespace "${NAMESPACE}" not found. Run "npm run k8s:apply" first.`);
+    console.log(`❌ Namespace "${getInfraConfig().kubernetes.namespace}" not found. Run "npm run k8s:apply" first.`);
     return;
   }
 
   console.log('');
   console.log('Pods:');
   try {
-    execSync(`kubectl get pods -n ${NAMESPACE}`, { stdio: 'inherit' });
+    execSync(`kubectl get pods -n ${getInfraConfig().kubernetes.namespace}`, { stdio: 'inherit' });
   } catch {
     console.log('  No pods found');
   }
@@ -375,7 +373,7 @@ async function k8sStatus(config: ServicesConfig): Promise<void> {
   console.log('');
   console.log('Services:');
   try {
-    execSync(`kubectl get services -n ${NAMESPACE}`, { stdio: 'inherit' });
+    execSync(`kubectl get services -n ${getInfraConfig().kubernetes.namespace}`, { stdio: 'inherit' });
   } catch {
     console.log('  No services found');
   }
@@ -383,7 +381,7 @@ async function k8sStatus(config: ServicesConfig): Promise<void> {
   console.log('');
   console.log('Ingress:');
   try {
-    execSync(`kubectl get ingress -n ${NAMESPACE}`, { stdio: 'inherit' });
+    execSync(`kubectl get ingress -n ${getInfraConfig().kubernetes.namespace}`, { stdio: 'inherit' });
   } catch {
     console.log('  No ingress found');
   }
@@ -553,7 +551,7 @@ async function k8sSecrets(config: ServicesConfig, env: string): Promise<void> {
 
   // Ensure namespace exists
   try {
-    execSync(`kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -`, { stdio: 'ignore' });
+    execSync(`kubectl create namespace ${getInfraConfig().kubernetes.namespace} --dry-run=client -o yaml | kubectl apply -f -`, { stdio: 'ignore' });
   } catch {}
 
   // Create db-secrets
@@ -561,7 +559,7 @@ async function k8sSecrets(config: ServicesConfig, env: string): Promise<void> {
     const cmd = `kubectl create secret generic db-secrets ` +
       `--from-literal=mongodb-uri="${envConfig.mongoUri}" ` +
       `--from-literal=redis-url="${envConfig.redisUrl}" ` +
-      `-n ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -`;
+      `-n ${getInfraConfig().kubernetes.namespace} --dry-run=client -o yaml | kubectl apply -f -`;
     
     execSync(cmd, { stdio: 'inherit', shell: true });
     console.log('✅ Created db-secrets');

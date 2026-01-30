@@ -6,6 +6,8 @@
  * - shared: services.shared.json
  * - Or custom: services.{name}.json
  * 
+ * Also loads infra.json for infrastructure settings (versions, defaults, etc.)
+ * 
  * Usage:
  *   --config=dev      # Load services.dev.json
  *   --config=shared   # Load services.shared.json
@@ -17,6 +19,135 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIGS_DIR = join(__dirname, '..', 'configs');
+
+// ═══════════════════════════════════════════════════════════════════
+// Infrastructure Config Types (from infra.json)
+// ═══════════════════════════════════════════════════════════════════
+
+export interface InfraVersions {
+  node: string;
+  mongodb: string;
+  redis: string;
+}
+
+export interface InfraConfig {
+  versions: InfraVersions;
+  docker: {
+    network: string;
+    containerPrefix: string;
+    registry: string | null;
+  };
+  kubernetes: {
+    namespace: string;
+    imagePullPolicy: string;
+  };
+  healthCheck: {
+    intervalSeconds: number;
+    timeoutSeconds: number;
+    startPeriodSeconds: number;
+    retries: number;
+    defaultPath: string;
+  };
+  defaults: {
+    service: {
+      healthPath: string;
+      graphqlPath: string;
+      entryPoint: string;
+    };
+    mongodb: {
+      port: number;
+      replicaSet: string;
+    };
+    redis: {
+      port: number;
+      sentinelPort: number;
+      masterName: string;
+    };
+  };
+  security: {
+    runAsUser: number;
+    runAsGroup: number;
+    fsGroup: number;
+  };
+}
+
+// Cached infra config (loaded once per mode)
+let _infraConfig: InfraConfig | null = null;
+let _infraConfigMode: string | null = null;
+
+/**
+ * Deep merge two objects (target overrides base)
+ */
+function deepMerge<T extends Record<string, any>>(base: T, override: Partial<T>): T {
+  const result = { ...base };
+  for (const key of Object.keys(override) as (keyof T)[]) {
+    const overrideValue = override[key];
+    if (overrideValue !== undefined) {
+      if (
+        typeof overrideValue === 'object' &&
+        overrideValue !== null &&
+        !Array.isArray(overrideValue) &&
+        typeof result[key] === 'object' &&
+        result[key] !== null &&
+        !Array.isArray(result[key])
+      ) {
+        // Deep merge nested objects
+        result[key] = deepMerge(result[key] as Record<string, any>, overrideValue as Record<string, any>) as T[keyof T];
+      } else {
+        // Override primitive or array
+        result[key] = overrideValue as T[keyof T];
+      }
+    }
+  }
+  return result;
+}
+
+/**
+ * Load infrastructure config with optional mode-specific overrides
+ * 
+ * Pattern:
+ * - infra.json (required) - base configuration
+ * - infra.{mode}.json (optional) - mode-specific overrides
+ * 
+ * Example: services.dev.json + infra.dev.json (if exists, else infra.json)
+ */
+export async function loadInfraConfig(mode: ConfigMode = 'dev'): Promise<InfraConfig> {
+  // Return cached if same mode
+  if (_infraConfig && _infraConfigMode === mode) return _infraConfig;
+  
+  // Load base infra.json (required)
+  const basePath = join(CONFIGS_DIR, 'infra.json');
+  const baseContent = await readFile(basePath, 'utf-8');
+  const baseConfig: InfraConfig = JSON.parse(baseContent);
+  
+  // Try to load mode-specific override (optional)
+  const modePath = join(CONFIGS_DIR, `infra.${mode}.json`);
+  try {
+    const modeContent = await readFile(modePath, 'utf-8');
+    const modeOverride: Partial<InfraConfig> = JSON.parse(modeContent);
+    _infraConfig = deepMerge(baseConfig, modeOverride);
+  } catch {
+    // No mode-specific override, use base
+    _infraConfig = baseConfig;
+  }
+  
+  _infraConfigMode = mode;
+  return _infraConfig;
+}
+
+/**
+ * Get infra config synchronously (must call loadInfraConfig first)
+ */
+export function getInfraConfig(): InfraConfig {
+  if (!_infraConfig) {
+    throw new Error('InfraConfig not loaded. Call loadInfraConfig() first.');
+  }
+  return _infraConfig;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Services Config Types
+// ═══════════════════════════════════════════════════════════════════
 
 export interface ServiceConfig {
   name: string;
@@ -92,29 +223,20 @@ export function getConfigPath(mode: ConfigMode): string {
  */
 export async function loadConfig(mode: ConfigMode = 'dev'): Promise<ServicesConfig> {
   const configPath = getConfigPath(mode);
-  
-  try {
-    const content = await readFile(configPath, 'utf-8');
-    return JSON.parse(content);
-  } catch (err) {
-    // Fallback to legacy services.json if mode-specific doesn't exist
-    const legacyPath = join(CONFIGS_DIR, 'services.json');
-    try {
-      const content = await readFile(legacyPath, 'utf-8');
-      return JSON.parse(content);
-    } catch {
-      throw new Error(`Config not found: ${configPath}`);
-    }
-  }
+  const content = await readFile(configPath, 'utf-8');
+  return JSON.parse(content);
 }
 
 /**
  * Load configuration based on CLI args
  */
-export async function loadConfigFromArgs(): Promise<{ config: ServicesConfig; mode: ConfigMode }> {
+export async function loadConfigFromArgs(): Promise<{ config: ServicesConfig; mode: ConfigMode; infra: InfraConfig }> {
   const mode = parseConfigMode();
-  const config = await loadConfig(mode);
-  return { config, mode };
+  const [config, infra] = await Promise.all([
+    loadConfig(mode),
+    loadInfraConfig(mode),  // Pass mode for optional infra.{mode}.json override
+  ]);
+  return { config, mode, infra };
 }
 
 /**

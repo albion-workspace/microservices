@@ -28,21 +28,12 @@ import {
   type LocalDependency,
 } from 'core-service';
 
-import { loadConfigFromArgs, logConfigSummary, type ServicesConfig, type ConfigMode, getMongoUri, getRedisUrl } from './config-loader.js';
+import { loadConfigFromArgs, logConfigSummary, getInfraConfig, type ServicesConfig, type ConfigMode, type InfraConfig, getMongoUri, getRedisUrl } from './config-loader.js';
 import { runScript, printHeader, printFooter } from './script-runner.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = join(__dirname, '..');
 const OUTPUT_DIR = join(ROOT_DIR, 'generated');
-
-// ═══════════════════════════════════════════════════════════════════
-// Infrastructure Versions - Keep updated to latest stable
-// ═══════════════════════════════════════════════════════════════════
-const VERSIONS = {
-  node: '24',           // Node.js LTS (24.x Krypton)
-  mongo: '8',           // MongoDB 8.x (latest stable)
-  redis: '7-alpine',    // Redis 7.x Alpine (minimal ~60MB)
-};
 
 // ═══════════════════════════════════════════════════════════════════
 // Docker Infrastructure Detection
@@ -254,6 +245,7 @@ ${volumeConfig}
 
 function generateMongoDockerService(config: ServicesConfig): string {
   const mongo = config.infrastructure.mongodb;
+  const { versions } = getInfraConfig();
   // Use dockerContainer name for Docker, fallback to a default
   const mongoContainer = (mongo as any).dockerContainer || 'ms-mongo';
 
@@ -264,7 +256,7 @@ function generateMongoDockerService(config: ServicesConfig): string {
     
     let services = `  # MongoDB Replica Set
   ${primaryHost}:
-    image: mongo:${VERSIONS.mongo}
+    image: mongo:${versions.mongodb}
     command: ["--replSet", "${mongo.replicaSet}", "--bind_ip_all"]
     ports:
       - "${mongo.port}:27017"
@@ -291,7 +283,7 @@ function generateMongoDockerService(config: ServicesConfig): string {
       services += `
 
   ${secondaryHost}:
-    image: mongo:${VERSIONS.mongo}
+    image: mongo:${versions.mongodb}
     command: ["--replSet", "${mongo.replicaSet}", "--bind_ip_all"]
     volumes:
       - mongo-data-${i}:/data/db
@@ -307,7 +299,7 @@ function generateMongoDockerService(config: ServicesConfig): string {
   // Single mode
   return `  # MongoDB (Single)
   ${mongoContainer}:
-    image: mongo:${VERSIONS.mongo}
+    image: mongo:${versions.mongodb}
     ports:
       - "${mongo.port}:27017"
     volumes:
@@ -318,8 +310,10 @@ function generateMongoDockerService(config: ServicesConfig): string {
 
 function generateRedisDockerService(config: ServicesConfig): string {
   const redis = config.infrastructure.redis;
+  const { versions } = getInfraConfig();
   // Use dockerContainer name for Docker, fallback to a default
   const redisContainer = (redis as any).dockerContainer || 'ms-redis';
+  const redisHost = redisContainer;
 
   if (redis.mode === 'sentinel' && redis.sentinel) {
     // Sentinel mode
@@ -327,7 +321,7 @@ function generateRedisDockerService(config: ServicesConfig): string {
     
     return `  # Redis Master
   ${redisContainer}:
-    image: redis:${VERSIONS.redis}
+    image: redis:${versions.redis}
     command: ["redis-server", "--appendonly", "yes"]
     ports:
       - "${redis.port}:6379"
@@ -340,7 +334,7 @@ function generateRedisDockerService(config: ServicesConfig): string {
 ${sentinel.hosts.map((h, i) => {
   const sentinelHost = h.host.split('.')[0];
   return `  ${sentinelHost}:
-    image: redis:${VERSIONS.redis}
+    image: redis:${versions.redis}
     command: >
       sh -c "echo 'sentinel monitor ${sentinel.name} ${redisHost} 6379 2' > /tmp/sentinel.conf &&
              echo 'sentinel down-after-milliseconds ${sentinel.name} 5000' >> /tmp/sentinel.conf &&
@@ -358,7 +352,7 @@ ${sentinel.hosts.map((h, i) => {
   // Single mode
   return `  # Redis (Single)
   ${redisContainer}:
-    image: redis:${VERSIONS.redis}
+    image: redis:${versions.redis}
     command: ["redis-server", "--appendonly", "yes"]
     ports:
       - "${redis.port}:6379"
@@ -456,7 +450,7 @@ async function generateK8s(config: ServicesConfig, mode: ConfigMode): Promise<vo
   const k8sDir = join(OUTPUT_DIR, 'k8s');
   await mkdir(k8sDir, { recursive: true });
 
-  const namespace = (config as any).kubernetes?.namespace || 'microservices';
+  const namespace = getInfraConfig().kubernetes.namespace;
 
   // Namespace
   await writeFile(join(k8sDir, '00-namespace.yaml'), generateK8sNamespace(namespace));
@@ -546,6 +540,7 @@ stringData:
 
 function generateK8sMongoDB(config: ServicesConfig, namespace: string): string {
   const mongo = config.infrastructure.mongodb;
+  const { versions } = getInfraConfig();
 
   if (mongo.mode === 'replicaSet') {
     return `# MongoDB StatefulSet (Replica Set)
@@ -567,7 +562,7 @@ spec:
     spec:
       containers:
       - name: mongodb
-        image: mongo:${VERSIONS.mongo}
+        image: mongo:${versions.mongodb}
         command: ["mongod", "--replSet", "${mongo.replicaSet}", "--bind_ip_all"]
         ports:
         - containerPort: 27017
@@ -617,7 +612,7 @@ spec:
     spec:
       containers:
       - name: mongodb
-        image: mongo:${VERSIONS.mongo}
+        image: mongo:${versions.mongodb}
         ports:
         - containerPort: 27017
         volumeMounts:
@@ -643,6 +638,7 @@ spec:
 
 function generateK8sRedis(config: ServicesConfig, namespace: string): string {
   const redis = config.infrastructure.redis;
+  const { versions } = getInfraConfig();
 
   if (redis.mode === 'sentinel' && redis.sentinel) {
     return `# Redis with Sentinel
@@ -664,7 +660,7 @@ spec:
     spec:
       containers:
       - name: redis
-        image: redis:${VERSIONS.redis}
+        image: redis:${versions.redis}
         command: ["redis-server", "--appendonly", "yes"]
         ports:
         - containerPort: 6379
@@ -714,7 +710,7 @@ spec:
     spec:
       containers:
       - name: redis
-        image: redis:${VERSIONS.redis}
+        image: redis:${versions.redis}
         command: ["redis-server", "--appendonly", "yes"]
         ports:
         - containerPort: 6379
@@ -922,6 +918,7 @@ async function generateDockerfiles(config: ServicesConfig): Promise<void> {
   console.log('🔧 Generating Dockerfiles for services...');
   
   const PROJECT_ROOT = join(__dirname, '..', '..');
+  const { versions } = getInfraConfig();
   
   for (const service of config.services) {
     const servicePath = join(PROJECT_ROOT, `${service.name}-service`);
@@ -934,7 +931,7 @@ async function generateDockerfiles(config: ServicesConfig): Promise<void> {
       name: `${service.name}-service`,
       port: service.port,
       healthPath: service.healthPath,
-      nodeVersion: VERSIONS.node,
+      nodeVersion: versions.node,
       entryPoint: 'dist/index.js',
       localDependencies,
     };

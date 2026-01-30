@@ -27,23 +27,13 @@ import { access, rm } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { loadConfigFromArgs, logConfigSummary, type ServicesConfig, type ServiceConfig } from './config-loader.js';
+import { loadConfigFromArgs, logConfigSummary, getInfraConfig, type ServicesConfig, type ServiceConfig, type InfraConfig } from './config-loader.js';
 import { runScript, runLongRunningScript, printHeader } from './script-runner.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = join(__dirname, '..', '..');
 const GATEWAY_DIR = join(__dirname, '..');
 const GENERATED_DIR = join(GATEWAY_DIR, 'generated');
-
-// Infrastructure versions - keep in sync with generate.ts
-const VERSIONS = {
-  node: '24',           // Node.js LTS
-  mongo: '8',           // MongoDB 8.x
-  redis: '7-alpine',    // Redis 7.x Alpine (minimal)
-};
-
-// Network name used by all services - must match ms-mongo/ms-redis network
-const DOCKER_NETWORK = 'ms_microservices-network';
 
 type DockerCommand = 'build' | 'up' | 'down' | 'logs' | 'status' | 'ps' | 'fresh' | 'clean';
 
@@ -177,11 +167,12 @@ async function generateDockerfile(serviceName: string): Promise<void> {
  * Ensure the Docker network exists
  */
 async function ensureNetworkExists(): Promise<void> {
+  const { docker } = getInfraConfig();
   try {
-    execSync(`docker network inspect ${DOCKER_NETWORK}`, { stdio: 'ignore' });
+    execSync(`docker network inspect ${docker.network}`, { stdio: 'ignore' });
   } catch {
-    console.log(`Creating Docker network: ${DOCKER_NETWORK}`);
-    execSync(`docker network create ${DOCKER_NETWORK}`, { stdio: 'inherit' });
+    console.log(`Creating Docker network: ${docker.network}`);
+    execSync(`docker network create ${docker.network}`, { stdio: 'inherit' });
   }
 }
 
@@ -227,6 +218,7 @@ function getRunningContainerName(baseName: string): string | null {
  * Creates them if they don't exist (fresh install scenario)
  */
 async function ensureInfrastructure(config: ServicesConfig): Promise<void> {
+  const { docker, versions } = getInfraConfig();
   const mongo = config.infrastructure.mongodb;
   const redis = config.infrastructure.redis;
   const mongoContainer = (mongo as any).dockerContainer || 'ms-mongo';
@@ -252,7 +244,7 @@ async function ensureInfrastructure(config: ServicesConfig): Promise<void> {
       } catch {
         // Container doesn't exist, that's fine
       }
-      execSync(`docker run -d --name ${mongoContainer} --network ${DOCKER_NETWORK} -p ${mongo.port}:27017 mongo:${VERSIONS.mongo}`, {
+      execSync(`docker run -d --name ${mongoContainer} --network ${docker.network} -p ${mongo.port}:27017 mongo:${versions.mongodb}`, {
         stdio: 'inherit',
       });
       console.log(`  ✅ ${mongoContainer} started`);
@@ -274,8 +266,8 @@ async function ensureInfrastructure(config: ServicesConfig): Promise<void> {
       }
       const redisPassword = redis.password;
       const redisCmd = redisPassword 
-        ? `docker run -d --name ${redisContainer} --network ${DOCKER_NETWORK} -p ${redis.port}:6379 redis:${VERSIONS.redis} redis-server --appendonly yes --requirepass ${redisPassword}`
-        : `docker run -d --name ${redisContainer} --network ${DOCKER_NETWORK} -p ${redis.port}:6379 redis:${VERSIONS.redis} redis-server --appendonly yes`;
+        ? `docker run -d --name ${redisContainer} --network ${docker.network} -p ${redis.port}:6379 redis:${versions.redis} redis-server --appendonly yes --requirepass ${redisPassword}`
+        : `docker run -d --name ${redisContainer} --network ${docker.network} -p ${redis.port}:6379 redis:${versions.redis} redis-server --appendonly yes`;
       execSync(redisCmd, { stdio: 'inherit' });
       console.log(`  ✅ ${redisContainer} started`);
     } catch (err) {
@@ -359,10 +351,11 @@ async function buildCoreBase(forceRebuild = false): Promise<void> {
   
   const coreBaseDockerfile = join(ROOT_DIR, 'Dockerfile.core-base');
   
-  // Generate core-base Dockerfile
+  // Generate core-base Dockerfile with version from infra config
   const { generateCoreBaseDockerfile } = await import('core-service/infra');
   const { writeFile } = await import('node:fs/promises');
-  await writeFile(coreBaseDockerfile, generateCoreBaseDockerfile());
+  const { versions } = getInfraConfig();
+  await writeFile(coreBaseDockerfile, generateCoreBaseDockerfile(versions.node));
   
   try {
     execSync('docker build -f Dockerfile.core-base -t core-base:latest .', {
@@ -441,6 +434,7 @@ async function dockerBuild(config: ServicesConfig, serviceName?: string, rebuild
  * For all services: use docker compose
  */
 async function dockerUp(env: 'dev' | 'prod', config: ServicesConfig, serviceName?: string): Promise<void> {
+  const { docker } = getInfraConfig();
   const services = getTargetServices(config, serviceName);
   const targetMsg = serviceName ? ` - ${serviceName} only` : '';
   printHeader(`Starting Docker Containers (${env})${targetMsg}`);
@@ -482,7 +476,7 @@ async function dockerUp(env: 'dev' | 'prod', config: ServicesConfig, serviceName
     const runArgs = [
       'run', '-d',
       '--name', containerName,
-      '--network', DOCKER_NETWORK,
+      '--network', docker.network,
       ...envVars.flatMap(e => ['-e', e]),
       '-p', `${service.port}:${service.port}`,
       `${svcName}:latest`,
@@ -511,7 +505,7 @@ async function dockerUp(env: 'dev' | 'prod', config: ServicesConfig, serviceName
   const composeFile = getComposeFile(env);
   const composeArgs = ['-f', composeFile, 'up', '-d', '--force-recreate'];
   
-  console.log(`\nStarting all containers on network: ${DOCKER_NETWORK}`);
+  console.log(`\nStarting all containers on network: ${docker.network}`);
   
   const proc = spawn('docker', ['compose', ...composeArgs], {
     cwd: GATEWAY_DIR,
@@ -760,6 +754,7 @@ async function dockerFresh(env: 'dev' | 'prod', config: ServicesConfig, serviceN
 }
 
 async function dockerStatus(env: 'dev' | 'prod', config: ServicesConfig): Promise<void> {
+  const { docker } = getInfraConfig();
   printHeader('Docker Status');
 
   // Check Docker
@@ -771,10 +766,10 @@ async function dockerStatus(env: 'dev' | 'prod', config: ServicesConfig): Promis
 
   // Check network
   try {
-    execSync(`docker network inspect ${DOCKER_NETWORK}`, { stdio: 'ignore' });
-    console.log(`✅ Network ${DOCKER_NETWORK} exists`);
+    execSync(`docker network inspect ${docker.network}`, { stdio: 'ignore' });
+    console.log(`✅ Network ${docker.network} exists`);
   } catch {
-    console.log(`⚠️  Network ${DOCKER_NETWORK} not found`);
+    console.log(`⚠️  Network ${docker.network} not found`);
   }
 
   // Check compose file
