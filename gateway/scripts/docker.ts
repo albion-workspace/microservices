@@ -35,6 +35,13 @@ const ROOT_DIR = join(__dirname, '..', '..');
 const GATEWAY_DIR = join(__dirname, '..');
 const GENERATED_DIR = join(GATEWAY_DIR, 'generated');
 
+// Infrastructure versions - keep in sync with generate.ts
+const VERSIONS = {
+  node: '24',           // Node.js LTS
+  mongo: '8',           // MongoDB 8.x
+  redis: '7-alpine',    // Redis 7.x Alpine (minimal)
+};
+
 // Network name used by all services - must match ms-mongo/ms-redis network
 const DOCKER_NETWORK = 'ms_microservices-network';
 
@@ -245,7 +252,7 @@ async function ensureInfrastructure(config: ServicesConfig): Promise<void> {
       } catch {
         // Container doesn't exist, that's fine
       }
-      execSync(`docker run -d --name ${mongoContainer} --network ${DOCKER_NETWORK} -p ${mongo.port}:27017 mongo:7`, {
+      execSync(`docker run -d --name ${mongoContainer} --network ${DOCKER_NETWORK} -p ${mongo.port}:27017 mongo:${VERSIONS.mongo}`, {
         stdio: 'inherit',
       });
       console.log(`  ✅ ${mongoContainer} started`);
@@ -267,8 +274,8 @@ async function ensureInfrastructure(config: ServicesConfig): Promise<void> {
       }
       const redisPassword = redis.password;
       const redisCmd = redisPassword 
-        ? `docker run -d --name ${redisContainer} --network ${DOCKER_NETWORK} -p ${redis.port}:6379 redis:7-alpine redis-server --appendonly yes --requirepass ${redisPassword}`
-        : `docker run -d --name ${redisContainer} --network ${DOCKER_NETWORK} -p ${redis.port}:6379 redis:7-alpine redis-server --appendonly yes`;
+        ? `docker run -d --name ${redisContainer} --network ${DOCKER_NETWORK} -p ${redis.port}:6379 redis:${VERSIONS.redis} redis-server --appendonly yes --requirepass ${redisPassword}`
+        : `docker run -d --name ${redisContainer} --network ${DOCKER_NETWORK} -p ${redis.port}:6379 redis:${VERSIONS.redis} redis-server --appendonly yes`;
       execSync(redisCmd, { stdio: 'inherit' });
       console.log(`  ✅ ${redisContainer} started`);
     } catch (err) {

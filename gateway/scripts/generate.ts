@@ -36,6 +36,15 @@ const ROOT_DIR = join(__dirname, '..');
 const OUTPUT_DIR = join(ROOT_DIR, 'generated');
 
 // ═══════════════════════════════════════════════════════════════════
+// Infrastructure Versions - Keep updated to latest stable
+// ═══════════════════════════════════════════════════════════════════
+const VERSIONS = {
+  node: '24',           // Node.js LTS (24.x Krypton)
+  mongo: '8',           // MongoDB 8.x (latest stable)
+  redis: '7-alpine',    // Redis 7.x Alpine (minimal ~60MB)
+};
+
+// ═══════════════════════════════════════════════════════════════════
 // Docker Infrastructure Detection
 // ═══════════════════════════════════════════════════════════════════
 
@@ -255,7 +264,7 @@ function generateMongoDockerService(config: ServicesConfig): string {
     
     let services = `  # MongoDB Replica Set
   ${primaryHost}:
-    image: mongo:7
+    image: mongo:${VERSIONS.mongo}
     command: ["--replSet", "${mongo.replicaSet}", "--bind_ip_all"]
     ports:
       - "${mongo.port}:27017"
@@ -282,7 +291,7 @@ function generateMongoDockerService(config: ServicesConfig): string {
       services += `
 
   ${secondaryHost}:
-    image: mongo:7
+    image: mongo:${VERSIONS.mongo}
     command: ["--replSet", "${mongo.replicaSet}", "--bind_ip_all"]
     volumes:
       - mongo-data-${i}:/data/db
@@ -298,7 +307,7 @@ function generateMongoDockerService(config: ServicesConfig): string {
   // Single mode
   return `  # MongoDB (Single)
   ${mongoContainer}:
-    image: mongo:7
+    image: mongo:${VERSIONS.mongo}
     ports:
       - "${mongo.port}:27017"
     volumes:
@@ -318,7 +327,7 @@ function generateRedisDockerService(config: ServicesConfig): string {
     
     return `  # Redis Master
   ${redisContainer}:
-    image: redis:7-alpine
+    image: redis:${VERSIONS.redis}
     command: ["redis-server", "--appendonly", "yes"]
     ports:
       - "${redis.port}:6379"
@@ -331,7 +340,7 @@ function generateRedisDockerService(config: ServicesConfig): string {
 ${sentinel.hosts.map((h, i) => {
   const sentinelHost = h.host.split('.')[0];
   return `  ${sentinelHost}:
-    image: redis:7-alpine
+    image: redis:${VERSIONS.redis}
     command: >
       sh -c "echo 'sentinel monitor ${sentinel.name} ${redisHost} 6379 2' > /tmp/sentinel.conf &&
              echo 'sentinel down-after-milliseconds ${sentinel.name} 5000' >> /tmp/sentinel.conf &&
@@ -349,7 +358,7 @@ ${sentinel.hosts.map((h, i) => {
   // Single mode
   return `  # Redis (Single)
   ${redisContainer}:
-    image: redis:7-alpine
+    image: redis:${VERSIONS.redis}
     command: ["redis-server", "--appendonly", "yes"]
     ports:
       - "${redis.port}:6379"
@@ -558,7 +567,7 @@ spec:
     spec:
       containers:
       - name: mongodb
-        image: mongo:7
+        image: mongo:${VERSIONS.mongo}
         command: ["mongod", "--replSet", "${mongo.replicaSet}", "--bind_ip_all"]
         ports:
         - containerPort: 27017
@@ -608,7 +617,7 @@ spec:
     spec:
       containers:
       - name: mongodb
-        image: mongo:7
+        image: mongo:${VERSIONS.mongo}
         ports:
         - containerPort: 27017
         volumeMounts:
@@ -655,7 +664,7 @@ spec:
     spec:
       containers:
       - name: redis
-        image: redis:7-alpine
+        image: redis:${VERSIONS.redis}
         command: ["redis-server", "--appendonly", "yes"]
         ports:
         - containerPort: 6379
@@ -705,7 +714,7 @@ spec:
     spec:
       containers:
       - name: redis
-        image: redis:7-alpine
+        image: redis:${VERSIONS.redis}
         command: ["redis-server", "--appendonly", "yes"]
         ports:
         - containerPort: 6379
@@ -925,7 +934,7 @@ async function generateDockerfiles(config: ServicesConfig): Promise<void> {
       name: `${service.name}-service`,
       port: service.port,
       healthPath: service.healthPath,
-      nodeVersion: '20',
+      nodeVersion: VERSIONS.node,
       entryPoint: 'dist/index.js',
       localDependencies,
     };
