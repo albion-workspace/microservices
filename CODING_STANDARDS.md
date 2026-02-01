@@ -502,7 +502,9 @@ Configuration files follow the pattern `gateway/configs/services.{mode}.json`:
 
 | Mode | File | Description |
 |------|------|-------------|
-| `dev` | `services.dev.json` | Single MongoDB/Redis, local development (default) |
+| `dev` (default/ms) | `services.dev.json` | Single MongoDB/Redis, all 5 services (default) |
+| `test` | `services.test.json` | Standalone stack; distinct ports (gateway 9998). Uses `infra.test.json`. |
+| `combo` | `services.combo.json` | Reuses ms Redis/Mongo/auth; deploys gateway + KYC only. Deploy ms first. Uses `infra.combo.json`. |
 | `shared` | `services.shared.json` | MongoDB Replica Set, Redis Sentinel |
 | `{brand}` | `services.{brand}.json` | Custom brand-specific config |
 
@@ -1755,10 +1757,10 @@ The `gateway/` folder orchestrates local development, Docker, and Kubernetes dep
 ### Configuration Files (`gateway/configs/`)
 
 ```
-services.dev.json      # Development mode (single MongoDB/Redis)
-services.shared.json   # Shared/Production mode (replica sets, sentinel)
-services.local-k8s.json # Local Kubernetes testing
-services.{brand}.json  # Brand-specific configurations
+infra.json, infra.test.json, infra.combo.json   # Infra overrides per profile
+services.json, services.dev.json                # Base + default (ms)
+services.test.json, services.combo.json         # Test (standalone), combo (reuses ms)
+services.shared.json, services.local-k8s.json   # Shared/production, local K8s
 ```
 
 ### Key Scripts
@@ -1766,24 +1768,24 @@ services.{brand}.json  # Brand-specific configurations
 ```bash
 # Generate infrastructure (Dockerfiles, compose, K8s manifests)
 npm run generate                        # All, dev config
-npm run generate -- --config=shared     # Shared config
+npm run generate:test                   # Test config
+npm run generate:combo                   # Combo config (deploy ms first)
 npm run generate:dockerfile             # Only Dockerfiles
 
 # Docker operations (support --service for single service)
 npm run docker:build                    # Build all images
-npm run docker:build -- --service=auth  # Build only auth-service
 npm run docker:up                       # Start all containers
-npm run docker:up -- --service=auth     # Start only auth-service
 npm run docker:status                   # Check status
+npm run docker:fresh                    # Full fresh: clean + build + start + health (default/ms)
+npm run docker:fresh:test               # Fresh deploy (test config)
+npm run docker:fresh:combo              # Fresh deploy (combo; deploy ms first)
 
-# Kubernetes operations
-npm run k8s:apply                       # Deploy to K8s
-npm run k8s:apply -- --service=auth     # Deploy only auth-service
-npm run k8s:status                      # Check K8s status
+# Kubernetes: k8s:apply, k8s:status, k8s:delete (suffix :test, :combo for those configs)
 
 # Health checks
 npm run health                          # Local services
-npm run health:docker                   # Docker services
+npm run health:docker                   # Docker (default/ms)
+npm run health:docker:test              # Docker (test config)
 npm run health:k8s                      # K8s services
 ```
 

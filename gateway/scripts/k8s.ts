@@ -26,7 +26,7 @@ import { access, readdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { loadConfigFromArgs, logConfigSummary, getInfraConfig, getConfigMode, type ServicesConfig, type ServiceConfig, type InfraConfig } from './config-loader.js';
+import { loadConfigFromArgs, logConfigSummary, getInfraConfig, getConfigMode, getReusedServiceEntries, type ServicesConfig, type ServiceConfig, type InfraConfig } from './config-loader.js';
 import { runScript, runLongRunningScript, printHeader } from './script-runner.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -328,6 +328,10 @@ async function k8sApply(serviceName?: string): Promise<void> {
     console.log('');
     console.log('✅ Manifests applied successfully');
     console.log('');
+    console.log('API Gateway (Ingress): No port-forward needed. If your cluster exposes Ingress on localhost (e.g. Docker Desktop K8s), use:');
+    console.log(`  curl http://localhost/graphql  (add Host header for your namespace if you have multiple)`);
+    console.log('To reach service /health directly (e.g. for health checks), use: npm run k8s:forward  (then curl http://localhost:<port>/health)');
+    console.log('');
     console.log('Run "npm run k8s:status" to check pod status');
   } catch (err) {
     console.error('❌ Failed to apply manifests');
@@ -379,13 +383,21 @@ async function k8sStatus(config: ServicesConfig): Promise<void> {
   console.log('Ingress:');
   try {
     execSync(`kubectl get ingress -n ${getInfraConfig().kubernetes.namespace}`, { stdio: 'inherit' });
+    console.log('  API Gateway: use http://localhost/graphql (no port-forward if Ingress controller is on localhost:80)');
   } catch {
     console.log('  No ingress found');
   }
 }
 
 async function k8sForward(config: ServicesConfig, serviceName?: string): Promise<void> {
-  const services = getTargetServices(config, serviceName);
+  const allServices = getTargetServices(config, serviceName);
+  const reusedSet = new Set(getReusedServiceEntries(config).map((e) => e.serviceName));
+  const services = allServices.filter((s) => !reusedSet.has(s.name));
+  if (reusedSet.size && allServices.length > services.length) {
+    console.log(`Skipping port-forward for reused (ExternalName) services: ${[...reusedSet].join(', ')}`);
+    console.log('');
+  }
+
   const targetMsg = serviceName ? ` (${serviceName})` : '';
   printHeader(`Port Forwarding Services${targetMsg}`);
   console.log('Press Ctrl+C to stop all port forwards.');

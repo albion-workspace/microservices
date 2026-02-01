@@ -33,7 +33,7 @@ All commands support `--config=dev` (default), `--config=shared`, `--config=test
 - **Ports (brand co-existence)**: ms and test can run on the same Docker host. ms uses default ports (Mongo 27017, Redis 6379, services 9001–9005, gateway 9999). test uses distinct ports (Mongo 27018, Redis 6380, services 9011–9015, gateway 9998) so both stacks can run simultaneously.
 - **Kubernetes (same behavior)**: ms uses namespace `microservices` and manifests in `generated/k8s/`. test uses namespace `microservices-test` and manifests in `generated/k8s-test/`. Both can coexist; generate/apply/delete use the current config’s dir and namespace. Generated K8s files are only cleaned for the current config (e.g. `k8s:fresh` with test cleans only `k8s-test/`).
 - **Gateway behavior (all environments)**: The nginx gateway is the single entry point in Docker (dev and prod) and K8s (Ingress). Routing (X-Target-Service / default service), `/health`, and GraphQL paths behave the same everywhere. In dev (Docker) you may use either the gateway port (e.g. 9999) or direct service ports (9001–9005); using the gateway matches prod/K8s behavior.
-- **Combo config**: Use `infra.combo.json` and `services.combo.json` with `reuseFrom`, `reuseInfra`, and `reuseServicePorts` (e.g. `"ms:auth": 9001`). Combo reuses **default (ms)** Redis, MongoDB, and auth-service; it **deploys only KYC** (plus gateway). Combo has its own project (`combo`), network (`combo_network`), gateway port 9997. Use `--config=combo` (e.g. `npm run generate:combo`, `npm run docker:up:combo`, `npm run k8s:apply:combo`). **Deploy ms first, then combo.** Test namespace is unchanged and remains a full standalone stack. (More detail below under "Implementing shared infra and shared services".) “Shared infra” means **data-plane only**: Redis, MongoDB (and in future e.g. message queues). It does **not** mean sharing app services like auth-service. Today each namespace has its own Redis and MongoDB. It is **possible** for a namespace (e.g. test) to use another’s Redis/Mongo: K8s allows cross-namespace DNS (`redis.microservices.svc.cluster.local`), and config already supports per-environment `mongoUri`/`redisUrl`. Implementing “test uses ms Redis” would mean: (1) **Config**: add an option (e.g. `sharedInfra: { redis: "microservices" }`) so test points at ms. (2) **K8s**: when shared, use that host in generated secrets and **omit** Redis (and optionally MongoDB) manifests for the test namespace. (3) **Docker**: test stack would use an external network and env pointing at `ms-redis`/`ms-mongo`. (4) **Isolation**: shared Redis may need key prefixes or Redis DB numbers; MongoDB already uses per-service DB names. — **Sharing app services** (e.g. test using ms auth-service instead of deploying its own) would be a **separate** option: test would not deploy auth-service and would call `auth-service.microservices.svc.cluster.local`; that would require config (e.g. `sharedServices: ["auth"]`) and omitting that deployment in the test namespace.
+- **Combo config**: Use `infra.combo.json` and `services.combo.json` with `reuseFrom`, `reuseInfra`, and `reuseServicePorts` (e.g. `"ms:auth": 9001`). Combo reuses **default (ms)** Redis, MongoDB, and auth-service; it **deploys only KYC** (plus gateway). Combo has its own project (`combo`), network (`combo_network`), gateway port 9997. Use `--config=combo` (e.g. `npm run generate:combo`, `npm run docker:up:combo`, `npm run docker:fresh:combo`). **Deploy ms first, then combo.** Test namespace is unchanged and remains a full standalone stack.  “Shared infra” means **data-plane only**: Redis, MongoDB (and in future e.g. message queues). It does **not** mean sharing app services like auth-service. Today each namespace has its own Redis and MongoDB. It is **possible** for a namespace (e.g. test) to use another’s Redis/Mongo: K8s allows cross-namespace DNS (`redis.microservices.svc.cluster.local`), and config already supports per-environment `mongoUri`/`redisUrl`. Implementing “test uses ms Redis” would mean: (1) **Config**: add an option (e.g. `sharedInfra: { redis: "microservices" }`) so test points at ms. (2) **K8s**: when shared, use that host in generated secrets and **omit** Redis (and optionally MongoDB) manifests for the test namespace. (3) **Docker**: test stack would use an external network and env pointing at `ms-redis`/`ms-mongo`. (4) **Isolation**: shared Redis may need key prefixes or Redis DB numbers; MongoDB already uses per-service DB names. — **Sharing app services** (e.g. test using ms auth-service instead of deploying its own) would be a **separate** option: test would not deploy auth-service and would call `auth-service.microservices.svc.cluster.local`; that would require config (e.g. `sharedServices: ["auth"]`) and omitting that deployment in the test namespace.
 
 ### Development
 
@@ -49,7 +49,8 @@ All commands support `--config=dev` (default), `--config=shared`, `--config=test
 | Command | Description |
 |---------|-------------|
 | `npm run health` | Check localhost (local dev) |
-| `npm run health:docker` | Check Docker containers |
+| `npm run health:docker` | Check Docker containers (default/ms) |
+| `npm run health:docker:test` | Check Docker containers (test config) |
 | `npm run health:k8s` | Check K8s pods |
 | `npm run health:shared` | Check shared config (localhost) |
 | `npm run health:shared:docker` | Check shared config (Docker) |
@@ -60,17 +61,29 @@ All commands support `--config=dev` (default), `--config=shared`, `--config=test
 | Command | Description |
 |---------|-------------|
 | `npm run docker:status` | Check Docker and container status |
+| `npm run docker:status:test` | Status for test config |
+| `npm run docker:status:combo` | Status for combo config |
 | `npm run docker:build` | Build all service images |
-| `npm run docker:up` | Start containers (dev config) |
+| `npm run docker:up` | Start containers (default/ms) |
 | `npm run docker:up:shared` | Start containers (shared config) |
-| `npm run docker:up:test` | Start containers (test config; group **test** in Docker Desktop: test-redis, test-mongo, test-auth-service, …) |
-| `npm run docker:up:combo` | Start containers (combo config; reuses ms Redis/Mongo/auth, deploys only KYC; deploy ms first) |
+| `npm run docker:up:test` | Start containers (test config) |
+| `npm run docker:up:combo` | Start containers (combo; reuses ms Redis/Mongo/auth; deploy ms first) |
 | `npm run docker:down` | Stop containers |
-| `npm run docker:down:test` | Stop test stack (project **test**) |
-| `npm run docker:down:combo` | Stop combo stack (project **combo**) |
+| `npm run docker:down:test` | Stop test stack |
+| `npm run docker:down:combo` | Stop combo stack |
 | `npm run docker:logs` | Stream container logs |
 | `npm run docker:up:prod` | Start prod mode with gateway |
 | `npm run docker:down:prod` | Stop prod containers |
+
+**Fresh deployment** (clean → build → start → health check → cleanup). Safe on Windows (cleanup uses a short delay to avoid libuv handle errors).
+
+| Command | Description |
+|---------|-------------|
+| `npm run docker:fresh` | Full fresh deploy (default/ms) |
+| `npm run docker:fresh:test` | Full fresh deploy (test config) |
+| `npm run docker:fresh:combo` | Full fresh deploy (combo; deploy ms first) |
+| `npm run docker:fresh:shared` | Full fresh deploy (shared config) |
+| `npm run docker:fresh:auth` | Fresh deploy auth-service only (and variants for payment, bonus, notification, kyc) |
 
 ### Kubernetes Operations
 
@@ -79,10 +92,16 @@ All commands support `--config=dev` (default), `--config=shared`, `--config=test
 | `npm run k8s:status` | Check cluster/pod status (dev) |
 | `npm run k8s:status:local` | Check status (local-k8s config) |
 | `npm run k8s:status:shared` | Check status (shared config) |
+| `npm run k8s:status:test` | Check status (test config) |
+| `npm run k8s:status:combo` | Check status (combo config) |
 | `npm run k8s:apply` | Apply manifests (dev) |
 | `npm run k8s:apply:local` | Apply manifests (local-k8s) |
 | `npm run k8s:apply:shared` | Apply manifests (shared config) |
+| `npm run k8s:apply:test` | Apply manifests (test config) |
+| `npm run k8s:apply:combo` | Apply manifests (combo config) |
 | `npm run k8s:delete` | Delete all resources |
+| `npm run k8s:delete:test` | Delete test namespace resources |
+| `npm run k8s:delete:combo` | Delete combo namespace resources |
 | `npm run k8s:forward` | Port forward (dev) |
 | `npm run k8s:forward:local` | Port forward (local-k8s) |
 | `npm run k8s:forward:shared` | Port forward (shared config) |
@@ -107,90 +126,17 @@ All commands support `--config=dev` (default), `--config=shared`, `--config=test
 
 ---
 
-## Implementing shared infra and shared services
+## Supported deployment profiles
 
-You can support two options: **(1) shared infrastructure** (test uses ms Redis/Mongo) and **(2) shared services** (test uses ms auth-service, etc.). Below is what implementing each means in practice.
+| Profile | Services config | Infra config | Description |
+|--------|-----------------|--------------|-------------|
+| **default (ms)** | `services.dev.json` | `infra.json` | Full stack: own Redis, MongoDB, all 5 services. Gateway 9999, services 9001â€“9005. |
+| **test** | `services.test.json` | `infra.test.json` | Standalone stack: own Redis, MongoDB, all 5 services. Distinct ports (gateway 9998, services 9011â€“9015) so ms and test can run on the same host. |
+| **combo** | `services.combo.json` | `infra.combo.json` | Reuses **ms** Redis, MongoDB, and auth; deploys only gateway + KYC. Gateway 9997. **Deploy ms first, then combo.** |
+| **shared** | `services.shared.json` | `infra.json` | Production-style (Replica Set, Sentinel). Single app service when using Docker. |
+| **local-k8s** | `services.local-k8s.json` | (local) | Local Kubernetes testing. |
 
-### Why both options
-
-- **Shared infra**: Fewer resources (one Redis/Mongo for ms + test), simpler ops, test can hit same data if needed.
-- **Shared services**: Test runs only the services under test (e.g. bonus, payment) and reuses ms auth (and optionally others), so test stack is smaller and behavior matches prod (same auth).
-
-### Option 1: Shared infrastructure
-
-**Config** (e.g. in `infra.test.json` or `services.test.json`):
-
-```json
-"sharedInfra": {
-  "redis": "microservices",
-  "mongodb": "microservices"
-}
-```
-
-Optional: `redisDb: 1` (or key prefix) so test uses a different Redis DB than ms and avoids key collisions.
-
-**K8s** (`generate.ts`):
-
-- When generating for a config that has `sharedInfra.redis`: in `generateK8sSecrets`, set Redis URL to `redis.${sharedInfra.redis}.svc.cluster.local` (and same namespace for Mongo if `sharedInfra.mongodb`). Use same password as the provider namespace or from config.
-- In `generateK8s`: **do not** write `05-mongodb.yaml` / `06-redis.yaml` when `sharedInfra.mongodb` / `sharedInfra.redis` is set (test namespace has no Redis/Mongo deployments).
-- Namespace must exist; ms namespace must be deployed first so Redis/Mongo exist there.
-
-**Docker** (`generate.ts`):
-
-- When `sharedInfra` is set: in dev/prod compose for test, **omit** the `mongo` and `redis` service blocks. Add the ms network as external, e.g. `networks: test_network: ... ; ms_network: external: true`. Put test services on both networks (or only ms_network) and set env: `REDIS_URL=redis://ms-redis:6379`, `MONGO_URI=mongodb://ms-mongo:27017/...` (use ms project name from infra, e.g. `ms` → `ms-redis`).
-- Ensure ms stack is up first so `ms-redis` / `ms-mongo` exist.
-
-**Config loader**: In `config-loader.ts` (or wherever you resolve infra), read `sharedInfra` and expose it so generate and docker scripts can branch.
-
----
-
-### Option 2: Shared services
-
-**Config** (e.g. in `services.test.json`):
-
-```json
-"sharedServices": ["auth"]
-```
-
-Means: “In this config (test), do not deploy auth-service; use the one from the provider namespace/project.”
-
-You need a single **provider** namespace/project (e.g. ms). So either:
-
-- Add `sharedServicesFrom": "microservices"` (K8s namespace) and `sharedServicesFromProject": "ms"` (Docker project name), or
-- Derive provider from existing infra (e.g. default ms = microservices / ms).
-
-**K8s** (`generate.ts`):
-
-- When generating deployments for a config that has `sharedServices`: **skip** emitting `10-${svc.name}-deployment.yaml` for any `svc.name` in `sharedServices` (e.g. skip auth).
-- Test namespace still needs a way to **call** ms auth: either
-  - **A)** Other test services (bonus, payment, …) call auth via gateway (Ingress in ms) or via direct URL. So you need a **Service** in test namespace that points at ms auth (ExternalName or multi-cluster). E.g. create a Service in test: `auth-service` → ExternalName `auth-service.microservices.svc.cluster.local`. Then test pods use `http://auth-service` and resolve to ms.
-  - **B)** Test gateway/Ingress routes `X-Target-Service: auth` to ms auth-service (e.g. backend `auth-service.microservices.svc.cluster.local:9001`). So nginx/Ingress in test namespace must have upstream for auth pointing at the other namespace.
-- So: **(1)** Skip deployment for shared services. **(2)** Either create ExternalName (or equivalent) Services in test namespace for each shared service, or configure test gateway/Ingress to proxy to ms namespace for those services. ConfigMap / Ingress annotations need to know the provider namespace.
-
-**Docker** (`generate.ts`):
-
-- When `sharedServices` is set: **omit** the `auth-service` (and any other shared) service block from test compose. Test stack does not start auth container.
-- Other test services that call auth need the URL. Options:
-  - **A)** Test containers join ms network (external) and use `ms-auth-service:9001` (or `auth-service` if you add an alias). Set env e.g. `AUTH_SERVICE_URL=http://ms-auth-service:9001` if apps support it.
-  - **B)** Test gateway (nginx) routes to ms: use `ms-auth-service` as upstream for auth. That requires nginx config for test to include an upstream pointing at `ms-auth-service:9001` (only possible if test gateway is on same Docker network as ms).
-- So: **(1)** Omit shared service blocks from compose. **(2)** Add ms network as external; put test gateway (and optionally other services) on ms network so gateway can proxy to `ms-auth-service`. **(3)** Generate nginx (or gateway) config for test so the “auth” route points at ms-auth-service.
-
-**Gateway / Ingress**: For “test uses ms auth”, test’s gateway must proxy auth traffic to ms. So when generating nginx or K8s Ingress for test, if `sharedServices` includes `auth`, the auth upstream/host should be `auth-service.microservices.svc.cluster.local` (K8s) or `ms-auth-service` (Docker) instead of local auth-service.
-
----
-
-### Summary: what to touch
-
-| Area | Shared infra | Shared services |
-|------|----------------|------------------|
-| **Config** | `sharedInfra: { redis, mongodb }` (+ optional `redisDb`) | `sharedServices: ["auth", ...]` + provider (e.g. `sharedServicesFrom: "microservices"`) |
-| **config-loader** | Load and expose `sharedInfra` | Load and expose `sharedServices` and provider |
-| **generate.ts K8s** | Secrets use provider-namespace Redis/Mongo; skip 05-mongodb, 06-redis when shared | Skip 10-*-deployment for shared svc; add ExternalName Services or Ingress backends to ms namespace |
-| **generate.ts Docker** | Omit mongo/redis; use external ms network; env → ms-redis, ms-mongo | Omit shared service blocks; test on ms network; gateway upstreams → ms-auth-service etc. |
-| **generate.ts nginx** | N/A | For test, auth upstream = ms-auth-service (or provider host) |
-| **Order** | Deploy ms first (Redis/Mongo and shared services) | Deploy ms first (shared services must exist) |
-
-**Isolation**: Shared Redis: use different Redis DB or key prefix for test. Mongo: DB names are per-service already. Shared auth: same JWT/issuer so tokens from ms auth work in test.
+Combo uses `reuseFrom` / `reuseInfra` / `reuseServicePorts` in config so the combo stack joins the ms network and reuses ms Redis, Mongo, and auth-service. Test remains fully standalone (no shared infra).
 
 ---
 
@@ -199,8 +145,15 @@ You need a single **provider** namespace/project (e.g. ms). So either:
 ```
 gateway/
 ├── configs/
-│   ├── services.dev.json     # Development config (single MongoDB/Redis)
-│   └── services.shared.json  # Production config (Sentinel, ReplicaSet)
+│   ├── infra.json            # Base infra (default/ms)
+│   ├── infra.test.json       # Test overrides (ports, project name)
+│   ├── infra.combo.json      # Combo overrides (reuse ms)
+│   ├── services.json         # Base services list
+│   ├── services.dev.json     # Development (default/ms)
+│   ├── services.test.json    # Test (standalone)
+│   ├── services.combo.json   # Combo (reuses ms; KYC only)
+│   ├── services.shared.json # Production (Replica Set, Sentinel)
+│   └── services.local-k8s.json
 ├── scripts/
 │   ├── config-loader.ts      # Config loading utility
 │   ├── dev.ts                # Unified development script
@@ -235,10 +188,11 @@ Configuration files follow the pattern `services.{mode}.json`. Use `--config={mo
 
 | Mode | File | Description |
 |------|------|-------------|
-| `dev` | `services.dev.json` | Single MongoDB/Redis, local development (default) |
-| `test` | `services.test.json` | Test profile; infra from `infra.test.json` (`docker.projectName`: **test**, network: **test_network** → separate Docker Desktop group) |
-| `shared` | `services.shared.json` | MongoDB Replica Set, Redis Sentinel; **Docker Compose runs only one app service** (the one with `strategy: "shared"`, e.g. auth) so Docker Desktop shows **ms** → redis, mongo, one service |
-| `local-k8s` | `services.local-k8s.json` | Docker Desktop Kubernetes testing |
+| `dev` (default/ms) | `services.dev.json` | Single MongoDB/Redis, all 5 services. Gateway 9999. |
+| `test` | `services.test.json` | Standalone stack; `infra.test.json` (project **test**, gateway 9998). |
+| `combo` | `services.combo.json` | Reuses ms Redis/Mongo/auth; deploys gateway + KYC only. Deploy ms first. |
+| `shared` | `services.shared.json` | Replica Set, Sentinel; single app service in Docker. |
+| `local-k8s` | `services.local-k8s.json` | Local Kubernetes testing. |
 
 **Docker Desktop grouping (dynamic from infra):**
 
@@ -489,4 +443,4 @@ Services read from environment:
 
 ---
 
-**Last Updated**: 2026-01-30
+**Last Updated**: 2026-02-01

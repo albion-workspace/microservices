@@ -918,8 +918,11 @@ spec:
 function generateK8sIngress(config: ServicesConfig, namespace: string): string {
   const defaultSvc = config.services.find(s => s.name === config.gateway.defaultService);
   const defaultPort = defaultSvc ? getK8sServicePort(defaultSvc, config) : (config.services[0]?.port ?? 9001);
+  const defaultBackend = `${config.gateway.defaultService}-service.${namespace}.svc.cluster.local:${defaultPort}`;
 
-  return `apiVersion: networking.k8s.io/v1
+  // Single backend: use spec.backend (no header-based routing needed)
+  if (config.services.length <= 1) {
+    return `apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: api-gateway
@@ -927,11 +930,53 @@ metadata:
   annotations:
     nginx.ingress.kubernetes.io/rewrite-target: /graphql
     nginx.ingress.kubernetes.io/configuration-snippet: |
-      # Route based on X-Target-Service header
       set $target_service $http_x_target_service;
       if ($target_service = "") {
         set $target_service "${config.gateway.defaultService}";
       }
+spec:
+  ingressClassName: nginx
+  rules:
+  - http:
+      paths:
+      - path: /graphql
+        pathType: Prefix
+        backend:
+          service:
+            name: ${config.gateway.defaultService}-service
+            port:
+              number: ${defaultPort}
+`;
+  }
+
+  // Multiple services: route by X-Target-Service to each backend (e.g. combo: auth + kyc)
+  const backendLines = config.services
+    .map(
+      (s) =>
+        `    ${s.name} ${s.name}-service.${namespace}.svc.cluster.local:${getK8sServicePort(s, config)};`
+    )
+    .join('\n');
+  const serverSnippet = `  map $target_service $k8s_backend {
+    default ${defaultBackend};
+${backendLines}
+  }`;
+  const configSnippet = `      set $target_service $http_x_target_service;
+      if ($target_service = "") {
+        set $target_service "${config.gateway.defaultService}";
+      }
+      resolver kube-dns.kube-system.svc.cluster.local valid=10s;
+      proxy_pass http://$k8s_backend$request_uri;`;
+
+  return `apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api-gateway
+  namespace: ${namespace}
+  annotations:
+    nginx.ingress.kubernetes.io/server-snippet: |
+${serverSnippet.split('\n').map((l) => '      ' + l).join('\n')}
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+${configSnippet.split('\n').map((l) => '      ' + l).join('\n')}
 spec:
   ingressClassName: nginx
   rules:
