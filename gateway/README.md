@@ -28,7 +28,7 @@ All commands support `--config=dev` (default), `--config=shared`, `--config=test
 - **Default (ms)** and **test** work as before: each is a full standalone stack (own Redis, MongoDB, all 5 services). **Combo** is a third namespace that reuses ms Redis/Mongo and auth, and deploys only KYC; deploy ms first, then combo.
 - **Services**: `services.{mode}.json` is loaded for the chosen mode (e.g. `services.test.json` for `--config=test`).
 - **Infra**: `infra.json` is the base; `infra.{mode}.json` deep-merges over it (e.g. `infra.test.json` overrides only what differs, such as `kubernetes.namespace` and `docker.projectName`).
-- **Docker Desktop**: Each config uses a Compose project name from infra (`docker.projectName`): default/dev/shared → **ms**, test → **test**, combo → **combo**. Containers are named `{projectName}-redis`, `{projectName}-mongo`, `{projectName}-auth-service`, etc. (e.g. **ms** → ms-redis, ms-mongo, ms-auth-service; **test** → test-redis, test-mongo, test-auth-service; **combo** → combo-gateway, combo-kyc-service only; combo has no mongo/redis/auth containers).
+- **Docker Desktop**: Each config uses a Compose project name from infra (`docker.projectName`): default/dev → **ms**, shared → **shared**, test → **test**, combo → **combo**. Containers are named `{projectName}-redis`, `{projectName}-mongo`, `{projectName}-auth-service`, etc. (e.g. **ms** → ms-redis, ms-mongo, ms-auth-service; **shared** → shared-mongo-primary, shared-redis, shared-redis-sentinel-*, shared-auth-service; **test** → test-redis, test-mongo, test-auth-service; **combo** → combo-gateway, combo-kyc-service only; combo has no mongo/redis/auth containers).
 - **Compose files**: Generated compose files are **kept** after `docker:fresh` so both ms and test definitions persist; only generated Dockerfiles are removed. Compose filenames are config-specific: `docker-compose.dev.yml` / `docker-compose.prod.yml` for ms, `docker-compose.dev.test.yml` / `docker-compose.prod.test.yml` for test.
 - **Ports (brand co-existence)**: ms and test can run on the same Docker host. ms uses default ports (Mongo 27017, Redis 6379, services 9001–9005, gateway 9999). test uses distinct ports (Mongo 27018, Redis 6380, services 9011–9015, gateway 9998) so both stacks can run simultaneously.
 - **Kubernetes (same behavior)**: ms uses namespace `microservices` and manifests in `generated/k8s/`. test uses namespace `microservices-test` and manifests in `generated/k8s-test/`. Both can coexist; generate/apply/delete use the current config’s dir and namespace. Generated K8s files are only cleaned for the current config (e.g. `k8s:fresh` with test cleans only `k8s-test/`).
@@ -68,7 +68,8 @@ All commands support `--config=dev` (default), `--config=shared`, `--config=test
 | `npm run docker:up:shared` | Start containers (shared config) |
 | `npm run docker:up:test` | Start containers (test config) |
 | `npm run docker:up:combo` | Start containers (combo; reuses ms Redis/Mongo/auth; deploy ms first) |
-| `npm run docker:down` | Stop containers |
+| `npm run docker:down` | Stop containers (uses `--remove-orphans` so switching configs cleans up orphaned containers) |
+| `npm run docker:down:shared` | Stop shared stack |
 | `npm run docker:down:test` | Stop test stack |
 | `npm run docker:down:combo` | Stop combo stack |
 | `npm run docker:logs` | Stream container logs |
@@ -130,7 +131,7 @@ All commands support `--config=dev` (default), `--config=shared`, `--config=test
 
 | Profile | Services config | Infra config | Description |
 |--------|-----------------|--------------|-------------|
-| **default (ms)** | `services.dev.json` | `infra.json` | Full stack: own Redis, MongoDB, all 5 services. Gateway 9999, services 9001â€“9005. |
+| **default (ms)** | `services.dev.json` | `infra.json` | Full stack: **single** Redis, **single** MongoDB, all 5 services. Gateway 9999, services 9001â€“9005. |
 | **test** | `services.test.json` | `infra.test.json` | Standalone stack: own Redis, MongoDB, all 5 services. Distinct ports (gateway 9998, services 9011â€“9015) so ms and test can run on the same host. |
 | **combo** | `services.combo.json` | `infra.combo.json` | Reuses **ms** Redis, MongoDB, and auth; deploys only gateway + KYC. Gateway 9997. **Deploy ms first, then combo.** |
 | **shared** | `services.shared.json` | `infra.shared.json` | Production-style (Replica Set, Redis Sentinel). Single app service in Docker. |
@@ -417,6 +418,10 @@ npm run docker:build
 npm run docker:logs
 ```
 
+### Switching Docker configs
+
+When switching between configs (e.g. ms ↔ test ↔ shared), run `npm run docker:down` (or `docker:down:test` / `docker:down:shared`) before starting the other stack. The down command uses `--remove-orphans` so containers from the previous compose file are removed and ports are freed.
+
 ### Kubernetes issues
 
 ```bash
@@ -442,6 +447,12 @@ Services read from environment:
 | `NODE_ENV` | Environment | `development` / `production` |
 | `MONGODB_URI` | MongoDB connection | `mongodb://localhost:27017/auth_service` |
 | `REDIS_URL` | Redis connection | `redis://localhost:6379` |
+
+---
+
+## Status & what remains
+
+See **[STATUS.md](./STATUS.md)** for implementation status, what’s done (default single Mongo/Redis, shared mode with replica set and Sentinel, Docker/K8s), and what remains (optional follow-ups).
 
 ---
 

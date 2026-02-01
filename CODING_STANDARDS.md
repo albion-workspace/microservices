@@ -1775,10 +1775,12 @@ npm run generate:dockerfile             # Only Dockerfiles
 # Docker operations (support --service for single service)
 npm run docker:build                    # Build all images
 npm run docker:up                       # Start all containers
+npm run docker:down                      # Stop containers (uses --remove-orphans when switching configs)
 npm run docker:status                   # Check status
-npm run docker:fresh                    # Full fresh: clean + build + start + health (default/ms)
+npm run docker:fresh                    # Full fresh: clean + build + start + health (default/ms, single Mongo/Redis)
 npm run docker:fresh:test               # Fresh deploy (test config)
 npm run docker:fresh:combo              # Fresh deploy (combo; deploy ms first)
+npm run docker:fresh:shared             # Fresh deploy (shared config: replica set + Sentinel)
 
 # Kubernetes: k8s:apply, k8s:status, k8s:delete (suffix :test, :combo for those configs)
 
@@ -1809,6 +1811,8 @@ The generator:
 3. Handles dependency chains (core-service → access-engine)
 
 **Result**: If tomorrow `core-service` is published to npm, just change `"file:../core-service"` to `"^1.0.0"` and regenerate Dockerfiles.
+
+**Default (ms)** uses **single** MongoDB and **single** Redis from `services.dev.json`; shared config uses replica set and Sentinel. When switching configs (e.g. ms ↔ test ↔ shared), run `docker:down` first; it uses `--remove-orphans` so orphaned containers are removed and ports freed. See `gateway/STATUS.md` for implementation status.
 
 ### Infrastructure Auto-Detection
 
