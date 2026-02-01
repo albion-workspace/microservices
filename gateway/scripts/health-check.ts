@@ -16,7 +16,7 @@
 
 import { execSync } from 'node:child_process';
 
-import { loadConfigFromArgs, logConfigSummary, type ServiceConfig, type ServicesConfig } from './config-loader.js';
+import { loadConfigFromArgs, logConfigSummary, getInfraConfig, getDockerContainerNames, type ServiceConfig, type ServicesConfig } from './config-loader.js';
 import { runScript, checkHttpHealth, printHeader, printFooter, type HealthResult } from './script-runner.js';
 
 type HealthEnv = 'local' | 'docker' | 'k8s';
@@ -88,12 +88,11 @@ async function checkService(
   namespace: string
 ): Promise<HealthResult> {
   if (env === 'docker') {
-    // Try Docker container status first
-    const dockerResult = checkDockerContainer(service.host);
+    const containerName = `${getInfraConfig().docker.projectName}-${service.name}-service`;
+    const dockerResult = checkDockerContainer(containerName);
     if (dockerResult.ok) {
       return dockerResult;
     }
-    // Fallback to HTTP check
     const url = getServiceUrl(service, env);
     return checkHttpHealth(url);
   }
@@ -131,12 +130,8 @@ async function checkInfrastructure(
   const { mongodb: mongo, redis } = config.infrastructure;
   
   if (env === 'docker') {
-    // Use dockerContainer if specified, otherwise derive from host
-    const mongoContainer = (mongo as any).dockerContainer || 
-      (mongo.host.includes('.') ? mongo.host.split('.')[0] : mongo.host);
-    const redisContainer = (redis as any).dockerContainer || 
-      (redis.host.includes('.') ? redis.host.split('.')[0] : redis.host);
-    
+    const { mongo: mongoContainer, redis: redisContainer } = getDockerContainerNames(getInfraConfig());
+
     const mongoResult = checkDockerContainer(mongoContainer);
     console.log(`[${mongoResult.ok ? 'OK' : 'FAIL'}] MongoDB (${mongo.mode}): ${mongoResult.status || mongoResult.error}`);
     

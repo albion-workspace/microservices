@@ -36,6 +36,8 @@ export interface InfraConfig {
     network: string;
     containerPrefix: string;
     registry: string | null;
+    /** Compose project name - shown as group in Docker Desktop */
+    projectName: string;
   };
   kubernetes: {
     namespace: string;
@@ -103,13 +105,7 @@ function deepMerge<T extends Record<string, any>>(base: T, override: Partial<T>)
 }
 
 /**
- * Load infrastructure config with optional mode-specific overrides
- * 
- * Pattern:
- * - infra.json (required) - base configuration
- * - infra.{mode}.json (optional) - mode-specific overrides
- * 
- * Example: services.dev.json + infra.dev.json (if exists, else infra.json)
+ * Load infrastructure config. Base: infra.json. Overrides: infra.{mode}.json when present.
  */
 export async function loadInfraConfig(mode: ConfigMode = 'dev'): Promise<InfraConfig> {
   // Return cached if same mode
@@ -120,14 +116,12 @@ export async function loadInfraConfig(mode: ConfigMode = 'dev'): Promise<InfraCo
   const baseContent = await readFile(basePath, 'utf-8');
   const baseConfig: InfraConfig = JSON.parse(baseContent);
   
-  // Try to load mode-specific override (optional)
   const modePath = join(CONFIGS_DIR, `infra.${mode}.json`);
   try {
     const modeContent = await readFile(modePath, 'utf-8');
     const modeOverride: Partial<InfraConfig> = JSON.parse(modeContent);
     _infraConfig = deepMerge(baseConfig, modeOverride);
   } catch {
-    // No mode-specific override, use base
     _infraConfig = baseConfig;
   }
   
@@ -143,6 +137,15 @@ export function getInfraConfig(): InfraConfig {
     throw new Error('InfraConfig not loaded. Call loadInfraConfig() first.');
   }
   return _infraConfig;
+}
+
+/** Docker container names from infra.docker.projectName only. */
+export function getDockerContainerNames(infra: InfraConfig): { mongo: string; redis: string } {
+  const { projectName } = infra.docker;
+  return {
+    mongo: `${projectName}-mongo`,
+    redis: `${projectName}-redis`,
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -232,10 +235,7 @@ export async function loadConfig(mode: ConfigMode = 'dev'): Promise<ServicesConf
  */
 export async function loadConfigFromArgs(): Promise<{ config: ServicesConfig; mode: ConfigMode; infra: InfraConfig }> {
   const mode = parseConfigMode();
-  const [config, infra] = await Promise.all([
-    loadConfig(mode),
-    loadInfraConfig(mode),  // Pass mode for optional infra.{mode}.json override
-  ]);
+  const [config, infra] = await Promise.all([loadConfig(mode), loadInfraConfig(mode)]);
   return { config, mode, infra };
 }
 

@@ -1,4 +1,6 @@
 {
+  "mode": "per-service",
+  "description": "Test mode - uses infra.test.json (namespace microservices-test)",
   "gateway": {
     "port": 9999,
     "defaultService": "auth",
@@ -63,17 +65,13 @@
     }
   },
   "environments": {
-    "dev": {
+    "local": {
       "mongoUri": "mongodb://localhost:27017",
       "redisUrl": "redis://:redis123@localhost:6379"
     },
     "docker": {
       "mongoUri": "mongodb://mongo:27017",
       "redisUrl": "redis://:redis123@redis:6379"
-    },
-    "prod": {
-      "mongoUri": "${MONGODB_URI}",
-      "redisUrl": "${REDIS_URL}"
     }
   }
 }

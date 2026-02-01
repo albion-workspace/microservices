@@ -9,9 +9,10 @@
   },
   
   "docker": {
-    "network": "ms_microservices-network",
+    "network": "ms_network",
     "containerPrefix": "ms",
-    "registry": null
+    "registry": null,
+    "projectName": "ms"
   },
   
   "kubernetes": {

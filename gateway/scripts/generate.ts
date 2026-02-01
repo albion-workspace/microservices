@@ -28,7 +28,7 @@ import {
   type LocalDependency,
 } from 'core-service';
 
-import { loadConfigFromArgs, logConfigSummary, getInfraConfig, type ServicesConfig, type ConfigMode, type InfraConfig, getMongoUri, getRedisUrl } from './config-loader.js';
+import { loadConfigFromArgs, logConfigSummary, getInfraConfig, getDockerContainerNames, type ServicesConfig, type ConfigMode, type InfraConfig, getMongoUri, getRedisUrl } from './config-loader.js';
 import { runScript, printHeader, printFooter } from './script-runner.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -48,21 +48,18 @@ interface InfraStatus {
 }
 
 /**
- * Auto-detect existing Docker infrastructure
- * Returns info about running containers and networks
+ * Auto-detect existing Docker infrastructure.
+ * Container names from infra.docker.projectName only (no config duplication).
  */
-function detectExistingInfra(config: ServicesConfig): InfraStatus {
-  const mongo = config.infrastructure.mongodb;
-  const redis = config.infrastructure.redis;
-  const mongoContainer = (mongo as any).dockerContainer || 'ms-mongo';
-  const redisContainer = (redis as any).dockerContainer || 'ms-redis';
-  
+function detectExistingInfra(): InfraStatus {
+  const { mongo: mongoContainer, redis: redisContainer } = getDockerContainerNames(getInfraConfig());
+
   const result: InfraStatus = {
     dockerAvailable: false,
     mongoRunning: false,
     redisRunning: false,
     networkExists: false,
-    networkName: 'ms-network',
+    networkName: getInfraConfig().docker.network,
   };
   
   try {
@@ -162,36 +159,47 @@ async function generateDockerCompose(config: ServicesConfig, mode: ConfigMode): 
 function generateDevCompose(config: ServicesConfig, mode: ConfigMode): string {
   const mongo = config.infrastructure.mongodb;
   const redis = config.infrastructure.redis;
-  // Use dockerContainer name for Docker, fallback to default
-  const mongoContainer = (mongo as any).dockerContainer || 'ms-mongo';
-  const redisContainer = (redis as any).dockerContainer || 'ms-redis';
-  
-  // Auto-detect existing infrastructure
-  const infra = detectExistingInfra(config);
+  const { docker } = getInfraConfig();
+  const projectName = docker.projectName;
+  const networkName = docker.network;
+
+  // Auto-detect existing infrastructure (container names from infra.projectName)
+  const infra = detectExistingInfra();
   const useExistingInfra = infra.mongoRunning && infra.redisRunning;
-  const networkName = useExistingInfra && infra.networkExists ? infra.networkName : 'ms-network';
-  
+  const effectiveNetwork = useExistingInfra && infra.networkExists ? infra.networkName : networkName;
+
+  // When we create infra, compose has services "mongo" and "redis" (hostnames). When using existing infra, hostnames are container names.
+  const { mongo: mongoContainerName, redis: redisContainerName } = getDockerContainerNames(getInfraConfig());
+  const mongoHost = useExistingInfra ? mongoContainerName : 'mongo';
+  const redisHost = useExistingInfra ? redisContainerName : 'redis';
+
   if (infra.dockerAvailable) {
     console.log(`   Existing infrastructure: ${useExistingInfra ? 'detected' : 'not found'}`);
     if (useExistingInfra) {
-      console.log(`   Using network: ${networkName}`);
+      console.log(`   Using network: ${effectiveNetwork}`);
     }
   }
 
-  // Build Redis URL with optional password
   const redisPassword = redis.password;
   const redisAuth = redisPassword ? `:${redisPassword}@` : '';
-  const redisUrl = `redis://${redisAuth}${redisContainer}:${redis.port}`;
+  const redisUrl = `redis://${redisAuth}${redisHost}:${redis.port}`;
 
-  // Build service blocks
-  const serviceBlocks = config.services.map(svc => {
-    // Context is relative to docker-compose file at gateway/generated/docker/
-    // Need ../../.. to reach project root
-    const dependsBlock = useExistingInfra ? '' : `    depends_on:
-      - ${mongoContainer}
-      - ${redisContainer}
+  // Per-service: all services; shared: only one (strategy 'shared' or first)
+  const servicesToInclude =
+    config.mode === 'shared'
+      ? [config.services.find((s) => (s as { strategy?: string }).strategy === 'shared') ?? config.services[0]]
+      : config.services;
+
+  const serviceBlocks = servicesToInclude.map((svc) => {
+    const dependsBlock = useExistingInfra
+      ? ''
+      : `    depends_on:
+      - ${mongoHost}
+      - ${redisHost}
 `;
+    const containerName = `${projectName}-${svc.name}-service`;
     return `  ${svc.name}-service:
+    container_name: ${containerName}
     image: ${svc.name}-service:latest
     build:
       context: ../../..
@@ -202,29 +210,28 @@ function generateDevCompose(config: ServicesConfig, mode: ConfigMode): string {
       - PORT=${svc.port}
       - NODE_ENV=development
       - JWT_SECRET=dev-jwt-secret-change-in-production
-      - MONGO_URI=mongodb://${mongoContainer}:${mongo.port}/${svc.database}
+      - MONGO_URI=mongodb://${mongoHost}:${mongo.port}/${svc.database}
       - REDIS_URL=${redisUrl}
 ${dependsBlock}    networks:
-      - ${networkName}
+      - ${effectiveNetwork}
     volumes:
       - ../../../${svc.name}-service/src:/app/src:ro`;
   }).join('\n\n');
 
-  // Generate infrastructure services (skip if using existing infra)
-  const mongoService = useExistingInfra ? '' : generateMongoDockerService(config);
-  const redisService = useExistingInfra ? '' : generateRedisDockerService(config);
+  const mongoService = useExistingInfra ? '' : generateMongoDockerService(config, projectName, effectiveNetwork);
+  const redisService = useExistingInfra ? '' : generateRedisDockerService(config, projectName, effectiveNetwork);
 
-  // Network configuration
-  const networkConfig = useExistingInfra 
+  const networkConfig = useExistingInfra
     ? `networks:
-  ${networkName}:
+  ${effectiveNetwork}:
     external: true`
     : `networks:
-  ms-network:
+  ${effectiveNetwork}:
     driver: bridge`;
 
-  // Volume configuration (only needed if creating infra)
-  const volumeConfig = useExistingInfra ? '' : `
+  const volumeConfig = useExistingInfra
+    ? ''
+    : `
 volumes:
   mongo-data:
   redis-data:`;
@@ -233,6 +240,9 @@ volumes:
 # Generated by gateway/scripts/generate.ts
 # MongoDB: ${mongo.mode}, Redis: ${redis.mode}
 # Infrastructure: ${useExistingInfra ? 'using existing' : 'will be created'}
+# Docker Desktop group: ${projectName} (containers: ${projectName}-redis, ${projectName}-mongo, ${projectName}-*-service)
+
+name: ${projectName}
 
 services:
 ${serviceBlocks}
@@ -243,19 +253,19 @@ ${volumeConfig}
 `;
 }
 
-function generateMongoDockerService(config: ServicesConfig): string {
+function generateMongoDockerService(config: ServicesConfig, projectName: string, networkName: string): string {
   const mongo = config.infrastructure.mongodb;
   const { versions } = getInfraConfig();
-  // Use dockerContainer name for Docker, fallback to a default
-  const mongoContainer = (mongo as any).dockerContainer || 'ms-mongo';
+  const containerName = `${projectName}-mongo`;
 
   if (mongo.mode === 'replicaSet' && mongo.members) {
-    // Replica Set mode
     const members = mongo.members;
-    const primaryHost = members[0]?.host.split('.')[0] || 'mongo-primary';
-    
-    let services = `  # MongoDB Replica Set
+    const primaryHost = members[0]?.host.split('.')[0] ?? 'mongo-primary';
+    const primaryContainerName = `${projectName}-${primaryHost}`;
+
+    let services = `  # MongoDB Replica Set (primary hostname: ${primaryHost})
   ${primaryHost}:
+    container_name: ${primaryContainerName}
     image: mongo:${versions.mongodb}
     command: ["--replSet", "${mongo.replicaSet}", "--bind_ip_all"]
     ports:
@@ -263,7 +273,7 @@ function generateMongoDockerService(config: ServicesConfig): string {
     volumes:
       - mongo-data:/data/db
     networks:
-      - ms-network
+      - ${networkName}
     healthcheck:
       test: |
         mongosh --quiet --eval "
@@ -277,18 +287,19 @@ function generateMongoDockerService(config: ServicesConfig): string {
       retries: 10
       start_period: 30s`;
 
-    // Add secondary nodes
     for (let i = 1; i < members.length; i++) {
       const secondaryHost = members[i].host.split('.')[0];
+      const secondaryContainerName = `${projectName}-${secondaryHost}`;
       services += `
 
   ${secondaryHost}:
+    container_name: ${secondaryContainerName}
     image: mongo:${versions.mongodb}
     command: ["--replSet", "${mongo.replicaSet}", "--bind_ip_all"]
     volumes:
       - mongo-data-${i}:/data/db
     networks:
-      - ms-network
+      - ${networkName}
     depends_on:
       - ${primaryHost}`;
     }
@@ -296,31 +307,29 @@ function generateMongoDockerService(config: ServicesConfig): string {
     return services;
   }
 
-  // Single mode
-  return `  # MongoDB (Single)
-  ${mongoContainer}:
+  return `  # MongoDB (Single) - hostname: mongo
+  mongo:
+    container_name: ${containerName}
     image: mongo:${versions.mongodb}
     ports:
       - "${mongo.port}:27017"
     volumes:
       - mongo-data:/data/db
     networks:
-      - ms-network`;
+      - ${networkName}`;
 }
 
-function generateRedisDockerService(config: ServicesConfig): string {
+function generateRedisDockerService(config: ServicesConfig, projectName: string, networkName: string): string {
   const redis = config.infrastructure.redis;
   const { versions } = getInfraConfig();
-  // Use dockerContainer name for Docker, fallback to a default
-  const redisContainer = (redis as any).dockerContainer || 'ms-redis';
-  const redisHost = redisContainer;
+  const containerName = `${projectName}-redis`;
 
   if (redis.mode === 'sentinel' && redis.sentinel) {
-    // Sentinel mode
     const sentinel = redis.sentinel;
-    
-    return `  # Redis Master
-  ${redisContainer}:
+
+    return `  # Redis Master (service key: redis for hostname)
+  redis:
+    container_name: ${containerName}
     image: redis:${versions.redis}
     command: ["redis-server", "--appendonly", "yes"]
     ports:
@@ -328,30 +337,32 @@ function generateRedisDockerService(config: ServicesConfig): string {
     volumes:
       - redis-data:/data
     networks:
-      - ms-network
+      - ${networkName}
 
   # Redis Sentinels
-${sentinel.hosts.map((h, i) => {
-  const sentinelHost = h.host.split('.')[0];
-  return `  ${sentinelHost}:
+${sentinel.hosts
+  .map((h) => {
+    const sentinelHost = h.host.split('.')[0];
+    return `  ${sentinelHost}:
     image: redis:${versions.redis}
     command: >
-      sh -c "echo 'sentinel monitor ${sentinel.name} ${redisHost} 6379 2' > /tmp/sentinel.conf &&
+      sh -c "echo 'sentinel monitor ${sentinel.name} redis 6379 2' > /tmp/sentinel.conf &&
              echo 'sentinel down-after-milliseconds ${sentinel.name} 5000' >> /tmp/sentinel.conf &&
              echo 'sentinel failover-timeout ${sentinel.name} 60000' >> /tmp/sentinel.conf &&
              redis-sentinel /tmp/sentinel.conf"
     ports:
       - "${h.port}:26379"
     networks:
-      - ms-network
+      - ${networkName}
     depends_on:
-      - ${redisHost}`;
-}).join('\n\n')}`;
+      - redis`;
+  })
+  .join('\n\n')}`;
   }
 
-  // Single mode
-  return `  # Redis (Single)
-  ${redisContainer}:
+  return `  # Redis (Single) - hostname: redis
+  redis:
+    container_name: ${containerName}
     image: redis:${versions.redis}
     command: ["redis-server", "--appendonly", "yes"]
     ports:
@@ -359,36 +370,42 @@ ${sentinel.hosts.map((h, i) => {
     volumes:
       - redis-data:/data
     networks:
-      - ms-network`;
+      - ${networkName}`;
 }
 
 function generateProdCompose(config: ServicesConfig, mode: ConfigMode): string {
   const gatewayPort = config.gateway.port;
   const mongo = config.infrastructure.mongodb;
   const redis = config.infrastructure.redis;
-  // Use dockerContainer name for Docker, fallback to defaults
-  const mongoContainer = (mongo as any).dockerContainer || 'ms-mongo';
-  const redisContainer = (redis as any).dockerContainer || 'ms-redis';
-  
-  // Build Redis URL with optional password
-  const redisPassword = (redis as any).password;
-  const redisAuth = redisPassword ? `:${redisPassword}@` : '';
-  const redisUrl = `redis://${redisAuth}${redisContainer}:${redis.port}`;
+  const { docker } = getInfraConfig();
+  const projectName = docker.projectName;
+  const networkName = docker.network;
 
-  const serviceBlocks = config.services.map(svc => {
-    const replicas = (svc as any).replicas || 2;
+  const redisPassword = (redis as { password?: string }).password;
+  const redisAuth = redisPassword ? `:${redisPassword}@` : '';
+  const redisUrl = `redis://${redisAuth}redis:${redis.port}`;
+
+  const servicesToInclude =
+    config.mode === 'shared'
+      ? [config.services.find((s) => (s as { strategy?: string }).strategy === 'shared') ?? config.services[0]]
+      : config.services;
+
+  const serviceBlocks = servicesToInclude.map((svc) => {
+    const replicas = (svc as { replicas?: number }).replicas ?? 2;
+    const containerName = `${projectName}-${svc.name}-service`;
     return `  ${svc.name}-service:
+    container_name: ${containerName}
     image: ${svc.name}-service:latest
     environment:
       - PORT=${svc.port}
       - NODE_ENV=production
-      - MONGO_URI=mongodb://${mongoContainer}:${mongo.port}/${svc.database}
+      - MONGO_URI=mongodb://mongo:${mongo.port}/${svc.database}
       - REDIS_URL=${redisUrl}
     depends_on:
-      - ${mongoContainer}
-      - ${redisContainer}
+      - mongo
+      - redis
     networks:
-      - ms-network
+      - ${networkName}
     deploy:
       replicas: ${replicas}
       resources:
@@ -397,27 +414,33 @@ function generateProdCompose(config: ServicesConfig, mode: ConfigMode): string {
           memory: 512M`;
   }).join('\n\n');
 
-  const mongoService = generateMongoDockerService(config);
-  const redisService = generateRedisDockerService(config);
+  const mongoService = generateMongoDockerService(config, projectName, networkName);
+  const redisService = generateRedisDockerService(config, projectName, networkName);
+
+  const gatewayDepends = servicesToInclude.map((s) => `      - ${s.name}-service`).join('\n');
 
   return `# Docker Compose - Production Mode (${mode})
 # Generated by gateway/scripts/generate.ts
 # Gateway port: ${gatewayPort}, MongoDB: ${mongo.mode}, Redis: ${redis.mode}
+# Docker Desktop group: ${projectName}
+
+name: ${projectName}
 
 version: '3.8'
 
 services:
   # Nginx Gateway
   gateway:
+    container_name: ${projectName}-gateway
     image: nginx:alpine
     ports:
       - "${gatewayPort}:${gatewayPort}"
     volumes:
       - ../nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
-${config.services.map(s => `      - ${s.name}-service`).join('\n')}
+${gatewayDepends}
     networks:
-      - ms-network
+      - ${networkName}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:${gatewayPort}/health"]
       interval: 30s
@@ -431,7 +454,7 @@ ${mongoService}
 ${redisService}
 
 networks:
-  ms-network:
+  ${networkName}:
     driver: bridge
 
 volumes:

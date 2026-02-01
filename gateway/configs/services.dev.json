@@ -54,16 +54,14 @@
       "mode": "single",
       "host": "localhost",
       "port": 27017,
-      "replicaSet": null,
-      "dockerContainer": "ms-mongo"
+      "replicaSet": null
     },
     "redis": {
       "mode": "single",
       "host": "localhost",
       "port": 6379,
       "password": "redis123",
-      "sentinel": null,
-      "dockerContainer": "ms-redis"
+      "sentinel": null
     }
   },
   "environments": {
@@ -72,8 +70,8 @@
       "redisUrl": "redis://:redis123@localhost:6379"
     },
     "docker": {
-      "mongoUri": "mongodb://ms-mongo:27017",
-      "redisUrl": "redis://:redis123@ms-redis:6379"
+      "mongoUri": "mongodb://mongo:27017",
+      "redisUrl": "redis://:redis123@redis:6379"
     }
   }
 }

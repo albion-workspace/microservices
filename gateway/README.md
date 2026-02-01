@@ -23,7 +23,11 @@ npm run health
 
 ## Available Commands
 
-All commands support `--config=dev` (default) or `--config=shared` to switch configuration profiles.
+All commands support `--config=dev` (default), `--config=shared`, or `--config=test` to switch configuration profiles. Config is fully dynamic:
+
+- **Services**: `services.{mode}.json` is loaded for the chosen mode (e.g. `services.test.json` for `--config=test`).
+- **Infra**: `infra.json` is the base; `infra.{mode}.json` deep-merges over it (e.g. `infra.test.json` overrides only what differs, such as `kubernetes.namespace` and `docker.projectName`).
+- **Docker Desktop**: Each config uses a Compose project name from infra (`docker.projectName`): default/dev/shared → **ms** (microservices), test → **test**. Containers are named `{projectName}-redis`, `{projectName}-mongo`, `{projectName}-auth-service`, etc., so they appear under the right group (e.g. **ms** → ms-redis, ms-mongo, ms-auth-service; **test** → test-redis, test-mongo, test-auth-service).
 
 ### Development
 
@@ -53,7 +57,9 @@ All commands support `--config=dev` (default) or `--config=shared` to switch con
 | `npm run docker:build` | Build all service images |
 | `npm run docker:up` | Start containers (dev config) |
 | `npm run docker:up:shared` | Start containers (shared config) |
+| `npm run docker:up:test` | Start containers (test config; group **test** in Docker Desktop: test-redis, test-mongo, test-auth-service, …) |
 | `npm run docker:down` | Stop containers |
+| `npm run docker:down:test` | Stop test stack (project **test**) |
 | `npm run docker:logs` | Stream container logs |
 | `npm run docker:up:prod` | Start prod mode with gateway |
 | `npm run docker:down:prod` | Stop prod containers |
@@ -88,6 +94,7 @@ All commands support `--config=dev` (default) or `--config=shared` to switch con
 | `npm run generate:nginx` | Generate nginx config |
 | `npm run generate:docker` | Generate docker-compose files |
 | `npm run generate:k8s` | Generate Kubernetes manifests |
+| `npm run generate:test` | Generate all (test config; uses infra.test.json overrides) |
 
 ---
 
@@ -129,8 +136,15 @@ Configuration files follow the pattern `services.{mode}.json`. Use `--config={mo
 | Mode | File | Description |
 |------|------|-------------|
 | `dev` | `services.dev.json` | Single MongoDB/Redis, local development (default) |
-| `shared` | `services.shared.json` | MongoDB Replica Set, Redis Sentinel |
+| `test` | `services.test.json` | Test profile; infra from `infra.test.json` (`docker.projectName`: **test**, network: **test_network** → separate Docker Desktop group) |
+| `shared` | `services.shared.json` | MongoDB Replica Set, Redis Sentinel; **Docker Compose runs only one app service** (the one with `strategy: "shared"`, e.g. auth) so Docker Desktop shows **ms** → redis, mongo, one service |
 | `local-k8s` | `services.local-k8s.json` | Docker Desktop Kubernetes testing |
+
+**Docker Desktop grouping (dynamic from infra):**
+
+- **Default (dev)**: project name **ms** → containers: ms-redis, ms-mongo, ms-auth-service, ms-payment-service, …
+- **Test**: project name **test** → containers: test-redis, test-mongo, test-auth-service, …
+- **Shared**: project name **ms** → containers: ms-redis, ms-mongo, one app service (auth when `strategy: "shared"`)
 
 ### Custom Profiles (Brands)
 
