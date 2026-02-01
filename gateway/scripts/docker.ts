@@ -114,6 +114,12 @@ function getComposeFileSuffix(): string {
   return projectName === 'ms' ? '' : `.${projectName}`;
 }
 
+/** Image tag per project: ms uses :latest, test/combo use :test / :combo so images don't overwrite each other. */
+function getImageTag(): string {
+  const projectName = getInfraConfig().docker.projectName;
+  return projectName === 'ms' ? 'latest' : projectName;
+}
+
 async function checkComposeFileExists(env: 'dev' | 'prod'): Promise<boolean> {
   try {
     await access(getComposeFile(env));
@@ -279,10 +285,11 @@ function removeOldContainer(serviceName: string): void {
 }
 
 /**
- * Remove old image if it exists. Image name: {service}-service:latest.
+ * Remove old image if it exists. Image name: {service}-service:{tag}.
  */
-function removeOldImage(serviceName: string): void {
-  const imageName = `${serviceName}-service:latest`;
+function removeOldImage(serviceName: string, tag?: string): void {
+  const imageTag = tag ?? getImageTag();
+  const imageName = `${serviceName}-service:${imageTag}`;
   try {
     execSync(`docker image inspect ${imageName}`, { stdio: 'ignore' });
     console.log(`  Removing old image: ${imageName}`);
@@ -346,11 +353,12 @@ async function buildCoreBase(forceRebuild = false): Promise<void> {
 }
 
 /**
- * Build a single Docker image - uses core-base for fast builds
+ * Build a single Docker image - uses core-base for fast builds. Tags with project (ms=latest, test=test, combo=combo).
  */
 async function buildSingleImage(service: ServiceConfig): Promise<void> {
   const svcName = `${service.name}-service`;
-  const imageName = `${svcName}:latest`;
+  const imageTag = getImageTag();
+  const imageName = `${svcName}:${imageTag}`;
   const dockerfilePath = `${svcName}/Dockerfile`;
   
   console.log(`\n🔧 Building ${imageName}...`);
@@ -358,7 +366,7 @@ async function buildSingleImage(service: ServiceConfig): Promise<void> {
   // Always clean before build for fresh images
   console.log(`  Removing old container/image for ${service.name}...`);
   removeOldContainer(service.name);
-  removeOldImage(service.name);
+  removeOldImage(service.name, imageTag);
   
   try {
     // Build from project root with -f flag
@@ -442,7 +450,7 @@ async function dockerUp(env: 'dev' | 'prod', config: ServicesConfig, mode: Confi
       '--network', docker.network,
       ...envVars.flatMap(e => ['-e', e]),
       '-p', `${service.port}:${service.port}`,
-      `${svcName}:latest`,
+      `${svcName}:${getImageTag()}`,
     ];
     
     try {
@@ -759,23 +767,25 @@ async function dockerStatus(env: 'dev' | 'prod', config: ServicesConfig): Promis
     console.log('  No containers running');
   }
 
-  // List images
+  // List images (use project-specific tag so test/combo show their own images)
+  const imageTag = getImageTag();
   console.log('');
   console.log('Service images:');
   for (const service of config.services) {
+    const imageRef = `${service.name}-service:${imageTag}`;
     try {
-      const imageId = execSync(`docker images -q ${service.name}-service:latest`, { encoding: 'utf8' }).trim();
+      const imageId = execSync(`docker images -q ${imageRef}`, { encoding: 'utf8' }).trim();
       if (imageId) {
         // Get image creation time
-        const created = execSync(`docker inspect --format='{{.Created}}' ${service.name}-service:latest`, { encoding: 'utf8' }).trim();
+        const created = execSync(`docker inspect --format='{{.Created}}' ${imageRef}`, { encoding: 'utf8' }).trim();
         const createdDate = new Date(created);
         const ago = getTimeAgo(createdDate);
-        console.log(`  ✅ ${service.name}-service:latest (built ${ago})`);
+        console.log(`  ✅ ${imageRef} (built ${ago})`);
       } else {
-        console.log(`  ❌ ${service.name}-service:latest (not built)`);
+        console.log(`  ❌ ${imageRef} (not built)`);
       }
     } catch {
-      console.log(`  ❌ ${service.name}-service:latest (not built)`);
+      console.log(`  ❌ ${imageRef} (not built)`);
     }
   }
 }

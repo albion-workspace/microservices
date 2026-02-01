@@ -198,6 +198,7 @@ function generateDevCompose(config: ServicesConfig, mode: ConfigMode): string {
     servicesToInclude = servicesToInclude.filter((s) => !reuseServicesSet.has(s.name));
   }
 
+  const imageTag = projectName === 'ms' ? 'latest' : projectName;
   const { dev: runtimeDev } = getInfraConfig().defaults.runtime;
   const serviceBlocks = servicesToInclude.map((svc) => {
     const containerName = `${projectName}-${svc.name}-service`;
@@ -205,7 +206,7 @@ function generateDevCompose(config: ServicesConfig, mode: ConfigMode): string {
     const dependsBlock = depends.length ? `    depends_on:\n      - ${depends.join('\n      - ')}\n` : '';
     return `  ${svc.name}-service:
     container_name: ${containerName}
-    image: ${svc.name}-service:latest
+    image: ${svc.name}-service:${imageTag}
     build:
       context: ../../..
       dockerfile: ${svc.name}-service/Dockerfile
@@ -431,6 +432,7 @@ function generateProdCompose(config: ServicesConfig, mode: ConfigMode): string {
     servicesToInclude = servicesToInclude.filter((s) => !reuseServicesSet.has(s.name));
   }
 
+  const imageTag = projectName === 'ms' ? 'latest' : projectName;
   const serviceBlocks = servicesToInclude.map((svc) => {
     const replicas = (svc as { replicas?: number }).replicas ?? 2;
     const containerName = `${projectName}-${svc.name}-service`;
@@ -440,7 +442,7 @@ function generateProdCompose(config: ServicesConfig, mode: ConfigMode): string {
 `;
     return `  ${svc.name}-service:
     container_name: ${containerName}
-    image: ${svc.name}-service:latest
+    image: ${svc.name}-service:${imageTag}
     environment:
       - PORT=${svc.port}
       - NODE_ENV=${runtimeProd.nodeEnv}
