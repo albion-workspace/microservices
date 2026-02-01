@@ -717,6 +717,8 @@ async function dockerFresh(env: 'dev' | 'prod', config: ServicesConfig, mode: Co
       console.log('\n🎉 Fresh deployment successful!');
       console.log('\nStep 5/5: Cleaning up generated files...');
       await cleanGeneratedFiles(config, serviceName);
+      // Let Windows/libuv finish closing file handles before process exit (avoids UV_HANDLE_CLOSING assertion)
+      await new Promise<void>((r) => setTimeout(r, 150));
     } else {
       console.log('\n⚠️  Deployment completed but some services are unhealthy');
       console.log('Generated files preserved for debugging.');
