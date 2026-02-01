@@ -2,7 +2,7 @@
   "mode": "shared",
   "description": "Shared/Production mode - Redis Sentinel, MongoDB Replica Set, gateway routing",
   "gateway": {
-    "port": 9999,
+    "port": 9996,
     "defaultService": "auth",
     "rateLimit": 100
   },
@@ -10,7 +10,7 @@
     {
       "name": "auth",
       "host": "auth-service",
-      "port": 9001,
+      "port": 9021,
       "database": "core_service",
       "healthPath": "/health",
       "graphqlPath": "/graphql",
@@ -58,7 +58,7 @@
     "mongodb": {
       "mode": "replicaSet",
       "host": "mongo-primary",
-      "port": 27017,
+      "port": 27019,
       "replicaSet": "rs0",
       "members": [
         { "host": "mongo-primary", "port": 27017, "priority": 2 },
@@ -69,9 +69,10 @@
     "redis": {
       "mode": "sentinel",
       "host": "redis-master",
-      "port": 6379,
+      "port": 6381,
       "sentinel": {
         "name": "mymaster",
+        "hostPortBase": 26383,
         "hosts": [
           { "host": "redis-sentinel-1", "port": 26379 },
           { "host": "redis-sentinel-2", "port": 26379 },

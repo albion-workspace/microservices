@@ -133,8 +133,10 @@ All commands support `--config=dev` (default), `--config=shared`, `--config=test
 | **default (ms)** | `services.dev.json` | `infra.json` | Full stack: own Redis, MongoDB, all 5 services. Gateway 9999, services 9001â€“9005. |
 | **test** | `services.test.json` | `infra.test.json` | Standalone stack: own Redis, MongoDB, all 5 services. Distinct ports (gateway 9998, services 9011â€“9015) so ms and test can run on the same host. |
 | **combo** | `services.combo.json` | `infra.combo.json` | Reuses **ms** Redis, MongoDB, and auth; deploys only gateway + KYC. Gateway 9997. **Deploy ms first, then combo.** |
-| **shared** | `services.shared.json` | `infra.json` | Production-style (Replica Set, Sentinel). Single app service when using Docker. |
+| **shared** | `services.shared.json` | `infra.shared.json` | Production-style (Replica Set, Redis Sentinel). Single app service in Docker. |
 | **local-k8s** | `services.local-k8s.json` | (local) | Local Kubernetes testing. |
+
+**Redis**: Single or Sentinel from config. If `infrastructure.redis.mode` is `"sentinel"` and `redis.sentinel` is set, Docker (dev and prod) and K8s generate one Redis master + Bitnami Sentinel containers; otherwise a single Redis container. Optional `redis.sentinel.hostPortBase` (default 26380) sets Docker sentinel host ports so ms and shared can run together (e.g. shared uses 26383). Apps connect to `redis:6379`. **K8s**: Replica set/sentinel use separate headless Services (`mongodb-pods`, `redis-pods`) so existing `mongodb`/`redis` ClusterIP Services are not changed (avoids clusterIP immutable error).
 
 Combo uses `reuseFrom` / `reuseInfra` / `reuseServicePorts` in config so the combo stack joins the ms network and reuses ms Redis, Mongo, and auth-service. Test remains fully standalone (no shared infra).
 
@@ -198,7 +200,7 @@ Configuration files follow the pattern `services.{mode}.json`. Use `--config={mo
 
 - **Default (dev)**: project name **ms** → containers: ms-redis, ms-mongo, ms-auth-service, ms-payment-service, …
 - **Test**: project name **test** → containers: test-redis, test-mongo, test-auth-service, …
-- **Shared**: project name **ms** → containers: ms-redis, ms-mongo, one app service (auth when `strategy: "shared"`)
+- **Shared**: project name **shared** → containers: shared-redis, shared-mongo-primary, shared-redis-sentinel-1/2/3, one app service (auth when `strategy: "shared"`)
 
 ### Custom Profiles (Brands)
 

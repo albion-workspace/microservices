@@ -157,6 +157,17 @@ export function getDockerContainerNames(infra: InfraConfig): { mongo: string; re
   };
 }
 
+/** Mongo Docker container name: single = project-mongo, replica set = project-primaryHost (e.g. shared-mongo-primary). */
+export function getMongoDockerContainerName(infra: InfraConfig, config: ServicesConfig): string {
+  const mongo = config.infrastructure.mongodb;
+  const { projectName } = infra.docker;
+  if (mongo.mode === 'replicaSet' && mongo.members?.length) {
+    const primaryHost = mongo.members[0].host.split('.')[0] ?? 'mongo-primary';
+    return `${projectName}-${primaryHost}`;
+  }
+  return `${projectName}-mongo`;
+}
+
 /**
  * Internal/container ports for MongoDB and Redis (single source of truth from infra.defaults).
  * Use for: Docker compose service env (MONGO_URI, REDIS_URL), K8s secrets, K8s containerPort/targetPort.
@@ -199,6 +210,8 @@ export interface RedisConfig {
   sentinel: {
     name: string;
     hosts: Array<{ host: string; port: number }>;
+    /** Docker host port for first sentinel (default 26380). Others use base+1, base+2 so stacks don't conflict. */
+    hostPortBase?: number;
   } | null;
 }
 

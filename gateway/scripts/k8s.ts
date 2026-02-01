@@ -289,13 +289,19 @@ async function k8sApply(serviceName?: string): Promise<void> {
         }
       }
       
-      // Wait for infrastructure to be ready
+      // Wait for infrastructure to be ready (StatefulSet or Deployment)
       console.log('Waiting for infrastructure to be ready...');
-      try {
-        execSync(`kubectl wait --for=condition=available deployment/mongodb -n ${getInfraConfig().kubernetes.namespace} --timeout=60s`, { stdio: 'ignore' });
-        execSync(`kubectl wait --for=condition=available deployment/redis -n ${getInfraConfig().kubernetes.namespace} --timeout=60s`, { stdio: 'ignore' });
-      } catch {
-        console.log('  Infrastructure may already be running or still starting...');
+      const ns = getInfraConfig().kubernetes.namespace;
+      for (const resource of ['mongodb', 'redis']) {
+        try {
+          execSync(`kubectl wait --for=condition=ready statefulset/${resource} -n ${ns} --timeout=60s`, { stdio: 'ignore' });
+        } catch {
+          try {
+            execSync(`kubectl wait --for=condition=available deployment/${resource} -n ${ns} --timeout=60s`, { stdio: 'ignore' });
+          } catch {
+            console.log(`  ${resource} may still be starting...`);
+          }
+        }
       }
       
       // Apply service manifest

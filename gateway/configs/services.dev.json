@@ -1,6 +1,6 @@
 {
   "mode": "per-service",
-  "description": "Development mode - single MongoDB/Redis, per-service ports",
+  "description": "Development mode - per-service ports (test: MongoDB replica set + Redis Sentinel)",
   "gateway": {
     "port": 9999,
     "defaultService": "auth",
@@ -51,26 +51,38 @@
   ],
   "infrastructure": {
     "mongodb": {
-      "mode": "single",
-      "host": "localhost",
+      "mode": "replicaSet",
+      "host": "mongo-primary",
       "port": 27017,
-      "replicaSet": null
+      "replicaSet": "rs0",
+      "members": [
+        { "host": "mongo-primary", "port": 27017, "priority": 2 },
+        { "host": "mongo-secondary-1", "port": 27017, "priority": 1 },
+        { "host": "mongo-secondary-2", "port": 27017, "priority": 1 }
+      ]
     },
     "redis": {
-      "mode": "single",
-      "host": "localhost",
+      "mode": "sentinel",
+      "host": "redis-master",
       "port": 6379,
       "password": "redis123",
-      "sentinel": null
+      "sentinel": {
+        "name": "mymaster",
+        "hosts": [
+          { "host": "redis-sentinel-1", "port": 26379 },
+          { "host": "redis-sentinel-2", "port": 26379 },
+          { "host": "redis-sentinel-3", "port": 26379 }
+        ]
+      }
     }
   },
   "environments": {
     "local": {
-      "mongoUri": "mongodb://localhost:27017",
+      "mongoUri": "mongodb://mongo-primary:27017,mongo-secondary-1:27017,mongo-secondary-2:27017/?replicaSet=rs0",
       "redisUrl": "redis://:redis123@localhost:6379"
     },
     "docker": {
-      "mongoUri": "mongodb://mongo:27017",
+      "mongoUri": "mongodb://mongo-primary:27017/core_service?replicaSet=rs0",
       "redisUrl": "redis://:redis123@redis:6379"
     }
   }

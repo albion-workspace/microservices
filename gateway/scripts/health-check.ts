@@ -16,7 +16,7 @@
 
 import { execSync } from 'node:child_process';
 
-import { loadConfigFromArgs, logConfigSummary, getInfraConfig, getDockerContainerNames, type ServiceConfig, type ServicesConfig } from './config-loader.js';
+import { loadConfigFromArgs, logConfigSummary, getInfraConfig, getDockerContainerNames, getMongoDockerContainerName, type ServiceConfig, type ServicesConfig } from './config-loader.js';
 import { runScript, checkHttpHealth, printHeader, printFooter, type HealthResult } from './script-runner.js';
 
 type HealthEnv = 'local' | 'docker' | 'k8s';
@@ -131,7 +131,9 @@ async function checkInfrastructure(
   const { mongodb: mongo, redis } = config.infrastructure;
   
   if (env === 'docker') {
-    const { mongo: mongoContainer, redis: redisContainer } = getDockerContainerNames(getInfraConfig());
+    const infra = getInfraConfig();
+    const mongoContainer = getMongoDockerContainerName(infra, config);
+    const { redis: redisContainer } = getDockerContainerNames(infra);
 
     const mongoResult = checkDockerContainer(mongoContainer);
     console.log(`[${mongoResult.ok ? 'OK' : 'FAIL'}] MongoDB (${mongo.mode}): ${mongoResult.status || mongoResult.error}`);

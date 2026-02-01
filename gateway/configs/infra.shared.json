@@ -1,0 +1,10 @@
+{
+  "description": "Shared overrides - single app service (strategy shared), distinct project for Docker/K8s.",
+  "docker": {
+    "network": "shared_network",
+    "projectName": "shared"
+  },
+  "kubernetes": {
+    "namespace": "microservices-shared"
+  }
+}
