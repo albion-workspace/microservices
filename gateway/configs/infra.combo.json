@@ -1,0 +1,10 @@
+{
+  "description": "Combo overrides - reuses ms Redis/Mongo and auth; deploys only KYC. Distinct project so test stays standalone.",
+  "docker": {
+    "network": "combo_network",
+    "projectName": "combo"
+  },
+  "kubernetes": {
+    "namespace": "microservices-combo"
+  }
+}

@@ -23,15 +23,17 @@ npm run health
 
 ## Available Commands
 
-All commands support `--config=dev` (default), `--config=shared`, or `--config=test` to switch configuration profiles. Config is fully dynamic:
+All commands support `--config=dev` (default), `--config=shared`, `--config=test`, or `--config=combo` to switch configuration profiles. Config is fully dynamic:
 
+- **Default (ms)** and **test** work as before: each is a full standalone stack (own Redis, MongoDB, all 5 services). **Combo** is a third namespace that reuses ms Redis/Mongo and auth, and deploys only KYC; deploy ms first, then combo.
 - **Services**: `services.{mode}.json` is loaded for the chosen mode (e.g. `services.test.json` for `--config=test`).
 - **Infra**: `infra.json` is the base; `infra.{mode}.json` deep-merges over it (e.g. `infra.test.json` overrides only what differs, such as `kubernetes.namespace` and `docker.projectName`).
-- **Docker Desktop**: Each config uses a Compose project name from infra (`docker.projectName`): default/dev/shared → **ms** (microservices), test → **test**. Containers are named `{projectName}-redis`, `{projectName}-mongo`, `{projectName}-auth-service`, etc., so they appear under the right group (e.g. **ms** → ms-redis, ms-mongo, ms-auth-service; **test** → test-redis, test-mongo, test-auth-service).
+- **Docker Desktop**: Each config uses a Compose project name from infra (`docker.projectName`): default/dev/shared → **ms**, test → **test**, combo → **combo**. Containers are named `{projectName}-redis`, `{projectName}-mongo`, `{projectName}-auth-service`, etc. (e.g. **ms** → ms-redis, ms-mongo, ms-auth-service; **test** → test-redis, test-mongo, test-auth-service; **combo** → combo-gateway, combo-kyc-service only; combo has no mongo/redis/auth containers).
 - **Compose files**: Generated compose files are **kept** after `docker:fresh` so both ms and test definitions persist; only generated Dockerfiles are removed. Compose filenames are config-specific: `docker-compose.dev.yml` / `docker-compose.prod.yml` for ms, `docker-compose.dev.test.yml` / `docker-compose.prod.test.yml` for test.
 - **Ports (brand co-existence)**: ms and test can run on the same Docker host. ms uses default ports (Mongo 27017, Redis 6379, services 9001–9005, gateway 9999). test uses distinct ports (Mongo 27018, Redis 6380, services 9011–9015, gateway 9998) so both stacks can run simultaneously.
 - **Kubernetes (same behavior)**: ms uses namespace `microservices` and manifests in `generated/k8s/`. test uses namespace `microservices-test` and manifests in `generated/k8s-test/`. Both can coexist; generate/apply/delete use the current config’s dir and namespace. Generated K8s files are only cleaned for the current config (e.g. `k8s:fresh` with test cleans only `k8s-test/`).
 - **Gateway behavior (all environments)**: The nginx gateway is the single entry point in Docker (dev and prod) and K8s (Ingress). Routing (X-Target-Service / default service), `/health`, and GraphQL paths behave the same everywhere. In dev (Docker) you may use either the gateway port (e.g. 9999) or direct service ports (9001–9005); using the gateway matches prod/K8s behavior.
+- **Combo config**: Use `infra.combo.json` and `services.combo.json` with `reuseFrom`, `reuseInfra`, and `reuseServicePorts` (e.g. `"ms:auth": 9001`). Combo reuses **default (ms)** Redis, MongoDB, and auth-service; it **deploys only KYC** (plus gateway). Combo has its own project (`combo`), network (`combo_network`), gateway port 9997. Use `--config=combo` (e.g. `npm run generate:combo`, `npm run docker:up:combo`, `npm run k8s:apply:combo`). **Deploy ms first, then combo.** Test namespace is unchanged and remains a full standalone stack. (More detail below under "Implementing shared infra and shared services".) “Shared infra” means **data-plane only**: Redis, MongoDB (and in future e.g. message queues). It does **not** mean sharing app services like auth-service. Today each namespace has its own Redis and MongoDB. It is **possible** for a namespace (e.g. test) to use another’s Redis/Mongo: K8s allows cross-namespace DNS (`redis.microservices.svc.cluster.local`), and config already supports per-environment `mongoUri`/`redisUrl`. Implementing “test uses ms Redis” would mean: (1) **Config**: add an option (e.g. `sharedInfra: { redis: "microservices" }`) so test points at ms. (2) **K8s**: when shared, use that host in generated secrets and **omit** Redis (and optionally MongoDB) manifests for the test namespace. (3) **Docker**: test stack would use an external network and env pointing at `ms-redis`/`ms-mongo`. (4) **Isolation**: shared Redis may need key prefixes or Redis DB numbers; MongoDB already uses per-service DB names. — **Sharing app services** (e.g. test using ms auth-service instead of deploying its own) would be a **separate** option: test would not deploy auth-service and would call `auth-service.microservices.svc.cluster.local`; that would require config (e.g. `sharedServices: ["auth"]`) and omitting that deployment in the test namespace.
 
 ### Development
 
@@ -62,8 +64,10 @@ All commands support `--config=dev` (default), `--config=shared`, or `--config=t
 | `npm run docker:up` | Start containers (dev config) |
 | `npm run docker:up:shared` | Start containers (shared config) |
 | `npm run docker:up:test` | Start containers (test config; group **test** in Docker Desktop: test-redis, test-mongo, test-auth-service, …) |
+| `npm run docker:up:combo` | Start containers (combo config; reuses ms Redis/Mongo/auth, deploys only KYC; deploy ms first) |
 | `npm run docker:down` | Stop containers |
 | `npm run docker:down:test` | Stop test stack (project **test**) |
+| `npm run docker:down:combo` | Stop combo stack (project **combo**) |
 | `npm run docker:logs` | Stream container logs |
 | `npm run docker:up:prod` | Start prod mode with gateway |
 | `npm run docker:down:prod` | Stop prod containers |
@@ -99,6 +103,94 @@ All commands support `--config=dev` (default), `--config=shared`, or `--config=t
 | `npm run generate:docker` | Generate docker-compose files |
 | `npm run generate:k8s` | Generate Kubernetes manifests |
 | `npm run generate:test` | Generate all (test config; uses infra.test.json overrides) |
+| `npm run generate:combo` | Generate all (combo config; reuses ms Redis/Mongo and auth) |
+
+---
+
+## Implementing shared infra and shared services
+
+You can support two options: **(1) shared infrastructure** (test uses ms Redis/Mongo) and **(2) shared services** (test uses ms auth-service, etc.). Below is what implementing each means in practice.
+
+### Why both options
+
+- **Shared infra**: Fewer resources (one Redis/Mongo for ms + test), simpler ops, test can hit same data if needed.
+- **Shared services**: Test runs only the services under test (e.g. bonus, payment) and reuses ms auth (and optionally others), so test stack is smaller and behavior matches prod (same auth).
+
+### Option 1: Shared infrastructure
+
+**Config** (e.g. in `infra.test.json` or `services.test.json`):
+
+```json
+"sharedInfra": {
+  "redis": "microservices",
+  "mongodb": "microservices"
+}
+```
+
+Optional: `redisDb: 1` (or key prefix) so test uses a different Redis DB than ms and avoids key collisions.
+
+**K8s** (`generate.ts`):
+
+- When generating for a config that has `sharedInfra.redis`: in `generateK8sSecrets`, set Redis URL to `redis.${sharedInfra.redis}.svc.cluster.local` (and same namespace for Mongo if `sharedInfra.mongodb`). Use same password as the provider namespace or from config.
+- In `generateK8s`: **do not** write `05-mongodb.yaml` / `06-redis.yaml` when `sharedInfra.mongodb` / `sharedInfra.redis` is set (test namespace has no Redis/Mongo deployments).
+- Namespace must exist; ms namespace must be deployed first so Redis/Mongo exist there.
+
+**Docker** (`generate.ts`):
+
+- When `sharedInfra` is set: in dev/prod compose for test, **omit** the `mongo` and `redis` service blocks. Add the ms network as external, e.g. `networks: test_network: ... ; ms_network: external: true`. Put test services on both networks (or only ms_network) and set env: `REDIS_URL=redis://ms-redis:6379`, `MONGO_URI=mongodb://ms-mongo:27017/...` (use ms project name from infra, e.g. `ms` → `ms-redis`).
+- Ensure ms stack is up first so `ms-redis` / `ms-mongo` exist.
+
+**Config loader**: In `config-loader.ts` (or wherever you resolve infra), read `sharedInfra` and expose it so generate and docker scripts can branch.
+
+---
+
+### Option 2: Shared services
+
+**Config** (e.g. in `services.test.json`):
+
+```json
+"sharedServices": ["auth"]
+```
+
+Means: “In this config (test), do not deploy auth-service; use the one from the provider namespace/project.”
+
+You need a single **provider** namespace/project (e.g. ms). So either:
+
+- Add `sharedServicesFrom": "microservices"` (K8s namespace) and `sharedServicesFromProject": "ms"` (Docker project name), or
+- Derive provider from existing infra (e.g. default ms = microservices / ms).
+
+**K8s** (`generate.ts`):
+
+- When generating deployments for a config that has `sharedServices`: **skip** emitting `10-${svc.name}-deployment.yaml` for any `svc.name` in `sharedServices` (e.g. skip auth).
+- Test namespace still needs a way to **call** ms auth: either
+  - **A)** Other test services (bonus, payment, …) call auth via gateway (Ingress in ms) or via direct URL. So you need a **Service** in test namespace that points at ms auth (ExternalName or multi-cluster). E.g. create a Service in test: `auth-service` → ExternalName `auth-service.microservices.svc.cluster.local`. Then test pods use `http://auth-service` and resolve to ms.
+  - **B)** Test gateway/Ingress routes `X-Target-Service: auth` to ms auth-service (e.g. backend `auth-service.microservices.svc.cluster.local:9001`). So nginx/Ingress in test namespace must have upstream for auth pointing at the other namespace.
+- So: **(1)** Skip deployment for shared services. **(2)** Either create ExternalName (or equivalent) Services in test namespace for each shared service, or configure test gateway/Ingress to proxy to ms namespace for those services. ConfigMap / Ingress annotations need to know the provider namespace.
+
+**Docker** (`generate.ts`):
+
+- When `sharedServices` is set: **omit** the `auth-service` (and any other shared) service block from test compose. Test stack does not start auth container.
+- Other test services that call auth need the URL. Options:
+  - **A)** Test containers join ms network (external) and use `ms-auth-service:9001` (or `auth-service` if you add an alias). Set env e.g. `AUTH_SERVICE_URL=http://ms-auth-service:9001` if apps support it.
+  - **B)** Test gateway (nginx) routes to ms: use `ms-auth-service` as upstream for auth. That requires nginx config for test to include an upstream pointing at `ms-auth-service:9001` (only possible if test gateway is on same Docker network as ms).
+- So: **(1)** Omit shared service blocks from compose. **(2)** Add ms network as external; put test gateway (and optionally other services) on ms network so gateway can proxy to `ms-auth-service`. **(3)** Generate nginx (or gateway) config for test so the “auth” route points at ms-auth-service.
+
+**Gateway / Ingress**: For “test uses ms auth”, test’s gateway must proxy auth traffic to ms. So when generating nginx or K8s Ingress for test, if `sharedServices` includes `auth`, the auth upstream/host should be `auth-service.microservices.svc.cluster.local` (K8s) or `ms-auth-service` (Docker) instead of local auth-service.
+
+---
+
+### Summary: what to touch
+
+| Area | Shared infra | Shared services |
+|------|----------------|------------------|
+| **Config** | `sharedInfra: { redis, mongodb }` (+ optional `redisDb`) | `sharedServices: ["auth", ...]` + provider (e.g. `sharedServicesFrom: "microservices"`) |
+| **config-loader** | Load and expose `sharedInfra` | Load and expose `sharedServices` and provider |
+| **generate.ts K8s** | Secrets use provider-namespace Redis/Mongo; skip 05-mongodb, 06-redis when shared | Skip 10-*-deployment for shared svc; add ExternalName Services or Ingress backends to ms namespace |
+| **generate.ts Docker** | Omit mongo/redis; use external ms network; env → ms-redis, ms-mongo | Omit shared service blocks; test on ms network; gateway upstreams → ms-auth-service etc. |
+| **generate.ts nginx** | N/A | For test, auth upstream = ms-auth-service (or provider host) |
+| **Order** | Deploy ms first (Redis/Mongo and shared services) | Deploy ms first (shared services must exist) |
+
+**Isolation**: Shared Redis: use different Redis DB or key prefix for test. Mongo: DB names are per-service already. Shared auth: same JWT/issuer so tokens from ms auth work in test.
 
 ---
 

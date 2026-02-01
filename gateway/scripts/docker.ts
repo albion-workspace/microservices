@@ -27,7 +27,7 @@ import { access, rm } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { loadConfigFromArgs, logConfigSummary, getInfraConfig, getDockerContainerNames, type ServicesConfig, type ServiceConfig, type InfraConfig, type ConfigMode } from './config-loader.js';
+import { loadConfigFromArgs, logConfigSummary, getInfraConfig, getDockerContainerNames, getReusedServiceEntries, type ServicesConfig, type ServiceConfig, type InfraConfig, type ConfigMode } from './config-loader.js';
 import { runScript, runLongRunningScript, printHeader } from './script-runner.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -457,17 +457,22 @@ async function dockerUp(env: 'dev' | 'prod', config: ServicesConfig, mode: Confi
   // All services: use docker compose - always regenerate so file matches current --config (infra + services)
   await generateConfigs(mode);
 
-  // Remove any infra containers started outside compose so compose can create them (same group).
-  const { mongo: mongoContainer, redis: redisContainer } = getDockerContainerNames(getInfraConfig());
-  try {
-    execSync(`docker rm -f ${mongoContainer} ${redisContainer}`, { stdio: 'pipe', shell: true });
-  } catch {
-    // None or one may not exist
+  // Remove any infra containers started outside compose so compose can create them (same group). Skip when reusing provider infra.
+  const reuseInfra = config.reuseInfra && config.reuseFrom;
+  if (!reuseInfra) {
+    const { mongo: mongoContainer, redis: redisContainer } = getDockerContainerNames(getInfraConfig());
+    try {
+      execSync(`docker rm -f ${mongoContainer} ${redisContainer}`, { stdio: 'pipe', shell: true });
+    } catch {
+      // None or one may not exist
+    }
   }
 
+  // Only remove old containers for services we deploy (reused services have no container in this project)
+  const reusedSet = new Set(getReusedServiceEntries(config).map(e => e.serviceName));
   console.log('Cleaning old containers...');
   for (const service of services) {
-    removeOldContainer(service.name);
+    if (!reusedSet.has(service.name)) removeOldContainer(service.name);
   }
 
   const composeFile = getComposeFile(env);
@@ -726,12 +731,13 @@ async function dockerStatus(env: 'dev' | 'prod', config: ServicesConfig): Promis
   }
   console.log('✅ Docker is running');
 
-  // Check network
+  // Check network (Docker Compose creates as {project}_{network}, e.g. combo_combo_network)
+  const networkFull = `${docker.projectName}_${docker.network}`;
   try {
-    execSync(`docker network inspect ${docker.network}`, { stdio: 'ignore' });
-    console.log(`✅ Network ${docker.network} exists`);
+    execSync(`docker network inspect ${networkFull}`, { stdio: 'ignore' });
+    console.log(`✅ Network ${networkFull} exists`);
   } catch {
-    console.log(`⚠️  Network ${docker.network} not found`);
+    console.log(`⚠️  Network ${networkFull} not found`);
   }
 
   // Check compose file (filename includes project, e.g. docker-compose.dev.test.yml for test)

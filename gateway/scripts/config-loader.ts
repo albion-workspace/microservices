@@ -202,6 +202,16 @@ export interface RedisConfig {
   } | null;
 }
 
+/** Combo mode: reuse infra/services from another namespace (e.g. test uses ms Redis + auth). Avoids "shared" which is already used for per-service vs shared strategy. */
+export interface ReuseFromConfig {
+  /** K8s namespace to reuse from (e.g. "microservices") */
+  namespace: string;
+  /** Docker Compose project name to reuse from (e.g. "ms") */
+  project: string;
+  /** Docker network name in provider's compose (e.g. "ms_network"). Full name is {project}_{network}. */
+  network?: string;
+}
+
 export interface ServicesConfig {
   mode: string;
   description?: string;
@@ -219,6 +229,40 @@ export interface ServicesConfig {
     mongoUri: string;
     redisUrl: string;
   }>;
+  /** Combo only: which namespace/project to reuse Redis/Mongo and optionally services from */
+  reuseFrom?: ReuseFromConfig;
+  /** Combo only: reuse Redis and/or MongoDB from reuseFrom (do not deploy in this namespace) */
+  reuseInfra?: { redis?: boolean; mongodb?: boolean };
+  /**
+   * Combo only: which services to reuse and from where. Key = "provider:serviceName" (e.g. "ms:auth"), value = port.
+   * Slim and intuitive: one map encodes provider, service, and port. Reused service names derived from keys.
+   */
+  reuseServicePorts?: Record<string, number>;
+}
+
+/** Parsed entry from reuseServicePorts (key "provider:serviceName", value port). */
+export interface ReusedServiceEntry {
+  project: string;
+  serviceName: string;
+  port: number;
+}
+
+/**
+ * Parse reuseServicePorts into entries. Key format: "provider:serviceName" (e.g. "ms:auth").
+ * Returns list of { project, serviceName, port }. Invalid keys (no colon) are skipped.
+ */
+export function getReusedServiceEntries(config: ServicesConfig): ReusedServiceEntry[] {
+  const out: ReusedServiceEntry[] = [];
+  for (const [key, port] of Object.entries(config.reuseServicePorts ?? {})) {
+    const colon = key.indexOf(':');
+    if (colon === -1) continue;
+    out.push({
+      project: key.slice(0, colon),
+      serviceName: key.slice(colon + 1),
+      port,
+    });
+  }
+  return out;
 }
 
 export type ConfigMode = 'dev' | 'shared' | string;
