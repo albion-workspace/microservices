@@ -31,6 +31,7 @@ All commands support `--config=dev` (default), `--config=shared`, or `--config=t
 - **Compose files**: Generated compose files are **kept** after `docker:fresh` so both ms and test definitions persist; only generated Dockerfiles are removed. Compose filenames are config-specific: `docker-compose.dev.yml` / `docker-compose.prod.yml` for ms, `docker-compose.dev.test.yml` / `docker-compose.prod.test.yml` for test.
 - **Ports (brand co-existence)**: ms and test can run on the same Docker host. ms uses default ports (Mongo 27017, Redis 6379, services 9001–9005, gateway 9999). test uses distinct ports (Mongo 27018, Redis 6380, services 9011–9015, gateway 9998) so both stacks can run simultaneously.
 - **Kubernetes (same behavior)**: ms uses namespace `microservices` and manifests in `generated/k8s/`. test uses namespace `microservices-test` and manifests in `generated/k8s-test/`. Both can coexist; generate/apply/delete use the current config’s dir and namespace. Generated K8s files are only cleaned for the current config (e.g. `k8s:fresh` with test cleans only `k8s-test/`).
+- **Gateway behavior (all environments)**: The nginx gateway is the single entry point in Docker (dev and prod) and K8s (Ingress). Routing (X-Target-Service / default service), `/health`, and GraphQL paths behave the same everywhere. In dev (Docker) you may use either the gateway port (e.g. 9999) or direct service ports (9001–9005); using the gateway matches prod/K8s behavior.
 
 ### Development
 
