@@ -506,15 +506,15 @@ ${config.services.map(s => `  ${s.name.toUpperCase().replace(/-/g, '_')}_PORT: "
 
 function generateK8sSecrets(config: ServicesConfig, namespace: string, mode: ConfigMode): string {
   const mongoHost = `mongodb.${namespace}.svc.cluster.local`;
-  const mongoPort = config.infrastructure.mongodb.port;
   const redisHost = `redis.${namespace}.svc.cluster.local`;
-  const redisPort = config.infrastructure.redis.port;
   const redisPassword = config.infrastructure.redis.password;
   const redisAuth = redisPassword ? `:${redisPassword}@` : '';
+  // Cluster-internal ports (services expose 27017/6379); config.port is for Docker host binding only.
+  const MONGO_CLUSTER_PORT = 27017;
+  const REDIS_CLUSTER_PORT = 6379;
 
-  // Generate per-service MongoDB URIs with database names
-  const perServiceMongoUris = config.services.map(svc => 
-    `  ${svc.name}-mongodb-uri: "mongodb://${mongoHost}:${mongoPort}/${svc.database}"`
+  const perServiceMongoUris = config.services.map(svc =>
+    `  ${svc.name}-mongodb-uri: "mongodb://${mongoHost}:${MONGO_CLUSTER_PORT}/${svc.database}"`
   ).join('\n');
 
   return `# Database Secrets - Per-service MongoDB URIs
@@ -525,7 +525,7 @@ metadata:
   namespace: ${namespace}
 type: Opaque
 stringData:
-  redis-url: "redis://${redisAuth}${redisHost}:${redisPort}"
+  redis-url: "redis://${redisAuth}${redisHost}:${REDIS_CLUSTER_PORT}"
 ${perServiceMongoUris}
 ---
 # JWT Secrets
