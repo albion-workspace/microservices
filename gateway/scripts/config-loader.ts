@@ -139,6 +139,11 @@ export function getInfraConfig(): InfraConfig {
   return _infraConfig;
 }
 
+/** Current config mode (set by loadConfigFromArgs). Used by k8s/generate to pass --config. */
+export function getConfigMode(): ConfigMode {
+  return (_infraConfigMode as ConfigMode) ?? 'dev';
+}
+
 /** Docker container names from infra.docker.projectName only. */
 export function getDockerContainerNames(infra: InfraConfig): { mongo: string; redis: string } {
   const { projectName } = infra.docker;

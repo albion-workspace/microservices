@@ -33,9 +33,10 @@ function parseEnv(): HealthEnv {
 
 function getServiceUrl(service: ServiceConfig, env: HealthEnv): string {
   const healthPath = service.healthPath || '/health';
-  
   switch (env) {
     case 'docker':
+      // Script runs on host; use localhost and host-mapped port so both ms and test can be checked.
+      return `http://localhost:${service.port}${healthPath}`;
     case 'k8s':
       return `http://${service.host}:${service.port}${healthPath}`;
     case 'local':

@@ -108,10 +108,15 @@ function checkDockerRunning(): boolean {
   }
 }
 
+/** Compose filename suffix: none for default (ms), otherwise .{projectName} so configs don't overwrite each other. */
+function getComposeFileSuffix(): string {
+  const projectName = getInfraConfig().docker.projectName;
+  return projectName === 'ms' ? '' : `.${projectName}`;
+}
+
 async function checkComposeFileExists(env: 'dev' | 'prod'): Promise<boolean> {
-  const composeFile = join(GENERATED_DIR, 'docker', `docker-compose.${env}.yml`);
   try {
-    await access(composeFile);
+    await access(getComposeFile(env));
     return true;
   } catch {
     return false;
@@ -119,7 +124,8 @@ async function checkComposeFileExists(env: 'dev' | 'prod'): Promise<boolean> {
 }
 
 function getComposeFile(env: 'dev' | 'prod'): string {
-  return join(GENERATED_DIR, 'docker', `docker-compose.${env}.yml`);
+  const suffix = getComposeFileSuffix();
+  return join(GENERATED_DIR, 'docker', `docker-compose.${env}${suffix}.yml`);
 }
 
 async function generateConfigs(mode: ConfigMode): Promise<void> {
@@ -604,19 +610,10 @@ async function runHealthCheck(config: ServicesConfig, serviceName?: string): Pro
 }
 
 /**
- * Clean up generated Docker files (docker-compose and service Dockerfiles)
+ * Clean up generated Docker files (service Dockerfiles only).
+ * Compose files are kept so both brands (ms, test) can coexist and be run without regenerating.
  */
 async function cleanGeneratedFiles(config?: ServicesConfig, serviceName?: string): Promise<void> {
-  const dockerGenDir = join(GENERATED_DIR, 'docker');
-  
-  // Clean generated docker-compose files
-  try {
-    await rm(dockerGenDir, { recursive: true, force: true });
-    console.log('  ✅ Cleaned generated docker-compose files');
-  } catch {
-    // Directory might not exist
-  }
-  
   // Clean generated Dockerfiles in service directories
   const services = config ? getTargetServices(config, serviceName) : [];
   for (const service of services) {
@@ -737,11 +734,12 @@ async function dockerStatus(env: 'dev' | 'prod', config: ServicesConfig): Promis
     console.log(`⚠️  Network ${docker.network} not found`);
   }
 
-  // Check compose file
+  // Check compose file (filename includes project, e.g. docker-compose.dev.test.yml for test)
+  const composeFile = getComposeFile(env);
   if (await checkComposeFileExists(env)) {
-    console.log(`✅ docker-compose.${env}.yml exists`);
+    console.log(`✅ ${composeFile.split(/[/\\]/).pop()} exists`);
   } else {
-    console.log(`⚠️  docker-compose.${env}.yml not found. Run "npm run generate:docker"`);
+    console.log(`⚠️  ${composeFile.split(/[/\\]/).pop()} not found. Run "npm run generate:docker" or "npm run generate:test"`);
   }
 
   // List running containers

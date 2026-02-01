@@ -28,6 +28,9 @@ All commands support `--config=dev` (default), `--config=shared`, or `--config=t
 - **Services**: `services.{mode}.json` is loaded for the chosen mode (e.g. `services.test.json` for `--config=test`).
 - **Infra**: `infra.json` is the base; `infra.{mode}.json` deep-merges over it (e.g. `infra.test.json` overrides only what differs, such as `kubernetes.namespace` and `docker.projectName`).
 - **Docker Desktop**: Each config uses a Compose project name from infra (`docker.projectName`): default/dev/shared → **ms** (microservices), test → **test**. Containers are named `{projectName}-redis`, `{projectName}-mongo`, `{projectName}-auth-service`, etc., so they appear under the right group (e.g. **ms** → ms-redis, ms-mongo, ms-auth-service; **test** → test-redis, test-mongo, test-auth-service).
+- **Compose files**: Generated compose files are **kept** after `docker:fresh` so both ms and test definitions persist; only generated Dockerfiles are removed. Compose filenames are config-specific: `docker-compose.dev.yml` / `docker-compose.prod.yml` for ms, `docker-compose.dev.test.yml` / `docker-compose.prod.test.yml` for test.
+- **Ports (brand co-existence)**: ms and test can run on the same Docker host. ms uses default ports (Mongo 27017, Redis 6379, services 9001–9005, gateway 9999). test uses distinct ports (Mongo 27018, Redis 6380, services 9011–9015, gateway 9998) so both stacks can run simultaneously.
+- **Kubernetes (same behavior)**: ms uses namespace `microservices` and manifests in `generated/k8s/`. test uses namespace `microservices-test` and manifests in `generated/k8s-test/`. Both can coexist; generate/apply/delete use the current config’s dir and namespace. Generated K8s files are only cleaned for the current config (e.g. `k8s:fresh` with test cleans only `k8s-test/`).
 
 ### Development
 
@@ -116,9 +119,13 @@ gateway/
 │   ├── nginx/
 │   │   └── nginx.conf
 │   ├── docker/
-│   │   ├── docker-compose.dev.yml
-│   │   └── docker-compose.prod.yml
-│   └── k8s/
+│   │   ├── docker-compose.dev.yml        # ms (default)
+│   │   ├── docker-compose.prod.yml      # ms
+│   │   ├── docker-compose.dev.test.yml  # test (when generated)
+│   │   └── docker-compose.prod.test.yml # test (when generated)
+│   ├── k8s/                  # ms (default) manifests
+│   │   └── *.yaml
+│   └── k8s-test/             # test manifests (when generated)
 │       └── *.yaml
 └── package.json
 ```

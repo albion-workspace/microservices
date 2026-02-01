@@ -139,21 +139,29 @@ async function generateNginx(config: ServicesConfig, mode: ConfigMode): Promise<
 // Docker Compose Generation
 // ═══════════════════════════════════════════════════════════════════
 
+/** Compose filename suffix: none for default (ms), otherwise .{projectName} so configs don't overwrite each other. */
+function getComposeFileSuffix(projectName: string): string {
+  return projectName === 'ms' ? '' : `.${projectName}`;
+}
+
 async function generateDockerCompose(config: ServicesConfig, mode: ConfigMode): Promise<void> {
   console.log('🔧 Generating docker-compose configurations...');
-  
+  const { projectName } = getInfraConfig().docker;
+  const suffix = getComposeFileSuffix(projectName);
+
   const dockerDir = join(OUTPUT_DIR, 'docker');
   await mkdir(dockerDir, { recursive: true });
 
-  // Generate dev compose
-  const devCompose = generateDevCompose(config, mode);
-  await writeFile(join(dockerDir, 'docker-compose.dev.yml'), devCompose);
-  console.log('✅ Generated: generated/docker/docker-compose.dev.yml');
+  const devFile = `docker-compose.dev${suffix}.yml`;
+  const prodFile = `docker-compose.prod${suffix}.yml`;
 
-  // Generate prod compose (with nginx gateway)
+  const devCompose = generateDevCompose(config, mode);
+  await writeFile(join(dockerDir, devFile), devCompose);
+  console.log(`✅ Generated: generated/docker/${devFile}`);
+
   const prodCompose = generateProdCompose(config, mode);
-  await writeFile(join(dockerDir, 'docker-compose.prod.yml'), prodCompose);
-  console.log('✅ Generated: generated/docker/docker-compose.prod.yml');
+  await writeFile(join(dockerDir, prodFile), prodCompose);
+  console.log(`✅ Generated: generated/docker/${prodFile}`);
 }
 
 function generateDevCompose(config: ServicesConfig, mode: ConfigMode): string {
@@ -164,12 +172,15 @@ function generateDevCompose(config: ServicesConfig, mode: ConfigMode): string {
   const networkName = docker.network;
 
   // Always include mongo and redis in compose so they appear in the same Docker Desktop group (projectName).
+  // Inside Docker network containers listen on fixed ports (27017, 6379); config ports are for host binding only.
   const mongoHost = 'mongo';
   const redisHost = 'redis';
+  const MONGO_CONTAINER_PORT = 27017;
+  const REDIS_CONTAINER_PORT = 6379;
 
   const redisPassword = redis.password;
   const redisAuth = redisPassword ? `:${redisPassword}@` : '';
-  const redisUrl = `redis://${redisAuth}${redisHost}:${redis.port}`;
+  const redisUrl = `redis://${redisAuth}${redisHost}:${REDIS_CONTAINER_PORT}`;
 
   const servicesToInclude =
     config.mode === 'shared'
@@ -190,7 +201,7 @@ function generateDevCompose(config: ServicesConfig, mode: ConfigMode): string {
       - PORT=${svc.port}
       - NODE_ENV=development
       - JWT_SECRET=dev-jwt-secret-change-in-production
-      - MONGO_URI=mongodb://${mongoHost}:${mongo.port}/${svc.database}
+      - MONGO_URI=mongodb://${mongoHost}:${MONGO_CONTAINER_PORT}/${svc.database}
       - REDIS_URL=${redisUrl}
     depends_on:
       - mongo
@@ -353,9 +364,12 @@ function generateProdCompose(config: ServicesConfig, mode: ConfigMode): string {
   const projectName = docker.projectName;
   const networkName = docker.network;
 
+  // Inside Docker network containers listen on fixed ports; config ports are for host binding only.
+  const MONGO_CONTAINER_PORT = 27017;
+  const REDIS_CONTAINER_PORT = 6379;
   const redisPassword = (redis as { password?: string }).password;
   const redisAuth = redisPassword ? `:${redisPassword}@` : '';
-  const redisUrl = `redis://${redisAuth}redis:${redis.port}`;
+  const redisUrl = `redis://${redisAuth}redis:${REDIS_CONTAINER_PORT}`;
 
   const servicesToInclude =
     config.mode === 'shared'
@@ -371,7 +385,7 @@ function generateProdCompose(config: ServicesConfig, mode: ConfigMode): string {
     environment:
       - PORT=${svc.port}
       - NODE_ENV=production
-      - MONGO_URI=mongodb://mongo:${mongo.port}/${svc.database}
+      - MONGO_URI=mongodb://mongo:${MONGO_CONTAINER_PORT}/${svc.database}
       - REDIS_URL=${redisUrl}
     depends_on:
       - mongo
@@ -439,39 +453,32 @@ volumes:
 // Kubernetes Generation
 // ═══════════════════════════════════════════════════════════════════
 
+/** K8s output dir suffix: none for ms (default), otherwise -{projectName} so configs don't overwrite each other. */
+function getK8sDirSuffix(projectName: string): string {
+  return projectName === 'ms' ? '' : `-${projectName}`;
+}
+
 async function generateK8s(config: ServicesConfig, mode: ConfigMode): Promise<void> {
   console.log('🔧 Generating Kubernetes manifests...');
-  
-  const k8sDir = join(OUTPUT_DIR, 'k8s');
+  const { projectName } = getInfraConfig().docker;
+  const suffix = getK8sDirSuffix(projectName);
+  const k8sDir = join(OUTPUT_DIR, `k8s${suffix}`);
   await mkdir(k8sDir, { recursive: true });
 
   const namespace = getInfraConfig().kubernetes.namespace;
 
-  // Namespace
   await writeFile(join(k8sDir, '00-namespace.yaml'), generateK8sNamespace(namespace));
-
-  // ConfigMap
   await writeFile(join(k8sDir, '01-configmap.yaml'), generateK8sConfigMap(config, namespace));
-
-  // Secrets template
   await writeFile(join(k8sDir, '02-secrets.yaml'), generateK8sSecrets(config, namespace, mode));
-
-  // MongoDB
   await writeFile(join(k8sDir, '05-mongodb.yaml'), generateK8sMongoDB(config, namespace));
-
-  // Redis
   await writeFile(join(k8sDir, '06-redis.yaml'), generateK8sRedis(config, namespace));
-
-  // Service deployments
   for (const svc of config.services) {
     const deployment = generateK8sDeployment(svc, config, namespace);
     await writeFile(join(k8sDir, `10-${svc.name}-deployment.yaml`), deployment);
   }
-
-  // Ingress
   await writeFile(join(k8sDir, '20-ingress.yaml'), generateK8sIngress(config, namespace));
 
-  console.log('✅ Generated: generated/k8s/*.yaml');
+  console.log(`✅ Generated: generated/k8s${suffix}/*.yaml`);
 }
 
 function generateK8sNamespace(namespace: string): string {

@@ -26,14 +26,20 @@ import { access, readdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { loadConfigFromArgs, logConfigSummary, getInfraConfig, type ServicesConfig, type ServiceConfig, type InfraConfig } from './config-loader.js';
+import { loadConfigFromArgs, logConfigSummary, getInfraConfig, getConfigMode, type ServicesConfig, type ServiceConfig, type InfraConfig } from './config-loader.js';
 import { runScript, runLongRunningScript, printHeader } from './script-runner.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = join(__dirname, '..', '..');
 const GATEWAY_DIR = join(__dirname, '..');
 const GENERATED_DIR = join(GATEWAY_DIR, 'generated');
-const K8S_DIR = join(GENERATED_DIR, 'k8s');
+
+/** K8s manifests dir: k8s for ms, k8s-test for test (same behavior as Docker compose paths). */
+function getK8sDir(): string {
+  const projectName = getInfraConfig().docker.projectName;
+  const suffix = projectName === 'ms' ? '' : `-${projectName}`;
+  return join(GENERATED_DIR, `k8s${suffix}`);
+}
 
 type K8sCommand = 'apply' | 'delete' | 'status' | 'forward' | 'logs' | 'secrets' | 'fresh' | 'load-images';
 
@@ -109,7 +115,7 @@ function checkK8sCluster(): boolean {
 
 async function checkK8sManifestsExist(): Promise<boolean> {
   try {
-    await access(K8S_DIR);
+    await access(getK8sDir());
     return true;
   } catch {
     return false;
@@ -118,12 +124,12 @@ async function checkK8sManifestsExist(): Promise<boolean> {
 
 async function generateManifests(): Promise<void> {
   console.log('Generating K8s manifests...');
-  
+  const mode = getConfigMode();
   const generateScript = join(__dirname, 'generate.ts');
   const tsxPath = join(ROOT_DIR, 'core-service', 'node_modules', 'tsx', 'dist', 'cli.mjs');
-  
+
   return new Promise((resolve, reject) => {
-    const proc = spawn('node', [tsxPath, generateScript, '--k8s'], {
+    const proc = spawn('node', [tsxPath, generateScript, '--k8s', `--config=${mode}`], {
       cwd: GATEWAY_DIR,
       stdio: 'inherit',
       shell: true,
@@ -137,23 +143,14 @@ async function generateManifests(): Promise<void> {
 }
 
 /**
- * Clean up generated K8s files
+ * Clean up generated K8s files for current config only (so ms and test manifests can coexist).
  */
 async function cleanGeneratedK8sFiles(): Promise<void> {
   const { rm } = await import('node:fs/promises');
-  
+  const k8sDir = getK8sDir();
   try {
-    await rm(K8S_DIR, { recursive: true, force: true });
-    console.log('  ✅ Cleaned generated K8s manifests');
-  } catch {
-    // Directory might not exist
-  }
-  
-  // Also clean nginx config if exists
-  const nginxDir = join(GENERATED_DIR, 'nginx');
-  try {
-    await rm(nginxDir, { recursive: true, force: true });
-    console.log('  ✅ Cleaned generated nginx config');
+    await rm(k8sDir, { recursive: true, force: true });
+    console.log(`  ✅ Cleaned generated K8s manifests (${k8sDir.split(/[/\\]/).pop()})`);
   } catch {
     // Directory might not exist
   }
@@ -258,7 +255,7 @@ async function k8sApply(serviceName?: string): Promise<void> {
     if (serviceName) {
       // Single service deploy - ensure namespace and infrastructure exist first
       console.log('Ensuring namespace exists...');
-      const namespaceFile = join(K8S_DIR, '00-namespace.yaml');
+      const namespaceFile = join(getK8sDir(), '00-namespace.yaml');
       try {
         await access(namespaceFile);
         execSync(`kubectl apply -f "${namespaceFile}"`, { stdio: 'inherit' });
@@ -270,7 +267,7 @@ async function k8sApply(serviceName?: string): Promise<void> {
       // Apply configmap and secrets if they exist
       const configFiles = ['01-configmap.yaml', '02-secrets.yaml'];
       for (const configFile of configFiles) {
-        const filePath = join(K8S_DIR, configFile);
+        const filePath = join(getK8sDir(), configFile);
         try {
           await access(filePath);
           execSync(`kubectl apply -f "${filePath}"`, { stdio: 'ignore' });
@@ -283,7 +280,7 @@ async function k8sApply(serviceName?: string): Promise<void> {
       console.log('Ensuring infrastructure (MongoDB, Redis)...');
       const infraFiles = ['05-mongodb.yaml', '06-redis.yaml'];
       for (const infraFile of infraFiles) {
-        const filePath = join(K8S_DIR, infraFile);
+        const filePath = join(getK8sDir(), infraFile);
         try {
           await access(filePath);
           execSync(`kubectl apply -f "${filePath}"`, { stdio: 'inherit' });
@@ -302,10 +299,11 @@ async function k8sApply(serviceName?: string): Promise<void> {
       }
       
       // Apply service manifest
+      const k8sDir = getK8sDir();
       const possibleFiles = [
-        join(K8S_DIR, `10-${serviceName}-deployment.yaml`),
-        join(K8S_DIR, `${serviceName}-deployment.yaml`),
-        join(K8S_DIR, `${serviceName}-service.yaml`),
+        join(k8sDir, `10-${serviceName}-deployment.yaml`),
+        join(k8sDir, `${serviceName}-deployment.yaml`),
+        join(k8sDir, `${serviceName}-service.yaml`),
       ];
       
       let applied = false;
@@ -325,8 +323,7 @@ async function k8sApply(serviceName?: string): Promise<void> {
         throw new Error(`No manifest found for service "${serviceName}". Expected files like: 10-${serviceName}-deployment.yaml`);
       }
     } else {
-      // Apply all manifests
-      execSync(`kubectl apply -f "${K8S_DIR}"`, { stdio: 'inherit' });
+      execSync(`kubectl apply -f "${getK8sDir()}"`, { stdio: 'inherit' });
     }
     console.log('');
     console.log('✅ Manifests applied successfully');
@@ -396,14 +393,14 @@ async function k8sForward(config: ServicesConfig, serviceName?: string): Promise
 
   const processes: ReturnType<typeof spawn>[] = [];
 
+  const namespace = getInfraConfig().kubernetes.namespace;
   for (const svc of services) {
     console.log(`Forwarding ${svc.name}-service: localhost:${svc.port} -> pod:${svc.port}`);
-    
     const proc = spawn('kubectl', [
       'port-forward',
       `svc/${svc.name}-service`,
       `${svc.port}:${svc.port}`,
-      '-n', NAMESPACE
+      '-n', namespace
     ], {
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: true,
@@ -450,13 +447,13 @@ async function k8sLogs(config: ServicesConfig, serviceName?: string): Promise<vo
   printHeader(`Streaming Logs${targetMsg}`);
   console.log('Press Ctrl+C to stop.');
   console.log('');
+  const namespace = getInfraConfig().kubernetes.namespace;
 
   if (serviceName) {
-    // Stream logs for specific service
     const proc = spawn('kubectl', [
       'logs', '-f',
       '-l', `app=${serviceName}-service`,
-      '-n', NAMESPACE,
+      '-n', namespace,
       '--all-containers'
     ], {
       stdio: 'inherit',
@@ -469,10 +466,9 @@ async function k8sLogs(config: ServicesConfig, serviceName?: string): Promise<vo
     return;
   }
 
-  // Use stern if available, otherwise fall back to kubectl
   try {
     execSync('stern --version', { stdio: 'ignore' });
-    const proc = spawn('stern', ['.', '-n', NAMESPACE], {
+    const proc = spawn('stern', ['.', '-n', namespace], {
       stdio: 'inherit',
       shell: true,
     });
@@ -485,7 +481,7 @@ async function k8sLogs(config: ServicesConfig, serviceName?: string): Promise<vo
     console.log('(Using kubectl logs - install stern for better multi-pod logging)');
     console.log('');
     
-    const proc = spawn('kubectl', ['logs', '-f', '-l', 'app', '-n', NAMESPACE, '--all-containers'], {
+    const proc = spawn('kubectl', ['logs', '-f', '-l', 'app', '-n', namespace, '--all-containers'], {
       stdio: 'inherit',
       shell: true,
     });

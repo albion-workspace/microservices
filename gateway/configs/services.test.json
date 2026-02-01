@@ -1,8 +1,8 @@
 {
   "mode": "per-service",
-  "description": "Test mode - uses infra.test.json (namespace microservices-test)",
+  "description": "Test mode - uses infra.test.json (namespace microservices-test). Distinct ports so ms and test can run on same Docker host.",
   "gateway": {
-    "port": 9999,
+    "port": 9998,
     "defaultService": "auth",
     "rateLimit": 100
   },
@@ -10,7 +10,7 @@
     {
       "name": "auth",
       "host": "auth-service",
-      "port": 9001,
+      "port": 9011,
       "database": "core_service",
       "healthPath": "/health",
       "graphqlPath": "/graphql",
@@ -19,7 +19,7 @@
     {
       "name": "payment",
       "host": "payment-service",
-      "port": 9002,
+      "port": 9012,
       "database": "payment_service",
       "healthPath": "/health",
       "graphqlPath": "/graphql"
@@ -27,7 +27,7 @@
     {
       "name": "bonus",
       "host": "bonus-service",
-      "port": 9003,
+      "port": 9013,
       "database": "bonus_service",
       "healthPath": "/health",
       "graphqlPath": "/graphql"
@@ -35,7 +35,7 @@
     {
       "name": "notification",
       "host": "notification-service",
-      "port": 9004,
+      "port": 9014,
       "database": "notification_service",
       "healthPath": "/health",
       "graphqlPath": "/graphql"
@@ -43,7 +43,7 @@
     {
       "name": "kyc",
       "host": "kyc-service",
-      "port": 9005,
+      "port": 9015,
       "database": "kyc_service",
       "healthPath": "/health",
       "graphqlPath": "/graphql"
@@ -53,21 +53,21 @@
     "mongodb": {
       "mode": "single",
       "host": "localhost",
-      "port": 27017,
+      "port": 27018,
       "replicaSet": null
     },
     "redis": {
       "mode": "single",
       "host": "localhost",
-      "port": 6379,
+      "port": 6380,
       "password": "redis123",
       "sentinel": null
     }
   },
   "environments": {
     "local": {
-      "mongoUri": "mongodb://localhost:27017",
-      "redisUrl": "redis://:redis123@localhost:6379"
+      "mongoUri": "mongodb://localhost:27018",
+      "redisUrl": "redis://:redis123@localhost:6380"
     },
     "docker": {
       "mongoUri": "mongodb://mongo:27017",
