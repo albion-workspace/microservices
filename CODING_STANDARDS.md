@@ -1827,19 +1827,52 @@ This makes CI/CD bulletproof - works in both scenarios.
 
 ### Adding a New Service
 
-1. Create service folder with standard structure
-2. Add to `gateway/configs/services.*.json`:
+**Use the service generator** so the new microservice follows coding standards (dynamic config from MongoDB, GraphQL, database accessor, error codes, optional Redis/webhooks). For what the template contains and steps to align existing services to it, see **`core-service/src/infra/SERVICE_GENERATOR.md`**.
+
+```bash
+# From repo root or core-service
+cd core-service && npm run build
+npx service-infra service --name <name> [--port 9006] [--output ..] [--webhooks] [--core-db]
+```
+
+Example: `service-infra service --name test --port 9006 --output ..` creates `test-service/` with:
+
+- `config.ts` / `config-defaults.ts` (dynamic config via `getConfigWithDefault`, `registerServiceConfigDefaults`)
+- `database.ts` (`createServiceDatabaseAccess`), optional `redis.ts` (`createServiceRedisAccess`)
+- `error-codes.ts`, `graphql.ts` (types + `createResolvers`), `index.ts` (bootstrap: `resolveContext`, `loadConfig`, `db.initialize`, `createGateway`, `startListening`)
+- `services/index.ts`, `types.ts`
+
+Then:
+
+1. Add the service to `gateway/configs/services.dev.json` (and other profiles as needed):
    ```json
-   {
-     "name": "new",
-     "port": 9006,
-     "host": "new-service",
-     "healthPath": "/health",
-     "database": "new_service"
-   }
+   { "name": "test", "host": "test-service", "port": 9006, "database": "test_service", "healthPath": "/health", "graphqlPath": "/graphql" }
    ```
-3. Run `npm run generate` from gateway
-4. Dockerfiles and manifests are auto-generated
+2. Run `npm run generate` from gateway
+3. Add the service to gateway dev script if needed; run `npm run dev` or `npm run docker:fresh`
+
+### Microservice naming conventions (auth, payment, bonus, notification, generator)
+
+All microservices that use core-service should follow the same naming so patterns stay consistent. The service generator produces this structure; existing services (auth, payment, bonus, notification) match it.
+
+| Area | Convention | Example (auth / test) |
+|------|------------|----------------------|
+| **Config** | `SERVICE_NAME = '{service}-service'`, `loadConfig(brand?, tenantId?)` **via getConfigWithDefault only** (no `process.env`), `validateConfig`, `printConfigSummary`, interface `{Service}Config` | `auth-service`, `AuthConfig`, `loadConfig` |
+| **Config defaults** | Export `{SERVICE}_CONFIG_DEFAULTS` with **every** key used by loadConfig: `port`, `serviceName`, `nodeEnv`, `corsOrigins`, `jwt`, `database` (mongoUri, redisUrl). Each key: `{ value, description }`; use `sensitivePaths` for secrets. Index calls `registerServiceConfigDefaults('{service}-service', {SERVICE}_CONFIG_DEFAULTS)`. | `AUTH_CONFIG_DEFAULTS`, `TEST_CONFIG_DEFAULTS` |
+| **Error codes** | `{SERVICE}_ERRORS` (object), `{SERVICE}_ERROR_CODES` (array), code values `MS{Service}*`, type `{Service}ErrorCode` | `AUTH_ERRORS`, `AUTH_ERROR_CODES`, `MSAuthUserNotFound`, `AuthErrorCode` |
+| **GraphQL** | Types: `{shortName}GraphQLTypes` (camelCase short name). Resolvers: `create{Service}Resolvers(config)` | `authGraphQLTypes`, `createAuthResolvers`; `testGraphQLTypes`, `createTestResolvers` |
+| **Database** | `db = createServiceDatabaseAccess('{service}-service')` or `'core-service'` for shared | `createServiceDatabaseAccess('auth-service')` |
+| **Redis** | `redis = createServiceRedisAccess('{service}-service')` | `createServiceRedisAccess('auth-service')` |
+| **Index** | `registerServiceConfigDefaults`, `resolveContext`, `loadConfig`, `db.initialize`, `createGateway`, optional Redis / webhooks / `startListening` | Same order as auth-service index.ts |
+
+**Short name** for GraphQL: service name without `-service` (e.g. auth, payment, notification, test). Use camelCase for multi-word: `my-api` → `myApiGraphQLTypes`.
+
+**Service configuration – no process.env (dynamic config only):**
+
+- **Do not use `process.env` in microservices.** All config must come from the MongoDB config store via `getConfigWithDefault(SERVICE_NAME, key, { brand, tenantId })` in `config.ts`.
+- Register **every** value used at runtime in `config-defaults.ts`: `port`, `serviceName`, `nodeEnv`, `corsOrigins`, `jwt` (secret, expiresIn, refreshSecret, refreshExpiresIn), `database` (mongoUri, redisUrl). Use `{ value, description }` per key; add `sensitivePaths` for secrets.
+- In `loadConfig`, load each key with `getConfigWithDefault(SERVICE_NAME, key, { brand, tenantId }) ?? defaultFromSameFile`. No fallback to `process.env`. Deployment/infra can set values in the config store or via admin; the app reads only from the config store.
+- Existing services that still use `process.env` in config.ts should be migrated to this pattern when touched.
 
 ---
 

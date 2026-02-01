@@ -369,27 +369,31 @@ kubectl scale deployment auth-service --replicas=3 -n microservices
 
 ## Adding a New Service
 
-1. Add service to `configs/services.json`:
-```json
-{
-  "name": "new-service",
-  "host": "new-service",
-  "port": 9006,
-  "database": "new_service",
-  "healthPath": "/health",
-  "graphqlPath": "/graphql"
-}
-```
+1. **Scaffold the service** with the core-service generator (follows CODING_STANDARDS: dynamic config, GraphQL, database, Redis, error codes):
+   ```bash
+   cd core-service && npm run build
+   npx service-infra service --name <name> --port <port> --output ..
+   ```
+   Example: `npx service-infra service --name test --port 9006 --output ..` creates `test-service/` at repo root. See CODING_STANDARDS.md “Adding a New Service” for options (`--webhooks`, `--core-db`).
 
-2. Regenerate configs:
-```bash
-npm run generate:all
-```
+2. **Register in gateway**: add the service to `configs/services.dev.json` (and other profiles as needed):
+   ```json
+   {
+     "name": "test",
+     "host": "test-service",
+     "port": 9006,
+     "database": "test_service",
+     "healthPath": "/health",
+     "graphqlPath": "/graphql"
+   }
+   ```
 
-3. Restart development:
-```bash
-npm run dev
-```
+3. **Regenerate and run**:
+   ```bash
+   npm run generate
+   npm run dev
+   ```
+   Or use `npm run docker:fresh` after adding the service to gateway configs.
 
 ---
 
