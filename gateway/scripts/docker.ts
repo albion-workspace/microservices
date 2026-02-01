@@ -401,13 +401,9 @@ async function dockerUp(env: 'dev' | 'prod', config: ServicesConfig, mode: Confi
   const targetMsg = serviceName ? ` - ${serviceName} only` : '';
   printHeader(`Starting Docker Containers (${env})${targetMsg}`);
 
-  // Ensure network exists
-  await ensureNetworkExists();
-  
-  // Ensure MongoDB and Redis are running (creates them if needed - fresh install)
-  await ensureInfrastructure(config);
-
   if (serviceName) {
+    await ensureNetworkExists();
+    await ensureInfrastructure(config);
     const service = services[0];
     const svcName = `${service.name}-service`;
     const containerName = `${getInfraConfig().docker.projectName}-${service.name}-service`;
@@ -455,7 +451,14 @@ async function dockerUp(env: 'dev' | 'prod', config: ServicesConfig, mode: Confi
   // All services: use docker compose - always regenerate so file matches current --config (infra + services)
   await generateConfigs(mode);
 
-  // Remove old containers for fresh start
+  // Remove any infra containers started outside compose so compose can create them (same group).
+  const { mongo: mongoContainer, redis: redisContainer } = getDockerContainerNames(getInfraConfig());
+  try {
+    execSync(`docker rm -f ${mongoContainer} ${redisContainer}`, { stdio: 'pipe', shell: true });
+  } catch {
+    // None or one may not exist
+  }
+
   console.log('Cleaning old containers...');
   for (const service of services) {
     removeOldContainer(service.name);
