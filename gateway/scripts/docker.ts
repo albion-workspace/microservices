@@ -525,7 +525,7 @@ async function dockerDown(env: 'dev' | 'prod', config: ServicesConfig, serviceNa
   const composeFile = getComposeFile(env);
   const projectName = getInfraConfig().docker.projectName;
   
-  const proc = spawn('docker', ['compose', '-f', composeFile, '-p', projectName, 'down'], {
+  const proc = spawn('docker', ['compose', '-f', composeFile, '-p', projectName, 'down', '--remove-orphans'], {
     cwd: GATEWAY_DIR,
     stdio: 'inherit',
     shell: true,
