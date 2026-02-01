@@ -28,7 +28,7 @@ import {
   type LocalDependency,
 } from 'core-service';
 
-import { loadConfigFromArgs, logConfigSummary, getInfraConfig, getDockerContainerNames, type ServicesConfig, type ConfigMode, type InfraConfig, getMongoUri, getRedisUrl } from './config-loader.js';
+import { loadConfigFromArgs, logConfigSummary, getInfraConfig, getDockerContainerNames, getInternalPorts, type ServicesConfig, type ConfigMode, type InfraConfig, getMongoUri, getRedisUrl } from './config-loader.js';
 import { runScript, printHeader, printFooter } from './script-runner.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -171,22 +171,19 @@ function generateDevCompose(config: ServicesConfig, mode: ConfigMode): string {
   const projectName = docker.projectName;
   const networkName = docker.network;
 
-  // Always include mongo and redis in compose so they appear in the same Docker Desktop group (projectName).
-  // Inside Docker network containers listen on fixed ports (27017, 6379); config ports are for host binding only.
   const mongoHost = 'mongo';
   const redisHost = 'redis';
-  const MONGO_CONTAINER_PORT = 27017;
-  const REDIS_CONTAINER_PORT = 6379;
-
+  const { mongoPort, redisPort } = getInternalPorts(getInfraConfig());
   const redisPassword = redis.password;
   const redisAuth = redisPassword ? `:${redisPassword}@` : '';
-  const redisUrl = `redis://${redisAuth}${redisHost}:${REDIS_CONTAINER_PORT}`;
+  const redisUrl = `redis://${redisAuth}${redisHost}:${redisPort}`;
 
   const servicesToInclude =
     config.mode === 'shared'
       ? [config.services.find((s) => (s as { strategy?: string }).strategy === 'shared') ?? config.services[0]]
       : config.services;
 
+  const { dev: runtimeDev } = getInfraConfig().defaults.runtime;
   const serviceBlocks = servicesToInclude.map((svc) => {
     const containerName = `${projectName}-${svc.name}-service`;
     return `  ${svc.name}-service:
@@ -199,9 +196,9 @@ function generateDevCompose(config: ServicesConfig, mode: ConfigMode): string {
       - "${svc.port}:${svc.port}"
     environment:
       - PORT=${svc.port}
-      - NODE_ENV=development
-      - JWT_SECRET=dev-jwt-secret-change-in-production
-      - MONGO_URI=mongodb://${mongoHost}:${MONGO_CONTAINER_PORT}/${svc.database}
+      - NODE_ENV=${runtimeDev.nodeEnv}
+      - JWT_SECRET=${runtimeDev.jwtSecret}
+      - MONGO_URI=mongodb://${mongoHost}:${mongoPort}/${svc.database}
       - REDIS_URL=${redisUrl}
     depends_on:
       - mongo
@@ -239,6 +236,7 @@ volumes:
 function generateMongoDockerService(config: ServicesConfig, projectName: string, networkName: string): string {
   const mongo = config.infrastructure.mongodb;
   const { versions } = getInfraConfig();
+  const { mongoPort } = getInternalPorts(getInfraConfig());
   const containerName = `${projectName}-mongo`;
 
   if (mongo.mode === 'replicaSet' && mongo.members) {
@@ -252,7 +250,7 @@ function generateMongoDockerService(config: ServicesConfig, projectName: string,
     image: mongo:${versions.mongodb}
     command: ["--replSet", "${mongo.replicaSet}", "--bind_ip_all"]
     ports:
-      - "${mongo.port}:27017"
+      - "${mongo.port}:${mongoPort}"
     volumes:
       - mongo-data:/data/db
     networks:
@@ -261,7 +259,7 @@ function generateMongoDockerService(config: ServicesConfig, projectName: string,
       test: |
         mongosh --quiet --eval "
           try { rs.status().ok } catch (e) {
-            rs.initiate({_id: '${mongo.replicaSet}', members: [${members.map((m, i) => `{_id: ${i}, host: '${m.host.split('.')[0]}:27017'${m.priority ? `, priority: ${m.priority}` : ''}}`).join(', ')}]});
+            rs.initiate({_id: '${mongo.replicaSet}', members: [${members.map((m, i) => `{_id: ${i}, host: '${m.host.split('.')[0]}:${mongoPort}'${m.priority ? `, priority: ${m.priority}` : ''}}`).join(', ')}]});
             1
           }
         " | grep -q 1
@@ -295,7 +293,7 @@ function generateMongoDockerService(config: ServicesConfig, projectName: string,
     container_name: ${containerName}
     image: mongo:${versions.mongodb}
     ports:
-      - "${mongo.port}:27017"
+      - "${mongo.port}:${mongoPort}"
     volumes:
       - mongo-data:/data/db
     networks:
@@ -305,6 +303,7 @@ function generateMongoDockerService(config: ServicesConfig, projectName: string,
 function generateRedisDockerService(config: ServicesConfig, projectName: string, networkName: string): string {
   const redis = config.infrastructure.redis;
   const { versions } = getInfraConfig();
+  const { redisPort } = getInternalPorts(getInfraConfig());
   const containerName = `${projectName}-redis`;
 
   if (redis.mode === 'sentinel' && redis.sentinel) {
@@ -316,7 +315,7 @@ function generateRedisDockerService(config: ServicesConfig, projectName: string,
     image: redis:${versions.redis}
     command: ["redis-server", "--appendonly", "yes"]
     ports:
-      - "${redis.port}:6379"
+      - "${redis.port}:${redisPort}"
     volumes:
       - redis-data:/data
     networks:
@@ -329,7 +328,7 @@ ${sentinel.hosts
     return `  ${sentinelHost}:
     image: redis:${versions.redis}
     command: >
-      sh -c "echo 'sentinel monitor ${sentinel.name} redis 6379 2' > /tmp/sentinel.conf &&
+      sh -c "echo 'sentinel monitor ${sentinel.name} redis ${redisPort} 2' > /tmp/sentinel.conf &&
              echo 'sentinel down-after-milliseconds ${sentinel.name} 5000' >> /tmp/sentinel.conf &&
              echo 'sentinel failover-timeout ${sentinel.name} 60000' >> /tmp/sentinel.conf &&
              redis-sentinel /tmp/sentinel.conf"
@@ -349,7 +348,7 @@ ${sentinel.hosts
     image: redis:${versions.redis}
     command: ["redis-server", "--appendonly", "yes"]
     ports:
-      - "${redis.port}:6379"
+      - "${redis.port}:${redisPort}"
     volumes:
       - redis-data:/data
     networks:
@@ -364,12 +363,11 @@ function generateProdCompose(config: ServicesConfig, mode: ConfigMode): string {
   const projectName = docker.projectName;
   const networkName = docker.network;
 
-  // Inside Docker network containers listen on fixed ports; config ports are for host binding only.
-  const MONGO_CONTAINER_PORT = 27017;
-  const REDIS_CONTAINER_PORT = 6379;
+  const { mongoPort, redisPort } = getInternalPorts(getInfraConfig());
+  const { prod: runtimeProd } = getInfraConfig().defaults.runtime;
   const redisPassword = (redis as { password?: string }).password;
   const redisAuth = redisPassword ? `:${redisPassword}@` : '';
-  const redisUrl = `redis://${redisAuth}redis:${REDIS_CONTAINER_PORT}`;
+  const redisUrl = `redis://${redisAuth}redis:${redisPort}`;
 
   const servicesToInclude =
     config.mode === 'shared'
@@ -384,8 +382,9 @@ function generateProdCompose(config: ServicesConfig, mode: ConfigMode): string {
     image: ${svc.name}-service:latest
     environment:
       - PORT=${svc.port}
-      - NODE_ENV=production
-      - MONGO_URI=mongodb://mongo:${MONGO_CONTAINER_PORT}/${svc.database}
+      - NODE_ENV=${runtimeProd.nodeEnv}
+      - JWT_SECRET=${runtimeProd.jwtSecret}
+      - MONGO_URI=mongodb://mongo:${mongoPort}/${svc.database}
       - REDIS_URL=${redisUrl}
     depends_on:
       - mongo
@@ -507,14 +506,13 @@ ${config.services.map(s => `  ${s.name.toUpperCase().replace(/-/g, '_')}_PORT: "
 function generateK8sSecrets(config: ServicesConfig, namespace: string, mode: ConfigMode): string {
   const mongoHost = `mongodb.${namespace}.svc.cluster.local`;
   const redisHost = `redis.${namespace}.svc.cluster.local`;
+  const { mongoPort, redisPort } = getInternalPorts(getInfraConfig());
+  const { prod: runtimeProd } = getInfraConfig().defaults.runtime;
   const redisPassword = config.infrastructure.redis.password;
   const redisAuth = redisPassword ? `:${redisPassword}@` : '';
-  // Cluster-internal ports (services expose 27017/6379); config.port is for Docker host binding only.
-  const MONGO_CLUSTER_PORT = 27017;
-  const REDIS_CLUSTER_PORT = 6379;
 
   const perServiceMongoUris = config.services.map(svc =>
-    `  ${svc.name}-mongodb-uri: "mongodb://${mongoHost}:${MONGO_CLUSTER_PORT}/${svc.database}"`
+    `  ${svc.name}-mongodb-uri: "mongodb://${mongoHost}:${mongoPort}/${svc.database}"`
   ).join('\n');
 
   return `# Database Secrets - Per-service MongoDB URIs
@@ -525,7 +523,7 @@ metadata:
   namespace: ${namespace}
 type: Opaque
 stringData:
-  redis-url: "redis://${redisAuth}${redisHost}:${REDIS_CLUSTER_PORT}"
+  redis-url: "redis://${redisAuth}${redisHost}:${redisPort}"
 ${perServiceMongoUris}
 ---
 # JWT Secrets
@@ -536,13 +534,14 @@ metadata:
   namespace: ${namespace}
 type: Opaque
 stringData:
-  jwt-secret: "change-me-in-production"
+  jwt-secret: "${runtimeProd.jwtSecret}"
 `;
 }
 
 function generateK8sMongoDB(config: ServicesConfig, namespace: string): string {
   const mongo = config.infrastructure.mongodb;
   const { versions } = getInfraConfig();
+  const { mongoPort } = getInternalPorts(getInfraConfig());
 
   if (mongo.mode === 'replicaSet') {
     return `# MongoDB StatefulSet (Replica Set)
@@ -567,7 +566,7 @@ spec:
         image: mongo:${versions.mongodb}
         command: ["mongod", "--replSet", "${mongo.replicaSet}", "--bind_ip_all"]
         ports:
-        - containerPort: 27017
+        - containerPort: ${mongoPort}
         volumeMounts:
         - name: mongo-data
           mountPath: /data/db
@@ -590,12 +589,11 @@ spec:
   selector:
     app: mongodb
   ports:
-  - port: 27017
-    targetPort: 27017
+  - port: ${mongoPort}
+    targetPort: ${mongoPort}
 `;
   }
 
-  // Single mode
   return `# MongoDB Deployment (Single)
 apiVersion: apps/v1
 kind: Deployment
@@ -616,7 +614,7 @@ spec:
       - name: mongodb
         image: mongo:${versions.mongodb}
         ports:
-        - containerPort: 27017
+        - containerPort: ${mongoPort}
         volumeMounts:
         - name: mongo-data
           mountPath: /data/db
@@ -633,14 +631,15 @@ spec:
   selector:
     app: mongodb
   ports:
-  - port: 27017
-    targetPort: 27017
+  - port: ${mongoPort}
+    targetPort: ${mongoPort}
 `;
 }
 
 function generateK8sRedis(config: ServicesConfig, namespace: string): string {
   const redis = config.infrastructure.redis;
   const { versions } = getInfraConfig();
+  const { redisPort } = getInternalPorts(getInfraConfig());
 
   if (redis.mode === 'sentinel' && redis.sentinel) {
     return `# Redis with Sentinel
@@ -665,7 +664,7 @@ spec:
         image: redis:${versions.redis}
         command: ["redis-server", "--appendonly", "yes"]
         ports:
-        - containerPort: 6379
+        - containerPort: ${redisPort}
         volumeMounts:
         - name: redis-data
           mountPath: /data
@@ -688,12 +687,11 @@ spec:
   selector:
     app: redis
   ports:
-  - port: 6379
-    targetPort: 6379
+  - port: ${redisPort}
+    targetPort: ${redisPort}
 `;
   }
 
-  // Single mode
   return `# Redis Deployment (Single)
 apiVersion: apps/v1
 kind: Deployment
@@ -715,7 +713,7 @@ spec:
         image: redis:${versions.redis}
         command: ["redis-server", "--appendonly", "yes"]
         ports:
-        - containerPort: 6379
+        - containerPort: ${redisPort}
 ---
 apiVersion: v1
 kind: Service
@@ -726,8 +724,8 @@ spec:
   selector:
     app: redis
   ports:
-  - port: 6379
-    targetPort: 6379
+  - port: ${redisPort}
+    targetPort: ${redisPort}
 `;
 }
 
@@ -738,6 +736,7 @@ function generateK8sDeployment(svc: ServicesConfig['services'][0], config: Servi
     requests: { cpu: '100m', memory: '128Mi' },
     limits: { cpu: '500m', memory: '512Mi' }
   };
+  const { prod: runtimeProd } = getInfraConfig().defaults.runtime;
 
   return `apiVersion: apps/v1
 kind: Deployment
@@ -764,7 +763,7 @@ spec:
         - name: PORT
           value: "${svc.port}"
         - name: NODE_ENV
-          value: "production"
+          value: "${runtimeProd.nodeEnv}"
         - name: MONGO_URI
           valueFrom:
             secretKeyRef:

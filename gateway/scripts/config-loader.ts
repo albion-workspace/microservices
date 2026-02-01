@@ -56,6 +56,10 @@ export interface InfraConfig {
       graphqlPath: string;
       entryPoint: string;
     };
+    runtime: {
+      dev: { nodeEnv: string; jwtSecret: string };
+      prod: { nodeEnv: string; jwtSecret: string };
+    };
     mongodb: {
       port: number;
       replicaSet: string;
@@ -150,6 +154,18 @@ export function getDockerContainerNames(infra: InfraConfig): { mongo: string; re
   return {
     mongo: `${projectName}-mongo`,
     redis: `${projectName}-redis`,
+  };
+}
+
+/**
+ * Internal/container ports for MongoDB and Redis (single source of truth from infra.defaults).
+ * Use for: Docker compose service env (MONGO_URI, REDIS_URL), K8s secrets, K8s containerPort/targetPort.
+ * Host binding ports come from services.*.json infrastructure.mongodb.port / redis.port.
+ */
+export function getInternalPorts(infra: InfraConfig): { mongoPort: number; redisPort: number } {
+  return {
+    mongoPort: infra.defaults.mongodb.port,
+    redisPort: infra.defaults.redis.port,
   };
 }
 

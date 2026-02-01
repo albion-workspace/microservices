@@ -34,6 +34,16 @@
       "graphqlPath": "/graphql",
       "entryPoint": "dist/index.js"
     },
+    "runtime": {
+      "dev": {
+        "nodeEnv": "development",
+        "jwtSecret": "dev-jwt-secret-change-in-production"
+      },
+      "prod": {
+        "nodeEnv": "production",
+        "jwtSecret": "change-me-in-production"
+      }
+    },
     "mongodb": {
       "port": 27017,
       "replicaSet": "rs0"
