@@ -1,57 +1,63 @@
 # Service Generator
 
-The **service generator** (`service-infra service --name <name> ...`) is the single source of truth for microservice structure. New services are generated from this template; existing services (auth, bonus, payment, notification, kyc) should be aligned to the same pattern so all services share the same common infra and config approach.
+The **service generator** (`service-infra service --name <name> ...`) is the single source of truth for microservice structure. New services are generated from this template. **All current services** (auth, bonus, payment, notification, kyc) are aligned to this pattern and use dynamic config only.
 
-**Generic pattern only:** The template never emits `process.env`. The only exception is **outside** the generator: core-service itself or auth-service when using core DB may need `process.env` for bootstrap/strategy resolution (e.g. reading DB strategy before the config store is available). All other services must use **dynamic config only** (getConfigWithDefault / config store). Do not keep legacy `process.env` fallbacks—remove them per CODING_STANDARDS.
+**Alignment status (done):** auth, bonus, payment, notification, kyc all use `getConfigWithDefault` only in config.ts; index uses `config.redisUrl` and `SERVICE_NAME`; no `process.env` in code (only in comments). Verification: `grep process.env` in each service `src/` returns only comment lines. You can run and test all services; see **STATUS_CONFIG_AND_STANDARDS.md** (repo root) for summary and optional next steps.
 
-**Per-service, per-brand DB init:** The template covers init using existing accessors: `db.initialize({ brand, tenantId })` and (when Redis) `redis.initialize({ brand })` after `resolveContext()` and `loadConfig(context.brand, context.tenantId)`. Uses `createServiceDatabaseAccess(serviceName)` and `createServiceRedisAccess(serviceName)`.
+---
 
-**Config: key-by-key and single-JSON:** Default is key-by-key `getConfigWithDefault(SERVICE_NAME, key, { brand, tenantId })`. Services may also use a **single key** that holds a whole JSON object (e.g. `database`, `jwt`, or service-specific `providers`): `await getConfigWithDefault<YourType>(SERVICE_NAME, 'yourKey', { brand, tenantId }) ?? defaultYourKey`. Add that key to config-defaults.ts. No requirement that every key be one-by-one getWithDefault.
+**Generic pattern only:** The template never emits `process.env`. The only exception is **outside** the generator: core-service itself or auth-service when using core DB may need `process.env` for bootstrap/strategy resolution (e.g. reading DB strategy before the config store is available). All other services use **dynamic config only** (getConfigWithDefault / config store).
 
-**JWT (single secret, shared by default):** One JWT secret; same default everywhere (`shared-jwt-secret-change-in-production`). Gateway JSON is for bootstrap (Docker/K8s `JWT_SECRET`); runtime = dynamic config. Customization: JSON (shared) or dynamic config (per-service). **Common config (like database):** gateway key has jwt, database, corsOrigins, nodeEnv; all services use `getConfigWithDefault(service, key) ?? getConfigWithDefault('gateway', key)`. Gateway passes `JWT_SECRET` from config (gateway `services.*.json` → `environments.docker` or `environments.prod`, else `infra.defaults.runtime`). At runtime, services read from the config store; auth-service registers a shared key `gateway` with `GATEWAY_JWT_DEFAULTS` so `getConfigWithDefault('gateway', 'jwt')` can be used as a fallback when the service’s own `jwt` is empty. Same pattern as database: one key (e.g. `gateway`) for shared, or per-service override.
+**Per-service, per-brand DB init:** The template uses `db.initialize({ brand, tenantId })` and (when Redis) `redis.initialize({ brand })` after `resolveContext()` and `loadConfig(context.brand, context.tenantId)`. Uses `createServiceDatabaseAccess(serviceName)` and `createServiceRedisAccess(serviceName)`.
 
-**Config interface – DefaultServiceConfig:** Common properties are defined once in core-service as `DefaultServiceConfig`: port, nodeEnv, serviceName, mongoUri, redisUrl, corsOrigins, jwt\*, and optional `useMongoTransactions` (used by payment/bonus; others ignore). Each microservice's config interface **extends DefaultServiceConfig** and adds only service-specific properties (e.g. `PaymentConfig extends DefaultServiceConfig { exchangeRateDefaultSource, ... }`). The service generator emits `export interface {Service}Config extends DefaultServiceConfig {}`; add service-specific fields in types.ts. Reduces duplication; see CODING_STANDARDS.md.
+**Config: key-by-key and single-JSON:** Default is key-by-key `getConfigWithDefault(SERVICE_NAME, key, { brand, tenantId })`. Services may also use a **single key** that holds a whole JSON object (e.g. `database`, `jwt`, or service-specific `providers`): `await getConfigWithDefault<YourType>(SERVICE_NAME, 'yourKey', { brand, tenantId }) ?? defaultYourKey`. Add that key to config-defaults.ts.
+
+**JWT (single secret, shared by default):** One JWT secret; same default everywhere (`shared-jwt-secret-change-in-production`). Gateway key has jwt, database, corsOrigins, nodeEnv; all services use `getConfigWithDefault(SERVICE_NAME, key) ?? getConfigWithDefault('gateway', key)`. Auth-service registers `gateway` with `GATEWAY_JWT_DEFAULTS` so `getConfigWithDefault('gateway', 'jwt')` can be used as fallback.
+
+**Config interface – DefaultServiceConfig:** Common properties are in core-service `DefaultServiceConfig` (port, nodeEnv, serviceName, mongoUri, redisUrl, corsOrigins, jwt\*, optional useMongoTransactions). Each service: `export interface {Service}Config extends DefaultServiceConfig { ... }` in types.ts only; add only service-specific properties. Generator emits `export interface {Service}Config extends DefaultServiceConfig {}`.
+
+**SERVICE_NAME:** Exported from config.ts (`export const SERVICE_NAME = '{service}-service'`). Used in config.ts for `getConfigWithDefault(SERVICE_NAME, key, ...)` and in index.ts for `registerServiceConfigDefaults(SERVICE_NAME, ...)` and `ensureDefaultConfigsCreated(SERVICE_NAME, ...)`. No static service name string in index.
 
 This document describes:
-1. **Config analysis** – which services use dynamic config vs `process.env`
-2. **Steps for the template** – what the generator must contain so it matches “all common stuff” of other services
-3. **Steps to align existing services** – how to make auth, bonus, payment, notification, kyc match the generated template
+1. **Current state** – all services aligned; what the template contains
+2. **Template reference** – what the generator emits and how to keep it complete
+3. **Maintenance reference** – when adding a new service or touching config, follow these rules
 
 ---
 
-## 1. Config analysis (dynamic vs process.env)
+## 1. Current state (all services aligned)
 
-**CODING_STANDARDS.md** requires: *"Do not use `process.env` in microservices. All config must come from the MongoDB config store via `getConfigWithDefault`."*
+All five microservices (auth, bonus, payment, notification, kyc) match the generator pattern:
 
-| Service | config.ts | index.ts / other | Aligned to template? |
-|--------|-----------|-------------------|----------------------|
-| **kyc-service** (generated) | ✅ getConfigWithDefault only | ✅ config.redisUrl | **Yes** – reference |
-| auth-service | ❌ env overrides (port, mongo, redis, jwt, oauth, smtp, twilio, urls, cors, etc.) | ❌ REDIS_URL in index; JWT/URLs in graphql, oauth-routes, password, otp-provider | **No** |
-| bonus-service | ❌ env overrides (port, mongo, redis, nodeEnv, serviceName, cors, jwt) | ❌ REDIS_URL in index; MONGO_TRANSACTIONS in bonus.ts | **No** |
-| payment-service | ❌ env overrides (port, mongo, redis, jwt, exchangeRate, transaction, wallet, transfer) | ❌ REDIS_URL in index; MONGO_TRANSACTIONS in transfer/transaction/wallet | **No** |
-| notification-service | ❌ env overrides (port, mongo, redis, smtp, twilio, push, queue, realtime) | ❌ CORS + JWT in index.ts | **No** |
+| Service | config.ts | index.ts | Notes |
+|--------|-----------|----------|-------|
+| auth-service | getConfigWithDefault only; gateway fallback for jwt, database, nodeEnv, corsOrigins | config.redisUrl; SERVICE_NAME; registerServiceConfigDefaults(SERVICE_NAME, …) | Auth-specific keys in config-defaults; domain code uses getAuthConfig() |
+| bonus-service | getConfigWithDefault only; gateway fallback | config.redisUrl; SERVICE_NAME; ensureDefaultConfigsCreated(SERVICE_NAME, …) | transaction.useTransactions in config |
+| payment-service | getConfigWithDefault only; gateway fallback | config.redisUrl; SERVICE_NAME | exchangeRate, transaction, wallet, transfer keys |
+| notification-service | getConfigWithDefault only; gateway fallback | SERVICE_NAME; registerServiceConfigDefaults(SERVICE_NAME, …) | smtp, twilio, push, queue, realtime keys |
+| kyc-service | loadConfig with getConfigWithDefault only; gateway fallback | loadConfig; SERVICE_NAME; KYC_CONFIG_DEFAULTS exported from config-defaults | Single-JSON keys (providers, verification, etc.) in config-defaults |
 
-**Conclusion:** Only the **generated** service (e.g. kyc-service) is fully aligned. Other services use a hybrid: `getConfigWithDefault` for some keys but `process.env` overrides in `config.ts` and `process.env` in `index.ts` / domain code. Aligning them means making them behave as if they were generated from the template and then given service-specific additions (extra config keys, resolvers, event handlers).
+**Verification:** In each service `src/`, `grep process.env` returns only comments (e.g. “No process.env (CODING_STANDARDS)”). No runtime use of process.env for app config.
 
 ---
 
-## 2. Steps for the template (generator)
+## 2. Template reference (generator output)
 
-Ensure the **service template** (output of `service-generator.ts`) contains all **common** infra that every service should have. When adding behavior that is shared across auth, bonus, payment, notification, add it to the generator so new services get it by default and alignment is straightforward.
+The **service template** (output of `service-generator.ts`) is the canonical structure. When adding shared behavior across services, add it to the generator so new services get it by default.
 
-### 2.1 What the template already contains
+### 2.1 What the template contains
 
 - **package.json** – name, scripts (start, dev, build, build:run, test), dependencies (access-engine, core-service), devDependencies (@types/node, typescript)
 - **tsconfig.json** – ES2020, ESNext, strict, rootDir src, outDir dist
 - **src/database.ts** – `createServiceDatabaseAccess(serviceName)` (or core-service for `--core-db`)
 - **src/redis.ts** – `createServiceRedisAccess(serviceName)` (when `--redis`)
 - **src/error-codes.ts** – `{SERVICE}_ERRORS`, `{SERVICE}_ERROR_CODES`, type `{Service}ErrorCode`, prefix `MS{Service}`
-- **src/config-defaults.ts** – `{SERVICE}_CONFIG_DEFAULTS` with port, serviceName, nodeEnv, corsOrigins, jwt, database (mongoUri, redisUrl); sensitivePaths for secrets
-- **src/config.ts** – `loadConfig(brand?, tenantId?)` using **only** `getConfigWithDefault(SERVICE_NAME, key, { brand, tenantId }) ?? default`; no `process.env`
+- **src/config-defaults.ts** – `{SERVICE}_CONFIG_DEFAULTS` with port, serviceName, nodeEnv, corsOrigins, jwt, database (mongoUri, redisUrl); sensitivePaths for secrets. **No** registration call; index calls `registerServiceConfigDefaults(SERVICE_NAME, {SERVICE}_CONFIG_DEFAULTS)`.
+- **src/config.ts** – `export const SERVICE_NAME = '{service}-service'`; `loadConfig(brand?, tenantId?)` using **only** `getConfigWithDefault(SERVICE_NAME, key, { brand, tenantId }) ?? default`; no `process.env`
 - **src/types.ts** – `{Service}Config extends DefaultServiceConfig` (from core-service); add only service-specific properties
 - **src/graphql.ts** – `{shortName}GraphQLTypes`, `create{Service}Resolvers(config)` with health + `{name}Health`
 - **src/services/index.ts** – placeholder export
-- **src/index.ts** – registerServiceConfigDefaults → resolveContext → loadConfig → validateConfig → printConfigSummary → db.initialize → createGateway(services, permissions, mongoUri, redisUrl) → Redis init using **config.redisUrl** → ensureDefaultConfigsCreated → startListening using **config.redisUrl** → registerServiceErrorCodes
+- **src/index.ts** – imports `SERVICE_NAME` from config; `registerServiceConfigDefaults(SERVICE_NAME, {SERVICE}_CONFIG_DEFAULTS)` → resolveContext → loadConfig → validateConfig → printConfigSummary → db.initialize → createGateway(...) → Redis init using **config.redisUrl** → ensureDefaultConfigsCreated(SERVICE_NAME, ...) → startListening using **config.redisUrl** → registerServiceErrorCodes
 
 ### 2.2 Steps to keep the template complete and common
 
@@ -76,9 +82,9 @@ Ensure the **service template** (output of `service-generator.ts`) contains all 
 
 ---
 
-## 3. Steps to align existing services to the template
+## 3. Maintenance reference (new services and config changes)
 
-Goal: auth, bonus, payment, notification (and any other existing service) should **look as if** they were generated from the template and then extended with service-specific config, resolvers, and domain logic. No behavior change required for deployment if infra already injects env vars; we only change **where** the app reads config (config store only).
+Use this section when **adding a new service** (generate with the CLI, then add business logic) or when **changing config** in an existing service. All current services already follow this; the rules below keep them and new ones consistent.
 
 ### 3.1 Config (config.ts and config-defaults.ts)
 
@@ -90,52 +96,32 @@ Goal: auth, bonus, payment, notification (and any other existing service) should
 - **SERVICE_NAME** – Defined and exported from config.ts (`export const SERVICE_NAME = '{service}-service'`). Used in config.ts for `getConfigWithDefault(SERVICE_NAME, key, ...)` and in index.ts for `registerServiceConfigDefaults(SERVICE_NAME, ...)` and `ensureDefaultConfigsCreated(SERVICE_NAME, ...)`. Single constant, no static string for the service name in index.
 
 1. **config.ts**
-   - For **every** key used at runtime, use only:
-     - `await getConfigWithDefault(SERVICE_NAME, key, { brand, tenantId }) ?? default`
-     - where `default` is a literal or a value from the same file (e.g. from a constants object), **not** `process.env`.
-   - Remove all `process.env.*` fallbacks (PORT, MONGO_URI, REDIS_URL, NODE_ENV, SERVICE_NAME, CORS_ORIGINS, JWT_*, and any service-specific env vars).
-   - Keep the same keys and types; only the source of the value changes (config store instead of env).
+   - For every key used at runtime: `await getConfigWithDefault(SERVICE_NAME, key, { brand, tenantId }) ?? default` (default is literal or from same file, **not** `process.env`).
+   - Export `SERVICE_NAME`; use it for all getConfigWithDefault and in index for registerServiceConfigDefaults / ensureDefaultConfigsCreated.
+   - No `process.env` fallbacks.
 
 2. **config-defaults.ts**
-   - Ensure **every** key read in `loadConfig` exists in `{SERVICE}_CONFIG_DEFAULTS` with `value`, `description`, and `sensitivePaths` where appropriate (e.g. jwt, database, smtp, twilio).
-   - If a key exists in config.ts but not in config-defaults, add it so that `registerServiceConfigDefaults` and `ensureDefaultConfigsCreated` can create it in the store.
-
-3. **Order of migration (per service)**
-   - Prefer doing one service at a time (e.g. bonus, then payment, then notification, then auth).
-   - Within a service: first port, mongoUri, redisUrl, nodeEnv, serviceName, corsOrigins, jwt; then domain-specific keys (exchangeRate, transaction, wallet, transfer, smtp, twilio, oauth, etc.).
+   - Every key read in `loadConfig` must exist in `{SERVICE}_CONFIG_DEFAULTS` with `value`, `description`, and `sensitivePaths` where appropriate.
+   - No registration logic in this file; index calls `registerServiceConfigDefaults(SERVICE_NAME, {SERVICE}_CONFIG_DEFAULTS)`.
 
 ### 3.2 Index and bootstrap
 
-4. **index.ts**
-   - Replace any `process.env.REDIS_URL` with `config.redisUrl` for:
-     - `configureRedisStrategy({ defaultUrl: ... })`
-     - `redis.initialize(...)`
-     - `startListening(...)` (guard with `if (config.redisUrl)`).
-   - Ensure gateway options (port, cors, jwt, mongoUri, redisUrl) come from `config` only (already the case once config is loaded from config store).
+3. **index.ts**
+   - Import `SERVICE_NAME` from config. Use `registerServiceConfigDefaults(SERVICE_NAME, {SERVICE}_CONFIG_DEFAULTS)` and `ensureDefaultConfigsCreated(SERVICE_NAME, ...)` (no static service name string).
+   - Use `config.redisUrl` for configureRedisStrategy, redis.initialize, startListening (guard with `if (config.redisUrl)`). All gateway options from `config` only.
+   - Order: registerServiceConfigDefaults(SERVICE_NAME, …) → resolveContext → loadConfig → validateConfig → printConfigSummary → db.initialize → createGateway(...) → Redis init (if config.redisUrl) → ensureDefaultConfigsCreated(SERVICE_NAME, …) → startListening (if config.redisUrl) → registerServiceErrorCodes.
 
-5. **Order of execution**
-   - Match the template: registerServiceConfigDefaults → resolveContext → loadConfig → validateConfig → printConfigSummary → db.initialize → createGateway(...) → Redis init (if config.redisUrl) → ensureDefaultConfigsCreated → startListening (if config.redisUrl) → registerServiceErrorCodes. Reorder only if necessary for legacy reasons; document the reason.
+### 3.3 Domain code
 
-### 3.3 Domain code (no process.env)
+4. **Use config, not process.env**
+   - App config (JWT, URLs, feature flags) must come from the loaded config (e.g. getAuthConfig(), or config passed from index). No `process.env` for app config in domain code.
+   - Feature flags (e.g. use MongoDB transactions): add a key in config-defaults and loadConfig; expose on `{Service}Config`; use config in domain code.
 
-6. **Use config or inject options**
-   - Any file that today reads `process.env` for **app config** (e.g. JWT secret, URLs, feature flags) should instead receive config via arguments or a shared `loadConfig()` result. Examples:
-     - **auth**: graphql.ts, oauth-routes.ts, password.ts, otp-provider.ts – use config (jwt, frontendUrl, appUrl, notificationServiceUrl) from the single loaded config; do not read `process.env.JWT_SECRET`, `process.env.FRONTEND_URL`, etc.
-   - **Feature flags / operational options** (e.g. “use MongoDB transactions”): add a key to config (e.g. `transaction.useTransactions`) and read it via `getConfigWithDefault` in config.ts; expose on `{Service}Config`. Remove `process.env.MONGO_TRANSACTIONS` from payment-service and bonus-service and use the config value instead.
+### 3.4 Verification
 
-### 3.4 Auth-service specifics
-
-7. Auth has the most env usage (OAuth, SMTP, Twilio, URLs, password/OTP/session). Migrate in stages:
-   - Stage 1: port, mongoUri, redisUrl, nodeEnv, serviceName, jwt, corsOrigins → config store only; index.ts uses config.redisUrl.
-   - Stage 2: urls (frontendUrl, appUrl), password/OTP/session defaults → config-defaults + getConfigWithDefault only.
-   - Stage 3: OAuth, SMTP, Twilio, WhatsApp, Telegram → config-defaults + getConfigWithDefault only; remove process.env in config.ts.
-   - Stage 4: graphql.ts, oauth-routes.ts, password.ts, otp-provider.ts – stop using process.env; use config passed from index or a shared getConfig().
-
-### 3.5 Verification
-
-8. After alignment for a service:
-   - Grep for `process.env` in that service’s `src`: there should be **no** matches (except possibly in a test or script that is clearly tooling).
-   - Build and run the service; ensure gateway still starts it with the same env vars if needed – the app will ignore them and read from the config store once defaults are created (e.g. by ensureDefaultConfigsCreated or by an admin seeding the store from env).
+5. When adding or changing config:
+   - `grep process.env` in that service’s `src/` should only hit comments (or a documented bootstrap exception).
+   - Build and run the service; gateway can still pass env for infra/bootstrap; the app reads from the config store once defaults exist.
 
 ---
 
@@ -151,4 +137,6 @@ Goal: auth, bonus, payment, notification (and any other existing service) should
 
 - **Gateway:** Add the new service to `gateway/configs/services.dev.json` (and other profiles); run `npm run generate` from gateway; use same port as in config-defaults.
 
-- **Finding process.env usage:** When aligning a service, run `grep -r "process\.env" src/` in that service to get a file-by-file list; use it to drive the alignment steps above.
+- **Status:** See **STATUS_CONFIG_AND_STANDARDS.md** (repo root) for what’s done and optional next steps. All five services are aligned; you can run and test them now.
+
+- **Verification:** `grep -r "process\.env" src/` in a service should only return comment lines (or documented bootstrap exception). Use this when adding config or touching a service.

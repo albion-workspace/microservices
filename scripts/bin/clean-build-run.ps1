@@ -99,9 +99,8 @@ Write-Host ""
 Write-Host "[STEP 6] Starting all services in WATCH MODE..." -ForegroundColor Yellow
 Write-Host ""
 
-# Get path to start-service-dev.ps1 script
-$scriptsDir = Split-Path -Parent $PSScriptRoot
-$startServiceDevScript = Join-Path $scriptsDir "start-service-dev.ps1"
+# Get path to start-service-dev.ps1 script (same directory as this script)
+$startServiceDevScript = Join-Path $PSScriptRoot "start-service-dev.ps1"
 
 # Auth Service (port 9001) - Watch Mode
 Write-Host "  Starting Auth Service (port 9001) in WATCH MODE..." -ForegroundColor Cyan
@@ -123,6 +122,11 @@ Write-Host "  Starting Notification Service (port 9004) in WATCH MODE..." -Foreg
 Start-Process powershell -ArgumentList "-ExecutionPolicy", "Bypass", "-File", $startServiceDevScript, "notification-service"
 Start-Sleep -Seconds 3
 
+# KYC Service (port 9005) - Watch Mode
+Write-Host "  Starting KYC Service (port 9005) in WATCH MODE..." -ForegroundColor Cyan
+Start-Process powershell -ArgumentList "-ExecutionPolicy", "Bypass", "-File", $startServiceDevScript, "kyc-service"
+Start-Sleep -Seconds 3
+
 # React App (port 5173) - Already in watch mode
 Write-Host "  Starting React App (port 5173) in WATCH MODE..." -ForegroundColor Cyan
 $reactScript = "cd '$rootDir\app'; Write-Host '=== REACT APP (Port 5173) - WATCH MODE ===' -ForegroundColor Cyan; npm run dev"
@@ -139,6 +143,7 @@ Write-Host "  - Auth Service:         http://localhost:9001" -ForegroundColor Gr
 Write-Host "  - Payment Service:      http://localhost:9002" -ForegroundColor Green
 Write-Host "  - Bonus Service:        http://localhost:9003" -ForegroundColor Green
 Write-Host "  - Notification Service: http://localhost:9004" -ForegroundColor Green
+Write-Host "  - KYC Service:          http://localhost:9005" -ForegroundColor Green
 Write-Host "  - React App:            http://localhost:5173" -ForegroundColor Green
 Write-Host ""
 Write-Host "[WAIT] Waiting 25 seconds for services to initialize..." -ForegroundColor Yellow
@@ -155,7 +160,8 @@ $services = @(
     @{ Name = "Auth Service"; Url = "http://localhost:9001/health" },
     @{ Name = "Payment Service"; Url = "http://localhost:9002/health" },
     @{ Name = "Bonus Service"; Url = "http://localhost:9003/health" },
-    @{ Name = "Notification Service"; Url = "http://localhost:9004/health" }
+    @{ Name = "Notification Service"; Url = "http://localhost:9004/health" },
+    @{ Name = "KYC Service"; Url = "http://localhost:9005/health" }
 )
 
 foreach ($service in $services) {
