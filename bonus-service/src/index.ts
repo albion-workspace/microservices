@@ -43,7 +43,7 @@ import { hasAnyRole as hasAnyRoleAccess } from 'core-service/access';
 import { BONUS_ERRORS, BONUS_ERROR_CODES } from './error-codes.js';
 import { setupRecovery } from './recovery-setup.js';
 import { createBonusEngine, type BonusEngineOptions } from './services/bonus-engine/index.js';
-import { loadConfig, validateConfig, printConfigSummary, setUseMongoTransactions, type BonusConfig } from './config.js';
+import { loadConfig, validateConfig, printConfigSummary, setUseMongoTransactions, SERVICE_NAME, type BonusConfig } from './config.js';
 import { BONUS_CONFIG_DEFAULTS } from './config-defaults.js';
 import {
   bonusWebhooks,
@@ -968,7 +968,7 @@ async function main() {
   registerServiceErrorCodes(BONUS_ERROR_CODES);
 
   // Register default configs (auto-created in DB if missing)
-  registerServiceConfigDefaults('bonus-service', BONUS_CONFIG_DEFAULTS);
+  registerServiceConfigDefaults(SERVICE_NAME, BONUS_CONFIG_DEFAULTS);
 
   // Load config (MongoDB + env vars + defaults)
   // Resolve brand/tenantId dynamically (from user context, config store, or env vars)
@@ -1018,7 +1018,7 @@ async function main() {
   // Ensure all registered default configs are created in database
   // This happens after database connection is established
   try {
-    const createdCount = await ensureDefaultConfigsCreated('bonus-service', {
+    const createdCount = await ensureDefaultConfigsCreated(SERVICE_NAME, {
       brand: context.brand,
       tenantId: context.tenantId,
     });

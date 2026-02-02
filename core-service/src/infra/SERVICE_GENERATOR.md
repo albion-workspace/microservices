@@ -82,6 +82,13 @@ Goal: auth, bonus, payment, notification (and any other existing service) should
 
 ### 3.1 Config (config.ts and config-defaults.ts)
 
+**File responsibilities (no mixing):**
+
+- **types.ts** – Type definitions only: `{Service}Config extends DefaultServiceConfig`, domain types, input/output interfaces. No default values, no `loadConfig`, no registration.
+- **config.ts** – Loading logic only: `loadConfig(brand?, tenantId?)`, `validateConfig`, `printConfigSummary`, getter/setter for current config. Imports `{Service}Config` from `./types.js`; re-exports it. No interface definitions for the service config; no default value constants (those live in config-defaults).
+- **config-defaults.ts** – Default value definitions only: export `{SERVICE}_CONFIG_DEFAULTS` with every key used by `loadConfig` (and by domain code). Optionally export a derived type for default shapes (e.g. `ConfigDefaultValues<typeof AUTH_CONFIG_DEFAULTS>`). **No** `loadConfig`, **no** `registerServiceConfigDefaults` call in this file; index.ts calls `registerServiceConfigDefaults(SERVICE_NAME, {SERVICE}_CONFIG_DEFAULTS)`.
+- **SERVICE_NAME** – Defined and exported from config.ts (`export const SERVICE_NAME = '{service}-service'`). Used in config.ts for `getConfigWithDefault(SERVICE_NAME, key, ...)` and in index.ts for `registerServiceConfigDefaults(SERVICE_NAME, ...)` and `ensureDefaultConfigsCreated(SERVICE_NAME, ...)`. Single constant, no static string for the service name in index.
+
 1. **config.ts**
    - For **every** key used at runtime, use only:
      - `await getConfigWithDefault(SERVICE_NAME, key, { brand, tenantId }) ?? default`

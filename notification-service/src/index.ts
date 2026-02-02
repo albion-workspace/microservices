@@ -30,7 +30,7 @@ import {
   resolveContext,
 } from 'core-service';
 
-import { loadConfig, validateConfig, printConfigSummary, type NotificationConfig } from './config.js';
+import { loadConfig, validateConfig, printConfigSummary, SERVICE_NAME, type NotificationConfig } from './config.js';
 import { NOTIFICATION_CONFIG_DEFAULTS } from './config-defaults.js';
 import { NotificationService } from './notification-service.js';
 import { notificationGraphQLTypes, createNotificationResolvers } from './graphql.js';
@@ -102,7 +102,7 @@ async function main() {
   registerServiceErrorCodes(NOTIFICATION_ERROR_CODES);
 
   // Register default configs (auto-created in DB if missing)
-  registerServiceConfigDefaults('notification-service', NOTIFICATION_CONFIG_DEFAULTS);
+  registerServiceConfigDefaults(SERVICE_NAME, NOTIFICATION_CONFIG_DEFAULTS);
 
   // Load config (MongoDB + env vars + defaults)
   // Resolve brand/tenantId dynamically (from user context, config store, or env vars)

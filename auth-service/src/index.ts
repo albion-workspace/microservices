@@ -43,7 +43,7 @@ import {
 import { db } from './database.js';
 import { redis } from './redis.js';
 
-import { loadConfig, validateConfig, printConfigSummary, setAuthConfig } from './config.js';
+import { loadConfig, validateConfig, printConfigSummary, setAuthConfig, SERVICE_NAME } from './config.js';
 import { AUTH_CONFIG_DEFAULTS, GATEWAY_JWT_DEFAULTS, GATEWAY_DATABASE_DEFAULTS, GATEWAY_COMMON_DEFAULTS } from './config-defaults.js';
 import { configurePassport } from './providers/passport-strategies.js';
 import { setupOAuthRoutes } from './oauth-routes.js';
@@ -349,7 +349,7 @@ async function main() {
   // ═══════════════════════════════════════════════════════════════════
 
   // Register default configs (auto-created in DB if missing)
-  registerServiceConfigDefaults('auth-service', AUTH_CONFIG_DEFAULTS);
+  registerServiceConfigDefaults(SERVICE_NAME, AUTH_CONFIG_DEFAULTS);
   registerServiceConfigDefaults('gateway', { ...GATEWAY_JWT_DEFAULTS, ...GATEWAY_DATABASE_DEFAULTS, ...GATEWAY_COMMON_DEFAULTS });
 
   // Load config (MongoDB config store; JWT can fall back to gateway key)
@@ -555,7 +555,7 @@ async function main() {
   // Ensure all registered default configs are created in database
   // This happens after database connection is established
   try {
-    const createdCount = await ensureDefaultConfigsCreated('auth-service', {
+    const createdCount = await ensureDefaultConfigsCreated(SERVICE_NAME, {
       brand: context.brand,
       tenantId: context.tenantId,
     });

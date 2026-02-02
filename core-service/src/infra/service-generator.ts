@@ -241,7 +241,7 @@ export const ${serviceNameConst.toUpperCase()}_CONFIG_DEFAULTS = {
 import { getConfigWithDefault } from 'core-service';
 import type { ${serviceNamePascal}Config } from './types.js';
 
-const SERVICE_NAME = '${serviceNameKebab}';
+export const SERVICE_NAME = '${serviceNameKebab}';
 
 export async function loadConfig(brand?: string, tenantId?: string): Promise<${serviceNamePascal}Config> {
   const port = (await getConfigWithDefault<number>(SERVICE_NAME, 'port', { brand, tenantId })) ?? ${port};
@@ -404,13 +404,13 @@ import {
 } from 'core-service';
 import { db } from './database.js';${redisImport}${eventDispatcherImport}
 
-import { loadConfig, validateConfig, printConfigSummary } from './config.js';
+import { loadConfig, validateConfig, printConfigSummary, SERVICE_NAME } from './config.js';
 import { ${serviceNameConst.toUpperCase()}_CONFIG_DEFAULTS } from './config-defaults.js';
 import { ${serviceNameConst.toUpperCase()}_ERROR_CODES } from './error-codes.js';
 import { ${graphqlTypesName}, create${serviceNamePascal}Resolvers } from './graphql.js';
 
 async function main() {
-  registerServiceConfigDefaults('${serviceNameKebab}', ${serviceNameConst.toUpperCase()}_CONFIG_DEFAULTS);
+  registerServiceConfigDefaults(SERVICE_NAME, ${serviceNameConst.toUpperCase()}_CONFIG_DEFAULTS);
   const context = await resolveContext();
   const config = await loadConfig(context.brand, context.tenantId);
   validateConfig(config);
@@ -445,7 +445,7 @@ async function main() {
   });${redisInit}
 
   try {
-    const created = await ensureDefaultConfigsCreated('${serviceNameKebab}', { brand: context.brand, tenantId: context.tenantId });
+    const created = await ensureDefaultConfigsCreated(SERVICE_NAME, { brand: context.brand, tenantId: context.tenantId });
     if (created > 0) logger.info(\`Created \${created} default config(s)\`);
   } catch (e) {
     logger.warn('ensureDefaultConfigsCreated failed', { error: (e as Error).message });

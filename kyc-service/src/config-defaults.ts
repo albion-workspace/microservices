@@ -1,20 +1,14 @@
 /**
  * KYC Service Configuration Defaults
  *
- * Registers default configuration values with core-service config store.
- * Common keys (port, serviceName, nodeEnv, corsOrigins, jwt, database) used by loadConfig();
- * single-JSON keys (providers, verification, compliance, etc.) used by domain code.
+ * Every key read in loadConfig (and by domain code) must exist here.
+ * Pass to registerServiceConfigDefaults('kyc-service', KYC_CONFIG_DEFAULTS) in index.ts.
+ * No process.env; no registration logic in this file (CODING_STANDARDS / service generator).
  */
 
-import { registerServiceConfigDefaults } from 'core-service';
-
-/**
- * KYC Service configuration defaults
- */
-export function registerKYCConfigDefaults(): void {
-  registerServiceConfigDefaults('kyc-service', {
-    // Common (key-by-key in config.ts)
-    port: { value: 9005, description: 'HTTP port' },
+// Common (key-by-key in config.ts)
+export const KYC_CONFIG_DEFAULTS = {
+  port: { value: 9005, description: 'HTTP port' },
     serviceName: { value: 'kyc-service', description: 'Service name' },
     nodeEnv: { value: 'development', description: 'Node environment' },
     corsOrigins: {
@@ -219,5 +213,4 @@ export function registerKYCConfigDefaults(): void {
         ],
       },
     },
-  });
-}
+} as const;

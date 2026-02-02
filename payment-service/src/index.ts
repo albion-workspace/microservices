@@ -51,7 +51,7 @@ import {
   type PaymentWebhookEvents,
 } from './event-dispatcher.js';
 import { PAYMENT_ERROR_CODES, PAYMENT_ERRORS } from './error-codes.js';
-import { loadConfig, validateConfig, printConfigSummary, setUseMongoTransactions, type PaymentConfig } from './config.js';
+import { loadConfig, validateConfig, printConfigSummary, setUseMongoTransactions, SERVICE_NAME, type PaymentConfig } from './config.js';
 import { PAYMENT_CONFIG_DEFAULTS } from './config-defaults.js';
 
 // Re-export for consumers
@@ -776,7 +776,7 @@ async function main() {
   registerServiceErrorCodes(PAYMENT_ERROR_CODES);
 
   // Register default configs (auto-created in DB if missing)
-  registerServiceConfigDefaults('payment-service', PAYMENT_CONFIG_DEFAULTS);
+  registerServiceConfigDefaults(SERVICE_NAME, PAYMENT_CONFIG_DEFAULTS);
 
   // Load config (MongoDB + env vars + defaults)
   // Resolve brand/tenantId dynamically (from user context, config store, or env vars)
@@ -803,7 +803,7 @@ async function main() {
   // Ensure all registered default configs are created in database
   // This happens after database connection is established
   try {
-    const createdCount = await ensureDefaultConfigsCreated('payment-service', {
+    const createdCount = await ensureDefaultConfigsCreated(SERVICE_NAME, {
       brand: context.brand,
       tenantId: context.tenantId,
     });

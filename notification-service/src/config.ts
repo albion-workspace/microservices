@@ -10,7 +10,7 @@ import type { NotificationConfig } from './types.js';
 
 export type { NotificationConfig };
 
-const SERVICE_NAME = 'notification-service';
+export const SERVICE_NAME = 'notification-service';
 
 export async function loadConfig(brand?: string, tenantId?: string): Promise<NotificationConfig> {
   const port = (await getConfigWithDefault<number>(SERVICE_NAME, 'port', { brand, tenantId })) ?? 9004;

@@ -10,7 +10,7 @@ import { logger, getConfigWithDefault } from 'core-service';
 
 export type { BonusConfig } from './types.js';
 
-const SERVICE_NAME = 'bonus-service';
+export const SERVICE_NAME = 'bonus-service';
 
 /** Set by index after loadConfig so bonus.ts sagaOptions can read it without process.env */
 let _useMongoTransactions = true;

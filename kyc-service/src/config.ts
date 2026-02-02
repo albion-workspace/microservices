@@ -10,7 +10,7 @@ import { getConfigWithDefault } from 'core-service';
 
 export type { KYCConfig } from './types.js';
 
-const SERVICE_NAME = 'kyc-service';
+export const SERVICE_NAME = 'kyc-service';
 
 export async function loadConfig(brand?: string, tenantId?: string): Promise<KYCConfig> {
   const port = (await getConfigWithDefault<number>(SERVICE_NAME, 'port', { brand, tenantId })) ?? 9005;

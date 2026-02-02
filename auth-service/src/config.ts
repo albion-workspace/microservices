@@ -12,7 +12,7 @@ import type { AuthConfigDefaults } from './config-defaults.js';
 
 export type { AuthConfig } from './types.js';
 
-const SERVICE_NAME = 'auth-service';
+export const SERVICE_NAME = 'auth-service';
 
 /** Set by index after loadConfig so graphql, oauth-routes, password, otp-provider can read config without process.env */
 let _authConfig: AuthConfig | null = null;

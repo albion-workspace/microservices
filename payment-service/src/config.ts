@@ -10,7 +10,7 @@ import { logger, getConfigWithDefault } from 'core-service';
 
 export type { PaymentConfig } from './types.js';
 
-const SERVICE_NAME = 'payment-service';
+export const SERVICE_NAME = 'payment-service';
 
 let _useMongoTransactions = true;
 export function setUseMongoTransactions(v: boolean): void {

@@ -11,9 +11,10 @@
  * - Event-driven integration with auth, payment, bonus services
  */
 
-import { 
+import {
   createGateway,
   logger,
+  registerServiceConfigDefaults,
   registerServiceErrorCodes,
   resolveContext,
   isAuthenticated,
@@ -33,8 +34,8 @@ import {
 import { redis } from './redis.js';
 
 import { db, registerKYCIndexes } from './database.js';
-import { registerKYCConfigDefaults } from './config-defaults.js';
-import { loadConfig, validateConfig, printConfigSummary, type KYCConfig } from './config.js';
+import { KYC_CONFIG_DEFAULTS } from './config-defaults.js';
+import { loadConfig, validateConfig, printConfigSummary, SERVICE_NAME, type KYCConfig } from './config.js';
 import { initializeProviders } from './providers/provider-factory.js';
 import { initializeEventHandlers } from './event-dispatcher.js';
 import { KYC_ERROR_CODES } from './error-codes.js';
@@ -227,7 +228,7 @@ async function main() {
     logger.info('Starting KYC service');
 
     registerServiceErrorCodes(KYC_ERROR_CODES);
-    registerKYCConfigDefaults();
+    registerServiceConfigDefaults(SERVICE_NAME, KYC_CONFIG_DEFAULTS as unknown as Record<string, { value: unknown; sensitivePaths?: string[]; description?: string }>);
 
     const context = await resolveContext();
     const config = await loadConfig(context.brand, context.tenantId);
