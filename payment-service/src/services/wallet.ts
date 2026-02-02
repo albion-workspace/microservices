@@ -721,7 +721,7 @@ export const walletService = createService<Wallet, CreateWalletInput>({
   saga: walletSaga,
   // Transactions require MongoDB replica set (default in docker-compose)
   sagaOptions: {
-    get useTransaction() { return require('../config.js').getUseMongoTransactions(); },
+    get useTransaction() { return getUseMongoTransactions(); },
     maxRetries: 3,
   },
 });
