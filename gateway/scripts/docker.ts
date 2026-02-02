@@ -19,9 +19,14 @@
  *   npm run docker:logs                            # View logs
  *   npm run docker:logs -- --service=auth          # View logs for auth-service
  *   npm run docker:status                          # Check status
- *   npm run docker:fresh                           # Full fresh deploy: clean + build + start + health
+ *   npm run docker:fresh                           # Full fresh deploy: rebuild core-base + build + start + health
  *   npm run docker:fresh -- --service=auth         # Fresh deploy for single service
+ *   npm run docker:build -- --rebuild-base         # Force rebuild core-base (access-engine + core-service) then build images
  *   npm run docker:clean                           # Remove containers/images/generated files
+ *
+ * Core-base cache: Service images extend core-base (access-engine + core-service). docker:fresh always
+ * rebuilds core-base so services get the latest shared deps (e.g. DefaultServiceConfig). After changing
+ * core-service or access-engine, run docker:build with --rebuild-base (or docker:fresh) so the base is fresh.
  */
 
 import { spawn, execSync } from 'node:child_process';
@@ -45,6 +50,7 @@ interface ParsedArgs {
   service?: string;  // Optional: specific service to target
   infra?: boolean;   // If true, only mongo + redis (no gateway, no app services)
   noHealthCheck?: boolean;
+  rebuildBase?: boolean;  // If true, rebuild core-base before building service images
 }
 
 function parseArgs(): ParsedArgs {
@@ -53,6 +59,7 @@ function parseArgs(): ParsedArgs {
   let env: 'dev' | 'prod' = 'dev';
   let noHealthCheck = false;
   let infra = false;
+  let rebuildBase = false;
 
   // Support SERVICE env var for PowerShell compatibility (npm doesn't pass -- args on Windows)
   // Usage: $env:SERVICE="auth"; npm run docker:fresh
@@ -71,13 +78,16 @@ function parseArgs(): ParsedArgs {
     if (arg === '--infra') {
       infra = true;
     }
+    if (arg === '--rebuild-base') {
+      rebuildBase = true;
+    }
     // Support --service=auth or --service=auth-service (command line overrides env var)
     if (arg.startsWith('--service=')) {
       service = arg.split('=')[1].replace(/-service$/, '');
     }
   }
 
-  return { command, env, service, infra, noHealthCheck };
+  return { command, env, service, infra, noHealthCheck, rebuildBase };
 }
 
 /** Compose service names for infra only (mongo + redis). Matches keys in generated docker-compose. */
@@ -759,7 +769,7 @@ async function dockerClean(config: ServicesConfig, serviceName?: string): Promis
 /**
  * Fresh deployment workflow:
  * 1. Generate configs (only if building all)
- * 2. Build fresh images
+ * 2. Build core-base once (always), then build service images
  * 3. Start containers
  * 4. Run health check
  * 5. Clean generated files on success
@@ -779,9 +789,9 @@ async function dockerFresh(env: 'dev' | 'prod', config: ServicesConfig, mode: Co
     await generateDockerfile(serviceName, mode);
   }
 
-  // Step 2: Build fresh images (this also cleans old artifacts)
-  console.log('\nStep 2/5: Building fresh images...');
-  await dockerBuild(config, serviceName);
+  // Step 2: Build core-base once (every time on fresh), then build service images
+  console.log('\nStep 2/5: Building core-base (once), then service images...');
+  await dockerBuild(config, serviceName, true);
 
   // Step 3: Start containers
   console.log('\nStep 3/5: Starting containers...');
@@ -883,7 +893,7 @@ function getTimeAgo(date: Date): string {
 }
 
 async function main(): Promise<void> {
-  const { command, env, service, infra, noHealthCheck } = parseArgs();
+  const { command, env, service, infra, noHealthCheck, rebuildBase } = parseArgs();
   const { config, mode } = await loadConfigFromArgs();
 
   console.log('');
@@ -895,6 +905,9 @@ async function main(): Promise<void> {
   if (infra) {
     console.log('   Infra only: mongo + redis');
   }
+  if (rebuildBase) {
+    console.log('   Rebuild core-base: yes');
+  }
 
   if (!checkDockerRunning() && command !== 'status') {
     throw new Error('Docker is not running. Please start Docker Desktop.');
@@ -902,7 +915,7 @@ async function main(): Promise<void> {
 
   switch (command) {
     case 'build':
-      await dockerBuild(config, service);
+      await dockerBuild(config, service, rebuildBase);
       break;
     case 'up':
       await dockerUp(env, config, mode, service, infra);

@@ -27,6 +27,7 @@
     "generate:test": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/generate.ts --config=test",
     "generate:combo": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/generate.ts --config=combo",
     "docker:build": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/docker.ts build",
+    "docker:build:base": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/docker.ts build --rebuild-base",
     "docker:up": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/docker.ts up",
     "docker:up:infra": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/docker.ts up --infra",
     "docker:recovery:infra": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/docker.ts recovery --infra",

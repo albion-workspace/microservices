@@ -119,7 +119,17 @@ Use this section when **adding a new service** (generate with the CLI, then add 
 
 **Why the gateway runs MongoDB without replica set (and why transactions are off by default):** The **gateway** (not the core-service infra template) is the source of the default dev Docker/infra. In `gateway/configs/services.dev.json`, `infrastructure.mongodb.mode` is `"single"`. The gateway’s Docker generator (`gateway/scripts/generate.ts`) uses that: for `mode === 'single'` it emits a plain MongoDB service **without** `--replSet` (standalone). So the default dev stack runs MongoDB as a **standalone** instance. MongoDB transactions require a **replica set** (or mongos). So with the default gateway setup, transactions are not supported by the server. Services (payment, bonus) default `useTransactions: true` in config; to avoid “Transaction numbers are only allowed on a replica set member or mongos”, either (a) set `transaction.useTransactions: false` for local/single-Mongo, or (b) use a config that runs Mongo as a replica set (e.g. shared profile, or a single-node replica set). The **core-service** infra template (`core-service/src/infra/templates/docker-compose.ts`) does generate MongoDB **with** replica set (`--replSet rs0` and `rs.initiate`); that template is used by `service-infra service` and is separate from the gateway’s generated compose, which follows gateway config (single by default). So: default = simplest local setup (one Mongo, no replica) → no transactions unless you switch to replica set or disable transaction usage in config.
 
-### 3.4 Verification
+### 3.4 Docker and core-base cache
+
+All services are built from the same generator pattern and share **core-base** (access-engine + core-service). Service Dockerfiles extend core-base so shared deps are built once and cached.
+
+- **Alignment:** Each service’s `{Service}Config extends DefaultServiceConfig` (from core-service). core-service exports `DefaultServiceConfig` from its main entry (and `package.json` exports `"types"` for `.` so TypeScript resolves it in Docker builds).
+- **Rebuild base:** After changing **core-service** or **access-engine**, rebuild the base so service images get the latest shared code:
+  - `npm run docker:fresh` (gateway) always rebuilds core-base, then builds all service images.
+  - `npm run docker:build -- --rebuild-base` (gateway) rebuilds core-base then builds images; use when you only need images, not full deploy.
+- **Adding a service:** Generate with `service-infra service --name <name> ...` so the new service matches the template (config extends DefaultServiceConfig, config.ts uses getConfigWithDefault only, no process.env). Then add business logic; Docker build will use the same core-base.
+
+### 3.5 Verification
 
 5. When adding or changing config:
    - `grep process.env` in that service’s `src/` should only hit comments (or a documented bootstrap exception).

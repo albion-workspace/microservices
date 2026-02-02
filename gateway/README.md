@@ -63,7 +63,8 @@ All commands support `--config=dev` (default), `--config=shared`, `--config=test
 | `npm run docker:status` | Check Docker and container status |
 | `npm run docker:status:test` | Status for test config |
 | `npm run docker:status:combo` | Status for combo config |
-| `npm run docker:build` | Build all service images |
+| `npm run docker:build` | Build all service images (reuses core-base if present) |
+| `npm run docker:build:base` | Rebuild core-base (access-engine + core-service) then build images; use after changing core-service or access-engine |
 | `npm run docker:up` | Start containers (default/ms) |
 | `npm run docker:up:infra` | Start only mongo + redis (no gateway, no app services) |
 | `npm run docker:up:shared` | Start containers (shared config) |
@@ -90,7 +91,7 @@ This runs `docker compose down -v` (removes mongo-data and redis-data) then `doc
 
 | Command | Description |
 |---------|-------------|
-| `npm run docker:fresh` | Full fresh deploy (default/ms) |
+| `npm run docker:fresh` | Full fresh deploy (default/ms): rebuilds core-base, then build + start + health |
 | `npm run docker:fresh:test` | Full fresh deploy (test config) |
 | `npm run docker:fresh:combo` | Full fresh deploy (combo; deploy ms first) |
 | `npm run docker:fresh:shared` | Full fresh deploy (shared config) |
