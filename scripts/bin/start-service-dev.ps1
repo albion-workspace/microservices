@@ -12,8 +12,24 @@ param(
 )
 
 $allServices = @("auth-service", "payment-service", "bonus-service", "notification-service", "kyc-service")
+$servicePorts = @(9001, 9002, 9003, 9004, 9005)
 
 if ($ServiceName -eq "all") {
+    # Free ports: stop processes listening on 9001-9005 so start can bind
+    Write-Host "Stopping any processes on service ports (9001-9005)..." -ForegroundColor Yellow
+    foreach ($port in $servicePorts) {
+        $conn = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+        if ($conn) {
+            $pidsToStop = $conn.OwningProcess | Sort-Object -Unique
+            foreach ($procId in $pidsToStop) {
+                Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+                Write-Host "  Stopped process $procId on port $port" -ForegroundColor Gray
+            }
+        }
+    }
+    Start-Sleep -Seconds 2
+    Write-Host ""
+
     Write-Host "Starting all services in WATCH MODE (each in a new window)..." -ForegroundColor Cyan
     Write-Host ""
     foreach ($svc in $allServices) {
