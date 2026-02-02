@@ -4,6 +4,8 @@
  * Centralized configuration and utilities for all test scripts.
  * Loads configuration dynamically from MongoDB config store.
  * Provides MongoDB connections, service URLs, and other shared utilities.
+ * When MONGO_URI/REDIS_URL are not set, checks docker ps for mongo/redis containers
+ * and uses the correct host port (e.g. ms-mongo -> localhost:27017).
  * 
  * Following CODING_STANDARDS.md:
  * - Uses abstractions (getConfigWithDefault, resolveContext, getServiceDatabase)
@@ -11,6 +13,8 @@
  * - Generic only (no service-specific logic)
  * - Import ordering: Internal packages → Type imports
  */
+
+import { execSync } from 'node:child_process';
 
 // Internal packages (core-service)
 import { 
@@ -85,6 +89,40 @@ export let AUTH_SERVICE_URL = 'http://localhost:9001/graphql';
 export let PAYMENT_SERVICE_URL = 'http://localhost:9002/graphql';
 export let BONUS_SERVICE_URL = 'http://localhost:9003/graphql';
 export let NOTIFICATION_SERVICE_URL = 'http://localhost:9004/graphql';
+
+// ═══════════════════════════════════════════════════════════════════
+// Docker detection (use correct host/port when Mongo/Redis run in Docker)
+// ═══════════════════════════════════════════════════════════════════
+
+/** Run docker ps and return host port for a container whose name matches pattern (e.g. mongo, redis). */
+function getDockerHostPort(namePattern: RegExp, defaultPort: number): number {
+  try {
+    const out = execSync('docker ps --format "{{.Names}}\t{{.Ports}}"', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+    for (const line of out.split(/\r?\n/)) {
+      const [names, ports] = line.split('\t');
+      if (!names || !ports) continue;
+      if (!namePattern.test(names)) continue;
+      // Parse first port mapping: "0.0.0.0:27017->27017/tcp" or "27017/tcp" -> 27017
+      const m = ports.match(/(?:0\.0\.0\.0:)?(\d+)->\d+/);
+      if (m) return parseInt(m[1], 10);
+      const m2 = ports.match(/^(\d+)\//);
+      if (m2) return parseInt(m2[1], 10);
+    }
+  } catch {
+    // docker not available or not running
+  }
+  return defaultPort;
+}
+
+/** MongoDB host port when using Docker (ms-mongo, mongo, *-mongo). */
+function getDockerMongoPort(): number {
+  return getDockerHostPort(/-mongo$|^mongo$/, 27017);
+}
+
+/** Redis host port when using Docker (ms-redis, redis, *-redis). */
+function getDockerRedisPort(): number {
+  return getDockerHostPort(/-redis$|^redis$/, 6379);
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // Configuration Cache
@@ -248,9 +286,10 @@ export async function loadScriptConfig(): Promise<ScriptConfig> {
     }
   }
 
-  // Get core MongoDB URI (from config or env)
+  // Get core MongoDB URI (from config, env, or docker ps for correct host port)
+  const mongoPort = getDockerMongoPort();
   const coreMongoUri = process.env.MONGO_URI 
-    || `mongodb://localhost:27017/${CORE_DATABASE_NAME}?directConnection=true`;
+    || `mongodb://localhost:${mongoPort}/${CORE_DATABASE_NAME}?directConnection=true`;
 
   cachedConfig = {
     coreMongoUri,
@@ -314,12 +353,13 @@ export async function getServiceMongoUri(service: string): Promise<string> {
     return envVar;
   }
 
-  // Default template
+  // Default template (use docker ps port when Mongo runs in Docker)
   const dbName = service === 'core-service' || service === 'auth-service' 
     ? CORE_DATABASE_NAME 
     : service.replace(/-/g, '_');
+  const mongoPort = getDockerMongoPort();
   return process.env.MONGO_URI 
-    || `mongodb://localhost:27017/${dbName}?directConnection=true`;
+    || `mongodb://localhost:${mongoPort}/${dbName}?directConnection=true`;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -703,8 +743,9 @@ export async function dropAllDatabases(options?: { brand?: string; tenantId?: st
   cachedConfig = null;
   databaseConnected = false;
 
-  // Ensure we're connected to core_service
-  const coreMongoUri = `mongodb://localhost:27017/${CORE_DATABASE_NAME}?directConnection=true`;
+  // Ensure we're connected to core_service (use docker ps port when Mongo runs in Docker)
+  const mongoPort = getDockerMongoPort();
+  const coreMongoUri = process.env.MONGO_URI || `mongodb://localhost:${mongoPort}/${CORE_DATABASE_NAME}?directConnection=true`;
   await connectDatabase(coreMongoUri);
   databaseConnected = true;
 
@@ -738,11 +779,12 @@ export async function dropAllDatabases(options?: { brand?: string; tenantId?: st
     }
   }
 
-  // Flush Redis cache to clear any stale data (sessions, pending operations, etc.)
+  // Flush Redis cache (use docker ps port when Redis runs in Docker)
   try {
     console.log('\n🧹 Flushing Redis cache...');
+    const redisPort = getDockerRedisPort();
     const redisUrl = process.env.REDIS_URL 
-      || `redis://:${process.env.REDIS_PASSWORD || 'redis123'}@localhost:6379`;
+      || (process.env.REDIS_PASSWORD ? `redis://:${process.env.REDIS_PASSWORD}@localhost:${redisPort}` : `redis://localhost:${redisPort}`);
     await connectRedis(redisUrl);
     const redis = getRedis();
     if (redis) {
@@ -761,9 +803,10 @@ export async function dropAllDatabases(options?: { brand?: string; tenantId?: st
   try {
     console.log('\n🔄 Recreating core_service database for config store...');
     
-    // Use static imports (already imported at top level)
+    // Use docker ps port when Mongo runs in Docker
+    const mongoPort = getDockerMongoPort();
     const coreMongoUri = process.env.MONGO_URI 
-      || `mongodb://localhost:27017/${CORE_DATABASE_NAME}?directConnection=true`;
+      || `mongodb://localhost:${mongoPort}/${CORE_DATABASE_NAME}?directConnection=true`;
     
     // Connect directly to core_service (bypasses config store)
     await connectDatabase(coreMongoUri);

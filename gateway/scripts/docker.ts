@@ -12,7 +12,9 @@
  *   npm run docker:build                           # Build all images (fresh)
  *   npm run docker:build -- --service=auth         # Build only auth-service (fresh)
  *   npm run docker:up                              # Start containers (dev config)
- *   npm run docker:up -- --service=auth            # Start only auth-service
+ *   npm run docker:up:infra                        # Start only mongo + redis (no gateway, no app services)
+ *   npm run docker:recovery:infra                  # Reset infra volumes and start mongo + redis (transition single ↔ replica)
+ *   npm run docker:up -- --service=auth             # Start only auth-service
  *   npm run docker:down                            # Stop containers
  *   npm run docker:logs                            # View logs
  *   npm run docker:logs -- --service=auth          # View logs for auth-service
@@ -35,12 +37,13 @@ const ROOT_DIR = join(__dirname, '..', '..');
 const GATEWAY_DIR = join(__dirname, '..');
 const GENERATED_DIR = join(GATEWAY_DIR, 'generated');
 
-type DockerCommand = 'build' | 'up' | 'down' | 'logs' | 'status' | 'ps' | 'fresh' | 'clean';
+type DockerCommand = 'build' | 'up' | 'down' | 'logs' | 'status' | 'ps' | 'fresh' | 'clean' | 'recovery';
 
 interface ParsedArgs {
   command: DockerCommand;
   env: 'dev' | 'prod';
   service?: string;  // Optional: specific service to target
+  infra?: boolean;   // If true, only mongo + redis (no gateway, no app services)
   noHealthCheck?: boolean;
 }
 
@@ -49,13 +52,14 @@ function parseArgs(): ParsedArgs {
   let command: DockerCommand = 'status';
   let env: 'dev' | 'prod' = 'dev';
   let noHealthCheck = false;
-  
+  let infra = false;
+
   // Support SERVICE env var for PowerShell compatibility (npm doesn't pass -- args on Windows)
   // Usage: $env:SERVICE="auth"; npm run docker:fresh
   let service: string | undefined = process.env.SERVICE?.replace(/-service$/, '');
 
   for (const arg of args) {
-    if (['build', 'up', 'down', 'logs', 'status', 'ps', 'fresh', 'clean'].includes(arg)) {
+    if (['build', 'up', 'down', 'logs', 'status', 'ps', 'fresh', 'clean', 'recovery'].includes(arg)) {
       command = arg as DockerCommand;
     }
     if (arg === '--prod') {
@@ -64,13 +68,25 @@ function parseArgs(): ParsedArgs {
     if (arg === '--no-health') {
       noHealthCheck = true;
     }
+    if (arg === '--infra') {
+      infra = true;
+    }
     // Support --service=auth or --service=auth-service (command line overrides env var)
     if (arg.startsWith('--service=')) {
       service = arg.split('=')[1].replace(/-service$/, '');
     }
   }
 
-  return { command, env, service, noHealthCheck };
+  return { command, env, service, infra, noHealthCheck };
+}
+
+/** Compose service names for infra only (mongo + redis). Matches keys in generated docker-compose. */
+function getInfraComposeServiceNames(config: ServicesConfig): [string, string] {
+  const mongo = config.infrastructure.mongodb;
+  const mongoService = mongo.mode === 'replicaSet' && mongo.members?.length
+    ? (mongo.members[0].host.split('.')[0] ?? 'mongo')
+    : 'mongo';
+  return [mongoService, 'redis'];
 }
 
 /**
@@ -409,11 +425,45 @@ async function dockerBuild(config: ServicesConfig, serviceName?: string, rebuild
  * For single service: use docker run directly for better isolation
  * For all services: use docker compose
  */
-async function dockerUp(env: 'dev' | 'prod', config: ServicesConfig, mode: ConfigMode, serviceName?: string): Promise<void> {
+async function dockerUp(env: 'dev' | 'prod', config: ServicesConfig, mode: ConfigMode, serviceName?: string, infraOnly?: boolean): Promise<void> {
   const { docker } = getInfraConfig();
   const services = getTargetServices(config, serviceName);
-  const targetMsg = serviceName ? ` - ${serviceName} only` : '';
+  const targetMsg = infraOnly ? ' (mongo + redis only)' : (serviceName ? ` - ${serviceName} only` : '');
   printHeader(`Starting Docker Containers (${env})${targetMsg}`);
+
+  if (infraOnly) {
+    await generateConfigs(mode);
+    const [mongoService, redisService] = getInfraComposeServiceNames(config);
+    const reuseInfra = config.reuseInfra && config.reuseFrom;
+    if (!reuseInfra) {
+      const { mongo: mongoContainer, redis: redisContainer } = getDockerContainerNames(getInfraConfig());
+      try {
+        execSync(`docker rm -f ${mongoContainer} ${redisContainer}`, { stdio: 'pipe', shell: true });
+      } catch {
+        // None or one may not exist
+      }
+    }
+    const composeFile = getComposeFile(env);
+    const projectName = docker.projectName;
+    const composeArgs = ['-f', composeFile, '-p', projectName, 'up', '-d', '--force-recreate', mongoService, redisService];
+    console.log(`\nStarting infra only (${mongoService}, ${redisService}) on network: ${docker.network}`);
+    const proc = spawn('docker', ['compose', ...composeArgs], {
+      cwd: GATEWAY_DIR,
+      stdio: 'inherit',
+      shell: true,
+    });
+    return new Promise((resolve, reject) => {
+      proc.on('exit', (code) => {
+        if (code === 0) {
+          console.log('');
+          console.log('Mongo + Redis started. Run "npm run docker:logs" to view logs.');
+          resolve();
+        } else {
+          reject(new Error(`docker compose up failed with code ${code}`));
+        }
+      });
+    });
+  }
 
   if (serviceName) {
     await ensureNetworkExists();
@@ -507,6 +557,34 @@ async function dockerUp(env: 'dev' | 'prod', config: ServicesConfig, mode: Confi
       }
     });
   });
+}
+
+/**
+ * Recovery: infra only. Stops containers, removes infra volumes (mongo-data, redis-data),
+ * then starts mongo + redis with fresh data. Use when switching config (e.g. single ↔ replica set)
+ * and Mongo reports "config is invalid or we are not a member of it" — the volume had a different
+ * replica set layout. Avoids removing volumes by mistake; use this explicit command instead.
+ */
+async function dockerRecoveryInfra(env: 'dev' | 'prod', config: ServicesConfig, mode: ConfigMode): Promise<void> {
+  printHeader('Recovery: Infra (reset volumes, start mongo + redis)');
+  console.log('Stopping containers and removing infra volumes (mongo-data, redis-data)...');
+  await generateConfigs(mode);
+  const composeFile = getComposeFile(env);
+  const projectName = getInfraConfig().docker.projectName;
+  const procDown = spawn('docker', ['compose', '-f', composeFile, '-p', projectName, 'down', '-v', '--remove-orphans'], {
+    cwd: GATEWAY_DIR,
+    stdio: 'inherit',
+    shell: true,
+  });
+  await new Promise<void>((resolve, reject) => {
+    procDown.on('exit', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`docker compose down -v failed with code ${code}`));
+    });
+  });
+  console.log('');
+  console.log('Starting mongo + redis with fresh volumes...');
+  await dockerUp(env, config, mode, undefined, true);
 }
 
 async function dockerDown(env: 'dev' | 'prod', config: ServicesConfig, serviceName?: string): Promise<void> {
@@ -805,7 +883,7 @@ function getTimeAgo(date: Date): string {
 }
 
 async function main(): Promise<void> {
-  const { command, env, service, noHealthCheck } = parseArgs();
+  const { command, env, service, infra, noHealthCheck } = parseArgs();
   const { config, mode } = await loadConfigFromArgs();
 
   console.log('');
@@ -813,6 +891,9 @@ async function main(): Promise<void> {
   
   if (service) {
     console.log(`   Target service: ${service}`);
+  }
+  if (infra) {
+    console.log('   Infra only: mongo + redis');
   }
 
   if (!checkDockerRunning() && command !== 'status') {
@@ -824,10 +905,16 @@ async function main(): Promise<void> {
       await dockerBuild(config, service);
       break;
     case 'up':
-      await dockerUp(env, config, mode, service);
+      await dockerUp(env, config, mode, service, infra);
       break;
     case 'down':
       await dockerDown(env, config, service);
+      break;
+    case 'recovery':
+      if (!infra) {
+        throw new Error('Recovery requires --infra. Use: npm run docker:recovery:infra');
+      }
+      await dockerRecoveryInfra(env, config, mode);
       break;
     case 'logs':
       await dockerLogs(env, service);

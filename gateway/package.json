@@ -28,6 +28,8 @@
     "generate:combo": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/generate.ts --config=combo",
     "docker:build": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/docker.ts build",
     "docker:up": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/docker.ts up",
+    "docker:up:infra": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/docker.ts up --infra",
+    "docker:recovery:infra": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/docker.ts recovery --infra",
     "docker:up:shared": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/docker.ts up --config=shared",
     "docker:up:test": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/docker.ts up --config=test",
     "docker:up:combo": "node ../core-service/node_modules/tsx/dist/cli.mjs scripts/docker.ts up --config=combo",

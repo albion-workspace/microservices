@@ -51,10 +51,13 @@
   ],
   "infrastructure": {
     "mongodb": {
-      "mode": "single",
-      "host": "localhost",
+      "mode": "replicaSet",
+      "host": "mongo",
       "port": 27017,
-      "replicaSet": null
+      "replicaSet": "rs0",
+      "members": [
+        { "host": "mongo", "port": 27017 }
+      ]
     },
     "redis": {
       "mode": "single",

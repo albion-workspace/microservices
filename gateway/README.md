@@ -65,9 +65,11 @@ All commands support `--config=dev` (default), `--config=shared`, `--config=test
 | `npm run docker:status:combo` | Status for combo config |
 | `npm run docker:build` | Build all service images |
 | `npm run docker:up` | Start containers (default/ms) |
+| `npm run docker:up:infra` | Start only mongo + redis (no gateway, no app services) |
 | `npm run docker:up:shared` | Start containers (shared config) |
 | `npm run docker:up:test` | Start containers (test config) |
 | `npm run docker:up:combo` | Start containers (combo; reuses ms Redis/Mongo/auth; deploy ms first) |
+| `npm run docker:recovery:infra` | Reset infra volumes and start mongo + redis (use when switching single ↔ replica; see below) |
 | `npm run docker:down` | Stop containers (uses `--remove-orphans` so switching configs cleans up orphaned containers) |
 | `npm run docker:down:shared` | Stop shared stack |
 | `npm run docker:down:test` | Stop test stack |
@@ -75,6 +77,14 @@ All commands support `--config=dev` (default), `--config=shared`, `--config=test
 | `npm run docker:logs` | Stream container logs |
 | `npm run docker:up:prod` | Start prod mode with gateway |
 | `npm run docker:down:prod` | Stop prod containers |
+
+**Infra recovery (Mongo replica set transition)** — Rare case: if Mongo reports `"config is invalid or we are not a member of it"` or `"no replset config"`, the Mongo data volume was created with a **different** config (e.g. shared 3-member replica set) and you are now running dev (single-node). Do **not** remove volumes by hand; use the explicit recovery command so infra is re-initialized for the current config:
+
+```bash
+npm run docker:recovery:infra
+```
+
+This runs `docker compose down -v` (removes mongo-data and redis-data) then `docker:up:infra`, so Mongo and Redis start with fresh data and the healthcheck initiates the replica set for the current config. Wait ~30–45s for Mongo to show `(healthy)` before starting services.
 
 **Fresh deployment** (clean → build → start → health check → cleanup). Safe on Windows (cleanup uses a short delay to avoid libuv handle errors).
 

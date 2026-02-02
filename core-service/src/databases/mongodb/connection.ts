@@ -101,13 +101,20 @@ export const DEFAULT_MONGO_CONFIG: Omit<Required<MongoConfig>, 'uri' | 'dbName' 
 // Track base URI (server) to reuse client for same server
 let baseUri: string | null = null;
 
+/** Normalize server key for client reuse: protocol + host only (ignore path and query so gateway and db.initialize use same client). */
+function getServerKey(uriObj: URL): string {
+  return `${uriObj.protocol}//${uriObj.host}`;
+}
+
 export async function connectDatabase(uri: string, config: Partial<MongoConfig> = {}): Promise<Db> {
   // Parse URI to extract base (server) and database name
   const uriObj = new URL(uri);
+  const serverKey = getServerKey(uriObj);
   const currentBaseUri = `${uriObj.protocol}//${uriObj.host}${uriObj.search || ''}`;
   
   // Check if we have a cached client for the same server AND it's actually connected
-  if (client && baseUri === currentBaseUri) {
+  // Use serverKey so we reuse one client per host regardless of path/query (avoids "ClientSession must be from the same MongoClient")
+  if (client && baseUri !== null && getServerKey(new URL(baseUri)) === serverKey) {
     try {
       // Verify client is actually connected using ping command (modern MongoDB driver approach)
       await client.db('admin').command({ ping: 1 });

@@ -1721,9 +1721,9 @@ async function testRecovery() {
   console.log('║        TESTING GENERIC TRANSFER RECOVERY SYSTEM                 ║');
   console.log('╚═══════════════════════════════════════════════════════════════════╝\n');
 
-  // Try to connect to Redis (default: redis://:redis123@localhost:6379)
+  // Try to connect to Redis (default: redis://localhost:6379 when no password; use REDIS_URL if set)
   console.log('🔌 Connecting to Redis...');
-  const redisUrl = process.env.REDIS_URL || `redis://:${process.env.REDIS_PASSWORD || 'redis123'}@localhost:6379`;
+  const redisUrl = process.env.REDIS_URL || (process.env.REDIS_PASSWORD ? `redis://:${process.env.REDIS_PASSWORD}@localhost:6379` : 'redis://localhost:6379');
   
   let redisConnected = false;
   try {

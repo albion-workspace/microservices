@@ -13,6 +13,7 @@ Status of gateway orchestration: default (ms), test, combo, and shared modes (Do
 - **Config**: `services.dev.json` uses `infrastructure.mongodb.mode: "single"` and `infrastructure.redis.mode: "single"` (no replica set, no Sentinel).
 - **Docker**: `npm run generate` and `npm run docker:fresh` produce a single `mongo` and single `redis` container; all 5 services + gateway start and pass health checks.
 - **Kubernetes**: Default manifests use single MongoDB and Redis when config is single; replica set/sentinel use separate headless Services (`mongodb-pods`, `redis-pods`) so existing `mongodb`/`redis` ClusterIP Services are unchanged.
+- **Why no replica set by default?** Default is intentionally **standalone** MongoDB (simplest local setup: one container, no `--replSet`). MongoDB **transactions** require a replica set or mongos. So with default (single) Mongo, services that use transactions (e.g. payment, bonus) will see “Transaction numbers are only allowed on a replica set member or mongos” unless they set `transaction.useTransactions: false` in config or use a profile with replica set (e.g. shared). See `core-service/src/infra/SERVICE_GENERATOR.md` (§3.3) for the full explanation.
 
 ### Shared mode – replica set & Sentinel
 
@@ -41,6 +42,7 @@ Status of gateway orchestration: default (ms), test, combo, and shared modes (Do
 ## What remains (optional)
 
 - **Cleanup when switching configs**: If you run ms, then switch to test without running `docker:down` first, the ms stack may still hold ports. **Workaround**: run `npm run docker:down` (or `docker:down:test` / `docker:down:shared`) before starting the other stack; `--remove-orphans` is already in use.
+- **Mongo volume / config mismatch (single ↔ replica)**: If Mongo reports "config is invalid or we are not a member of it", the data volume was created with another config (e.g. shared 3-member). Use **`npm run docker:recovery:infra`** to reset infra volumes and start mongo + redis for the current config; do not remove volumes manually. Documented in README under "Infra recovery".
 - **Cross-namespace infra**: “Test uses ms Redis/Mongo” (shared data-plane across namespaces) is not implemented; config and K8s/Docker support (e.g. `sharedInfra`, omit Redis/Mongo in test namespace) would be added if needed.
 - **Shared app services**: “Test uses ms auth-service” (no auth deployment in test) would require config (e.g. `sharedServices: ["auth"]`) and omitting that deployment in the test namespace; not implemented.
 - **K8s Redis AUTH**: If K8s Redis is configured with a password, ensure app secrets and Redis manifest match; recurring “Recovery job failed” or auth errors in logs may need env/secret alignment.

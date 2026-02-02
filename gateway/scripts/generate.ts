@@ -344,13 +344,21 @@ function generateMongoDockerService(config: ServicesConfig, projectName: string,
     healthcheck:
       test: |
         mongosh --quiet --eval "
-          try { rs.status().ok } catch (e) {
+          try {
+            var s = rs.status();
+            if (!s.ok) throw new Error('not ok');
+          } catch (e) {
             rs.initiate({_id: '${mongo.replicaSet}', members: [${members.map((m, i) => `{_id: ${i}, host: '${m.host.split('.')[0]}:${mongoPort}'${m.priority ? `, priority: ${m.priority}` : ''}}`).join(', ')}]});
-            1
           }
-        " | grep -q 1
+          for (var i = 0; i < 8; i++) {
+            var st = rs.status();
+            if (st.ok && st.members && st.members[0].stateStr === 'PRIMARY') quit(0);
+            sleep(1000);
+          }
+          quit(1);
+        "
       interval: 10s
-      timeout: 10s
+      timeout: 15s
       retries: 10
       start_period: 30s`;
 
