@@ -2,6 +2,7 @@
  * Notification Service Configuration
  *
  * Dynamic config only: MongoDB config store + registered defaults. No process.env (CODING_STANDARDS).
+ * NotificationConfig extends DefaultServiceConfig (core-service); single config type in types.ts.
  */
 
 import { logger, getConfigWithDefault } from 'core-service';

@@ -54,6 +54,7 @@ export type {
 
 // Role type from core-service/access
 export type { Role } from 'core-service/access';
+import type { DefaultServiceConfig } from 'core-service';
 
 // SocialProfile is exported from user-types.ts
 
@@ -303,11 +304,11 @@ export interface TwoFactorSetupResponse {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Service Configuration (auth-specific only; common props in DefaultServiceConfig)
+// Service Configuration (align with service generator: one config extends DefaultServiceConfig)
 // ═══════════════════════════════════════════════════════════════════
 
-/** Auth-specific config; common props (port, nodeEnv, jwt*, corsOrigins, database) come from DefaultServiceConfig. */
-export interface AuthConfig {
+/** Auth service config: extends DefaultServiceConfig from core-service, adds only auth-specific properties. */
+export interface AuthConfig extends DefaultServiceConfig {
   // Security
   passwordMinLength: number;
   passwordRequireUppercase: boolean;
@@ -320,8 +321,8 @@ export interface AuthConfig {
   sessionMaxAge: number; // days
   maxActiveSessions: number;
   // URLs (from config store)
-  frontendUrl?: string;
-  appUrl?: string;
+  frontendUrl: string;
+  appUrl: string;
   notificationServiceUrl?: string;
   notificationServiceToken?: string;
   // Social providers

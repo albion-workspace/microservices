@@ -2,14 +2,15 @@
  * KYC Service Configuration
  *
  * Dynamic config only: MongoDB config store + registered defaults. No process.env (CODING_STANDARDS).
+ * KYCConfig extends DefaultServiceConfig (core-service); single config type in types.ts.
  */
 
-import type { DefaultServiceConfig } from 'core-service';
+import type { KYCConfig } from './types.js';
 import { getConfigWithDefault } from 'core-service';
 
-const SERVICE_NAME = 'kyc-service';
+export type { KYCConfig } from './types.js';
 
-export interface KYCConfig extends DefaultServiceConfig {}
+const SERVICE_NAME = 'kyc-service';
 
 export async function loadConfig(brand?: string, tenantId?: string): Promise<KYCConfig> {
   const port = (await getConfigWithDefault<number>(SERVICE_NAME, 'port', { brand, tenantId })) ?? 9005;

@@ -2,12 +2,13 @@
  * Bonus Service Configuration
  *
  * Dynamic config only: MongoDB config store + registered defaults. No process.env (CODING_STANDARDS).
+ * BonusConfig extends DefaultServiceConfig (core-service); single config type in types.ts.
  */
 
-import type { DefaultServiceConfig } from 'core-service';
+import type { BonusConfig } from './types.js';
 import { logger, getConfigWithDefault } from 'core-service';
 
-export interface BonusConfig extends DefaultServiceConfig {}
+export type { BonusConfig } from './types.js';
 
 const SERVICE_NAME = 'bonus-service';
 

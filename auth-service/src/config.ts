@@ -3,20 +3,14 @@
  *
  * Dynamic config only: MongoDB config store + registered defaults. No process.env (CODING_STANDARDS).
  * Exception: core-service or auth bootstrap/core DB may use process.env for strategy resolution (outside this file).
+ * AuthConfig extends DefaultServiceConfig (core-service); single config type, aligned with service generator.
  */
 
-import type { DefaultServiceConfig } from 'core-service';
-import type { AuthConfig as BaseAuthConfig } from './types.js';
+import type { AuthConfig } from './types.js';
 import { logger, getConfigWithDefault } from 'core-service';
 import type { AuthConfigDefaults } from './config-defaults.js';
 
-/** Full auth config: common (DefaultServiceConfig) + auth-specific (BaseAuthConfig). */
-export interface AuthConfig extends DefaultServiceConfig, BaseAuthConfig {
-  frontendUrl: string;
-  appUrl: string;
-  notificationServiceUrl?: string;
-  notificationServiceToken?: string;
-}
+export type { AuthConfig } from './types.js';
 
 const SERVICE_NAME = 'auth-service';
 

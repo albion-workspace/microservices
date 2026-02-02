@@ -2,24 +2,13 @@
  * Payment Service Configuration
  *
  * Dynamic config only: MongoDB config store + registered defaults. No process.env (CODING_STANDARDS).
+ * PaymentConfig extends DefaultServiceConfig (core-service); single config type in types.ts.
  */
 
-import type { DefaultServiceConfig } from 'core-service';
+import type { PaymentConfig } from './types.js';
 import { logger, getConfigWithDefault } from 'core-service';
 
-export interface PaymentConfig extends DefaultServiceConfig {
-  exchangeRateDefaultSource: string;
-  exchangeRateCacheTtl: number;
-  exchangeRateAutoUpdateInterval: number;
-  transactionMinAmount: number;
-  transactionMaxAmount: number;
-  allowNegativeBalance: boolean;
-  defaultCurrency: string;
-  supportedCurrencies: string[];
-  transferRequireApproval: boolean;
-  maxPendingTransfers: number;
-  approvalTimeout: number;
-}
+export type { PaymentConfig } from './types.js';
 
 const SERVICE_NAME = 'payment-service';
 
