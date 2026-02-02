@@ -220,7 +220,7 @@ stringData:
   # Note: Update mongo-uri for your replica set configuration in production
   mongo-uri: "mongodb://mongo:27017/${name.replace(/-/g, '_')}?replicaSet=rs0"
   redis-url: "redis://redis:6379"
-  jwt-secret: "your-256-bit-secret-change-in-production"
+  jwt-secret: "shared-jwt-secret-change-in-production"
 `;
 }
 

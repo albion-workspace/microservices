@@ -8,7 +8,7 @@ import { logger, createPendingOperationStore } from 'core-service';
 import { db } from '../database.js';
 import type { SendOTPInput, VerifyOTPInput, OTPResponse, OTPChannel, OTPPurpose } from '../types.js';
 import { generateOTP, hashToken } from '../utils.js';
-import type { AuthConfig } from '../types.js';
+import type { AuthConfig } from '../config.js';
 import type { OTPProviderFactory } from '../providers/otp-provider.js';
 
 export class OTPService {

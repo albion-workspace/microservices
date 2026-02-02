@@ -33,8 +33,7 @@ let CONFIG = {
   authServiceUrl: AUTH_SERVICE_URL,
   webhookReceiverPort: 9999,
   webhookSecret: 'test-webhook-secret-12345',
-  // All services use the same shared JWT secret
-  jwtSecret: process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || 'shared-jwt-secret-change-in-production',
+  jwtSecret: process.env.JWT_SECRET || 'shared-jwt-secret-change-in-production',
   // System credentials for webhook tests (using centralized config)
   systemEmail: process.env.SYSTEM_EMAIL || users.system.email,
   systemPassword: process.env.SYSTEM_PASSWORD || users.system.password,

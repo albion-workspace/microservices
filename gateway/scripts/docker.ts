@@ -27,7 +27,7 @@ import { access, rm } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { loadConfigFromArgs, logConfigSummary, getInfraConfig, getDockerContainerNames, getReusedServiceEntries, type ServicesConfig, type ServiceConfig, type InfraConfig, type ConfigMode } from './config-loader.js';
+import { loadConfigFromArgs, logConfigSummary, getInfraConfig, getDockerContainerNames, getReusedServiceEntries, getJwtSecret, type ServicesConfig, type ServiceConfig, type InfraConfig, type ConfigMode } from './config-loader.js';
 import { runScript, runLongRunningScript, printHeader } from './script-runner.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -432,15 +432,16 @@ async function dockerUp(env: 'dev' | 'prod', config: ServicesConfig, mode: Confi
     const redisPassword = config.infrastructure.redis.password ?? 'redis123';
     const mongoUri = `mongodb://${mongoContainer}:27017/${database}`;
     const redisUrl = `redis://:${redisPassword}@${redisContainer}:6379`;
-    
-    // Common environment variables needed for all services
+    const jwtSecret = getJwtSecret(config, 'docker');
+    const runtimeEnv = getInfraConfig().defaults.runtime.dev;
+
+    // Common environment variables from config (services.*.json environments or infra.defaults.runtime)
     const envVars = [
       `MONGO_URI=${mongoUri}`,
       `REDIS_URL=${redisUrl}`,
       `PORT=${service.port}`,
-      'NODE_ENV=development',  // Use development to avoid strict validation
-      'JWT_SECRET=dev-secret-for-docker-testing',
-      'SHARED_JWT_SECRET=dev-shared-secret-for-docker-testing',
+      `NODE_ENV=${runtimeEnv.nodeEnv}`,
+      `JWT_SECRET=${jwtSecret}`,
     ];
     
     // Build docker run command

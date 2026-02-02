@@ -26,7 +26,7 @@ import {
   generateOTP,
   addMinutes,
 } from '../utils.js';
-import type { AuthConfig } from '../types.js';
+import type { AuthConfig } from '../config.js';
 import type { OTPProviderFactory } from '../providers/otp-provider.js';
 
 export class PasswordService {
@@ -407,7 +407,7 @@ export class PasswordService {
       const provider = this.otpProviders.getProvider('email');
       
       // Send reset link with the JWT token
-      const appUrl = process.env.APP_URL || process.env.FRONTEND_URL || 'http://localhost:5173';
+      const appUrl = this.config.appUrl || this.config.frontendUrl || 'http://localhost:5173';
       const resetLink = `${appUrl}/reset-password?token=${resetToken}`;
       await provider.send(user.email, resetLink, 'password_reset', user.tenantId, user.id);
       

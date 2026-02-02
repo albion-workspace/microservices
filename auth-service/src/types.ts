@@ -303,58 +303,49 @@ export interface TwoFactorSetupResponse {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Service Configuration
+// Service Configuration (auth-specific only; common props in DefaultServiceConfig)
 // ═══════════════════════════════════════════════════════════════════
 
+/** Auth-specific config; common props (port, nodeEnv, jwt*, corsOrigins, database) come from DefaultServiceConfig. */
 export interface AuthConfig {
-  // JWT
-  jwtSecret: string;
-  jwtExpiresIn: string;
-  jwtRefreshSecret?: string;
-  jwtRefreshExpiresIn: string;
-  
   // Security
   passwordMinLength: number;
   passwordRequireUppercase: boolean;
   passwordRequireNumbers: boolean;
   passwordRequireSymbols: boolean;
-  
   // OTP
   otpLength: number;
   otpExpiryMinutes: number;
-  
   // Session
   sessionMaxAge: number; // days
   maxActiveSessions: number;
-  
+  // URLs (from config store)
+  frontendUrl?: string;
+  appUrl?: string;
+  notificationServiceUrl?: string;
+  notificationServiceToken?: string;
   // Social providers
   googleClientId?: string;
   googleClientSecret?: string;
   googleCallbackUrl: string;
-  
   facebookAppId?: string;
   facebookAppSecret?: string;
   facebookCallbackUrl: string;
-  
   linkedinClientId?: string;
   linkedinClientSecret?: string;
   linkedinCallbackUrl: string;
-  
   instagramClientId?: string;
   instagramClientSecret?: string;
   instagramCallbackUrl: string;
-  
   // Communication providers
   twilioAccountSid?: string;
   twilioAuthToken?: string;
   twilioPhoneNumber?: string;
-  
   smtpHost?: string;
   smtpPort: number;
   smtpUser?: string;
   smtpPassword?: string;
   smtpFrom?: string;
-  
   whatsappApiKey?: string;
   telegramBotToken?: string;
 }

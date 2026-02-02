@@ -1,11 +1,21 @@
 # Service Generator
 
-The **service generator** (`service-infra service --name <name> ...`) is the single source of truth for microservice structure. New services are generated from this template; existing services (auth, bonus, payment, notification) should be aligned to the same pattern so all services share the same common infra and config approach.
+The **service generator** (`service-infra service --name <name> ...`) is the single source of truth for microservice structure. New services are generated from this template; existing services (auth, bonus, payment, notification, kyc) should be aligned to the same pattern so all services share the same common infra and config approach.
+
+**Generic pattern only:** The template never emits `process.env`. The only exception is **outside** the generator: core-service itself or auth-service when using core DB may need `process.env` for bootstrap/strategy resolution (e.g. reading DB strategy before the config store is available). All other services must use **dynamic config only** (getConfigWithDefault / config store). Do not keep legacy `process.env` fallbacks—remove them per CODING_STANDARDS.
+
+**Per-service, per-brand DB init:** The template covers init using existing accessors: `db.initialize({ brand, tenantId })` and (when Redis) `redis.initialize({ brand })` after `resolveContext()` and `loadConfig(context.brand, context.tenantId)`. Uses `createServiceDatabaseAccess(serviceName)` and `createServiceRedisAccess(serviceName)`.
+
+**Config: key-by-key and single-JSON:** Default is key-by-key `getConfigWithDefault(SERVICE_NAME, key, { brand, tenantId })`. Services may also use a **single key** that holds a whole JSON object (e.g. `database`, `jwt`, or service-specific `providers`): `await getConfigWithDefault<YourType>(SERVICE_NAME, 'yourKey', { brand, tenantId }) ?? defaultYourKey`. Add that key to config-defaults.ts. No requirement that every key be one-by-one getWithDefault.
+
+**JWT (single secret, shared by default):** One JWT secret; same default everywhere (`shared-jwt-secret-change-in-production`). Gateway JSON is for bootstrap (Docker/K8s `JWT_SECRET`); runtime = dynamic config. Customization: JSON (shared) or dynamic config (per-service). **Common config (like database):** gateway key has jwt, database, corsOrigins, nodeEnv; all services use `getConfigWithDefault(service, key) ?? getConfigWithDefault('gateway', key)`. Gateway passes `JWT_SECRET` from config (gateway `services.*.json` → `environments.docker` or `environments.prod`, else `infra.defaults.runtime`). At runtime, services read from the config store; auth-service registers a shared key `gateway` with `GATEWAY_JWT_DEFAULTS` so `getConfigWithDefault('gateway', 'jwt')` can be used as a fallback when the service’s own `jwt` is empty. Same pattern as database: one key (e.g. `gateway`) for shared, or per-service override.
+
+**Config interface – DefaultServiceConfig:** Common properties are defined once in core-service as `DefaultServiceConfig`: port, nodeEnv, serviceName, mongoUri, redisUrl, corsOrigins, jwt\*, and optional `useMongoTransactions` (used by payment/bonus; others ignore). Each microservice's config interface **extends DefaultServiceConfig** and adds only service-specific properties (e.g. `PaymentConfig extends DefaultServiceConfig { exchangeRateDefaultSource, ... }`). The service generator emits `export interface {Service}Config extends DefaultServiceConfig {}`; add service-specific fields in types.ts. Reduces duplication; see CODING_STANDARDS.md.
 
 This document describes:
 1. **Config analysis** – which services use dynamic config vs `process.env`
 2. **Steps for the template** – what the generator must contain so it matches “all common stuff” of other services
-3. **Steps to align existing services** – how to make auth, bonus, payment, notification match the generated template
+3. **Steps to align existing services** – how to make auth, bonus, payment, notification, kyc match the generated template
 
 ---
 
@@ -38,7 +48,7 @@ Ensure the **service template** (output of `service-generator.ts`) contains all 
 - **src/error-codes.ts** – `{SERVICE}_ERRORS`, `{SERVICE}_ERROR_CODES`, type `{Service}ErrorCode`, prefix `MS{Service}`
 - **src/config-defaults.ts** – `{SERVICE}_CONFIG_DEFAULTS` with port, serviceName, nodeEnv, corsOrigins, jwt, database (mongoUri, redisUrl); sensitivePaths for secrets
 - **src/config.ts** – `loadConfig(brand?, tenantId?)` using **only** `getConfigWithDefault(SERVICE_NAME, key, { brand, tenantId }) ?? default`; no `process.env`
-- **src/types.ts** – `{Service}Config` (port, nodeEnv, serviceName, corsOrigins, mongoUri, redisUrl, jwt*)
+- **src/types.ts** – `{Service}Config extends DefaultServiceConfig` (from core-service); add only service-specific properties
 - **src/graphql.ts** – `{shortName}GraphQLTypes`, `create{Service}Resolvers(config)` with health + `{name}Health`
 - **src/services/index.ts** – placeholder export
 - **src/index.ts** – registerServiceConfigDefaults → resolveContext → loadConfig → validateConfig → printConfigSummary → db.initialize → createGateway(services, permissions, mongoUri, redisUrl) → Redis init using **config.redisUrl** → ensureDefaultConfigsCreated → startListening using **config.redisUrl** → registerServiceErrorCodes

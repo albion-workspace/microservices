@@ -241,6 +241,8 @@ export interface ServicesConfig {
   environments: Record<string, {
     mongoUri: string;
     redisUrl: string;
+    /** Optional: JWT secret for this environment (single secret; can be shared or per-service via config store) */
+    jwtSecret?: string;
   }>;
   /** Combo only: which namespace/project to reuse Redis/Mongo and optionally services from */
   reuseFrom?: ReuseFromConfig;
@@ -348,6 +350,20 @@ export function getRedisUrl(config: ServicesConfig, env: string = 'local'): stri
   const redis = config.infrastructure.redis;
   const redisAuth = redis.password ? `:${redis.password}@` : '';
   return `redis://${redisAuth}${redis.host}:${redis.port}`;
+}
+
+/**
+ * Get JWT secret for a config environment (Docker/K8s runtime).
+ * Uses config.environments[env].jwtSecret when set, else infra.defaults.runtime.dev|prod.jwtSecret.
+ */
+export function getJwtSecret(config: ServicesConfig, env: string = 'docker'): string {
+  const envConfig = config.environments[env];
+  if (envConfig?.jwtSecret) {
+    return envConfig.jwtSecret;
+  }
+  const infra = getInfraConfig();
+  const runtime = env === 'prod' ? infra.defaults.runtime.prod : infra.defaults.runtime.dev;
+  return runtime.jwtSecret;
 }
 
 /**

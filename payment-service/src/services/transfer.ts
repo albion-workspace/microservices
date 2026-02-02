@@ -13,6 +13,7 @@ import {
   createTransferWithTransactions,
   type ClientSession,
 } from 'core-service';
+import { getUseMongoTransactions } from '../config.js';
 import { db } from '../database.js';
 import type { Transfer as PaymentTransfer, Transaction } from '../types.js';
 
@@ -135,7 +136,7 @@ export const transferService = createService<PaymentTransfer, CreateTransferInpu
   // CRITICAL: Financial operations MUST use transaction mode
   // Recovery system relies on this - see README "Saga, Transaction, and Recovery Boundaries"
   sagaOptions: {
-    useTransaction: process.env.MONGO_TRANSACTIONS !== 'false', // Should always be true for financial ops
+    get useTransaction() { return getUseMongoTransactions(); }, // Financial ops
     maxRetries: 3,
   },
 });

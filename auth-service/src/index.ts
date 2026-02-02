@@ -43,8 +43,8 @@ import {
 import { db } from './database.js';
 import { redis } from './redis.js';
 
-import { loadConfig, validateConfig, printConfigSummary } from './config.js';
-import { AUTH_CONFIG_DEFAULTS } from './config-defaults.js';
+import { loadConfig, validateConfig, printConfigSummary, setAuthConfig } from './config.js';
+import { AUTH_CONFIG_DEFAULTS, GATEWAY_JWT_DEFAULTS, GATEWAY_DATABASE_DEFAULTS, GATEWAY_COMMON_DEFAULTS } from './config-defaults.js';
 import { configurePassport } from './providers/passport-strategies.js';
 import { setupOAuthRoutes } from './oauth-routes.js';
 import { OTPProviderFactory } from './providers/otp-provider.js';
@@ -350,12 +350,14 @@ async function main() {
 
   // Register default configs (auto-created in DB if missing)
   registerServiceConfigDefaults('auth-service', AUTH_CONFIG_DEFAULTS);
+  registerServiceConfigDefaults('gateway', { ...GATEWAY_JWT_DEFAULTS, ...GATEWAY_DATABASE_DEFAULTS, ...GATEWAY_COMMON_DEFAULTS });
 
-  // Load config (MongoDB + env vars + defaults)
+  // Load config (MongoDB config store; JWT can fall back to gateway key)
   // Resolve brand/tenantId dynamically (from user context, config store, or env vars)
   const context = await resolveContext();
   authConfig = await loadConfig(context.brand, context.tenantId);
   validateConfig(authConfig);
+  setAuthConfig(authConfig);
 
   // ═══════════════════════════════════════════════════════════════════
   // Initialize Services
@@ -537,11 +539,11 @@ async function main() {
   });
 
   // Initialize Redis accessor (after gateway connects to Redis)
-  if (process.env.REDIS_URL) {
+  if (authConfig.redisUrl) {
     try {
       await configureRedisStrategy({
         strategy: 'shared',
-        defaultUrl: process.env.REDIS_URL,
+        defaultUrl: authConfig.redisUrl,
       });
       await redis.initialize({ brand: context.brand });
       logger.info('Redis accessor initialized', { brand: context.brand });
@@ -610,7 +612,7 @@ async function main() {
   logger.info('OAuth strategies configured and ready');
   
   // Start listening to Redis events
-  if (process.env.REDIS_URL) {
+  if (authConfig.redisUrl) {
     try {
       const channels = [
         'integration:auth',      // Auth service events

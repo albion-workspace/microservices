@@ -15,6 +15,7 @@
 import crypto from 'crypto';
 
 // Internal packages
+import { getUseMongoTransactions } from '../config.js';
 import { 
   createService, 
   generateId, 
@@ -247,7 +248,7 @@ export const depositService = createService<Transaction, CreateDepositInput>({
   },
   saga: depositSaga,
   sagaOptions: {
-    useTransaction: process.env.MONGO_TRANSACTIONS !== 'false',
+    get useTransaction() { return getUseMongoTransactions(); },
     maxRetries: 3,
   },
 });
@@ -407,7 +408,7 @@ export const withdrawalService = createService<Transaction, CreateWithdrawalInpu
   },
   saga: withdrawalSaga,
   sagaOptions: {
-    useTransaction: process.env.MONGO_TRANSACTIONS !== 'false',
+    get useTransaction() { return getUseMongoTransactions(); },
     maxRetries: 3,
   },
 });

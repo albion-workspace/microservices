@@ -635,6 +635,7 @@ export type {
   Connection,
 } from './types/index.js';
 export { CATEGORIES } from './types/index.js';
+export type { DefaultServiceConfig } from './types/index.js';
 
 // Auth & Permissions Types
 export type { 

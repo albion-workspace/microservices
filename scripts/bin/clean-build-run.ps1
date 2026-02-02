@@ -90,11 +90,9 @@ Pop-Location
 Write-Host "[OK] shared-validators built successfully" -ForegroundColor Green
 Write-Host ""
 
-# Step 5: Set shared JWT secret
-# Use consistent default secret instead of random to ensure all services can verify tokens
-$sharedJwtSecret = if ($env:SHARED_JWT_SECRET) { $env:SHARED_JWT_SECRET } else { "shared-jwt-secret-change-in-production" }
-Write-Host "[INFO] Using shared JWT_SECRET for all services" -ForegroundColor Cyan
-Write-Host "[INFO] JWT_SECRET: $sharedJwtSecret" -ForegroundColor Gray
+# Step 5: JWT secret (single value; can be shared or customized via env)
+$jwtSecret = if ($env:JWT_SECRET) { $env:JWT_SECRET } else { "shared-jwt-secret-change-in-production" }
+Write-Host "[INFO] JWT_SECRET: $jwtSecret" -ForegroundColor Gray
 Write-Host ""
 
 # Step 6: Start all services in WATCH MODE using start-service-dev.ps1

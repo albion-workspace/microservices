@@ -71,7 +71,13 @@
     },
     "docker": {
       "mongoUri": "mongodb://mongo:27017",
-      "redisUrl": "redis://:redis123@redis:6379"
+      "redisUrl": "redis://:redis123@redis:6379",
+      "jwtSecret": "shared-jwt-secret-change-in-production"
+    },
+    "prod": {
+      "mongoUri": "",
+      "redisUrl": "",
+      "jwtSecret": "shared-jwt-secret-change-in-production"
     }
   }
 }

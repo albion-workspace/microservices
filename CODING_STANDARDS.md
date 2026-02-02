@@ -1857,7 +1857,7 @@ All microservices that use core-service should follow the same naming so pattern
 
 | Area | Convention | Example (auth / test) |
 |------|------------|----------------------|
-| **Config** | `SERVICE_NAME = '{service}-service'`, `loadConfig(brand?, tenantId?)` **via getConfigWithDefault only** (no `process.env`), `validateConfig`, `printConfigSummary`, interface `{Service}Config` | `auth-service`, `AuthConfig`, `loadConfig` |
+| **Config** | `SERVICE_NAME = '{service}-service'`, `loadConfig(brand?, tenantId?)` **via getConfigWithDefault only** (no `process.env`), `validateConfig`, `printConfigSummary`. Interface `{Service}Config` **extends `DefaultServiceConfig`** (from core-service) and adds only service-specific properties. | `auth-service`, `AuthConfig`, `loadConfig` |
 | **Config defaults** | Export `{SERVICE}_CONFIG_DEFAULTS` with **every** key used by loadConfig: `port`, `serviceName`, `nodeEnv`, `corsOrigins`, `jwt`, `database` (mongoUri, redisUrl). Each key: `{ value, description }`; use `sensitivePaths` for secrets. Index calls `registerServiceConfigDefaults('{service}-service', {SERVICE}_CONFIG_DEFAULTS)`. | `AUTH_CONFIG_DEFAULTS`, `TEST_CONFIG_DEFAULTS` |
 | **Error codes** | `{SERVICE}_ERRORS` (object), `{SERVICE}_ERROR_CODES` (array), code values `MS{Service}*`, type `{Service}ErrorCode` | `AUTH_ERRORS`, `AUTH_ERROR_CODES`, `MSAuthUserNotFound`, `AuthErrorCode` |
 | **GraphQL** | Types: `{shortName}GraphQLTypes` (camelCase short name). Resolvers: `create{Service}Resolvers(config)` | `authGraphQLTypes`, `createAuthResolvers`; `testGraphQLTypes`, `createTestResolvers` |
@@ -1870,6 +1870,9 @@ All microservices that use core-service should follow the same naming so pattern
 **Service configuration – no process.env (dynamic config only):**
 
 - **Do not use `process.env` in microservices.** All config must come from the MongoDB config store via `getConfigWithDefault(SERVICE_NAME, key, { brand, tenantId })` in `config.ts`.
+- **Exception:** `process.env` is allowed **only** in core-service or in auth-service when required for **bootstrap/core DB** (e.g. strategy resolution before the config store is available). Document which env vars are used there. All other services must use **dynamic config only** (getConfigWithDefault / config store).
+- **Legacy fallback:** Remove; do not keep `process.env` as fallback in config.ts or index. Remove legacy/deprecated code instead of keeping it (see Refactoring Guidelines).
+- **Config interface:** Use `DefaultServiceConfig` from core-service for common properties (port, nodeEnv, serviceName, mongoUri, redisUrl, corsOrigins, jwtSecret, jwtExpiresIn, jwtRefreshSecret, jwtRefreshExpiresIn). Each service defines `export interface {Service}Config extends DefaultServiceConfig { ... }` and adds **only** service-specific properties. Reduces duplication and keeps config shape consistent; see SERVICE_GENERATOR.md.
 - Register **every** value used at runtime in `config-defaults.ts`: `port`, `serviceName`, `nodeEnv`, `corsOrigins`, `jwt` (secret, expiresIn, refreshSecret, refreshExpiresIn), `database` (mongoUri, redisUrl). Use `{ value, description }` per key; add `sensitivePaths` for secrets.
 - In `loadConfig`, load each key with `getConfigWithDefault(SERVICE_NAME, key, { brand, tenantId }) ?? defaultFromSameFile`. No fallback to `process.env`. Deployment/infra can set values in the config store or via admin; the app reads only from the config store.
 - Existing services that still use `process.env` in config.ts should be migrated to this pattern when touched.

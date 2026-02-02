@@ -1,86 +1,64 @@
 /**
  * Authentication Service Configuration
- * 
- * Centralized configuration management with dynamic MongoDB-based config store.
- * Supports multi-brand/tenant configurations with permission-based access.
- * 
- * Priority order:
- * 1. Environment variables (highest priority - overrides everything)
- * 2. MongoDB config store (dynamic, multi-brand/tenant) - stored in core_service
- * 3. Registered defaults (auto-created if missing)
- * 
- * NOTE: Config is always stored in core_service.service_configs (central)
- * because you need to read the database strategy before connecting to service DB.
+ *
+ * Dynamic config only: MongoDB config store + registered defaults. No process.env (CODING_STANDARDS).
+ * Exception: core-service or auth bootstrap/core DB may use process.env for strategy resolution (outside this file).
  */
 
+import type { DefaultServiceConfig } from 'core-service';
 import type { AuthConfig as BaseAuthConfig } from './types.js';
-import { 
-  logger, 
-  getConfigWithDefault,
-} from 'core-service';
+import { logger, getConfigWithDefault } from 'core-service';
 import type { AuthConfigDefaults } from './config-defaults.js';
 
-/**
- * Extended AuthConfig with service-specific settings
- */
-export interface AuthConfig extends BaseAuthConfig {
-  // Service
-  port: number;
-  nodeEnv: string;
-  serviceName: string;
-  
-  // Database - optional, gateway handles defaults from environment
-  mongoUri?: string;
-  redisUrl?: string;
-  
-  // URLs
+/** Full auth config: common (DefaultServiceConfig) + auth-specific (BaseAuthConfig). */
+export interface AuthConfig extends DefaultServiceConfig, BaseAuthConfig {
   frontendUrl: string;
   appUrl: string;
-  
-  // CORS
-  corsOrigins: string[];
+  notificationServiceUrl?: string;
+  notificationServiceToken?: string;
 }
 
-// Service name constant
 const SERVICE_NAME = 'auth-service';
 
-/**
- * Load configuration with dynamic MongoDB config store support
- * 
- * Priority order:
- * 1. Environment variables (highest priority)
- * 2. MongoDB config store (dynamic, multi-brand/tenant)
- * 3. Registered defaults (auto-created if missing)
- */
+/** Set by index after loadConfig so graphql, oauth-routes, password, otp-provider can read config without process.env */
+let _authConfig: AuthConfig | null = null;
+export function setAuthConfig(c: AuthConfig): void {
+  _authConfig = c;
+}
+export function getAuthConfig(): AuthConfig {
+  if (!_authConfig) throw new Error('Auth config not loaded yet');
+  return _authConfig;
+}
+
 export async function loadConfig(brand?: string, tenantId?: string): Promise<AuthConfig> {
-  const port = parseInt(process.env.PORT || '9001');
-  
-  // Load from MongoDB config store (core_service.service_configs) with automatic default creation
-  // If config doesn't exist in DB, uses registered default and creates it automatically
-  const otpLength = await getConfigWithDefault<number>(SERVICE_NAME, 'otpLength', { brand, tenantId }) ?? 6;
-  const otpExpiryMinutes = await getConfigWithDefault<number>(SERVICE_NAME, 'otpExpiryMinutes', { brand, tenantId }) ?? 10;
-  const sessionMaxAge = await getConfigWithDefault<number>(SERVICE_NAME, 'sessionMaxAge', { brand, tenantId }) ?? 30;
-  const maxActiveSessions = await getConfigWithDefault<number>(SERVICE_NAME, 'maxActiveSessions', { brand, tenantId }) ?? 5;
-  const passwordMinLength = await getConfigWithDefault<number>(SERVICE_NAME, 'passwordMinLength', { brand, tenantId }) ?? 8;
-  const passwordRequireUppercase = await getConfigWithDefault<boolean>(SERVICE_NAME, 'passwordRequireUppercase', { brand, tenantId }) ?? true;
-  const passwordRequireNumbers = await getConfigWithDefault<boolean>(SERVICE_NAME, 'passwordRequireNumbers', { brand, tenantId }) ?? true;
-  const passwordRequireSymbols = await getConfigWithDefault<boolean>(SERVICE_NAME, 'passwordRequireSymbols', { brand, tenantId }) ?? true;
-  
-  // Load nested configs
-  const jwtConfig = await getConfigWithDefault<AuthConfigDefaults['jwt']>(SERVICE_NAME, 'jwt', { brand, tenantId }) ?? {
-    expiresIn: '1h',
-    refreshExpiresIn: '7d',
-    secret: '',
-    refreshSecret: '',
-  };
-  
+  const port = (await getConfigWithDefault<number>(SERVICE_NAME, 'port', { brand, tenantId })) ?? 9001;
+  const serviceName = (await getConfigWithDefault<string>(SERVICE_NAME, 'serviceName', { brand, tenantId })) ?? SERVICE_NAME;
+  const nodeEnv = (await getConfigWithDefault<string>(SERVICE_NAME, 'nodeEnv', { brand, tenantId })) ?? (await getConfigWithDefault<string>('gateway', 'nodeEnv', { brand, tenantId })) ?? 'development';
+  const otpLength = (await getConfigWithDefault<number>(SERVICE_NAME, 'otpLength', { brand, tenantId })) ?? 6;
+  const otpExpiryMinutes = (await getConfigWithDefault<number>(SERVICE_NAME, 'otpExpiryMinutes', { brand, tenantId })) ?? 10;
+  const sessionMaxAge = (await getConfigWithDefault<number>(SERVICE_NAME, 'sessionMaxAge', { brand, tenantId })) ?? 30;
+  const maxActiveSessions = (await getConfigWithDefault<number>(SERVICE_NAME, 'maxActiveSessions', { brand, tenantId })) ?? 5;
+  const passwordMinLength = (await getConfigWithDefault<number>(SERVICE_NAME, 'passwordMinLength', { brand, tenantId })) ?? 8;
+  const passwordRequireUppercase = (await getConfigWithDefault<boolean>(SERVICE_NAME, 'passwordRequireUppercase', { brand, tenantId })) ?? true;
+  const passwordRequireNumbers = (await getConfigWithDefault<boolean>(SERVICE_NAME, 'passwordRequireNumbers', { brand, tenantId })) ?? true;
+  const passwordRequireSymbols = (await getConfigWithDefault<boolean>(SERVICE_NAME, 'passwordRequireSymbols', { brand, tenantId })) ?? true;
+
+  // Per-service JWT first; fallback to shared 'gateway' key (like database strategy)
+  const jwtConfig =
+    (await getConfigWithDefault<AuthConfigDefaults['jwt']>(SERVICE_NAME, 'jwt', { brand, tenantId })) ??
+    (await getConfigWithDefault<AuthConfigDefaults['jwt']>('gateway', 'jwt', { brand, tenantId })) ??
+    {
+      expiresIn: '1h',
+      refreshExpiresIn: '7d',
+      secret: '',
+      refreshSecret: '',
+    };
   const oauthConfig = await getConfigWithDefault<AuthConfigDefaults['oauth']>(SERVICE_NAME, 'oauth', { brand, tenantId }) ?? {
     google: { clientId: '', clientSecret: '', callbackUrl: '' },
     facebook: { appId: '', appSecret: '', callbackUrl: '' },
     linkedin: { clientId: '', clientSecret: '', callbackUrl: '' },
     instagram: { clientId: '', clientSecret: '', callbackUrl: '' },
   };
-  
   const smtpConfig = await getConfigWithDefault<AuthConfigDefaults['smtp']>(SERVICE_NAME, 'smtp', { brand, tenantId }) ?? {
     host: '',
     port: 587,
@@ -88,125 +66,73 @@ export async function loadConfig(brand?: string, tenantId?: string): Promise<Aut
     password: '',
     from: '',
   };
-  
   const twilioConfig = await getConfigWithDefault<AuthConfigDefaults['twilio']>(SERVICE_NAME, 'twilio', { brand, tenantId }) ?? {
     accountSid: '',
     authToken: '',
     phoneNumber: '',
   };
-  
-  const whatsappConfig = await getConfigWithDefault<AuthConfigDefaults['whatsapp']>(SERVICE_NAME, 'whatsapp', { brand, tenantId }) ?? {
-    apiKey: '',
-  };
-  
-  const telegramConfig = await getConfigWithDefault<AuthConfigDefaults['telegram']>(SERVICE_NAME, 'telegram', { brand, tenantId }) ?? {
-    botToken: '',
-  };
-  
-  const urlsConfig = await getConfigWithDefault<AuthConfigDefaults['urls']>(SERVICE_NAME, 'urls', { brand, tenantId }) ?? {
+  const whatsappConfig = await getConfigWithDefault<AuthConfigDefaults['whatsapp']>(SERVICE_NAME, 'whatsapp', { brand, tenantId }) ?? { apiKey: '' };
+  const telegramConfig = await getConfigWithDefault<AuthConfigDefaults['telegram']>(SERVICE_NAME, 'telegram', { brand, tenantId }) ?? { botToken: '' };
+  const urlsConfig = await getConfigWithDefault<AuthConfigDefaults['urls'] & { notificationServiceUrl?: string; notificationServiceToken?: string }>(SERVICE_NAME, 'urls', { brand, tenantId }) ?? {
     frontendUrl: 'http://localhost:5173',
     appUrl: 'http://localhost:3000',
+    notificationServiceUrl: 'http://localhost:9004/graphql',
+    notificationServiceToken: '',
   };
-  
-  const corsOrigins = await getConfigWithDefault<string[]>(SERVICE_NAME, 'corsOrigins', { brand, tenantId }) ?? [
+  const corsOrigins = (await getConfigWithDefault<string[]>(SERVICE_NAME, 'corsOrigins', { brand, tenantId })) ?? (await getConfigWithDefault<string[]>('gateway', 'corsOrigins', { brand, tenantId })) ?? [
     'http://localhost:5173',
     'http://localhost:3000',
     'http://127.0.0.1:5173',
   ];
-  
-  // Load database config (for MongoDB URI and Redis URL resolution)
-  const dbConfig = await getConfigWithDefault<{ strategy: string; mongoUri?: string; dbNameTemplate?: string; redisUrl?: string }>(SERVICE_NAME, 'database', { brand, tenantId });
-  
-  // Resolve MongoDB URI from config or env
-  // IMPORTANT: Use database strategy to resolve the correct database name
-  // For per-service strategy, this will be 'auth_service', but users should be in 'core_service'
-  // NOTE: Database config is handled by core-service strategy-config.ts
-  // auth-service uses 'shared' strategy (core_service database)
-  // Uses MONGO_URI and REDIS_URL from environment variables
-  // See CODING_STANDARDS.md for database access patterns
-  
-  // MongoDB URI and Redis URL come from environment
-  // The gateway scripts (docker/k8s) set these based on services.*.json config
-  const mongoUri = process.env.MONGO_URI;
-  const redisUrl = process.env.REDIS_URL;
-  
-  // Build config object (env vars override MongoDB configs)
+  const databaseConfig = (await getConfigWithDefault<{ mongoUri?: string; redisUrl?: string }>(SERVICE_NAME, 'database', { brand, tenantId })) ?? (await getConfigWithDefault<{ mongoUri?: string; redisUrl?: string }>('gateway', 'database', { brand, tenantId })) ?? { mongoUri: '', redisUrl: '' };
+
+  const portNum = typeof port === 'number' ? port : parseInt(String(port), 10);
+
   return {
-    // Service
-    port,
-    nodeEnv: process.env.NODE_ENV || 'development',
-    serviceName: process.env.SERVICE_NAME || 'auth-service',
-    
-    // Database - Fully configurable from MongoDB config store
-    mongoUri,
-    redisUrl,
-    
-    // JWT - Env vars override MongoDB configs
-    jwtSecret: process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || jwtConfig.secret || 'shared-jwt-secret-change-in-production',
-    jwtExpiresIn: process.env.JWT_EXPIRES_IN || jwtConfig.expiresIn,
-    jwtRefreshSecret: process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || jwtConfig.refreshSecret || 'shared-jwt-secret-change-in-production',
-    jwtRefreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || jwtConfig.refreshExpiresIn,
-    
-    // Password Policy - Env vars override MongoDB configs
-    passwordMinLength: parseInt(process.env.PASSWORD_MIN_LENGTH || String(passwordMinLength)),
-    passwordRequireUppercase: process.env.PASSWORD_REQUIRE_UPPERCASE !== 'false' ? passwordRequireUppercase : false,
-    passwordRequireNumbers: process.env.PASSWORD_REQUIRE_NUMBERS !== 'false' ? passwordRequireNumbers : false,
-    passwordRequireSymbols: process.env.PASSWORD_REQUIRE_SYMBOLS !== 'false' ? passwordRequireSymbols : false,
-    
-    // OTP - Env vars override MongoDB configs
-    otpLength: parseInt(process.env.OTP_LENGTH || String(otpLength)),
-    otpExpiryMinutes: parseInt(process.env.OTP_EXPIRY_MINUTES || String(otpExpiryMinutes)),
-    
-    // Session - Env vars override MongoDB configs
-    sessionMaxAge: parseInt(process.env.SESSION_MAX_AGE || String(sessionMaxAge)),
-    maxActiveSessions: parseInt(process.env.MAX_ACTIVE_SESSIONS || String(maxActiveSessions)),
-    
-    // URLs - Env vars override MongoDB configs
-    frontendUrl: process.env.FRONTEND_URL || urlsConfig.frontendUrl,
-    appUrl: process.env.APP_URL || urlsConfig.appUrl,
-    
-    // Google OAuth - Env vars override MongoDB configs
-    googleClientId: process.env.GOOGLE_CLIENT_ID || oauthConfig.google.clientId || '',
-    googleClientSecret: process.env.GOOGLE_CLIENT_SECRET || oauthConfig.google.clientSecret || '',
-    googleCallbackUrl: process.env.GOOGLE_CALLBACK_URL || oauthConfig.google.callbackUrl || `http://localhost:${port}/auth/google/callback`,
-    
-    // Facebook OAuth - Env vars override MongoDB configs
-    facebookAppId: process.env.FACEBOOK_APP_ID || oauthConfig.facebook.appId || '',
-    facebookAppSecret: process.env.FACEBOOK_APP_SECRET || oauthConfig.facebook.appSecret || '',
-    facebookCallbackUrl: process.env.FACEBOOK_CALLBACK_URL || oauthConfig.facebook.callbackUrl || `http://localhost:${port}/auth/facebook/callback`,
-    
-    // LinkedIn OAuth - Env vars override MongoDB configs
-    linkedinClientId: process.env.LINKEDIN_CLIENT_ID || oauthConfig.linkedin.clientId || '',
-    linkedinClientSecret: process.env.LINKEDIN_CLIENT_SECRET || oauthConfig.linkedin.clientSecret || '',
-    linkedinCallbackUrl: process.env.LINKEDIN_CALLBACK_URL || oauthConfig.linkedin.callbackUrl || `http://localhost:${port}/auth/linkedin/callback`,
-    
-    // Instagram OAuth - Env vars override MongoDB configs
-    instagramClientId: process.env.INSTAGRAM_CLIENT_ID || oauthConfig.instagram.clientId || '',
-    instagramClientSecret: process.env.INSTAGRAM_CLIENT_SECRET || oauthConfig.instagram.clientSecret || '',
-    instagramCallbackUrl: process.env.INSTAGRAM_CALLBACK_URL || oauthConfig.instagram.callbackUrl || `http://localhost:${port}/auth/instagram/callback`,
-    
-    // Twilio - Env vars override MongoDB configs
-    twilioAccountSid: process.env.TWILIO_ACCOUNT_SID || twilioConfig.accountSid,
-    twilioAuthToken: process.env.TWILIO_AUTH_TOKEN || twilioConfig.authToken,
-    twilioPhoneNumber: process.env.TWILIO_PHONE_NUMBER || twilioConfig.phoneNumber,
-    
-    // SMTP - Env vars override MongoDB configs
-    smtpHost: process.env.SMTP_HOST || smtpConfig.host,
-    smtpPort: parseInt(process.env.SMTP_PORT || String(smtpConfig.port)),
-    smtpUser: process.env.SMTP_USER || smtpConfig.user,
-    smtpPassword: process.env.SMTP_PASSWORD || smtpConfig.password,
-    smtpFrom: process.env.SMTP_FROM || smtpConfig.from,
-    
-    // WhatsApp - Env vars override MongoDB configs
-    whatsappApiKey: process.env.WHATSAPP_API_KEY || whatsappConfig.apiKey,
-    
-    // Telegram - Env vars override MongoDB configs
-    telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || telegramConfig.botToken,
-    
-    // CORS - Env vars override MongoDB configs
-    corsOrigins: process.env.CORS_ORIGINS
-      ? process.env.CORS_ORIGINS.split(',').map(origin => origin.trim())
-      : corsOrigins,
+    port: portNum,
+    nodeEnv,
+    serviceName,
+    mongoUri: databaseConfig.mongoUri || undefined,
+    redisUrl: databaseConfig.redisUrl || undefined,
+    jwtSecret: jwtConfig.secret || 'shared-jwt-secret-change-in-production',
+    jwtExpiresIn: jwtConfig.expiresIn,
+    jwtRefreshSecret: jwtConfig.refreshSecret,
+    jwtRefreshExpiresIn: jwtConfig.refreshExpiresIn,
+    passwordMinLength: typeof passwordMinLength === 'number' ? passwordMinLength : parseInt(String(passwordMinLength), 10),
+    passwordRequireUppercase,
+    passwordRequireNumbers,
+    passwordRequireSymbols,
+    otpLength: typeof otpLength === 'number' ? otpLength : parseInt(String(otpLength), 10),
+    otpExpiryMinutes: typeof otpExpiryMinutes === 'number' ? otpExpiryMinutes : parseInt(String(otpExpiryMinutes), 10),
+    sessionMaxAge: typeof sessionMaxAge === 'number' ? sessionMaxAge : parseInt(String(sessionMaxAge), 10),
+    maxActiveSessions: typeof maxActiveSessions === 'number' ? maxActiveSessions : parseInt(String(maxActiveSessions), 10),
+    frontendUrl: urlsConfig.frontendUrl,
+    appUrl: urlsConfig.appUrl,
+    googleClientId: oauthConfig.google.clientId || '',
+    googleClientSecret: oauthConfig.google.clientSecret || '',
+    googleCallbackUrl: oauthConfig.google.callbackUrl || `http://localhost:${portNum}/auth/google/callback`,
+    facebookAppId: oauthConfig.facebook.appId || '',
+    facebookAppSecret: oauthConfig.facebook.appSecret || '',
+    facebookCallbackUrl: oauthConfig.facebook.callbackUrl || `http://localhost:${portNum}/auth/facebook/callback`,
+    linkedinClientId: oauthConfig.linkedin.clientId || '',
+    linkedinClientSecret: oauthConfig.linkedin.clientSecret || '',
+    linkedinCallbackUrl: oauthConfig.linkedin.callbackUrl || `http://localhost:${portNum}/auth/linkedin/callback`,
+    instagramClientId: oauthConfig.instagram.clientId || '',
+    instagramClientSecret: oauthConfig.instagram.clientSecret || '',
+    instagramCallbackUrl: oauthConfig.instagram.callbackUrl || `http://localhost:${portNum}/auth/instagram/callback`,
+    twilioAccountSid: twilioConfig.accountSid,
+    twilioAuthToken: twilioConfig.authToken,
+    twilioPhoneNumber: twilioConfig.phoneNumber,
+    smtpHost: smtpConfig.host || undefined,
+    smtpPort: smtpConfig.port,
+    smtpUser: smtpConfig.user || undefined,
+    smtpPassword: smtpConfig.password || undefined,
+    smtpFrom: smtpConfig.from,
+    whatsappApiKey: whatsappConfig.apiKey,
+    telegramBotToken: telegramConfig.botToken,
+    corsOrigins,
+    notificationServiceUrl: urlsConfig.notificationServiceUrl,
+    notificationServiceToken: urlsConfig.notificationServiceToken,
   };
 }
 
@@ -215,14 +141,10 @@ export async function loadConfig(brand?: string, tenantId?: string): Promise<Aut
  */
 export function validateConfig(config: AuthConfig): void {
   const errors: string[] = [];
-  
-  if (!config.mongoUri) {
-    errors.push('MONGO_URI is required');
-  }
-  
+
   if (!config.jwtSecret || config.jwtSecret === 'shared-jwt-secret-change-in-production') {
     if (config.nodeEnv === 'production') {
-      errors.push('JWT_SECRET or SHARED_JWT_SECRET must be set in production');
+      errors.push('JWT_SECRET must be set in production');
     } else {
       logger.warn('⚠ WARNING: Using default JWT_SECRET. Change in production!');
     }

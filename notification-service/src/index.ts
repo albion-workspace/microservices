@@ -53,16 +53,16 @@ const buildGatewayConfig = (notificationService: NotificationService, notificati
   const config = notificationConfig; // Type narrowing helper
   
   return {
-    name: 'notification-service',
+    name: config.serviceName,
     port: config.port,
     cors: {
-      origins: (process.env.CORS_ORIGINS || 'http://localhost:5173,http://localhost:3000')
-        .split(',')
-        .map(o => o.trim()),
+      origins: config.corsOrigins,
     },
     jwt: {
-      secret: process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || 'shared-jwt-secret-change-in-production',
-      expiresIn: '1h',
+      secret: config.jwtSecret,
+      expiresIn: config.jwtExpiresIn,
+      refreshSecret: config.jwtRefreshSecret,
+      refreshExpiresIn: config.jwtRefreshExpiresIn,
     },
     services: [
       {

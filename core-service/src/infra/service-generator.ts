@@ -1,9 +1,16 @@
 /**
  * Microservice scaffold generator
  *
- * Generates a new microservice folder that follows project coding standards:
+ * Single source of truth for generic microservice structure. Emitted files use
+ * ONLY getConfigWithDefault and the config object—no process.env. Exception:
+ * core-service itself or auth-service when using core DB may need process.env
+ * for bootstrap/strategy resolution (outside this generator; generator never emits process.env).
+ *
  * - Dynamic config from MongoDB (getConfigWithDefault, registerServiceConfigDefaults)
- * - createServiceDatabaseAccess (per-service or core_service)
+ * - Per-service/per-brand DB init: createServiceDatabaseAccess, createServiceRedisAccess;
+ *   db.initialize({ brand, tenantId }), redis.initialize({ brand }) after resolveContext/loadConfig
+ * - Config: key-by-key getConfigWithDefault is default; a key may also hold a whole JSON object
+ *   (e.g. database, jwt, or service-specific 'providers') via getConfigWithDefault<SERVICE_NAME, 'key', ...>
  * - GraphQL types + resolvers, permissions, createGateway
  * - Error codes (registerServiceErrorCodes), optional Redis, optional webhooks
  *
@@ -226,6 +233,9 @@ export const ${serviceNameConst.toUpperCase()}_CONFIG_DEFAULTS = {
  * ${serviceNamePascal} Service Configuration
  *
  * Dynamic config only: MongoDB config store + registered defaults. No process.env (CODING_STANDARDS).
+ * Keys are loaded key-by-key above; for a single JSON key use:
+ *   await getConfigWithDefault<YourType>(SERVICE_NAME, 'yourKey', { brand, tenantId }) ?? defaultYourKey
+ * and add that key to config-defaults.ts.
  */
 
 import { getConfigWithDefault } from 'core-service';
@@ -236,19 +246,19 @@ const SERVICE_NAME = '${serviceNameKebab}';
 export async function loadConfig(brand?: string, tenantId?: string): Promise<${serviceNamePascal}Config> {
   const port = (await getConfigWithDefault<number>(SERVICE_NAME, 'port', { brand, tenantId })) ?? ${port};
   const serviceName = (await getConfigWithDefault<string>(SERVICE_NAME, 'serviceName', { brand, tenantId })) ?? SERVICE_NAME;
-  const nodeEnv = (await getConfigWithDefault<string>(SERVICE_NAME, 'nodeEnv', { brand, tenantId })) ?? 'development';
-  const corsOrigins = await getConfigWithDefault<string[]>(SERVICE_NAME, 'corsOrigins', { brand, tenantId }) ?? [
+  const nodeEnv = (await getConfigWithDefault<string>(SERVICE_NAME, 'nodeEnv', { brand, tenantId })) ?? (await getConfigWithDefault<string>('gateway', 'nodeEnv', { brand, tenantId })) ?? 'development';
+  const corsOrigins = (await getConfigWithDefault<string[]>(SERVICE_NAME, 'corsOrigins', { brand, tenantId })) ?? (await getConfigWithDefault<string[]>('gateway', 'corsOrigins', { brand, tenantId })) ?? [
     'http://localhost:5173',
     'http://localhost:3000',
     'http://127.0.0.1:5173',
   ];
-  const jwtConfig = await getConfigWithDefault<{ secret: string; expiresIn: string; refreshSecret: string; refreshExpiresIn: string }>(SERVICE_NAME, 'jwt', { brand, tenantId }) ?? {
+  const jwtConfig = (await getConfigWithDefault<{ secret: string; expiresIn: string; refreshSecret: string; refreshExpiresIn: string }>(SERVICE_NAME, 'jwt', { brand, tenantId })) ?? (await getConfigWithDefault<{ secret: string; expiresIn: string; refreshSecret: string; refreshExpiresIn: string }>('gateway', 'jwt', { brand, tenantId })) ?? {
     secret: '',
     expiresIn: '1h',
     refreshSecret: '',
     refreshExpiresIn: '7d',
   };
-  const databaseConfig = await getConfigWithDefault<{ mongoUri?: string; redisUrl?: string }>(SERVICE_NAME, 'database', { brand, tenantId }) ?? { mongoUri: '', redisUrl: '' };
+  const databaseConfig = (await getConfigWithDefault<{ mongoUri?: string; redisUrl?: string }>(SERVICE_NAME, 'database', { brand, tenantId })) ?? (await getConfigWithDefault<{ mongoUri?: string; redisUrl?: string }>('gateway', 'database', { brand, tenantId })) ?? { mongoUri: '', redisUrl: '' };
 
   return {
     port: typeof port === 'number' ? port : parseInt(String(port), 10),
@@ -257,7 +267,7 @@ export async function loadConfig(brand?: string, tenantId?: string): Promise<${s
     corsOrigins,
     mongoUri: databaseConfig.mongoUri || undefined,
     redisUrl: databaseConfig.redisUrl || undefined,
-    jwtSecret: jwtConfig.secret || 'change-in-production',
+    jwtSecret: jwtConfig.secret || 'shared-jwt-secret-change-in-production',
     jwtExpiresIn: jwtConfig.expiresIn,
     jwtRefreshSecret: jwtConfig.refreshSecret,
     jwtRefreshExpiresIn: jwtConfig.refreshExpiresIn,
@@ -265,7 +275,7 @@ export async function loadConfig(brand?: string, tenantId?: string): Promise<${s
 }
 
 export function validateConfig(config: ${serviceNamePascal}Config): void {
-  if (!config.jwtSecret || config.jwtSecret === 'change-in-production') {
+  if (!config.jwtSecret || config.jwtSecret === 'shared-jwt-secret-change-in-production') {
     console.warn('JWT secret should be set in config store for production');
   }
 }
@@ -281,20 +291,12 @@ export function printConfigSummary(config: ${serviceNamePascal}Config): void {
     'src/types.ts',
     `/**
  * ${serviceNamePascal} Service shared types
+ * Config extends DefaultServiceConfig (common props from core-service); add only service-specific props here.
  */
 
-export interface ${serviceNamePascal}Config {
-  port: number;
-  nodeEnv: string;
-  serviceName: string;
-  corsOrigins: string[];
-  mongoUri?: string;
-  redisUrl?: string;
-  jwtSecret: string;
-  jwtExpiresIn: string;
-  jwtRefreshSecret?: string;
-  jwtRefreshExpiresIn?: string;
-}
+import type { DefaultServiceConfig } from 'core-service';
+
+export interface ${serviceNamePascal}Config extends DefaultServiceConfig {}
 `
   );
 

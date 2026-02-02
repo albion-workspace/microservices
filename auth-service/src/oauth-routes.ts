@@ -8,6 +8,7 @@ import type { Request, Response } from 'express';
 import { createTokenPair, logger } from 'core-service';
 import type { User } from './types.js';
 import { createUserContext } from './utils.js';
+import { getAuthConfig } from './config.js';
 
 /**
  * OAuth provider configuration
@@ -40,13 +41,14 @@ async function handleOAuthCallback(
     // Create UserContext using reusable utility
     const userContext = createUserContext(user);
 
+    const authConfig = getAuthConfig();
     const tokens = createTokenPair(userContext, {
-      secret: process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || 'shared-jwt-secret-change-in-production',
-      expiresIn: '1h',
-      refreshExpiresIn: '7d',
+      secret: authConfig.jwtSecret,
+      expiresIn: authConfig.jwtExpiresIn,
+      refreshExpiresIn: authConfig.jwtRefreshExpiresIn ?? '7d',
     });
 
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+    const frontendUrl = authConfig.frontendUrl;
     const redirectUrl = `${frontendUrl}/auth/callback?` +
       `accessToken=${encodeURIComponent(tokens.accessToken)}&` +
       `refreshToken=${encodeURIComponent(tokens.refreshToken)}&` +
@@ -73,7 +75,7 @@ async function handleOAuthCallback(
  * Setup OAuth routes
  */
 export function setupOAuthRoutes(app: any) {
-  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+  const frontendUrl = getAuthConfig().frontendUrl;
   
   // OAuth provider configurations
   const providers: Record<string, OAuthProviderConfig> = {

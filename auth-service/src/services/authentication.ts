@@ -33,7 +33,7 @@ import {
   invalidateAllUserSessions,
   updateSessionLastUsed,
 } from '../utils/session-utils.js';
-import type { AuthConfig } from '../types.js';
+import type { AuthConfig } from '../config.js';
 import { authenticateLocal } from '../providers/passport-strategies.js';
 
 export class AuthenticationService {
@@ -240,7 +240,7 @@ export class AuthenticationService {
     
     // Calculate expiry times
     const accessExpiresIn = this.parseExpiry(this.config.jwtExpiresIn);
-    const refreshExpiresIn = this.parseExpiry(this.config.jwtRefreshExpiresIn);
+    const refreshExpiresIn = this.parseExpiry(this.config.jwtRefreshExpiresIn ?? '7d');
     const sessionMaxAgeSeconds = this.config.sessionMaxAge * 24 * 60 * 60;
     
     // Ensure deviceId exists
@@ -433,7 +433,7 @@ export class AuthenticationService {
           accessToken: jwtTokens.accessToken,
           refreshToken: refreshTokenValue, // Return same refresh token
           expiresIn: this.parseExpiry(this.config.jwtExpiresIn),
-          refreshExpiresIn: this.parseExpiry(this.config.jwtRefreshExpiresIn),
+          refreshExpiresIn: this.parseExpiry(this.config.jwtRefreshExpiresIn ?? '7d'),
         },
       };
     } catch (error: any) {

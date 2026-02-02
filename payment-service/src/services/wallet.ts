@@ -52,6 +52,7 @@
  */
 
 import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, resolveDatabase, deleteCache, deleteCachePattern, logger, validateInput, findOneById, findOneAndUpdateById, requireAuth, getUserId, getTenantId, getOrCreateWallet, paginateCollection, extractDocumentId, GraphQLError, type DatabaseResolutionOptions } from 'core-service';
+import { getUseMongoTransactions } from '../config.js';
 import { db } from '../database.js';
 import { PAYMENT_ERRORS } from '../error-codes.js';
 import type { Wallet, WalletCategory } from '../types.js';
@@ -720,7 +721,7 @@ export const walletService = createService<Wallet, CreateWalletInput>({
   saga: walletSaga,
   // Transactions require MongoDB replica set (default in docker-compose)
   sagaOptions: {
-    useTransaction: process.env.MONGO_TRANSACTIONS !== 'false',
+    get useTransaction() { return require('../config.js').getUseMongoTransactions(); },
     maxRetries: 3,
   },
 });

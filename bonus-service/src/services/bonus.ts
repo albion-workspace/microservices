@@ -8,6 +8,7 @@
  */
 
 import { createService, type, type Repository, type SagaContext, validateInput, logger, findUserIdByRole, GraphQLError, type DatabaseResolutionOptions } from 'core-service';
+import { getUseMongoTransactions } from '../config.js';
 import { BONUS_ERRORS } from '../error-codes.js';
 import type { BonusTemplate, UserBonus, BonusTransaction, BonusStatus } from '../types.js';
 import { createBonusEngine, type BonusEngineOptions } from './bonus-engine/index.js';
@@ -409,7 +410,7 @@ export const userBonusService = createService<UserBonus, CreateUserBonusSagaInpu
   // Use MongoDB transaction for bonus operations (money involved)
   // Requires MongoDB replica set (default in docker-compose)
   sagaOptions: {
-    useTransaction: process.env.MONGO_TRANSACTIONS !== 'false',
+    get useTransaction() { return getUseMongoTransactions(); },
     maxRetries: 3,
   },
 });
@@ -513,7 +514,7 @@ export const bonusTransactionService = createService<BonusTransaction, CreateBon
   // Critical: Use MongoDB transaction for all bonus transactions (money operations)
   // Requires MongoDB replica set (default in docker-compose)
   sagaOptions: {
-    useTransaction: process.env.MONGO_TRANSACTIONS !== 'false',
+    get useTransaction() { return getUseMongoTransactions(); },
     maxRetries: 3,
   },
 });

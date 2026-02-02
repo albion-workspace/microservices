@@ -15,7 +15,7 @@ import {
   createGateway,
   logger,
   registerServiceErrorCodes,
-  registerServiceConfigDefaults,
+  resolveContext,
   isAuthenticated,
   hasRole,
   hasAnyRole,
@@ -34,6 +34,7 @@ import { redis } from './redis.js';
 
 import { db, registerKYCIndexes } from './database.js';
 import { registerKYCConfigDefaults } from './config-defaults.js';
+import { loadConfig, validateConfig, printConfigSummary, type KYCConfig } from './config.js';
 import { initializeProviders } from './providers/provider-factory.js';
 import { initializeEventHandlers } from './event-dispatcher.js';
 import { KYC_ERROR_CODES } from './error-codes.js';
@@ -62,32 +63,6 @@ import { verificationRepository } from './repositories/verification-repository.j
 
 // Import types
 import type { KYCTier } from './types/kyc-types.js';
-
-// ═══════════════════════════════════════════════════════════════════
-// Configuration
-// NOTE: Database config is handled by core-service strategy-config.ts
-// Uses MONGO_URI and REDIS_URL from environment variables
-// See CODING_STANDARDS.md for database access patterns
-// ═══════════════════════════════════════════════════════════════════
-
-interface KYCConfig {
-  port: number;
-  corsOrigins: string[];
-  jwtSecret: string;
-  jwtExpiresIn: string;
-  jwtRefreshSecret: string;
-  jwtRefreshExpiresIn: string;
-}
-
-// Config loaded from environment variables (no hardcoded localhost fallbacks)
-const kycConfig: KYCConfig = {
-  port: parseInt(process.env.PORT || '9005', 10),
-  corsOrigins: process.env.CORS_ORIGINS?.split(',') || ['http://localhost:3000', 'http://localhost:5173'],
-  jwtSecret: process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || 'shared-jwt-secret-change-in-production',
-  jwtExpiresIn: process.env.JWT_EXPIRES_IN || '1h',
-  jwtRefreshSecret: process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || 'shared-jwt-secret-change-in-production',
-  jwtRefreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
-};
 
 // ═══════════════════════════════════════════════════════════════════
 // Custom Resolvers
@@ -191,18 +166,18 @@ const customResolvers = {
 // Gateway Configuration
 // ═══════════════════════════════════════════════════════════════════
 
-const buildGatewayConfig = (): Parameters<typeof createGateway>[0] => {
+function buildGatewayConfig(config: KYCConfig): Parameters<typeof createGateway>[0] {
   return {
-    name: 'kyc-service',
-    port: kycConfig.port,
+    name: config.serviceName,
+    port: config.port,
     cors: {
-      origins: kycConfig.corsOrigins,
+      origins: config.corsOrigins,
     },
     jwt: {
-      secret: kycConfig.jwtSecret,
-      expiresIn: kycConfig.jwtExpiresIn,
-      refreshSecret: kycConfig.jwtRefreshSecret,
-      refreshExpiresIn: kycConfig.jwtRefreshExpiresIn,
+      secret: config.jwtSecret,
+      expiresIn: config.jwtExpiresIn,
+      refreshSecret: config.jwtRefreshSecret,
+      refreshExpiresIn: config.jwtRefreshExpiresIn ?? '7d',
     },
     services: [
       { name: 'kycProfile', types: kycProfileService.types, resolvers: kycProfileService.resolvers },
@@ -237,13 +212,11 @@ const buildGatewayConfig = (): Parameters<typeof createGateway>[0] => {
         startKycVerification: isAuthenticated,
       },
     },
-    // NOTE: mongoUri and redisUrl come from MONGO_URI and REDIS_URL env vars
-    // handled by core-service gateway - no hardcoded values needed
-    mongoUri: process.env.MONGO_URI,
-    redisUrl: process.env.REDIS_URL,
+    mongoUri: config.mongoUri,
+    redisUrl: config.redisUrl,
     defaultPermission: 'deny' as const,
   };
-};
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // Startup
@@ -252,54 +225,48 @@ const buildGatewayConfig = (): Parameters<typeof createGateway>[0] => {
 async function main() {
   try {
     logger.info('Starting KYC service');
-    
-    // Register error codes
+
     registerServiceErrorCodes(KYC_ERROR_CODES);
-    
-    // Register configuration defaults
     registerKYCConfigDefaults();
-    
-    // Initialize database
-    await db.initialize({
-      brand: 'default',
-      tenantId: 'default',
+
+    const context = await resolveContext();
+    const config = await loadConfig(context.brand, context.tenantId);
+    validateConfig(config);
+    printConfigSummary(config);
+
+    const { database } = await db.initialize({
+      brand: context.brand,
+      tenantId: context.tenantId,
     });
-    
-    // Register indexes
+    logger.info('Database initialized', { database: database.databaseName });
+
     registerKYCIndexes();
     await db.ensureIndexes();
-    
-    // Initialize providers
+
     await initializeProviders();
-    
-    // Start gateway
-    await createGateway(buildGatewayConfig());
-    
-    logger.info(`KYC service started on port ${kycConfig.port}`);
-    
-    // Initialize Redis accessor (after gateway connects to Redis)
-    // Redis URL comes from REDIS_URL environment variable
-    if (process.env.REDIS_URL) {
+
+    await createGateway(buildGatewayConfig(config));
+
+    logger.info('KYC service started', { port: config.port });
+
+    if (config.redisUrl) {
       try {
         await configureRedisStrategy({
           strategy: 'shared',
-          defaultUrl: process.env.REDIS_URL,
+          defaultUrl: config.redisUrl,
         });
-        await redis.initialize({ brand: 'default' });
-        logger.info('Redis accessor initialized');
-        
-        // Initialize event handlers (after Redis is connected)
+        await redis.initialize({ brand: context.brand });
+        logger.info('Redis accessor initialized', { brand: context.brand });
         await initializeEventHandlers();
       } catch (err) {
-        logger.warn('Could not initialize Redis/event handlers', { 
-          error: err instanceof Error ? err.message : 'Unknown error' 
+        logger.warn('Could not initialize Redis/event handlers', {
+          error: err instanceof Error ? err.message : 'Unknown error',
         });
-        // Don't throw - service can still run without event handlers
       }
     }
   } catch (error) {
-    logger.error('Failed to start KYC service', { 
-      error: error instanceof Error ? error.message : 'Unknown error' 
+    logger.error('Failed to start KYC service', {
+      error: error instanceof Error ? error.message : 'Unknown error',
     });
     process.exit(1);
   }

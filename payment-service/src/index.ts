@@ -51,7 +51,7 @@ import {
   type PaymentWebhookEvents,
 } from './event-dispatcher.js';
 import { PAYMENT_ERROR_CODES, PAYMENT_ERRORS } from './error-codes.js';
-import { loadConfig, validateConfig, printConfigSummary, type PaymentConfig } from './config.js';
+import { loadConfig, validateConfig, printConfigSummary, setUseMongoTransactions, type PaymentConfig } from './config.js';
 import { PAYMENT_CONFIG_DEFAULTS } from './config-defaults.js';
 
 // Re-export for consumers
@@ -784,6 +784,7 @@ async function main() {
   paymentConfig = await loadConfig(context.brand, context.tenantId);
   validateConfig(paymentConfig);
   printConfigSummary(paymentConfig);
+  setUseMongoTransactions(paymentConfig.useMongoTransactions ?? true);
 
   // ═══════════════════════════════════════════════════════════════════
   // Initialize Services
@@ -958,7 +959,7 @@ async function main() {
   }, 24 * 60 * 60 * 1000); // Daily
   
   // Start listening to events from Redis
-  if (process.env.REDIS_URL) {
+  if (paymentConfig.redisUrl) {
     try {
       // Subscribe to event channels
       const channels = [

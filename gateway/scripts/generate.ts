@@ -28,7 +28,7 @@ import {
   type LocalDependency,
 } from 'core-service';
 
-import { loadConfigFromArgs, logConfigSummary, getInfraConfig, getDockerContainerNames, getInternalPorts, getReusedServiceEntries, type ServicesConfig, type ConfigMode, type InfraConfig, getMongoUri, getRedisUrl } from './config-loader.js';
+import { loadConfigFromArgs, logConfigSummary, getInfraConfig, getDockerContainerNames, getInternalPorts, getReusedServiceEntries, getJwtSecret, type ServicesConfig, type ConfigMode, type InfraConfig, getMongoUri, getRedisUrl } from './config-loader.js';
 import { runScript, printHeader, printFooter } from './script-runner.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -230,6 +230,7 @@ function generateDevCompose(config: ServicesConfig, mode: ConfigMode): string {
 
   const imageTag = projectName === 'ms' ? 'latest' : projectName;
   const { dev: runtimeDev } = getInfraConfig().defaults.runtime;
+  const jwtSecretDev = getJwtSecret(config, 'docker');
   const serviceBlocks = servicesToInclude.map((svc) => {
     const containerName = `${projectName}-${svc.name}-service`;
     const depends = reuseInfra ? [] : [mongoComposeService, 'redis'];
@@ -246,7 +247,7 @@ function generateDevCompose(config: ServicesConfig, mode: ConfigMode): string {
     environment:
       - PORT=${svc.port}
       - NODE_ENV=${runtimeDev.nodeEnv}
-      - JWT_SECRET=${runtimeDev.jwtSecret}
+      - JWT_SECRET=${jwtSecretDev}
       - MONGO_URI=${mongoUri}
       - REDIS_URL=${redisUrl}
 ${dependsBlock}    networks:
@@ -472,6 +473,7 @@ function generateProdCompose(config: ServicesConfig, mode: ConfigMode): string {
   const redisHost = config.reuseInfra?.redis && reuseInfra ? `${providerProject}-redis` : 'redis';
   const { mongoPort, redisPort } = getInternalPorts(getInfraConfig());
   const { prod: runtimeProd } = getInfraConfig().defaults.runtime;
+  const jwtSecretProd = getJwtSecret(config, 'prod');
   const redisPassword = (redis as { password?: string }).password;
   const redisAuth = redisPassword ? `:${redisPassword}@` : '';
   const redisUrl = `redis://${redisAuth}${redisHost}:${redisPort}`;
@@ -498,7 +500,7 @@ function generateProdCompose(config: ServicesConfig, mode: ConfigMode): string {
     environment:
       - PORT=${svc.port}
       - NODE_ENV=${runtimeProd.nodeEnv}
-      - JWT_SECRET=${runtimeProd.jwtSecret}
+      - JWT_SECRET=${jwtSecretProd}
       - MONGO_URI=mongodb://${mongoHost}:${mongoPort}/${svc.database}
       - REDIS_URL=${redisUrl}
 ${dependsBlock}    networks:

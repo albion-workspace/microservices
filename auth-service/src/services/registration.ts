@@ -18,7 +18,7 @@ import {
   hashPassword,
   normalizeUser,
 } from '../utils.js';
-import type { AuthConfig } from '../types.js';
+import type { AuthConfig } from '../config.js';
 import type { OTPProviderFactory } from '../providers/otp-provider.js';
 
 export interface RegistrationServiceOptions {

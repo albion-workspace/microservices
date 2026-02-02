@@ -8,17 +8,9 @@
  */
 
 export const NOTIFICATION_CONFIG_DEFAULTS = {
-  // NOTE: Database configuration is handled by core-service strategy-config.ts
-  // Do NOT define database config here - it uses MONGO_URI/REDIS_URL from environment
-  // See CODING_STANDARDS.md for database access patterns
-  
-  // Service Configuration
-  port: {
-    value: 9004,
-    description: 'Notification service port',
-  },
-  
-  // CORS Configuration
+  port: { value: 9004, description: 'Notification service port' },
+  serviceName: { value: 'notification-service', description: 'Service name' },
+  nodeEnv: { value: 'development', description: 'Node environment' },
   corsOrigins: {
     value: [
       'http://localhost:5173',
@@ -27,8 +19,16 @@ export const NOTIFICATION_CONFIG_DEFAULTS = {
     ],
     description: 'Allowed CORS origins',
   },
-  
-  // SMTP Configuration
+  jwt: {
+    value: { secret: '', expiresIn: '1h', refreshSecret: '', refreshExpiresIn: '7d' },
+    sensitivePaths: ['jwt.secret', 'jwt.refreshSecret'] as string[],
+    description: 'JWT configuration',
+  },
+  database: {
+    value: { mongoUri: '', redisUrl: '' },
+    sensitivePaths: ['database.mongoUri', 'database.redisUrl'] as string[],
+    description: 'MongoDB and Redis URLs (set via config store or deployment)',
+  },
   smtp: {
     value: {
       host: '',

@@ -1232,10 +1232,7 @@ export function createAuthResolvers(
           throw new GraphQLError(AUTH_ERRORS.TokenRequired, {});
         }
         
-        const jwtSecret = authConfig?.jwtSecret || 
-                         process.env.JWT_SECRET || 
-                         process.env.SHARED_JWT_SECRET || 
-                         'shared-jwt-secret-change-in-production';
+        const jwtSecret = authConfig?.jwtSecret || 'shared-jwt-secret-change-in-production';
         
         // Try Redis first
         if (redis.isInitialized()) {

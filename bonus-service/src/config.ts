@@ -1,102 +1,55 @@
 /**
  * Bonus Service Configuration
- * 
- * Centralized configuration management with dynamic MongoDB-based config store.
- * Supports multi-brand/tenant configurations with permission-based access.
- * 
- * Priority order:
- * 1. Environment variables (highest priority - overrides everything)
- * 2. MongoDB config store (dynamic, multi-brand/tenant) - stored in core_service
- * 3. Registered defaults (auto-created if missing)
- * 
- * NOTE: Config is always stored in core_service.service_configs (central)
- * because you need to read the database strategy before connecting to service DB.
+ *
+ * Dynamic config only: MongoDB config store + registered defaults. No process.env (CODING_STANDARDS).
  */
 
-import { 
-  logger, 
-  getConfigWithDefault,
-} from 'core-service';
+import type { DefaultServiceConfig } from 'core-service';
+import { logger, getConfigWithDefault } from 'core-service';
 
-/**
- * BonusConfig with service-specific settings
- */
-export interface BonusConfig {
-  // Service
-  port: number;
-  nodeEnv: string;
-  serviceName: string;
-  
-  // Database - optional, gateway handles defaults from environment
-  mongoUri?: string;
-  redisUrl?: string;
-  
-  // CORS
-  corsOrigins: string[];
-  
-  // JWT
-  jwtSecret: string;
-  jwtExpiresIn: string;
-  jwtRefreshSecret?: string;
-  jwtRefreshExpiresIn?: string;
-}
+export interface BonusConfig extends DefaultServiceConfig {}
 
-// Service name constant
 const SERVICE_NAME = 'bonus-service';
 
-/**
- * Load configuration with dynamic MongoDB config store support
- * 
- * Priority order:
- * 1. Environment variables (highest priority)
- * 2. MongoDB config store (from core_service.service_configs)
- * 3. Registered defaults (auto-created if missing)
- */
+/** Set by index after loadConfig so bonus.ts sagaOptions can read it without process.env */
+let _useMongoTransactions = true;
+export function setUseMongoTransactions(v: boolean): void {
+  _useMongoTransactions = v;
+}
+export function getUseMongoTransactions(): boolean {
+  return _useMongoTransactions;
+}
+
 export async function loadConfig(brand?: string, tenantId?: string): Promise<BonusConfig> {
-  const port = parseInt(process.env.PORT || '9003');
-  
-  // Load from MongoDB config store with automatic default creation
-  const corsOrigins = await getConfigWithDefault<string[]>(SERVICE_NAME, 'corsOrigins', { brand, tenantId }) ?? [
+  const port = (await getConfigWithDefault<number>(SERVICE_NAME, 'port', { brand, tenantId })) ?? 9003;
+  const serviceName = (await getConfigWithDefault<string>(SERVICE_NAME, 'serviceName', { brand, tenantId })) ?? SERVICE_NAME;
+  const nodeEnv = (await getConfigWithDefault<string>(SERVICE_NAME, 'nodeEnv', { brand, tenantId })) ?? (await getConfigWithDefault<string>('gateway', 'nodeEnv', { brand, tenantId })) ?? 'development';
+  const corsOrigins = (await getConfigWithDefault<string[]>(SERVICE_NAME, 'corsOrigins', { brand, tenantId })) ?? (await getConfigWithDefault<string[]>('gateway', 'corsOrigins', { brand, tenantId })) ?? [
     'http://localhost:5173',
     'http://localhost:3000',
     'http://127.0.0.1:5173',
   ];
-  
-  const jwtConfig = await getConfigWithDefault<{ expiresIn: string; secret: string; refreshExpiresIn: string; refreshSecret: string }>(SERVICE_NAME, 'jwt', { brand, tenantId }) ?? {
+  const jwtConfig = (await getConfigWithDefault<{ expiresIn: string; secret: string; refreshExpiresIn: string; refreshSecret: string }>(SERVICE_NAME, 'jwt', { brand, tenantId })) ?? (await getConfigWithDefault<{ expiresIn: string; secret: string; refreshExpiresIn: string; refreshSecret: string }>('gateway', 'jwt', { brand, tenantId })) ?? {
     expiresIn: '8h',
     secret: '',
     refreshExpiresIn: '7d',
     refreshSecret: '',
   };
-  
-  // NOTE: Database config is handled by core-service strategy-config.ts
-  // Uses MONGO_URI and REDIS_URL from environment variables
-  // See CODING_STANDARDS.md for database access patterns
-  
-  // MongoDB URI and Redis URL come from environment
-  // The gateway scripts (docker/k8s) set these based on services.*.json config
-  const mongoUri = process.env.MONGO_URI;
-  const redisUrl = process.env.REDIS_URL;
-  
-  // Build config object (env vars override MongoDB configs)
+  const databaseConfig = (await getConfigWithDefault<{ mongoUri?: string; redisUrl?: string }>(SERVICE_NAME, 'database', { brand, tenantId })) ?? (await getConfigWithDefault<{ mongoUri?: string; redisUrl?: string }>('gateway', 'database', { brand, tenantId })) ?? { mongoUri: '', redisUrl: '' };
+  const transactionConfig = await getConfigWithDefault<{ useTransactions?: boolean }>(SERVICE_NAME, 'transaction', { brand, tenantId }) ?? { useTransactions: true };
+
   return {
-    // Service
-    port: parseInt(process.env.PORT || String(port)),
-    nodeEnv: process.env.NODE_ENV || 'development',
-    serviceName: process.env.SERVICE_NAME || 'bonus-service',
-    
-    // Database - Fully configurable from MongoDB config store
-    mongoUri,
-    redisUrl,
-    
-    // CORS - Env vars override MongoDB configs
-    corsOrigins: process.env.CORS_ORIGINS?.split(',') || corsOrigins,
-    
-    // JWT - Env vars override MongoDB configs
-    jwtSecret: process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || jwtConfig.secret || 'shared-jwt-secret-change-in-production',
-    jwtExpiresIn: process.env.JWT_EXPIRES_IN || jwtConfig.expiresIn,
-    jwtRefreshSecret: process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || jwtConfig.refreshSecret || 'shared-jwt-secret-change-in-production',
-    jwtRefreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || jwtConfig.refreshExpiresIn,
+    port: typeof port === 'number' ? port : parseInt(String(port), 10),
+    nodeEnv,
+    serviceName,
+    mongoUri: databaseConfig.mongoUri || undefined,
+    redisUrl: databaseConfig.redisUrl || undefined,
+    corsOrigins,
+    jwtSecret: jwtConfig.secret || 'shared-jwt-secret-change-in-production',
+    jwtExpiresIn: jwtConfig.expiresIn,
+    jwtRefreshSecret: jwtConfig.refreshSecret,
+    jwtRefreshExpiresIn: jwtConfig.refreshExpiresIn,
+    useMongoTransactions: transactionConfig.useTransactions !== false,
   };
 }
 

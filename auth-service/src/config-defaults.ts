@@ -1,19 +1,52 @@
 /**
  * Auth Service Configuration Defaults
- * 
+ *
  * These defaults are registered at startup and automatically created in MongoDB
- * if they don't exist. This provides a single source of truth for configuration.
- * 
- * Sensitive paths are marked so they're filtered for non-admin users.
+ * if they don't exist. Sensitive paths are filtered for non-admin users.
+ *
+ * JWT is common across microservices when using a shared strategy (like database).
+ * Optional: register GATEWAY_JWT_DEFAULTS so getConfigWithDefault('gateway', 'jwt')
+ * can be used as a fallback; gateway config (services.*.json environments.jwtSecret)
+ * drives Docker/K8s env and can seed the store.
  */
 
+/** Shared JWT defaults (key 'gateway') – same default everywhere; override via JSON or dynamic config. */
+const SHARED_JWT_SECRET_DEFAULT = 'shared-jwt-secret-change-in-production';
+export const GATEWAY_JWT_DEFAULTS = {
+  jwt: {
+    value: { expiresIn: '1h', refreshExpiresIn: '7d', secret: SHARED_JWT_SECRET_DEFAULT, refreshSecret: '' },
+    sensitivePaths: ['jwt.secret', 'jwt.refreshSecret'] as string[],
+    description: 'Shared JWT (used by all services by default; override per-service in dynamic config)',
+  },
+} as const;
+
+/** Shared database defaults (key 'gateway') – Docker/bootstrap sets MONGO_URI/REDIS_URL; runtime uses dynamic config. */
+export const GATEWAY_DATABASE_DEFAULTS = {
+  database: {
+    value: { mongoUri: '', redisUrl: '' },
+    sensitivePaths: ['database.mongoUri', 'database.redisUrl'] as string[],
+    description: 'Shared MongoDB/Redis URLs (bootstrap from env; override per-service in dynamic config)',
+  },
+} as const;
+
+/** Shared CORS and nodeEnv (key 'gateway') – same pattern as database/JWT. */
+export const GATEWAY_COMMON_DEFAULTS = {
+  corsOrigins: {
+    value: ['http://localhost:5173', 'http://localhost:3000', 'http://127.0.0.1:5173'] as string[],
+    description: 'Shared CORS origins (override per-service in dynamic config)',
+  },
+  nodeEnv: { value: 'development', description: 'Shared Node environment' },
+} as const;
+
 export const AUTH_CONFIG_DEFAULTS = {
-  // NOTE: Database configuration is handled by core-service strategy-config.ts
-  // auth-service uses 'shared' strategy (core_service database) - see strategy-config.ts
-  // Do NOT define database config here - it uses MONGO_URI/REDIS_URL from environment
-  // See CODING_STANDARDS.md for database access patterns
-  
-  // OTP Configuration
+  port: { value: 9001, description: 'Auth service port' },
+  serviceName: { value: 'auth-service', description: 'Service name' },
+  nodeEnv: { value: 'development', description: 'Node environment' },
+  database: {
+    value: { mongoUri: '', redisUrl: '' },
+    sensitivePaths: ['database.mongoUri', 'database.redisUrl'] as string[],
+    description: 'MongoDB and Redis URLs (set via config store or deployment)',
+  },
   otpLength: {
     value: 6,
     description: 'OTP code length',
@@ -56,18 +89,17 @@ export const AUTH_CONFIG_DEFAULTS = {
     description: 'Require symbols in password',
   },
   
-  // JWT Configuration
-  // NOTE: For testing token refresh, set expiresIn to '2m' (2 minutes)
-  // For production, use '1h' (1 hour) or appropriate value
+  // JWT Configuration (per-service; fallback to gateway key when empty – see loadConfig)
+  // For token refresh testing use expiresIn: '2m'; for production use '1h'
   jwt: {
     value: {
-      expiresIn: '2m', // TESTING: 2 minutes for token refresh testing (change to '1h' for production)
+      expiresIn: '2m',
       refreshExpiresIn: '7d',
-      secret: '', // Will be set via env var or admin
-      refreshSecret: '', // Will be set via env var or admin
+      secret: '',
+      refreshSecret: '',
     },
     sensitivePaths: ['jwt.secret', 'jwt.refreshSecret'] as string[],
-    description: 'JWT configuration',
+    description: 'JWT configuration (shared across services when using gateway key)',
   },
   
   // OAuth Configuration
@@ -150,8 +182,11 @@ export const AUTH_CONFIG_DEFAULTS = {
     value: {
       frontendUrl: 'http://localhost:5173',
       appUrl: 'http://localhost:3000',
+      notificationServiceUrl: 'http://localhost:9004/graphql',
+      notificationServiceToken: '',
     },
-    description: 'Application URLs',
+    sensitivePaths: ['urls.notificationServiceToken'] as string[],
+    description: 'Application and notification service URLs',
   },
   
   // CORS Configuration
@@ -223,6 +258,8 @@ export interface AuthConfigDefaults {
   urls: {
     frontendUrl: string;
     appUrl: string;
+    notificationServiceUrl?: string;
+    notificationServiceToken?: string;
   };
   corsOrigins: string[];
 }
