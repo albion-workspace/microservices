@@ -419,79 +419,91 @@ function verifyWebhookSignature(
   }
 }
 
+const WEBHOOK_PORT_ALTERNATIVES = [9999, 9998, 9997, 9996];
+
 async function startWebhookReceiver(): Promise<void> {
-  return new Promise((resolve) => {
-    receivedWebhooks = [];
-    
-    webhookServer = http.createServer((req, res) => {
-      let body = '';
-      req.on('data', (chunk) => (body += chunk));
-      req.on('end', () => {
-        const url = req.url || '';
-        
-        // Handle test endpoints for circuit breaker and retry tests
-        if (url.includes('/webhook/failing')) {
-          endpointFailureCount++;
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Simulated failure', attempt: endpointFailureCount }));
-          return;
-        }
-        
-        if (url.includes('/webhook/retry-test')) {
-          endpointAttemptCount++;
-          if (endpointAttemptCount <= 2) {
-            // Fail first 2 attempts
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Temporary failure', attempt: endpointAttemptCount }));
-            return;
-          } else {
-            // Succeed on 3rd+ attempt
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ received: true, attempt: endpointAttemptCount }));
-            return;
-          }
-        }
-        
-        if (url.includes('/webhook/recovery-test')) {
-          if (shouldFailEndpoint) {
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Service down' }));
-            return;
-          } else {
+  let lastErr: Error | null = null;
+  for (const port of WEBHOOK_PORT_ALTERNATIVES) {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        receivedWebhooks = [];
+        webhookServer = http.createServer((req, res) => {
+          let body = '';
+          req.on('data', (chunk) => (body += chunk));
+          req.on('end', () => {
+            const url = req.url || '';
+
+            // Handle test endpoints for circuit breaker and retry tests
+            if (url.includes('/webhook/failing')) {
+              endpointFailureCount++;
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Simulated failure', attempt: endpointFailureCount }));
+              return;
+            }
+
+            if (url.includes('/webhook/retry-test')) {
+              endpointAttemptCount++;
+              if (endpointAttemptCount <= 2) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Temporary failure', attempt: endpointAttemptCount }));
+                return;
+              } else {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ received: true, attempt: endpointAttemptCount }));
+                return;
+              }
+            }
+
+            if (url.includes('/webhook/recovery-test')) {
+              if (shouldFailEndpoint) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Service down' }));
+                return;
+              } else {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ received: true }));
+                return;
+              }
+            }
+
+            const signature = req.headers['x-webhook-signature'] as string || '';
+            let secret = 'unknown';
+            if (url.includes('/bonus')) secret = MOCK_WEBHOOKS.bonusEvents.secret;
+            else if (url.includes('/payment')) secret = MOCK_WEBHOOKS.paymentEvents.secret;
+            else if (url.includes('/awarded')) secret = MOCK_WEBHOOKS.specificEvents.secret;
+
+            const verified = verifyWebhookSignature(body, signature, secret);
+            receivedWebhooks.push({
+              path: url,
+              headers: req.headers as Record<string, string | string[] | undefined>,
+              body: JSON.parse(body || '{}'),
+              signature,
+              verified,
+              timestamp: Date.now(),
+            });
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ received: true }));
-            return;
-          }
-        }
-        
-        // Normal webhook handling
-        const signature = req.headers['x-webhook-signature'] as string || '';
-        
-        let secret = 'unknown';
-        if (url.includes('/bonus')) secret = MOCK_WEBHOOKS.bonusEvents.secret;
-        else if (url.includes('/payment')) secret = MOCK_WEBHOOKS.paymentEvents.secret;
-        else if (url.includes('/awarded')) secret = MOCK_WEBHOOKS.specificEvents.secret;
-
-        const verified = verifyWebhookSignature(body, signature, secret);
-
-        receivedWebhooks.push({
-          path: url,
-          headers: req.headers as Record<string, string | string[] | undefined>,
-          body: JSON.parse(body || '{}'),
-          signature,
-          verified,
-          timestamp: Date.now(),
+          });
         });
-
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ received: true }));
+        webhookServer.on('error', (err: NodeJS.ErrnoException) => {
+          if (err.code === 'EADDRINUSE') reject(err);
+          else reject(err);
+        });
+        webhookServer.listen(port, () => {
+          CONFIG.webhookReceiverPort = port;
+          resolve();
+        });
       });
-    });
-
-    webhookServer.listen(CONFIG.webhookReceiverPort, () => {
-      resolve();
-    });
-  });
+      return;
+    } catch (err) {
+      lastErr = err as Error;
+      if (webhookServer) {
+        try { webhookServer.close(); } catch { /* ignore */ }
+        webhookServer = null;
+      }
+    }
+  }
+  throw lastErr ?? new Error('Failed to bind webhook receiver to any port');
 }
 
 function stopWebhookReceiver(): void {
