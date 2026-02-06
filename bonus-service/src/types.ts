@@ -18,6 +18,7 @@ import type {
   TriggeredBy,
   ValueType as SharedValueType,
   StatusHistoryEntry,
+  DefaultServiceConfig,
 } from 'core-service';
 
 // Re-export for consumers
@@ -25,6 +26,13 @@ export type Currency = SharedCurrency;
 
 // Use shared Domain type as BonusDomain
 export type BonusDomain = SharedDomain;
+
+// ═══════════════════════════════════════════════════════════════════
+// Service Configuration (single config type, aligned with service generator)
+// ═══════════════════════════════════════════════════════════════════
+
+/** Bonus service config: extends DefaultServiceConfig from core-service. */
+export interface BonusConfig extends DefaultServiceConfig {}
 
 // ═══════════════════════════════════════════════════════════════════
 // Bonus Types

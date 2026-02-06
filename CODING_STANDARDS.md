@@ -4,7 +4,7 @@
 
 **Project Status**: Pre-Production - This project has not yet been released to production. Code cleanup rules are simplified (no backward compatibility concerns). After production/release, these rules will be updated to include backward compatibility and legacy code management.
 
-**Last Updated**: 2026-01-30
+**Last Updated**: 2026-02-06
 
 ---
 
@@ -89,12 +89,13 @@ Before making any changes, follow this checklist:
 
 3. **Internal Packages** (core-service, core-service/access, etc.)
    ```typescript
-   import { logger, createServiceDatabaseAccess } from 'core-service';
+   import { logger, createServiceAccessors } from 'core-service';
    import { matchAnyUrn } from 'core-service/access';
    ```
 
 4. **Local Imports** (relative paths: `./`, `../`)
    ```typescript
+   import { db, redis } from './accessors.js';
    import { rolesToArray, normalizeUser } from './utils.js';
    import { SYSTEM_CURRENCY } from '../constants.js';
    ```
@@ -124,10 +125,11 @@ import { Server as SocketIOServer } from 'socket.io';
 import { GraphQLSchema, GraphQLObjectType } from 'graphql';
 
 // Internal packages
-import { logger, createServiceDatabaseAccess } from 'core-service';
+import { logger, createServiceAccessors } from 'core-service';
 import { matchAnyUrn } from 'core-service/access';
 
 // Local imports
+import { db, redis } from './accessors.js';
 import { rolesToArray } from './utils.js';
 import { SYSTEM_CURRENCY } from '../constants.js';
 
@@ -288,11 +290,15 @@ export async function verifyPassword(password: string, hash: string): Promise<bo
 
 ### shared-validators Package
 
-**Purpose**: Client-safe eligibility validators for bonus and KYC validation. Pure functions with no database dependencies.
+**Purpose**: Client-safe validators and utilities. Pure functions with no database dependencies. Used by the React app and services.
 
 **Usage**:
 ```typescript
-import { BonusEligibility, KYCEligibility } from 'shared-validators';
+import { BonusEligibility, KYCEligibility, decodeJWT, isExpired } from 'shared-validators';
+
+// JWT (client-safe decode only; no verification)
+const payload = decodeJWT(accessToken);
+if (payload && isExpired(payload)) { /* refresh or clear */ }
 
 // Bonus eligibility
 const result = BonusEligibility.check(template, { kycTier: 'standard' });
@@ -309,14 +315,15 @@ const txResult = KYCEligibility.checkTransaction(limits, {
 const requirements = KYCEligibility.getTierRequirements('enhanced');
 ```
 
-**Classes**:
-- `BonusEligibility` - Check bonus template eligibility (active, date range, tier, country, KYC tier)
-- `KYCEligibility` - Check transaction limits, tier requirements, action permissions
+**Exports**:
+- `decodeJWT`, `isExpired`, `JwtPayload` – client-safe JWT decode (e.g. auth-context, token expiry checks)
+- `BonusEligibility` – bonus template eligibility (active, date range, tier, country, KYC tier)
+- `KYCEligibility` – transaction limits, tier requirements, action permissions
 
 **Key Principles**:
 - All types are self-contained (no external dependencies)
-- Static classes with pure functions
-- No database calls - validation only
+- Pure functions / static classes
+- No database calls – validation and decode only
 - Same code runs on client and server
 
 
@@ -502,7 +509,9 @@ Configuration files follow the pattern `gateway/configs/services.{mode}.json`:
 
 | Mode | File | Description |
 |------|------|-------------|
-| `dev` | `services.dev.json` | Single MongoDB/Redis, local development (default) |
+| `dev` (default/ms) | `services.dev.json` | Single MongoDB/Redis, all 5 services (default) |
+| `test` | `services.test.json` | Standalone stack; distinct ports (gateway 9998). Uses `infra.test.json`. |
+| `combo` | `services.combo.json` | Reuses ms Redis/Mongo/auth; deploys gateway + KYC only. Deploy ms first. Uses `infra.combo.json`. |
 | `shared` | `services.shared.json` | MongoDB Replica Set, Redis Sentinel |
 | `{brand}` | `services.{brand}.json` | Custom brand-specific config |
 
@@ -553,19 +562,21 @@ See `gateway/README.md` for full documentation.
 
 ### Service Structure
 
-Every microservice follows this standard structure:
+Every microservice follows this standard structure (aligned with the service generator). Use a single **accessors** module for db + redis; do not add separate `database.ts` or `redis.ts` re-exports.
 
 ```
 service-name/
 ├── src/
-│   ├── index.ts           # Entry point with createGateway
-│   ├── database.ts        # MongoDB accessor
-│   ├── redis.ts           # Redis accessor
-│   ├── config.ts          # Service configuration
+│   ├── index.ts           # Entry point with createGateway; imports from ./accessors.js
+│   ├── accessors.ts       # db + redis via createServiceAccessors (single factory call)
+│   ├── config.ts          # Service configuration (getServiceConfigKey only)
+│   ├── config-defaults.ts # registerServiceConfigDefaults values
+│   ├── error-codes.ts     # SERVICE_ERRORS, SERVICE_ERROR_CODES
+│   ├── graphql.ts         # Types + createResolvers
 │   ├── services/
 │   │   └── feature.ts     # createService definitions
 │   ├── repositories/
-│   │   └── feature-repository.ts  # Extends BaseRepository
+│   │   └── feature-repository.ts  # Extends BaseRepository; import db from ../accessors.js
 │   └── types/
 │       └── feature-types.ts
 ├── package.json
@@ -593,38 +604,32 @@ service-name/
 }
 ```
 
-### Step 2: Create Database Accessor (`database.ts`)
+### Step 2: Create accessors (`accessors.ts`) – db + redis in one call
+
+Use a single **accessors** module. Do not create separate `database.ts` or `redis.ts`; all code imports `db` and `redis` from `./accessors.js`.
 
 ```typescript
-import { createServiceDatabaseAccess } from 'core-service';
+/**
+ * {ServiceName} service accessors (db + redis) from one factory call.
+ * Per-service database: {service_name}.   (or: Uses core_service database. for auth)
+ */
 
-// Create the database accessor for this service
-export const db = createServiceDatabaseAccess('service-name');
+import { createServiceAccessors } from 'core-service';
 
-// Usage in service code:
-// await db.initialize({ brand: 'default', tenantId: 'default' });
-// const database = await db.getDb();
-// const collection = database.collection('my_collection');
+export const { db, redis } = createServiceAccessors('service-name');
+
+// Auth-service uses shared DB: createServiceAccessors('auth-service', { databaseServiceName: 'core-service' });
 ```
 
-### Step 3: Create Redis Accessor (`redis.ts`)
+**Usage in service code:**
+- `await db.initialize({ brand, tenantId });` then `const database = await db.getDb();`
+- `await redis.initialize({ brand });` then `await redis.set('key', value, ttl);` / `redis.get<T>('key')`
+- All other files import: `import { db, redis } from './accessors.js';` or `from '../accessors.js';`
+
+### Step 3: Create Service with GraphQL (`services/feature.ts`)
 
 ```typescript
-import { createServiceRedisAccess } from 'core-service';
-
-// Create the Redis accessor for this service
-export const redis = createServiceRedisAccess('service-name');
-
-// Usage in service code:
-// await redis.initialize({ brand: 'default' });
-// await redis.set('key', value, ttlSeconds);
-// const value = await redis.get<T>('key');
-```
-
-### Step 4: Create Service with GraphQL (`services/feature.ts`)
-
-```typescript
-import { createService, type SagaContext, type Repository } from 'core-service';
+import { createService, type SagaContext, type Repository, buildConnectionTypeSDL, buildSagaResultTypeSDL, timestampFieldsSDL } from 'core-service';
 import { type } from 'arktype';
 
 // Define input validation schema
@@ -684,6 +689,7 @@ export const featureService = createService<Feature, CreateFeatureInput>({
   entity: {
     name: 'feature',
     collection: 'features',
+    // Use SDL helpers from core-service (single source of truth – no inline duplication)
     graphqlType: `
       type Feature {
         id: ID!
@@ -691,12 +697,11 @@ export const featureService = createService<Feature, CreateFeatureInput>({
         name: String!
         description: String
         status: String!
-        createdAt: String
-        updatedAt: String
+        ${timestampFieldsSDL()}
       }
-      
-      type FeatureConnection { nodes: [Feature!]! totalCount: Int! pageInfo: PageInfo! }
-      type CreateFeatureResult { success: Boolean! feature: Feature sagaId: ID! errors: [String!] executionTimeMs: Int }
+
+      ${buildConnectionTypeSDL('FeatureConnection', 'Feature')}
+      ${buildSagaResultTypeSDL('CreateFeatureResult', 'feature', 'Feature')}
     `,
     graphqlInput: `input CreateFeatureInput { name: String! description: String }`,
     validateInput: (input) => {
@@ -716,9 +721,18 @@ export const featureService = createService<Feature, CreateFeatureInput>({
 });
 ```
 
-### Step 5: Create Entry Point (`index.ts`)
+### Step 4: Create Entry Point (`index.ts`)
+
+Keep import order: core-service → accessors → local. Index header should include: "Aligned with service generator scaffold (accessors, config, createGateway). Domain-specific code below."
 
 ```typescript
+/**
+ * {ServiceName} Service
+ * Aligned with service generator scaffold (accessors, config, createGateway). Domain-specific code below.
+ *
+ * (Domain description...)
+ */
+
 import {
   createGateway,
   logger,
@@ -726,17 +740,14 @@ import {
   type ResolverContext,
   type GatewayConfig,
 } from 'core-service';
+import { db, redis } from './accessors.js';
 
-import { db } from './database.js';
-import { redis } from './redis.js';
+import { loadConfig, validateConfig, printConfigSummary, SERVICE_NAME } from './config.js';
 import { featureService } from './services/feature.js';
 
-// Configuration
-const config = {
-  port: parseInt(process.env.PORT || '9006', 10),
-  mongoUri: process.env.MONGODB_URI || 'mongodb://localhost:27017/service_name',
-  redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
-};
+// Configuration from config store only (no process.env in microservices)
+const context = await resolveContext();
+const config = await loadConfig(context.brand, context.tenantId);
 
 // Helper functions for resolvers
 function getUserId(ctx: ResolverContext): string {
@@ -917,13 +928,14 @@ extend type Query {
 
 ### Dependencies & Infrastructure
 - **Core-Service**: Provides (single source of truth):
-  - Database abstractions (`getDatabase`, `getClient`, `connectDatabase`, `createServiceDatabaseAccess`)
-  - Database utilities (`findOneById`, `paginateCollection`, `buildIdQuery`)
+  - **Accessors**: `createServiceAccessors(serviceName, options?)` returns `{ db, redis }` in one call; microservices use a single `accessors.ts` and import from `./accessors.js` (no separate `database.ts` or `redis.ts`).
+  - Database abstractions (`createServiceDatabaseAccess`, `createServiceAccessors`, `getDatabase`, `getClient`, `connectDatabase`)
+  - Database utilities (`findOneById`, `paginateCollection`, `buildIdQuery`, `createUniqueIndexSafe`, `normalizeWalletForGraphQL`)
   - Database types (`Db`, `ClientSession`, `Collection`, `Filter`, `MongoClient`)
-  - Redis abstractions (`createServiceRedisAccess`, `configureRedisStrategy`)
-  - Generic utilities (logging, retry, circuit breaker)
-  - Generic patterns (saga, gateway, event system)
-  - Type definitions and interfaces
+  - Redis abstractions (`createServiceRedisAccess`, `configureRedisStrategy`; prefer `createServiceAccessors` for new code)
+  - Generic utilities (logging, retry, circuit breaker, `getErrorMessage`, `getServiceConfigKey`)
+  - Generic patterns (saga, gateway, event system, `withEventHandlerError`, `createTransferRecoverySetup`, `buildConnectionTypeSDL`, `timestampFieldsSDL` / `timestampFieldsRequiredSDL` / `timestampFieldsOptionalSDL`, `buildSagaResultTypeSDL`, `paginationArgsSDL`)
+  - Type definitions and interfaces (e.g. `NotificationHandlerPlugin`, `HandlerContext` in core-service)
   - Shared helpers (pagination, validation, wallet operations)
 - **Core-Service**: Must NOT include:
   - Service-specific database schemas
@@ -941,11 +953,14 @@ This project uses **MongoDB Node.js Driver 7.x**. Follow these practices:
 
 **Database Access Pattern**:
 ```typescript
-// ✅ Correct: Use ServiceDatabaseAccessor
-import { createServiceDatabaseAccess } from 'core-service';
-export const db = createServiceDatabaseAccess('payment-service');
+// ✅ Correct: Single accessors module (db + redis from one factory)
+// In accessors.ts:
+import { createServiceAccessors } from 'core-service';
+export const { db, redis } = createServiceAccessors('payment-service');
 
-// Initialize once at startup
+// In other files: import { db } from './accessors.js'; or from '../accessors.js';
+
+// Initialize once at startup (in index)
 await db.initialize({ brand, tenantId });
 
 // Use in service code
@@ -1000,11 +1015,10 @@ This project uses **node-redis v5.10.0+**. Follow these practices:
 
 **Service Redis Accessor Pattern**:
 ```typescript
-// ✅ Correct: Use ServiceRedisAccessor
-import { createServiceRedisAccess } from 'core-service';
-export const redis = createServiceRedisAccess('payment-service');
+// ✅ Correct: Obtain redis from accessors.ts (same file as db)
+import { db, redis } from './accessors.js';
 
-// Initialize with brand context
+// Initialize with brand context (in index, after gateway/config)
 await redis.initialize({ brand: 'acme' });
 
 // Keys are auto-prefixed: {brand}:{service}:{key}
@@ -1199,6 +1213,8 @@ return wallet.balance;
 - **Always**: Keep GraphQL schemas and TypeScript types in sync
 - **Always**: Use cursor-based pagination (not offset)
 - **Always**: Remove deprecated fields from both schema and types immediately (no backward compatibility needed pre-production)
+- **Reuse**: For list types use `buildConnectionTypeSDL(connectionName, nodeTypeName)` from core; for common fields (e.g. `createdAt`, `updatedAt`) use `timestampFieldsSDL()`, `timestampFieldsRequiredSDL()`, or `timestampFieldsOptionalSDL()` from core so SDL is a single source of truth
+- **Reuse**: For saga result types use `buildSagaResultTypeSDL(resultName, entityField, entityType, extraFields?)` from core; for pagination arguments use `paginationArgsSDL()` from core
 
 #### GraphQL Schema ↔ TypeScript Type Sync Verification
 
@@ -1508,9 +1524,14 @@ for (const key of keys) { /* check if stuck */ }
 
 ### Generic Helpers in Core-Service
 - **Always**: Add generic, reusable helpers to `core-service`
-- **Examples**: `extractDocumentId()`, `retry()`, `circuitBreaker()`, pagination helpers
+- **Examples**: `extractDocumentId()`, `retry()`, `circuitBreaker()`, pagination helpers; `getErrorMessage(error)` for consistent error messages; `getServiceConfigKey()` for config with optional gateway fallback; `createServiceAccessors()`, `buildConnectionTypeSDL()`, `timestampFieldsSDL()` / `timestampFieldsRequiredSDL()`, `createUniqueIndexSafe()`, `normalizeWalletForGraphQL()`, `withEventHandlerError()`, `createTransferRecoverySetup()`, notification handler plugin types (`NotificationHandlerPlugin`, `HandlerContext`)
 - **Never**: Add service-specific logic to `core-service`
 - **Pattern**: If a helper can be used by multiple services, it belongs in `core-service`
+
+### Service Generator Alignment
+- **Always**: New and existing microservices should look as if generated by the service generator (same structure, comments, naming). Only domain-specific code (resolvers, sagas, event handlers) should differ.
+- **Accessors**: One `accessors.ts` per service with generator-style comment: "[Name] service accessors (db + redis) from one factory call." then "Per-service database: {name}_service." or "Uses core_service database." for auth.
+- **Index**: Include the line "Aligned with service generator scaffold (accessors, config, createGateway). Domain-specific code below." in the top comment block; keep import order: core-service → accessors → local.
 
 ### Service-Specific Patterns
 - **Always**: Create service-specific utilities when logic is unique to that service
@@ -1639,9 +1660,9 @@ for (const key of keys) { /* check if stuck */ }
 - **Risk**: "Field can only be defined once" errors
 
 ### 15. Missing Redis/MongoDB Accessor ⚠️
-- ❌ **Wrong**: Using `getRedis()` directly without accessor initialization
-- ✅ **Right**: Create `redis.ts` with `createServiceRedisAccess()` and initialize after gateway
-- **Risk**: "Redis not connected" errors
+- ❌ **Wrong**: Using `getRedis()` or raw DB without accessor initialization; or adding separate `database.ts` / `redis.ts` instead of a single `accessors.ts`
+- ✅ **Right**: Use single `accessors.ts` with `createServiceAccessors('service-name')` exporting `{ db, redis }`; import from `./accessors.js`; initialize `db` and (if used) `redis` after gateway/config
+- **Risk**: "Redis not connected" or "database not initialized" errors
 
 ### 16. Wrong Initialization Order ⚠️
 - ❌ **Wrong**: Initialize event handlers before Redis is connected
@@ -1694,6 +1715,7 @@ async send(notification) {
 - **Always**: Maintain service boundaries (no direct cross-service imports)
 - **Always**: Use `core-service` for generic utilities, add service-specific logic on top
 - **Always**: Use event-driven communication (`emit`/`on`) instead of direct HTTP calls
+- **Always**: Wrap integration event handlers (registered with `on()`) with `withEventHandlerError(errorCode, handler)` so failures throw GraphQLError with eventId and a consistent error code (payment, bonus, kyc use it)
 - **Always**: Import access-engine through `core-service/access`, not directly
 - **Never**: Add generic utilities to service code - use `core-service` instead
 
@@ -1755,10 +1777,10 @@ The `gateway/` folder orchestrates local development, Docker, and Kubernetes dep
 ### Configuration Files (`gateway/configs/`)
 
 ```
-services.dev.json      # Development mode (single MongoDB/Redis)
-services.shared.json   # Shared/Production mode (replica sets, sentinel)
-services.local-k8s.json # Local Kubernetes testing
-services.{brand}.json  # Brand-specific configurations
+infra.json, infra.test.json, infra.combo.json   # Infra overrides per profile
+services.json, services.dev.json                # Base + default (ms)
+services.test.json, services.combo.json         # Test (standalone), combo (reuses ms)
+services.shared.json, services.local-k8s.json   # Shared/production, local K8s
 ```
 
 ### Key Scripts
@@ -1766,26 +1788,62 @@ services.{brand}.json  # Brand-specific configurations
 ```bash
 # Generate infrastructure (Dockerfiles, compose, K8s manifests)
 npm run generate                        # All, dev config
-npm run generate -- --config=shared     # Shared config
+npm run generate:test                   # Test config
+npm run generate:combo                   # Combo config (deploy ms first)
 npm run generate:dockerfile             # Only Dockerfiles
 
 # Docker operations (support --service for single service)
 npm run docker:build                    # Build all images
-npm run docker:build -- --service=auth  # Build only auth-service
 npm run docker:up                       # Start all containers
-npm run docker:up -- --service=auth     # Start only auth-service
+npm run docker:down                      # Stop containers (uses --remove-orphans when switching configs)
 npm run docker:status                   # Check status
+npm run docker:fresh                    # Full fresh: clean + build + start + health (default/ms, single Mongo/Redis)
+npm run docker:fresh:test               # Fresh deploy (test config)
+npm run docker:fresh:combo              # Fresh deploy (combo; deploy ms first)
+npm run docker:fresh:shared             # Fresh deploy (shared config: replica set + Sentinel)
 
-# Kubernetes operations
-npm run k8s:apply                       # Deploy to K8s
-npm run k8s:apply -- --service=auth     # Deploy only auth-service
-npm run k8s:status                      # Check K8s status
+# Kubernetes: k8s:apply, k8s:status, k8s:delete (suffix :test, :combo for those configs)
 
 # Health checks
 npm run health                          # Local services
-npm run health:docker                   # Docker services
+npm run health:docker                   # Docker (default/ms)
+npm run health:docker:test              # Docker (test config)
 npm run health:k8s                      # K8s services
 ```
+
+### Cleaning build artifacts and generated files
+
+**Always** use the standard infra clean command. **Do not** add or use custom delete/clean scripts (e.g. ad‑hoc `rm -rf` or one-off PowerShell/Node scripts) for removing `dist`, `node_modules`, generated Dockerfiles, or gateway output. The single source of truth is the core-service infra CLI.
+
+**Commands** (run from repo root or from `core-service` after `npm run build` there):
+
+| Command | What it removes |
+|--------|------------------------------------------|
+| **Default clean** | Generated files only: `gateway/generated`, `Dockerfile.core-base` at repo root, and each package’s `Dockerfile` (e.g. `auth-service/Dockerfile`, `payment-service/Dockerfile`). Use when you want to wipe generated infra without touching build artifacts or dependencies. |
+| **Full clean** | Everything above **plus** in every package under repo root: `dist`, `node_modules`, `package-lock.json`. Use for a full reset before a clean install/build. |
+
+**How to run:**
+
+```bash
+# From core-service (requires core-service to be built first: npm run build)
+cd core-service
+npm run clean        # default: generated only
+npm run clean:full   # generated + dist, node_modules, package-lock.json in all packages
+
+# Or via CLI directly (from repo root or core-service)
+npx service-infra clean
+npx service-infra clean --full
+# or: node core-service/dist/infra/cli.js clean
+# or: node core-service/dist/infra/cli.js clean -f
+```
+
+- **When to use default clean:** After changing gateway config and wanting to regenerate everything; or to remove only generated Dockerfiles and gateway output without deleting `node_modules` or `dist`.
+- **When to use full clean:** When preparing for a clean install (e.g. after dependency or Node version changes), or when you want to ensure no stale build artifacts anywhere.
+
+**Rules:**
+
+- **Do not** introduce project-specific or one-off scripts that delete `dist`, `node_modules`, `package-lock.json`, or generated files (e.g. in `scripts/bin/` or service folders). Use `service-infra clean` / `npm run clean` and `npm run clean:full` only.
+- **Do not** hardcode service names or paths in clean logic; the infra CLI discovers packages by `package.json` under repo root and cleans generically.
 
 ### Dockerfile Generation Patterns
 
@@ -1808,6 +1866,8 @@ The generator:
 
 **Result**: If tomorrow `core-service` is published to npm, just change `"file:../core-service"` to `"^1.0.0"` and regenerate Dockerfiles.
 
+**Default (ms)** uses **single** MongoDB and **single** Redis from `services.dev.json`; shared config uses replica set and Sentinel. When switching configs (e.g. ms ↔ test ↔ shared), run `docker:down` first; it uses `--remove-orphans` so orphaned containers are removed and ports freed. See `gateway/STATUS.md` for implementation status.
+
 ### Infrastructure Auto-Detection
 
 When generating docker-compose, the script automatically detects:
@@ -1821,19 +1881,56 @@ This makes CI/CD bulletproof - works in both scenarios.
 
 ### Adding a New Service
 
-1. Create service folder with standard structure
-2. Add to `gateway/configs/services.*.json`:
+**Use the service generator** so the new microservice follows coding standards (dynamic config from MongoDB, GraphQL, database accessor, error codes, optional Redis/webhooks). All current services (auth, bonus, payment, notification, kyc) are aligned to this pattern—you can run and test them now. For the template contents and maintenance rules, see **`core-service/src/infra/SERVICE_GENERATOR.md`**; for status and optional next steps, see **README.md** (repo root) § Config and standards status.
+
+```bash
+# From repo root or core-service
+cd core-service && npm run build
+npx service-infra service --name <name> [--port 9006] [--output ..] [--webhooks] [--core-db]
+```
+
+Example: `service-infra service --name test --port 9006 --output ..` creates `test-service/` with:
+
+- `config.ts` / `config-defaults.ts` (dynamic config via `getServiceConfigKey`, `registerServiceConfigDefaults`)
+- **`accessors.ts`** (`createServiceAccessors` → `{ db, redis }`); no separate `database.ts` or `redis.ts`
+- `error-codes.ts`, `graphql.ts` (types + `createResolvers`), `index.ts` (bootstrap: `resolveContext`, `loadConfig`, `db.initialize`, `createGateway`, `startListening`)
+- `services/index.ts`, `types.ts`
+
+Then:
+
+1. Add the service to `gateway/configs/services.dev.json` (and other profiles as needed):
    ```json
-   {
-     "name": "new",
-     "port": 9006,
-     "host": "new-service",
-     "healthPath": "/health",
-     "database": "new_service"
-   }
+   { "name": "test", "host": "test-service", "port": 9006, "database": "test_service", "healthPath": "/health", "graphqlPath": "/graphql" }
    ```
-3. Run `npm run generate` from gateway
-4. Dockerfiles and manifests are auto-generated
+2. Run `npm run generate` from gateway
+3. Add the service to gateway dev script if needed; run `npm run dev` or `npm run docker:fresh`
+
+### Microservice naming conventions (auth, payment, bonus, notification, generator)
+
+All microservices that use core-service should follow the same naming so patterns stay consistent. The service generator produces this structure; existing services (auth, payment, bonus, notification, kyc) match it.
+
+| Area | Convention | Example (auth / test) |
+|------|------------|----------------------|
+| **Config** | **Export** `SERVICE_NAME = '{service}-service'` from config.ts. `loadConfig(brand?, tenantId?)` **via getServiceConfigKey** (common keys with `fallbackService: 'gateway'`, service-only keys with `{ brand, tenantId }`; no `process.env`), `validateConfig`, `printConfigSummary`. Interface `{Service}Config` **extends `DefaultServiceConfig`** (from core-service) in types.ts; add only service-specific properties. | `auth-service`, `AuthConfig`, `loadConfig`, `SERVICE_NAME` |
+| **Config defaults** | Export `{SERVICE}_CONFIG_DEFAULTS` with **every** key used by loadConfig: `port`, `serviceName`, `nodeEnv`, `corsOrigins`, `jwt`, `database` (mongoUri, redisUrl). Each key: `{ value, description }`; use `sensitivePaths` for secrets. **No** registration in config-defaults; index calls `registerServiceConfigDefaults(SERVICE_NAME, {SERVICE}_CONFIG_DEFAULTS)`. | `AUTH_CONFIG_DEFAULTS`, `TEST_CONFIG_DEFAULTS` |
+| **Error codes** | `{SERVICE}_ERRORS` (object), `{SERVICE}_ERROR_CODES` (array), code values `MS{Service}*`, type `{Service}ErrorCode` | `AUTH_ERRORS`, `AUTH_ERROR_CODES`, `MSAuthUserNotFound`, `AuthErrorCode` |
+| **GraphQL** | Types: `{shortName}GraphQLTypes` (camelCase short name). Resolvers: `create{Service}Resolvers(config)` | `authGraphQLTypes`, `createAuthResolvers`; `testGraphQLTypes`, `createTestResolvers` |
+| **Accessors** | Single `accessors.ts`: `createServiceAccessors('{service}-service')` → `{ db, redis }`; auth uses `{ databaseServiceName: 'core-service' }`. All code imports from `./accessors.js`. | `export const { db, redis } = createServiceAccessors('auth-service', { databaseServiceName: 'core-service' });` |
+| **Index** | Import `SERVICE_NAME` from config; `registerServiceConfigDefaults(SERVICE_NAME, …)`, `resolveContext`, `loadConfig`, `validateConfig`, `printConfigSummary`, `db.initialize`, `createGateway`, optional Redis (`config.redisUrl`) / `ensureDefaultConfigsCreated(SERVICE_NAME, …)` / `startListening`, `registerServiceErrorCodes` | Same order as template; see SERVICE_GENERATOR.md §2.1 |
+
+**Short name** for GraphQL: service name without `-service` (e.g. auth, payment, notification, test). Use camelCase for multi-word: `my-api` → `myApiGraphQLTypes`.
+
+**Service configuration – no process.env (dynamic config only):**
+
+- **Do not use `process.env` in microservices.** All config must come from the MongoDB config store. Use **`getServiceConfigKey`** (from core-service) as the single pattern in `config.ts` and anywhere a service reads its own or shared config.
+- **Exception:** `process.env` is allowed **only** in core-service or in auth-service when required for **bootstrap/core DB** (e.g. strategy resolution before the config store is available). Document which env vars are used there. All other services must use **dynamic config only** (getServiceConfigKey / config store).
+- **Legacy fallback:** Remove; do not keep `process.env` as fallback in config.ts or index. Remove legacy/deprecated code instead of keeping it (see Refactoring Guidelines).
+- **Config interface:** Use `DefaultServiceConfig` from core-service for common properties (port, nodeEnv, serviceName, mongoUri, redisUrl, corsOrigins, jwtSecret, jwtExpiresIn, jwtRefreshSecret, jwtRefreshExpiresIn). Each service defines `export interface {Service}Config extends DefaultServiceConfig { ... }` and adds **only** service-specific properties. Reduces duplication and keeps config shape consistent; see SERVICE_GENERATOR.md.
+- Register **every** value used at runtime in `config-defaults.ts`: `port`, `serviceName`, `nodeEnv`, `corsOrigins`, `jwt` (secret, expiresIn, refreshSecret, refreshExpiresIn), `database` (mongoUri, redisUrl). Use `{ value, description }` per key; add `sensitivePaths` for secrets.
+- **In `loadConfig`:** Use `getServiceConfigKey(SERVICE_NAME, key, defaultVal, opts)` for every key. For **common keys** (port, serviceName, nodeEnv, corsOrigins, jwt, database) use `opts = { brand, tenantId, fallbackService: 'gateway' }` so missing service key falls back to gateway. For **service-only keys** use `opts = { brand, tenantId }`. No fallback to `process.env`. Same pattern elsewhere when reading config (e.g. provider config): use `getServiceConfigKey` with an appropriate default.
+- **File separation:** Keep instructions in the correct file: **types.ts** = type/interface definitions only (no defaults, no loadConfig). **config.ts** = loadConfig, validateConfig, printConfigSummary only (no config interface definition, no default constants). **config-defaults.ts** = default value object `{SERVICE}_CONFIG_DEFAULTS` only (no loadConfig, no registration call; index calls `registerServiceConfigDefaults(SERVICE_NAME, {SERVICE}_CONFIG_DEFAULTS)`). See SERVICE_GENERATOR.md §3.1.
+- **SERVICE_NAME constant:** Export `SERVICE_NAME` from config.ts (`export const SERVICE_NAME = '{service}-service'`). Use it in index.ts for `registerServiceConfigDefaults(SERVICE_NAME, ...)` and `ensureDefaultConfigsCreated(SERVICE_NAME, ...)`; do not use a static string for the service name there. Same pattern in the service generator.
+- **Current state:** All five services (auth, bonus, payment, notification, kyc) use `getServiceConfigKey` in loadConfig; the service generator emits the same pattern. You can run and test all services; see **README.md** (repo root) § Config and standards status and **core-service/src/infra/SERVICE_GENERATOR.md** for alignment status and maintenance rules.
 
 ---
 

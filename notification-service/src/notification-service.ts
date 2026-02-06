@@ -5,7 +5,7 @@
  */
 
 import { logger, updateOneById, generateMongoId, GraphQLError } from 'core-service';
-import { db } from './database.js';
+import { db } from './accessors.js';
 import { NOTIFICATION_ERRORS } from './error-codes.js';
 import type { 
   NotificationRequest, 

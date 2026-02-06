@@ -2,6 +2,8 @@
  * Notification Service Types
  */
 
+import type { DefaultServiceConfig } from 'core-service';
+
 export type NotificationChannel = 
   | 'email' 
   | 'sms' 
@@ -141,15 +143,8 @@ export interface NotificationProvider {
   isConfigured(): boolean;
 }
 
-export interface NotificationConfig {
-  // Service
-  port: number;
-  nodeEnv: string;
-  
-  // Database - optional, gateway handles defaults from environment
-  mongoUri?: string;
-  redisUrl?: string;
-  
+/** Notification-specific config; common props come from DefaultServiceConfig. */
+export interface NotificationConfig extends DefaultServiceConfig {
   // SMTP (Email)
   smtpHost?: string;
   smtpPort: number;
@@ -157,22 +152,18 @@ export interface NotificationConfig {
   smtpPassword?: string;
   smtpFrom: string;
   smtpSecure?: boolean;
-  
   // Twilio (SMS/WhatsApp)
   twilioAccountSid?: string;
   twilioAuthToken?: string;
   twilioPhoneNumber?: string;
   twilioWhatsAppNumber?: string;
-  
   // Push Notifications
   pushProviderApiKey?: string;
   pushProviderProjectId?: string;
-  
   // Queue
   queueConcurrency: number;
   queueMaxRetries: number;
   queueRetryDelay: number;
-  
   // Real-time
   sseHeartbeatInterval: number;
   socketNamespace: string;

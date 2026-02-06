@@ -19,7 +19,10 @@
     "service-infra": "./dist/infra/cli.js"
   },
   "exports": {
-    ".": "./dist/index.js",
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
     "./saga": "./dist/saga/index.js",
     "./gateway": "./dist/gateway/index.js",
     "./infra": "./dist/infra/index.js",
@@ -28,7 +31,9 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "infra": "node dist/infra/cli.js"
+    "infra": "node dist/infra/cli.js",
+    "clean": "node dist/infra/cli.js clean",
+    "clean:full": "node dist/infra/cli.js clean --full"
   },
   "dependencies": {
     "access-engine": "file:../access-engine",

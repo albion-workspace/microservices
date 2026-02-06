@@ -1,0 +1,63 @@
+{
+  "$schema": "./infra.schema.json",
+  "description": "Infrastructure configuration - single source of truth for versions, defaults, and settings",
+  
+  "versions": {
+    "node": "24",
+    "mongodb": "8",
+    "redis": "7-alpine"
+  },
+  
+  "docker": {
+    "network": "ms_network",
+    "containerPrefix": "ms",
+    "registry": null,
+    "projectName": "ms"
+  },
+  
+  "kubernetes": {
+    "namespace": "microservices",
+    "imagePullPolicy": "IfNotPresent"
+  },
+  
+  "healthCheck": {
+    "intervalSeconds": 30,
+    "timeoutSeconds": 3,
+    "startPeriodSeconds": 5,
+    "retries": 3,
+    "defaultPath": "/health"
+  },
+  
+  "defaults": {
+    "service": {
+      "healthPath": "/health",
+      "graphqlPath": "/graphql",
+      "entryPoint": "dist/index.js"
+    },
+    "runtime": {
+      "dev": {
+        "nodeEnv": "development",
+        "jwtSecret": "shared-jwt-secret-change-in-production"
+      },
+      "prod": {
+        "nodeEnv": "production",
+        "jwtSecret": "shared-jwt-secret-change-in-production"
+      }
+    },
+    "mongodb": {
+      "port": 27017,
+      "replicaSet": "rs0"
+    },
+    "redis": {
+      "port": 6379,
+      "sentinelPort": 26379,
+      "masterName": "mymaster"
+    }
+  },
+  
+  "security": {
+    "runAsUser": 1001,
+    "runAsGroup": 1001,
+    "fsGroup": 1001
+  }
+}

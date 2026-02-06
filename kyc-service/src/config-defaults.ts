@@ -1,17 +1,31 @@
 /**
  * KYC Service Configuration Defaults
- * 
- * Registers default configuration values with core-service config store
+ *
+ * Every key read in loadConfig (and by domain code) must exist here.
+ * Pass to registerServiceConfigDefaults('kyc-service', KYC_CONFIG_DEFAULTS) in index.ts.
+ * No process.env; no registration logic in this file (CODING_STANDARDS / service generator).
  */
 
-import { registerServiceConfigDefaults } from 'core-service';
-
-/**
- * KYC Service configuration defaults
- */
-export function registerKYCConfigDefaults(): void {
-  registerServiceConfigDefaults('kyc-service', {
-    // Provider Configuration
+// Common (key-by-key in config.ts)
+export const KYC_CONFIG_DEFAULTS = {
+  port: { value: 9005, description: 'HTTP port' },
+    serviceName: { value: 'kyc-service', description: 'Service name' },
+    nodeEnv: { value: 'development', description: 'Node environment' },
+    corsOrigins: {
+      value: ['http://localhost:3000', 'http://localhost:5173'],
+      description: 'Allowed CORS origins',
+    },
+    jwt: {
+      value: { secret: '', expiresIn: '1h', refreshSecret: '', refreshExpiresIn: '7d' },
+      sensitivePaths: ['jwt.secret', 'jwt.refreshSecret'] as string[],
+      description: 'JWT configuration',
+    },
+    database: {
+      value: { mongoUri: '', redisUrl: '' },
+      sensitivePaths: ['database.mongoUri', 'database.redisUrl'] as string[],
+      description: 'MongoDB and Redis URLs (set via config store or deployment)',
+    },
+    // Provider Configuration (single-JSON)
     providers: {
       value: {
         defaultProvider: 'mock', // Use 'onfido', 'sumsub', etc. in production
@@ -199,5 +213,4 @@ export function registerKYCConfigDefaults(): void {
         ],
       },
     },
-  });
-}
+} as const;

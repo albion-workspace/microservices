@@ -73,6 +73,10 @@ export type {
   RedisStats,
 } from './databases/redis/service-accessor.js';
 
+// Optional: create db + redis in one call: const { db, redis } = createServiceAccessors('my-service');
+export { createServiceAccessors } from './databases/accessors.js';
+export type { CreateServiceAccessorsOptions, ServiceAccessors } from './databases/accessors.js';
+
 // ═══════════════════════════════════════════════════════════════════
 // Saga Pattern (Business Logic)
 // ═══════════════════════════════════════════════════════════════════
@@ -140,6 +144,7 @@ export {
   buildWalletUpdate,
   withTransaction,
 } from './common/wallet/wallet.js';
+export { normalizeWalletForGraphQL } from './common/wallet/normalize.js';
 export type {
   Wallet,
   BalanceType as WalletBalanceType,
@@ -163,6 +168,7 @@ export {
   getRecoveryHandler,
   getOperationStateTracker,
   getRecoveryJob,
+  createTransferRecoverySetup,
   OperationStateTracker,
   RecoveryJob,
 } from './common/resilience/recovery.js';
@@ -171,6 +177,7 @@ export type {
   RecoveryResult,
   RecoveryHandler,
   OperationState,
+  TransferRecoverySetupOptions,
 } from './common/resilience/recovery.js';
 
 export {
@@ -209,7 +216,7 @@ export {
 } from './common/auth/jwt.js';
 
 // Permissions & Authorization
-export { allow, deny, isAuthenticated, hasRole, hasAnyRole, can, and, or, isOwner, sameTenant, hasPermission, isSystem } from './common/auth/permissions.js';
+export { allow, deny, isAuthenticated, hasRole, hasAnyRole, can, and, or, isOwner, sameTenant, hasPermission, isSystem, checkSystemOrPermission } from './common/auth/permissions.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Configuration Management
@@ -229,6 +236,7 @@ export {
   clearServiceConfigStores,
   registerServiceConfigDefaults,
   getConfigWithDefault,
+  getServiceConfigKey,
   ensureDefaultConfigsCreated,
   ConfigStore,
 } from './common/config/store.js';
@@ -238,6 +246,7 @@ export type {
   GetConfigOptions,
   GetAllConfigOptions,
   SetConfigOptions,
+  GetServiceConfigKeyOptions,
 } from './common/config/store.js';
 
 // Shared defaults (simple constants services can optionally use)
@@ -437,6 +446,8 @@ export {
   createResolverBuilder,
 } from './common/graphql/builder.js';
 export type { ResolverFunction, ServiceResolvers } from './common/graphql/builder.js';
+export { buildConnectionTypeSDL } from './common/graphql/connection-builder.js';
+export { timestampFieldsSDL, timestampFieldsRequiredSDL, timestampFieldsOptionalSDL, buildSagaResultTypeSDL, paginationArgsSDL } from './common/graphql/sdl-fragments.js';
 
 // GraphQL Query Complexity
 export {
@@ -509,6 +520,10 @@ export {
   buildEvent,
 } from './common/events/integration.js';
 export type { IntegrationEvent, EmitOptions, UnifiedEmitOptions } from './common/events/integration.js';
+export { withEventHandlerError } from './common/events/handler-wrapper.js';
+export type { EventWithId } from './common/events/handler-wrapper.js';
+
+export type { NotificationHandlerPlugin, HandlerContext, EventHandler } from './common/notifications/plugin-types.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Webhooks
@@ -582,6 +597,7 @@ export type {
 // ═══════════════════════════════════════════════════════════════════
 export { generateInfra, loadConfig, generateSampleConfig, createDefaultConfig } from './infra/index.js';
 export { generateDockerfile, generateDockerCompose, generateNginxConf, generateK8sManifests } from './infra/index.js';
+export { generateServiceDockerfile, generateCoreBaseDockerfile } from './infra/index.js';
 // Multi-service gateway infrastructure
 export { generateMultiServiceNginxConf } from './infra/index.js';
 export { generateMultiServiceInfra, createDefaultGatewayRoutingConfig } from './infra/index.js';
@@ -634,6 +650,7 @@ export type {
   Connection,
 } from './types/index.js';
 export { CATEGORIES } from './types/index.js';
+export type { DefaultServiceConfig } from './types/index.js';
 
 // Auth & Permissions Types
 export type { 
@@ -750,6 +767,7 @@ export {
   updateOneById,
   deleteOneById,
   findOneAndUpdateById,
+  createUniqueIndexSafe,
 } from './databases/mongodb/utils.js';
 
 export type {
@@ -759,6 +777,7 @@ export type {
   ClientSession,
   Db,
   MongoClient,
+  CreateUniqueIndexOptions,
 } from './databases/mongodb/utils.js';
 
 // MongoDB Error Handling

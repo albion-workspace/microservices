@@ -51,12 +51,14 @@
  *    - Consistent across all entities
  */
 
-import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, resolveDatabase, deleteCache, deleteCachePattern, logger, validateInput, findOneById, findOneAndUpdateById, requireAuth, getUserId, getTenantId, getOrCreateWallet, paginateCollection, extractDocumentId, GraphQLError, type DatabaseResolutionOptions } from 'core-service';
-import { db } from '../database.js';
+import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, resolveDatabase, deleteCache, deleteCachePattern, logger, getErrorMessage, normalizeWalletForGraphQL, validateInput, findOneById, findOneAndUpdateById, requireAuth, getUserId, getTenantId, getOrCreateWallet, paginateCollection, extractDocumentId, GraphQLError, buildConnectionTypeSDL, buildSagaResultTypeSDL, type DatabaseResolutionOptions } from 'core-service';
+import { getUseMongoTransactions } from '../config.js';
+import { db } from '../accessors.js';
 import { PAYMENT_ERRORS } from '../error-codes.js';
 import type { Wallet, WalletCategory } from '../types.js';
 import { SYSTEM_CURRENCY } from '../constants.js';
 import { emitPaymentEvent } from '../event-dispatcher.js';
+import { buildDateRangeFilter } from './transaction.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // User Wallets API - Clean client response format
@@ -163,17 +165,19 @@ export const walletResolvers = {
         return null;
       }
       
-      // Map wallets to clean format
-      const wallets = walletDocs.map((w: any) => ({
-        id: w.id,
-        category: w.category || 'main',
-        realBalance: w.balance || 0,
-        bonusBalance: w.bonusBalance || 0,
-        lockedBalance: w.lockedBalance || 0,
-        totalBalance: (w.balance || 0) + (w.bonusBalance || 0),
-        status: w.status || 'active',
-        lastActivityAt: w.lastActivityAt,
-      }));
+      const wallets = walletDocs.map((w: any) => {
+        const n = normalizeWalletForGraphQL(w);
+        return {
+          id: w.id,
+          category: w.category || 'main',
+          realBalance: n.balance,
+          bonusBalance: n.bonusBalance,
+          lockedBalance: n.lockedBalance,
+          totalBalance: n.balance + n.bonusBalance,
+          status: w.status || 'active',
+          lastActivityAt: w.lastActivityAt,
+        };
+      });
       
       // Calculate totals across all wallets
       const totals = wallets.reduce((acc, w) => ({
@@ -260,37 +264,31 @@ export const walletResolvers = {
           }
         }
         
-        const balance = (wallet as any).balance || 0;
-        const bonusBalance = (wallet as any).bonusBalance || 0;
-        const lockedBalance = (wallet as any).lockedBalance || 0;
-        const availableBalance = balance - lockedBalance;
-        
-        // Get allowNegative directly from wallet (wallet-level permissions)
+        const n = normalizeWalletForGraphQL(wallet as Record<string, unknown>);
+        const availableBalance = n.balance - n.lockedBalance;
         const allowNegative = (wallet as any).allowNegative ?? false;
-        
-        // Return unified format (supports both GraphQL types)
         return {
           walletId: (wallet as any).id,
           userId: (wallet as any).userId || userId,
           category: (wallet as any).category || category,
           currency: (wallet as any).currency || currency,
-          balance,
+          balance: n.balance,
           availableBalance,
-          pendingIn: 0, // Not tracked separately - use transactions for pending
-          pendingOut: 0, // Not tracked separately - use transactions for pending
+          pendingIn: 0,
+          pendingOut: 0,
           allowNegative,
-          realBalance: balance,
-          bonusBalance,
-          lockedBalance,
-          totalBalance: balance + bonusBalance,
-          withdrawableBalance: balance,
+          realBalance: n.balance,
+          bonusBalance: n.bonusBalance,
+          lockedBalance: n.lockedBalance,
+          totalBalance: n.balance + n.bonusBalance,
+          withdrawableBalance: n.balance,
           status: (wallet as any).status || 'active',
         };
       } catch (error) {
         throw new GraphQLError(PAYMENT_ERRORS.FailedToGetWalletBalance, {
           userId,
           category,
-          originalError: error instanceof Error ? error.message : String(error),
+          originalError: getErrorMessage(error),
         });
       }
     },
@@ -318,19 +316,13 @@ export const walletResolvers = {
         }> = [];
         
         for (const currency of currencies) {
-          // Get or create wallet (creates if doesn't exist)
           const wallet = await getOrCreateWallet(userId, currency, tenantId, { database });
-          
-          const balance = (wallet as any).balance || 0;
-          const lockedBalance = (wallet as any).lockedBalance || 0;
-          const availableBalance = balance - lockedBalance;
-          
-          // Get allowNegative directly from wallet (wallet-level permissions)
+          const n = normalizeWalletForGraphQL(wallet as Record<string, unknown>);
+          const availableBalance = n.balance - n.lockedBalance;
           const allowNegative = (wallet as any).allowNegative ?? false;
-          
           balances.push({
             currency,
-            balance,
+            balance: n.balance,
             availableBalance,
             allowNegative,
           });
@@ -343,7 +335,7 @@ export const walletResolvers = {
       } catch (error) {
         throw new GraphQLError(PAYMENT_ERRORS.FailedToGetUserBalances, {
           userId,
-          originalError: error instanceof Error ? error.message : String(error),
+          originalError: getErrorMessage(error),
         });
       }
     },
@@ -440,18 +432,14 @@ export const walletResolvers = {
             }
           }
           
-          const balance = wallet.balance || 0;
-          const lockedBalance = wallet.lockedBalance || 0;
-          const availableBalance = balance - lockedBalance;
-          
-          // Get allowNegative directly from wallet (wallet-level permissions)
+          const n = normalizeWalletForGraphQL(wallet as Record<string, unknown>);
+          const availableBalance = n.balance - n.lockedBalance;
           const allowNegative = wallet.allowNegative ?? false;
-          
           const walletId = extractDocumentId(wallet);
           balances.push({
             userId,
             walletId: walletId || '',
-            balance,
+            balance: n.balance,
             availableBalance,
             pendingIn: 0,
             pendingOut: 0,
@@ -464,7 +452,7 @@ export const walletResolvers = {
         };
       } catch (error) {
         logger.error('Failed to get bulk wallet balances', { error, userIds });
-        throw new Error(`Failed to get bulk wallet balances: ${error instanceof Error ? error.message : String(error)}`);
+        throw new Error(`Failed to get bulk wallet balances: ${getErrorMessage(error)}`);
       }
     },
     
@@ -521,19 +509,8 @@ export const walletResolvers = {
         queryFilter.externalRef = { $regex: filter.externalRef, $options: 'i' };
       }
       
-      // Filter by date range if specified
-      if (filter.dateFrom || filter.dateTo) {
-        const dateFilter: Record<string, unknown> = {};
-        if (filter.dateFrom) {
-          dateFilter.$gte = new Date(filter.dateFrom as string);
-        }
-        if (filter.dateTo) {
-          const toDate = new Date(filter.dateTo as string);
-          toDate.setHours(23, 59, 59, 999); // Include full day
-          dateFilter.$lte = toDate;
-        }
-        queryFilter.createdAt = dateFilter;
-      }
+      const dateRange = buildDateRangeFilter(filter.dateFrom as string, filter.dateTo as string);
+      if (dateRange) queryFilter.createdAt = dateRange;
       
       // Use cursor-based pagination (O(1) performance)
       const result = await paginateCollection(transactionsCollection, {
@@ -699,8 +676,8 @@ export const walletService = createService<Wallet, CreateWalletInput>({
         allowNegative: Boolean
         creditLimit: Float
       }
-      type WalletConnection { nodes: [Wallet!]! totalCount: Int! pageInfo: PageInfo! }
-      type CreateWalletResult { success: Boolean! wallet: Wallet sagaId: ID! errors: [String!] executionTimeMs: Int }
+      ${buildConnectionTypeSDL('WalletConnection', 'Wallet')}
+      ${buildSagaResultTypeSDL('CreateWalletResult', 'wallet', 'Wallet')}
     `,
     graphqlInput: `input CreateWalletInput { userId: String! currency: String! category: String tenantId: String allowNegative: Boolean creditLimit: Float }`,
     validateInput: (input) => {
@@ -720,7 +697,7 @@ export const walletService = createService<Wallet, CreateWalletInput>({
   saga: walletSaga,
   // Transactions require MongoDB replica set (default in docker-compose)
   sagaOptions: {
-    useTransaction: process.env.MONGO_TRANSACTIONS !== 'false',
+    get useTransaction() { return getUseMongoTransactions(); },
     maxRetries: 3,
   },
 });
@@ -788,11 +765,7 @@ export const walletTypes = `
     metadata: JSON
   }
   
-  type TransactionHistoryConnection {
-    nodes: [TransactionHistory!]!
-    totalCount: Int!
-    pageInfo: PageInfo!
-  }
+  ${buildConnectionTypeSDL('TransactionHistoryConnection', 'TransactionHistory')}
   
   extend type Query {
     """

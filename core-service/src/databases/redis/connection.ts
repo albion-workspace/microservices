@@ -14,6 +14,7 @@
 
 import { createClient, RedisClientType } from 'redis';
 import { logger } from '../../common/logger.js';
+import { getErrorMessage } from '../../common/errors.js';
 
 let client: RedisClientType | null = null;
 let readClient: RedisClientType | null = null; // For read replica
@@ -358,7 +359,7 @@ export async function publish(channel: string, message: string | object): Promis
   } catch (error) {
     logger.error('Failed to publish message to Redis', {
       channel,
-      error: error instanceof Error ? error.message : String(error),
+      error: getErrorMessage(error),
     });
     return false;
   }

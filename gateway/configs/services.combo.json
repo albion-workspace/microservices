@@ -1,0 +1,65 @@
+{
+  "mode": "per-service",
+  "description": "Combo - reuses ms Redis, MongoDB, and auth; deploys only KYC. Deploy default (ms) first.",
+  "gateway": {
+    "port": 9997,
+    "defaultService": "auth",
+    "rateLimit": 100
+  },
+  "reuseFrom": {
+    "namespace": "microservices",
+    "project": "ms",
+    "network": "ms_network"
+  },
+  "reuseInfra": {
+    "redis": true,
+    "mongodb": true
+  },
+  "reuseServicePorts": {
+    "ms:auth": 9001
+  },
+  "services": [
+    {
+      "name": "auth",
+      "host": "auth-service",
+      "port": 9001,
+      "database": "core_service",
+      "healthPath": "/health",
+      "graphqlPath": "/graphql",
+      "strategy": "shared"
+    },
+    {
+      "name": "kyc",
+      "host": "kyc-service",
+      "port": 9025,
+      "database": "kyc_service",
+      "healthPath": "/health",
+      "graphqlPath": "/graphql"
+    }
+  ],
+  "infrastructure": {
+    "mongodb": {
+      "mode": "single",
+      "host": "localhost",
+      "port": 27018,
+      "replicaSet": null
+    },
+    "redis": {
+      "mode": "single",
+      "host": "localhost",
+      "port": 6380,
+      "password": "redis123",
+      "sentinel": null
+    }
+  },
+  "environments": {
+    "local": {
+      "mongoUri": "mongodb://localhost:27018",
+      "redisUrl": "redis://:redis123@localhost:6380"
+    },
+    "docker": {
+      "mongoUri": "mongodb://mongo:27017",
+      "redisUrl": "redis://:redis123@redis:6379"
+    }
+  }
+}

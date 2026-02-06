@@ -68,8 +68,8 @@
       "redisUrl": "redis://:redis123@localhost:6379"
     },
     "docker": {
-      "mongoUri": "mongodb://ms-mongo:27017",
-      "redisUrl": "redis://:redis123@ms-redis:6379"
+      "mongoUri": "mongodb://mongo:27017",
+      "redisUrl": "redis://:redis123@redis:6379"
     },
     "prod": {
       "mongoUri": "${MONGODB_URI}",

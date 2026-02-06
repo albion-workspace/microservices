@@ -24,7 +24,7 @@ let DEFAULT_TENANT_ID: string = 'default-tenant';
 
 // Export DEFAULT_TENANT_ID for backward compatibility
 export { DEFAULT_TENANT_ID };
-const JWT_SECRET = process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || 'shared-jwt-secret-change-in-production';
+const JWT_SECRET = process.env.JWT_SECRET || 'shared-jwt-secret-change-in-production';
 
 /**
  * Initialize configuration from MongoDB config store

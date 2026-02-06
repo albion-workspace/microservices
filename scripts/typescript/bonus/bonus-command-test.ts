@@ -20,6 +20,7 @@ import {
   connectRedis, 
   checkRedisHealth, 
   getClient,
+  getErrorMessage,
   findUserIdByRole,
   findUserIdsByRole,
 } from '../../../core-service/src/index.js';
@@ -393,7 +394,7 @@ async function runTest(name: string, testFn: () => Promise<void>): Promise<TestR
       name,
       passed: false,
       duration: Date.now() - start,
-      error: error instanceof Error ? error.message : String(error),
+      error: getErrorMessage(error),
     };
     results.push(result);
     console.log(`  ❌ ${name} - ${result.error}`);
@@ -1311,7 +1312,7 @@ async function testRecovery() {
 
   // Try to connect to Redis
   console.log('🔌 Connecting to Redis...');
-  const redisUrl = process.env.REDIS_URL || `redis://:${process.env.REDIS_PASSWORD || 'redis123'}@localhost:6379`;
+  const redisUrl = process.env.REDIS_URL || (process.env.REDIS_PASSWORD ? `redis://:${process.env.REDIS_PASSWORD}@localhost:6379` : 'redis://localhost:6379');
   
   let redisConnected = false;
   try {

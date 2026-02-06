@@ -21,7 +21,7 @@ export interface ScriptOptions {
   name: string;
   /** Whether script is long-running (dev server) */
   longRunning?: boolean;
-  /** Exit timeout in ms (default: 100) */
+  /** Exit timeout in ms (default: 400 on Windows, 100 elsewhere) */
   exitTimeout?: number;
 }
 
@@ -31,11 +31,14 @@ export interface ScriptOptions {
  * - Forces exit after timeout to avoid hanging
  * - Uses setTimeout to allow async handles to close gracefully (Windows compatibility)
  */
+/** Default exit delay: longer on Windows to avoid libuv UV_HANDLE_CLOSING assertion after fs/async work. */
+const DEFAULT_EXIT_TIMEOUT = process.platform === 'win32' ? 400 : 100;
+
 export function runScript(
   main: () => Promise<void>,
   options: ScriptOptions = { name: 'Script' }
 ): void {
-  const { name, exitTimeout = 100 } = options;
+  const { name, exitTimeout = DEFAULT_EXIT_TIMEOUT } = options;
 
   main()
     .then(() => {

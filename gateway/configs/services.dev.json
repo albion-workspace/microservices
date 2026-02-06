@@ -51,19 +51,20 @@
   ],
   "infrastructure": {
     "mongodb": {
-      "mode": "single",
-      "host": "localhost",
+      "mode": "replicaSet",
+      "host": "mongo",
       "port": 27017,
-      "replicaSet": null,
-      "dockerContainer": "ms-mongo"
+      "replicaSet": "rs0",
+      "members": [
+        { "host": "mongo", "port": 27017 }
+      ]
     },
     "redis": {
       "mode": "single",
       "host": "localhost",
       "port": 6379,
       "password": "redis123",
-      "sentinel": null,
-      "dockerContainer": "ms-redis"
+      "sentinel": null
     }
   },
   "environments": {
@@ -72,8 +73,14 @@
       "redisUrl": "redis://:redis123@localhost:6379"
     },
     "docker": {
-      "mongoUri": "mongodb://ms-mongo:27017",
-      "redisUrl": "redis://:redis123@ms-redis:6379"
+      "mongoUri": "mongodb://mongo:27017",
+      "redisUrl": "redis://:redis123@redis:6379",
+      "jwtSecret": "shared-jwt-secret-change-in-production"
+    },
+    "prod": {
+      "mongoUri": "",
+      "redisUrl": "",
+      "jwtSecret": "shared-jwt-secret-change-in-production"
     }
   }
 }

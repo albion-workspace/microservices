@@ -13,6 +13,7 @@
 import { GraphQLError } from '../errors.js';
 import { hasAnyRole } from '../auth/permissions.js';
 import { createConfigStore, type ConfigStore } from './store.js';
+import { timestampFieldsRequiredSDL } from '../graphql/sdl-fragments.js';
 import type { ResolverContext } from '../../types/index.js';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -38,8 +39,7 @@ export const configGraphQLTypes = `
     key: String!
     value: JSON!
     metadata: ConfigMetadata
-    createdAt: String!
-    updatedAt: String!
+    ${timestampFieldsRequiredSDL()}
     version: Int
   }
   

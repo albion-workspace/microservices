@@ -1,0 +1,10 @@
+{
+  "description": "Test overrides - only override what differs from infra.json",
+  "docker": {
+    "network": "test_network",
+    "projectName": "test"
+  },
+  "kubernetes": {
+    "namespace": "microservices-test"
+  }
+}

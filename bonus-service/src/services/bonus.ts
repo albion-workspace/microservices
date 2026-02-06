@@ -7,7 +7,8 @@
  * - Transfers = User-to-user operations (creates 2 transactions)
  */
 
-import { createService, type, type Repository, type SagaContext, validateInput, logger, findUserIdByRole, GraphQLError, type DatabaseResolutionOptions } from 'core-service';
+import { createService, type, type Repository, type SagaContext, validateInput, logger, getErrorMessage, findUserIdByRole, GraphQLError, buildConnectionTypeSDL, timestampFieldsOptionalSDL, buildSagaResultTypeSDL, type DatabaseResolutionOptions } from 'core-service';
+import { getUseMongoTransactions } from '../config.js';
 import { BONUS_ERRORS } from '../error-codes.js';
 import type { BonusTemplate, UserBonus, BonusTransaction, BonusStatus } from '../types.js';
 import { createBonusEngine, type BonusEngineOptions } from './bonus-engine/index.js';
@@ -189,12 +190,11 @@ export const bonusTemplateService = createService<BonusTemplate, CreateBonusTemp
         # Approval
         requiresApproval: Boolean
         approvalThreshold: Float
-        
-        createdAt: String
-        updatedAt: String
+
+        ${timestampFieldsOptionalSDL()}
       }
-      type BonusTemplateConnection { nodes: [BonusTemplate!]! totalCount: Int! pageInfo: PageInfo! }
-      type CreateBonusTemplateResult { success: Boolean! bonusTemplate: BonusTemplate sagaId: ID! errors: [String!] executionTimeMs: Int }
+      ${buildConnectionTypeSDL('BonusTemplateConnection', 'BonusTemplate')}
+      ${buildSagaResultTypeSDL('CreateBonusTemplateResult', 'bonusTemplate', 'BonusTemplate')}
     `,
     graphqlInput: `input CreateBonusTemplateInput { name: String! code: String! type: String! domain: String! valueType: String! value: Float! currency: String! supportedCurrencies: [String!] maxValue: Float minDeposit: Float turnoverMultiplier: Float! validFrom: String! validUntil: String! eligibleTiers: [String!] minSelections: Int maxSelections: Int priority: Int description: String isActive: Boolean stackable: Boolean requiresApproval: Boolean approvalThreshold: Float }`,
     validateInput: (input) => {
@@ -379,7 +379,7 @@ export const userBonusService = createService<UserBonus, CreateUserBonusSagaInpu
     collection: 'user_bonuses',
     graphqlType: `
       type UserBonus { id: ID! userId: String! templateCode: String! type: String! status: String! currency: String! originalValue: Float! currentValue: Float! turnoverRequired: Float! turnoverProgress: Float! expiresAt: String! }
-      type UserBonusConnection { nodes: [UserBonus!]! totalCount: Int! pageInfo: PageInfo! }
+      ${buildConnectionTypeSDL('UserBonusConnection', 'UserBonus')}
       type CreateUserBonusResult { 
         success: Boolean! 
         userBonus: UserBonus 
@@ -409,7 +409,7 @@ export const userBonusService = createService<UserBonus, CreateUserBonusSagaInpu
   // Use MongoDB transaction for bonus operations (money involved)
   // Requires MongoDB replica set (default in docker-compose)
   sagaOptions: {
-    useTransaction: process.env.MONGO_TRANSACTIONS !== 'false',
+    get useTransaction() { return getUseMongoTransactions(); },
     maxRetries: 3,
   },
 });
@@ -495,8 +495,8 @@ export const bonusTransactionService = createService<BonusTransaction, CreateBon
     collection: 'bonus_transactions',
     graphqlType: `
       type BonusTransaction { id: ID! userBonusId: String! userId: String! type: String! currency: String! amount: Float! balanceBefore: Float! balanceAfter: Float! originalCurrency: String originalAmount: Float exchangeRate: Float }
-      type BonusTransactionConnection { nodes: [BonusTransaction!]! totalCount: Int! pageInfo: PageInfo! }
-      type CreateBonusTransactionResult { success: Boolean! bonusTransaction: BonusTransaction sagaId: ID! errors: [String!] executionTimeMs: Int }
+      ${buildConnectionTypeSDL('BonusTransactionConnection', 'BonusTransaction')}
+      ${buildSagaResultTypeSDL('CreateBonusTransactionResult', 'bonusTransaction', 'BonusTransaction')}
     `,
     graphqlInput: `input CreateBonusTransactionInput { userBonusId: String! userId: String! type: String! currency: String! amount: Float! originalCurrency: String originalAmount: Float exchangeRate: Float relatedTransactionId: String }`,
     validateInput: (input) => {
@@ -513,7 +513,7 @@ export const bonusTransactionService = createService<BonusTransaction, CreateBon
   // Critical: Use MongoDB transaction for all bonus transactions (money operations)
   // Requires MongoDB replica set (default in docker-compose)
   sagaOptions: {
-    useTransaction: process.env.MONGO_TRANSACTIONS !== 'false',
+    get useTransaction() { return getUseMongoTransactions(); },
     maxRetries: 3,
   },
 });
@@ -550,7 +550,7 @@ async function getSystemUserId(tenantId?: string): Promise<string> {
     return systemUserId;
   } catch (error) {
     throw new GraphQLError(BONUS_ERRORS.FailedToGetSystemUserId, { 
-      error: error instanceof Error ? error.message : String(error),
+      error: getErrorMessage(error),
       tenantId 
     });
   }

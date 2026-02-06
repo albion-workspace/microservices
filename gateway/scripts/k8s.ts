@@ -26,16 +26,20 @@ import { access, readdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { loadConfigFromArgs, logConfigSummary, type ServicesConfig, type ServiceConfig } from './config-loader.js';
+import { loadConfigFromArgs, logConfigSummary, getInfraConfig, getConfigMode, getReusedServiceEntries, type ServicesConfig, type ServiceConfig, type InfraConfig } from './config-loader.js';
 import { runScript, runLongRunningScript, printHeader } from './script-runner.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = join(__dirname, '..', '..');
 const GATEWAY_DIR = join(__dirname, '..');
 const GENERATED_DIR = join(GATEWAY_DIR, 'generated');
-const K8S_DIR = join(GENERATED_DIR, 'k8s');
 
-const NAMESPACE = 'microservices';
+/** K8s manifests dir: k8s for ms, k8s-test for test (same behavior as Docker compose paths). */
+function getK8sDir(): string {
+  const projectName = getInfraConfig().docker.projectName;
+  const suffix = projectName === 'ms' ? '' : `-${projectName}`;
+  return join(GENERATED_DIR, `k8s${suffix}`);
+}
 
 type K8sCommand = 'apply' | 'delete' | 'status' | 'forward' | 'logs' | 'secrets' | 'fresh' | 'load-images';
 
@@ -111,7 +115,7 @@ function checkK8sCluster(): boolean {
 
 async function checkK8sManifestsExist(): Promise<boolean> {
   try {
-    await access(K8S_DIR);
+    await access(getK8sDir());
     return true;
   } catch {
     return false;
@@ -119,13 +123,13 @@ async function checkK8sManifestsExist(): Promise<boolean> {
 }
 
 async function generateManifests(): Promise<void> {
-  console.log('K8s manifests not found. Generating...');
-  
+  console.log('Generating K8s manifests...');
+  const mode = getConfigMode();
   const generateScript = join(__dirname, 'generate.ts');
   const tsxPath = join(ROOT_DIR, 'core-service', 'node_modules', 'tsx', 'dist', 'cli.mjs');
-  
+
   return new Promise((resolve, reject) => {
-    const proc = spawn('node', [tsxPath, generateScript, '--k8s'], {
+    const proc = spawn('node', [tsxPath, generateScript, '--k8s', `--config=${mode}`], {
       cwd: GATEWAY_DIR,
       stdio: 'inherit',
       shell: true,
@@ -136,6 +140,105 @@ async function generateManifests(): Promise<void> {
       else reject(new Error(`Generate failed with code ${code}`));
     });
   });
+}
+
+/**
+ * Clean up generated K8s files for current config only (so ms and test manifests can coexist).
+ */
+async function cleanGeneratedK8sFiles(): Promise<void> {
+  const { rm } = await import('node:fs/promises');
+  const k8sDir = getK8sDir();
+  try {
+    await rm(k8sDir, { recursive: true, force: true });
+    console.log(`  ✅ Cleaned generated K8s manifests (${k8sDir.split(/[/\\]/).pop()})`);
+  } catch {
+    // Directory might not exist
+  }
+}
+
+/**
+ * Wait for pods to be ready
+ */
+async function waitForPodsReady(config: ServicesConfig, serviceName?: string, timeoutSecs = 120): Promise<boolean> {
+  const services = getTargetServices(config, serviceName);
+  
+  console.log(`Waiting for ${services.length} service(s) to be ready (timeout: ${timeoutSecs}s)...`);
+  
+  const startTime = Date.now();
+  const timeoutMs = timeoutSecs * 1000;
+  
+  while (Date.now() - startTime < timeoutMs) {
+    let allReady = true;
+    
+    for (const svc of services) {
+      try {
+        const result = execSync(
+          `kubectl get pods -n ${getInfraConfig().kubernetes.namespace} -l app=${svc.name}-service -o jsonpath="{.items[0].status.conditions[?(@.type=='Ready')].status}"`,
+          { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] }
+        );
+        if (result.trim() !== 'True') {
+          allReady = false;
+        }
+      } catch {
+        allReady = false;
+      }
+    }
+    
+    if (allReady) {
+      console.log('✅ All pods ready!');
+      return true;
+    }
+    
+    // Wait 5 seconds before checking again
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    process.stdout.write('.');
+  }
+  
+  console.log('\n⚠️  Timeout waiting for pods');
+  return false;
+}
+
+/**
+ * Fresh K8s deployment workflow:
+ * 1. Generate manifests
+ * 2. Load images (for Kind clusters)
+ * 3. Apply manifests
+ * 4. Wait for pods to be ready
+ * 5. Clean up generated files on success
+ */
+async function k8sFresh(config: ServicesConfig, serviceName?: string): Promise<void> {
+  const services = getTargetServices(config, serviceName);
+  const count = services.length;
+  const targetMsg = serviceName ? ` (${serviceName} only)` : ` (all ${count} services)`;
+  printHeader(`Fresh Kubernetes Deployment${targetMsg}`);
+
+  // Step 1: Generate manifests
+  console.log('Step 1/5: Generating manifests...');
+  await generateManifests();
+
+  // Step 2: Load images for Kind clusters
+  console.log('\nStep 2/5: Loading images...');
+  await k8sLoadImages(config, serviceName);
+
+  // Step 3: Apply manifests
+  console.log('\nStep 3/5: Applying manifests...');
+  await k8sApply(serviceName);
+
+  // Step 4: Wait for pods to be ready
+  console.log('\nStep 4/5: Waiting for pods to be ready...');
+  const allReady = await waitForPodsReady(config, serviceName);
+
+  // Step 5: Cleanup on success
+  if (allReady) {
+    console.log('\n🎉 Fresh K8s deployment successful!');
+    console.log('\nStep 5/5: Cleaning up generated files...');
+    await cleanGeneratedK8sFiles();
+  } else {
+    console.log('\n⚠️  Deployment completed but some pods are not ready');
+    console.log('Generated files preserved for debugging.');
+    console.log('Run "npm run k8s:status" to check pod status');
+    console.log('Run "npm run k8s:logs" to view logs');
+  }
 }
 
 async function k8sApply(serviceName?: string): Promise<void> {
@@ -152,19 +255,19 @@ async function k8sApply(serviceName?: string): Promise<void> {
     if (serviceName) {
       // Single service deploy - ensure namespace and infrastructure exist first
       console.log('Ensuring namespace exists...');
-      const namespaceFile = join(K8S_DIR, '00-namespace.yaml');
+      const namespaceFile = join(getK8sDir(), '00-namespace.yaml');
       try {
         await access(namespaceFile);
         execSync(`kubectl apply -f "${namespaceFile}"`, { stdio: 'inherit' });
       } catch {
         // Create namespace directly if file doesn't exist
-        execSync(`kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -`, { stdio: 'ignore' });
+        execSync(`kubectl create namespace ${getInfraConfig().kubernetes.namespace} --dry-run=client -o yaml | kubectl apply -f -`, { stdio: 'ignore' });
       }
       
       // Apply configmap and secrets if they exist
       const configFiles = ['01-configmap.yaml', '02-secrets.yaml'];
       for (const configFile of configFiles) {
-        const filePath = join(K8S_DIR, configFile);
+        const filePath = join(getK8sDir(), configFile);
         try {
           await access(filePath);
           execSync(`kubectl apply -f "${filePath}"`, { stdio: 'ignore' });
@@ -173,11 +276,40 @@ async function k8sApply(serviceName?: string): Promise<void> {
         }
       }
       
+      // Ensure MongoDB and Redis infrastructure exist (fresh install scenario)
+      console.log('Ensuring infrastructure (MongoDB, Redis)...');
+      const infraFiles = ['05-mongodb.yaml', '06-redis.yaml'];
+      for (const infraFile of infraFiles) {
+        const filePath = join(getK8sDir(), infraFile);
+        try {
+          await access(filePath);
+          execSync(`kubectl apply -f "${filePath}"`, { stdio: 'inherit' });
+        } catch {
+          // Skip if doesn't exist
+        }
+      }
+      
+      // Wait for infrastructure to be ready (StatefulSet or Deployment)
+      console.log('Waiting for infrastructure to be ready...');
+      const ns = getInfraConfig().kubernetes.namespace;
+      for (const resource of ['mongodb', 'redis']) {
+        try {
+          execSync(`kubectl wait --for=condition=ready statefulset/${resource} -n ${ns} --timeout=60s`, { stdio: 'ignore' });
+        } catch {
+          try {
+            execSync(`kubectl wait --for=condition=available deployment/${resource} -n ${ns} --timeout=60s`, { stdio: 'ignore' });
+          } catch {
+            console.log(`  ${resource} may still be starting...`);
+          }
+        }
+      }
+      
       // Apply service manifest
+      const k8sDir = getK8sDir();
       const possibleFiles = [
-        join(K8S_DIR, `10-${serviceName}-deployment.yaml`),
-        join(K8S_DIR, `${serviceName}-deployment.yaml`),
-        join(K8S_DIR, `${serviceName}-service.yaml`),
+        join(k8sDir, `10-${serviceName}-deployment.yaml`),
+        join(k8sDir, `${serviceName}-deployment.yaml`),
+        join(k8sDir, `${serviceName}-service.yaml`),
       ];
       
       let applied = false;
@@ -197,11 +329,14 @@ async function k8sApply(serviceName?: string): Promise<void> {
         throw new Error(`No manifest found for service "${serviceName}". Expected files like: 10-${serviceName}-deployment.yaml`);
       }
     } else {
-      // Apply all manifests
-      execSync(`kubectl apply -f "${K8S_DIR}"`, { stdio: 'inherit' });
+      execSync(`kubectl apply -f "${getK8sDir()}"`, { stdio: 'inherit' });
     }
     console.log('');
     console.log('✅ Manifests applied successfully');
+    console.log('');
+    console.log('API Gateway (Ingress): No port-forward needed. If your cluster exposes Ingress on localhost (e.g. Docker Desktop K8s), use:');
+    console.log(`  curl http://localhost/graphql  (add Host header for your namespace if you have multiple)`);
+    console.log('To reach service /health directly (e.g. for health checks), use: npm run k8s:forward  (then curl http://localhost:<port>/health)');
     console.log('');
     console.log('Run "npm run k8s:status" to check pod status');
   } catch (err) {
@@ -214,7 +349,7 @@ async function k8sDelete(): Promise<void> {
   printHeader('Deleting Kubernetes Resources');
 
   try {
-    execSync(`kubectl delete namespace ${NAMESPACE} --ignore-not-found`, { stdio: 'inherit' });
+    execSync(`kubectl delete namespace ${getInfraConfig().kubernetes.namespace} --ignore-not-found`, { stdio: 'inherit' });
     console.log('');
     console.log('✅ Resources deleted');
   } catch (err) {
@@ -227,17 +362,17 @@ async function k8sStatus(config: ServicesConfig): Promise<void> {
 
   // Check namespace exists
   try {
-    execSync(`kubectl get namespace ${NAMESPACE}`, { stdio: 'ignore' });
-    console.log(`✅ Namespace "${NAMESPACE}" exists`);
+    execSync(`kubectl get namespace ${getInfraConfig().kubernetes.namespace}`, { stdio: 'ignore' });
+    console.log(`✅ Namespace "${getInfraConfig().kubernetes.namespace}" exists`);
   } catch {
-    console.log(`❌ Namespace "${NAMESPACE}" not found. Run "npm run k8s:apply" first.`);
+    console.log(`❌ Namespace "${getInfraConfig().kubernetes.namespace}" not found. Run "npm run k8s:apply" first.`);
     return;
   }
 
   console.log('');
   console.log('Pods:');
   try {
-    execSync(`kubectl get pods -n ${NAMESPACE}`, { stdio: 'inherit' });
+    execSync(`kubectl get pods -n ${getInfraConfig().kubernetes.namespace}`, { stdio: 'inherit' });
   } catch {
     console.log('  No pods found');
   }
@@ -245,7 +380,7 @@ async function k8sStatus(config: ServicesConfig): Promise<void> {
   console.log('');
   console.log('Services:');
   try {
-    execSync(`kubectl get services -n ${NAMESPACE}`, { stdio: 'inherit' });
+    execSync(`kubectl get services -n ${getInfraConfig().kubernetes.namespace}`, { stdio: 'inherit' });
   } catch {
     console.log('  No services found');
   }
@@ -253,14 +388,22 @@ async function k8sStatus(config: ServicesConfig): Promise<void> {
   console.log('');
   console.log('Ingress:');
   try {
-    execSync(`kubectl get ingress -n ${NAMESPACE}`, { stdio: 'inherit' });
+    execSync(`kubectl get ingress -n ${getInfraConfig().kubernetes.namespace}`, { stdio: 'inherit' });
+    console.log('  API Gateway: use http://localhost/graphql (no port-forward if Ingress controller is on localhost:80)');
   } catch {
     console.log('  No ingress found');
   }
 }
 
 async function k8sForward(config: ServicesConfig, serviceName?: string): Promise<void> {
-  const services = getTargetServices(config, serviceName);
+  const allServices = getTargetServices(config, serviceName);
+  const reusedSet = new Set(getReusedServiceEntries(config).map((e) => e.serviceName));
+  const services = allServices.filter((s) => !reusedSet.has(s.name));
+  if (reusedSet.size && allServices.length > services.length) {
+    console.log(`Skipping port-forward for reused (ExternalName) services: ${[...reusedSet].join(', ')}`);
+    console.log('');
+  }
+
   const targetMsg = serviceName ? ` (${serviceName})` : '';
   printHeader(`Port Forwarding Services${targetMsg}`);
   console.log('Press Ctrl+C to stop all port forwards.');
@@ -268,14 +411,14 @@ async function k8sForward(config: ServicesConfig, serviceName?: string): Promise
 
   const processes: ReturnType<typeof spawn>[] = [];
 
+  const namespace = getInfraConfig().kubernetes.namespace;
   for (const svc of services) {
     console.log(`Forwarding ${svc.name}-service: localhost:${svc.port} -> pod:${svc.port}`);
-    
     const proc = spawn('kubectl', [
       'port-forward',
       `svc/${svc.name}-service`,
       `${svc.port}:${svc.port}`,
-      '-n', NAMESPACE
+      '-n', namespace
     ], {
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: true,
@@ -322,13 +465,13 @@ async function k8sLogs(config: ServicesConfig, serviceName?: string): Promise<vo
   printHeader(`Streaming Logs${targetMsg}`);
   console.log('Press Ctrl+C to stop.');
   console.log('');
+  const namespace = getInfraConfig().kubernetes.namespace;
 
   if (serviceName) {
-    // Stream logs for specific service
     const proc = spawn('kubectl', [
       'logs', '-f',
       '-l', `app=${serviceName}-service`,
-      '-n', NAMESPACE,
+      '-n', namespace,
       '--all-containers'
     ], {
       stdio: 'inherit',
@@ -341,10 +484,9 @@ async function k8sLogs(config: ServicesConfig, serviceName?: string): Promise<vo
     return;
   }
 
-  // Use stern if available, otherwise fall back to kubectl
   try {
     execSync('stern --version', { stdio: 'ignore' });
-    const proc = spawn('stern', ['.', '-n', NAMESPACE], {
+    const proc = spawn('stern', ['.', '-n', namespace], {
       stdio: 'inherit',
       shell: true,
     });
@@ -357,7 +499,7 @@ async function k8sLogs(config: ServicesConfig, serviceName?: string): Promise<vo
     console.log('(Using kubectl logs - install stern for better multi-pod logging)');
     console.log('');
     
-    const proc = spawn('kubectl', ['logs', '-f', '-l', 'app', '-n', NAMESPACE, '--all-containers'], {
+    const proc = spawn('kubectl', ['logs', '-f', '-l', 'app', '-n', namespace, '--all-containers'], {
       stdio: 'inherit',
       shell: true,
     });
@@ -423,7 +565,7 @@ async function k8sSecrets(config: ServicesConfig, env: string): Promise<void> {
 
   // Ensure namespace exists
   try {
-    execSync(`kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -`, { stdio: 'ignore' });
+    execSync(`kubectl create namespace ${getInfraConfig().kubernetes.namespace} --dry-run=client -o yaml | kubectl apply -f -`, { stdio: 'ignore' });
   } catch {}
 
   // Create db-secrets
@@ -431,7 +573,7 @@ async function k8sSecrets(config: ServicesConfig, env: string): Promise<void> {
     const cmd = `kubectl create secret generic db-secrets ` +
       `--from-literal=mongodb-uri="${envConfig.mongoUri}" ` +
       `--from-literal=redis-url="${envConfig.redisUrl}" ` +
-      `-n ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -`;
+      `-n ${getInfraConfig().kubernetes.namespace} --dry-run=client -o yaml | kubectl apply -f -`;
     
     execSync(cmd, { stdio: 'inherit', shell: true });
     console.log('✅ Created db-secrets');
@@ -483,6 +625,9 @@ async function main(): Promise<void> {
       break;
     case 'load-images':
       await k8sLoadImages(config, service);
+      break;
+    case 'fresh':
+      await k8sFresh(config, service);
       break;
   }
 }

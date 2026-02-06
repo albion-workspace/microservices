@@ -1,39 +1,12 @@
 /**
  * Payment Service Notification Handler
- * 
- * Handles payment-related events and sends notifications:
- * - Payment completed
- * - Payment failed
- * - Payment refunded
- * 
- * This handler is registered with notification-service to enable
- * payment-related notifications.
- * 
- * Note: Types are defined locally per CODING_STANDARDS - services
- * should not depend on each other directly.
+ *
+ * Handles payment-related events and sends notifications.
+ * Uses NotificationHandlerPlugin and HandlerContext from core-service.
  */
 
 import { logger, on } from 'core-service';
-import type { IntegrationEvent } from 'core-service';
-
-// ═══════════════════════════════════════════════════════════════════
-// Local Plugin Types (per CODING_STANDARDS - no service dependencies)
-// ═══════════════════════════════════════════════════════════════════
-
-interface NotificationHandlerPlugin {
-  name: string;
-  description: string;
-  channels: string[];
-  eventTypes: string[];
-  initialize(notificationService: any): void;
-  isAvailable(): boolean;
-}
-
-interface HandlerContext {
-  notificationService: any;
-  event: IntegrationEvent<any>;
-  logger: typeof logger;
-}
+import type { IntegrationEvent, NotificationHandlerPlugin, HandlerContext } from 'core-service';
 
 // ═══════════════════════════════════════════════════════════════════
 // Event Types
@@ -74,7 +47,7 @@ export const paymentNotificationHandler: NotificationHandlerPlugin = {
       const context: HandlerContext = {
         notificationService,
         event,
-        logger,
+        logger: logger as HandlerContext['logger'],
       };
 
       try {

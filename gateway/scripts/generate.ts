@@ -20,7 +20,7 @@ import { execSync } from 'node:child_process';
 
 import {
   generateMultiServiceNginxConf,
-  generateDockerfile,
+  generateServiceDockerfile,
   type GatewayRoutingConfig,
   type ServiceEndpoint,
   type MultiServiceNginxConfig,
@@ -28,7 +28,7 @@ import {
   type LocalDependency,
 } from 'core-service';
 
-import { loadConfigFromArgs, logConfigSummary, type ServicesConfig, type ConfigMode, getMongoUri, getRedisUrl } from './config-loader.js';
+import { loadConfigFromArgs, logConfigSummary, getInfraConfig, getDockerContainerNames, getInternalPorts, getReusedServiceEntries, getJwtSecret, type ServicesConfig, type ConfigMode, type InfraConfig, getMongoUri, getRedisUrl } from './config-loader.js';
 import { runScript, printHeader, printFooter } from './script-runner.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -48,21 +48,18 @@ interface InfraStatus {
 }
 
 /**
- * Auto-detect existing Docker infrastructure
- * Returns info about running containers and networks
+ * Auto-detect existing Docker infrastructure.
+ * Container names from infra.docker.projectName only (no config duplication).
  */
-function detectExistingInfra(config: ServicesConfig): InfraStatus {
-  const mongo = config.infrastructure.mongodb;
-  const redis = config.infrastructure.redis;
-  const mongoContainer = (mongo as any).dockerContainer || 'ms-mongo';
-  const redisContainer = (redis as any).dockerContainer || 'ms-redis';
-  
+function detectExistingInfra(): InfraStatus {
+  const { mongo: mongoContainer, redis: redisContainer } = getDockerContainerNames(getInfraConfig());
+
   const result: InfraStatus = {
     dockerAvailable: false,
     mongoRunning: false,
     redisRunning: false,
     networkExists: false,
-    networkName: 'ms-network',
+    networkName: getInfraConfig().docker.network,
   };
   
   try {
@@ -102,13 +99,23 @@ function detectExistingInfra(config: ServicesConfig): InfraStatus {
 // ═══════════════════════════════════════════════════════════════════
 
 function buildGatewayRoutingConfig(config: ServicesConfig): GatewayRoutingConfig {
-  const services: ServiceEndpoint[] = config.services.map(svc => ({
-    name: svc.name,
-    host: svc.host,
-    port: svc.port,
-    healthPath: svc.healthPath,
-    graphqlPath: svc.graphqlPath,
-  }));
+  const reusedEntries = getReusedServiceEntries(config);
+  const reuseByService = new Map(reusedEntries.map(e => [e.serviceName, e]));
+  let serviceList = config.services;
+  if (config.mode === 'shared') {
+    const sharedSvc = config.services.find((s) => (s as { strategy?: string }).strategy === 'shared') ?? config.services[0];
+    serviceList = sharedSvc ? [sharedSvc] : config.services;
+  }
+  const services: ServiceEndpoint[] = serviceList.map(svc => {
+    const entry = reuseByService.get(svc.name);
+    return {
+      name: svc.name,
+      host: entry ? `${entry.project}-${svc.name}-service` : svc.host,
+      port: entry ? entry.port : svc.port,
+      healthPath: svc.healthPath,
+      graphqlPath: svc.graphqlPath,
+    };
+  });
 
   return {
     strategy: config.mode === 'shared' ? 'shared' : 'per-service',
@@ -142,57 +149,96 @@ async function generateNginx(config: ServicesConfig, mode: ConfigMode): Promise<
 // Docker Compose Generation
 // ═══════════════════════════════════════════════════════════════════
 
+/** Compose filename suffix: none for default (ms), otherwise .{projectName} so configs don't overwrite each other. */
+function getComposeFileSuffix(projectName: string): string {
+  return projectName === 'ms' ? '' : `.${projectName}`;
+}
+
+/** Primary Mongo service name in compose: mongo for single, first member host (e.g. mongo-primary) for replica set. */
+function getMongoComposeServiceName(config: ServicesConfig): string {
+  const mongo = config.infrastructure.mongodb;
+  if (mongo.mode === 'replicaSet' && mongo.members?.length) {
+    return mongo.members[0].host.split('.')[0] ?? 'mongo-primary';
+  }
+  return 'mongo';
+}
+
+/** Mongo connection string for Docker compose: replica set URI or single host. */
+function getMongoUriForCompose(config: ServicesConfig, database: string): string {
+  const mongo = config.infrastructure.mongodb;
+  const { mongoPort } = getInternalPorts(getInfraConfig());
+  if (config.reuseInfra?.mongodb && config.reuseFrom) {
+    const host = `${config.reuseFrom.project}-mongo`;
+    return `mongodb://${host}:${mongoPort}/${database}`;
+  }
+  if (mongo.mode === 'replicaSet' && mongo.members?.length) {
+    const primary = mongo.members[0];
+    const primaryHost = `${primary.host}:${primary.port}`;
+    return `mongodb://${primaryHost}/${database}?replicaSet=${mongo.replicaSet ?? 'rs0'}`;
+  }
+  return `mongodb://mongo:${mongoPort}/${database}`;
+}
+
 async function generateDockerCompose(config: ServicesConfig, mode: ConfigMode): Promise<void> {
+  // Ensure nginx config exists so gateway container mount works (dev and prod)
+  await generateNginx(config, mode);
   console.log('🔧 Generating docker-compose configurations...');
-  
+  const { projectName } = getInfraConfig().docker;
+  const suffix = getComposeFileSuffix(projectName);
+
   const dockerDir = join(OUTPUT_DIR, 'docker');
   await mkdir(dockerDir, { recursive: true });
 
-  // Generate dev compose
-  const devCompose = generateDevCompose(config, mode);
-  await writeFile(join(dockerDir, 'docker-compose.dev.yml'), devCompose);
-  console.log('✅ Generated: generated/docker/docker-compose.dev.yml');
+  const devFile = `docker-compose.dev${suffix}.yml`;
+  const prodFile = `docker-compose.prod${suffix}.yml`;
 
-  // Generate prod compose (with nginx gateway)
+  const devCompose = generateDevCompose(config, mode);
+  await writeFile(join(dockerDir, devFile), devCompose);
+  console.log(`✅ Generated: generated/docker/${devFile}`);
+
   const prodCompose = generateProdCompose(config, mode);
-  await writeFile(join(dockerDir, 'docker-compose.prod.yml'), prodCompose);
-  console.log('✅ Generated: generated/docker/docker-compose.prod.yml');
+  await writeFile(join(dockerDir, prodFile), prodCompose);
+  console.log(`✅ Generated: generated/docker/${prodFile}`);
 }
 
 function generateDevCompose(config: ServicesConfig, mode: ConfigMode): string {
   const mongo = config.infrastructure.mongodb;
   const redis = config.infrastructure.redis;
-  // Use dockerContainer name for Docker, fallback to default
-  const mongoContainer = (mongo as any).dockerContainer || 'ms-mongo';
-  const redisContainer = (redis as any).dockerContainer || 'ms-redis';
-  
-  // Auto-detect existing infrastructure
-  const infra = detectExistingInfra(config);
-  const useExistingInfra = infra.mongoRunning && infra.redisRunning;
-  const networkName = useExistingInfra && infra.networkExists ? infra.networkName : 'ms-network';
-  
-  if (infra.dockerAvailable) {
-    console.log(`   Existing infrastructure: ${useExistingInfra ? 'detected' : 'not found'}`);
-    if (useExistingInfra) {
-      console.log(`   Using network: ${networkName}`);
-    }
-  }
-
-  // Build Redis URL with optional password
+  const { docker } = getInfraConfig();
+  const projectName = docker.projectName;
+  const networkName = docker.network;
+  const reuseInfra = config.reuseInfra && config.reuseFrom;
+  const reusedEntries = getReusedServiceEntries(config);
+  const reuseServicesSet = new Set(reusedEntries.map(e => e.serviceName));
+  const providerProject = reusedEntries[0]?.project ?? config.reuseFrom?.project ?? '';
+  const providerNetwork = config.reuseFrom?.network ?? `${providerProject}_network`;
+  const providerNetworkFull = `${providerProject}_${providerNetwork}`;
+  const redisHost = config.reuseInfra?.redis && reuseInfra ? `${providerProject}-redis` : 'redis';
+  const { redisPort } = getInternalPorts(getInfraConfig());
   const redisPassword = redis.password;
   const redisAuth = redisPassword ? `:${redisPassword}@` : '';
-  const redisUrl = `redis://${redisAuth}${redisContainer}:${redis.port}`;
+  const redisUrl = `redis://${redisAuth}${redisHost}:${redisPort}`;
+  const mongoComposeService = getMongoComposeServiceName(config);
 
-  // Build service blocks
-  const serviceBlocks = config.services.map(svc => {
-    // Context is relative to docker-compose file at gateway/generated/docker/
-    // Need ../../.. to reach project root
-    const dependsBlock = useExistingInfra ? '' : `    depends_on:
-      - ${mongoContainer}
-      - ${redisContainer}
-`;
+  let servicesToInclude =
+    config.mode === 'shared'
+      ? [config.services.find((s) => (s as { strategy?: string }).strategy === 'shared') ?? config.services[0]]
+      : config.services;
+  if (reuseServicesSet.size) {
+    servicesToInclude = servicesToInclude.filter((s) => !reuseServicesSet.has(s.name));
+  }
+
+  const imageTag = projectName === 'ms' ? 'latest' : projectName;
+  const { dev: runtimeDev } = getInfraConfig().defaults.runtime;
+  const jwtSecretDev = getJwtSecret(config, 'docker');
+  const serviceBlocks = servicesToInclude.map((svc) => {
+    const containerName = `${projectName}-${svc.name}-service`;
+    const depends = reuseInfra ? [] : [mongoComposeService, 'redis'];
+    const dependsBlock = depends.length ? `    depends_on:\n      - ${depends.join('\n      - ')}\n` : '';
+    const mongoUri = getMongoUriForCompose(config, svc.database);
     return `  ${svc.name}-service:
-    image: ${svc.name}-service:latest
+    container_name: ${containerName}
+    image: ${svc.name}-service:${imageTag}
     build:
       context: ../../..
       dockerfile: ${svc.name}-service/Dockerfile
@@ -200,94 +246,135 @@ function generateDevCompose(config: ServicesConfig, mode: ConfigMode): string {
       - "${svc.port}:${svc.port}"
     environment:
       - PORT=${svc.port}
-      - NODE_ENV=development
-      - JWT_SECRET=dev-jwt-secret-change-in-production
-      - MONGO_URI=mongodb://${mongoContainer}:${mongo.port}/${svc.database}
+      - NODE_ENV=${runtimeDev.nodeEnv}
+      - JWT_SECRET=${jwtSecretDev}
+      - MONGO_URI=${mongoUri}
       - REDIS_URL=${redisUrl}
 ${dependsBlock}    networks:
-      - ${networkName}
+      - ${networkName}${reuseInfra ? `\n      - ${providerNetworkFull}` : ''}
     volumes:
       - ../../../${svc.name}-service/src:/app/src:ro`;
   }).join('\n\n');
 
-  // Generate infrastructure services (skip if using existing infra)
-  const mongoService = useExistingInfra ? '' : generateMongoDockerService(config);
-  const redisService = useExistingInfra ? '' : generateRedisDockerService(config);
+  const mongoService = config.reuseInfra?.mongodb && reuseInfra ? '' : generateMongoDockerService(config, projectName, networkName);
+  const redisService = config.reuseInfra?.redis && reuseInfra ? '' : generateRedisDockerService(config, projectName, networkName);
 
-  // Network configuration
-  const networkConfig = useExistingInfra 
-    ? `networks:
-  ${networkName}:
+  const gatewayPort = config.gateway.port;
+  const gatewayDepends = servicesToInclude.map((s) => `      - ${s.name}-service`).join('\n');
+  const gatewayNetworks = reuseInfra ? `      - ${networkName}\n      - ${providerNetworkFull}` : `      - ${networkName}`;
+  const gatewayBlock = `  # Nginx Gateway — same behavior as K8s Ingress / prod (single entry). In dev you may use gateway or direct service ports.
+  gateway:
+    container_name: ${projectName}-gateway
+    image: nginx:alpine
+    ports:
+      - "${gatewayPort}:${gatewayPort}"
+    volumes:
+      - ../nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+${gatewayDepends}
+    networks:
+${gatewayNetworks}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${gatewayPort}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+`;
+
+  const networksBlock = reuseInfra
+    ? `  ${networkName}:
+    driver: bridge
+  ${providerNetworkFull}:
     external: true`
-    : `networks:
-  ms-network:
+    : `  ${networkName}:
     driver: bridge`;
 
-  // Volume configuration (only needed if creating infra)
-  const volumeConfig = useExistingInfra ? '' : `
+  const mongoVolumes =
+    reuseInfra
+      ? []
+      : mongo.mode === 'replicaSet' && mongo.members?.length
+        ? ['mongo-data', ...mongo.members.slice(1).map((_, i) => `mongo-data-${i + 1}`)]
+        : ['mongo-data'];
+  const volumesList = [...mongoVolumes, 'redis-data'].map((v) => `  ${v}:`).join('\n');
+  const volumesBlock = reuseInfra ? '' : `
 volumes:
-  mongo-data:
-  redis-data:`;
+${volumesList}`;
 
   return `# Docker Compose - Development Mode (${mode})
 # Generated by gateway/scripts/generate.ts
-# MongoDB: ${mongo.mode}, Redis: ${redis.mode}
-# Infrastructure: ${useExistingInfra ? 'using existing' : 'will be created'}
+# Gateway port: ${gatewayPort}, MongoDB: ${mongo.mode}, Redis: ${redis.mode}
+# Docker Desktop group: ${projectName} (gateway, mongo, redis, *-service)${reuseInfra ? ' — combo: reuses ' + providerProject + ' Redis/Mongo' + (reuseServicesSet.size ? ' and ' + [...reuseServicesSet].join(',') : '') : ''}
+
+name: ${projectName}
 
 services:
+${gatewayBlock}
 ${serviceBlocks}
 ${mongoService}
 ${redisService}
-${networkConfig}
-${volumeConfig}
+networks:
+${networksBlock}
+${volumesBlock}
 `;
 }
 
-function generateMongoDockerService(config: ServicesConfig): string {
+function generateMongoDockerService(config: ServicesConfig, projectName: string, networkName: string): string {
   const mongo = config.infrastructure.mongodb;
-  // Use dockerContainer name for Docker, fallback to a default
-  const mongoContainer = (mongo as any).dockerContainer || 'ms-mongo';
+  const { versions } = getInfraConfig();
+  const { mongoPort } = getInternalPorts(getInfraConfig());
+  const containerName = `${projectName}-mongo`;
 
   if (mongo.mode === 'replicaSet' && mongo.members) {
-    // Replica Set mode
     const members = mongo.members;
-    const primaryHost = members[0]?.host.split('.')[0] || 'mongo-primary';
-    
-    let services = `  # MongoDB Replica Set
+    const primaryHost = members[0]?.host.split('.')[0] ?? 'mongo-primary';
+    const primaryContainerName = `${projectName}-${primaryHost}`;
+
+    let services = `  # MongoDB Replica Set (primary hostname: ${primaryHost})
   ${primaryHost}:
-    image: mongo:7
+    container_name: ${primaryContainerName}
+    image: mongo:${versions.mongodb}
     command: ["--replSet", "${mongo.replicaSet}", "--bind_ip_all"]
     ports:
-      - "${mongo.port}:27017"
+      - "${mongo.port}:${mongoPort}"
     volumes:
       - mongo-data:/data/db
     networks:
-      - ms-network
+      - ${networkName}
     healthcheck:
       test: |
         mongosh --quiet --eval "
-          try { rs.status().ok } catch (e) {
-            rs.initiate({_id: '${mongo.replicaSet}', members: [${members.map((m, i) => `{_id: ${i}, host: '${m.host.split('.')[0]}:27017'${m.priority ? `, priority: ${m.priority}` : ''}}`).join(', ')}]});
-            1
+          try {
+            var s = rs.status();
+            if (!s.ok) throw new Error('not ok');
+          } catch (e) {
+            rs.initiate({_id: '${mongo.replicaSet}', members: [${members.map((m, i) => `{_id: ${i}, host: '${m.host.split('.')[0]}:${mongoPort}'${m.priority ? `, priority: ${m.priority}` : ''}}`).join(', ')}]});
           }
-        " | grep -q 1
+          for (var i = 0; i < 8; i++) {
+            var st = rs.status();
+            if (st.ok && st.members && st.members[0].stateStr === 'PRIMARY') quit(0);
+            sleep(1000);
+          }
+          quit(1);
+        "
       interval: 10s
-      timeout: 10s
+      timeout: 15s
       retries: 10
       start_period: 30s`;
 
-    // Add secondary nodes
     for (let i = 1; i < members.length; i++) {
       const secondaryHost = members[i].host.split('.')[0];
+      const secondaryContainerName = `${projectName}-${secondaryHost}`;
       services += `
 
   ${secondaryHost}:
-    image: mongo:7
+    container_name: ${secondaryContainerName}
+    image: mongo:${versions.mongodb}
     command: ["--replSet", "${mongo.replicaSet}", "--bind_ip_all"]
     volumes:
       - mongo-data-${i}:/data/db
     networks:
-      - ms-network
+      - ${networkName}
     depends_on:
       - ${primaryHost}`;
     }
@@ -295,97 +382,138 @@ function generateMongoDockerService(config: ServicesConfig): string {
     return services;
   }
 
-  // Single mode
-  return `  # MongoDB (Single)
-  ${mongoContainer}:
-    image: mongo:7
+  return `  # MongoDB (Single) - hostname: mongo
+  mongo:
+    container_name: ${containerName}
+    image: mongo:${versions.mongodb}
     ports:
-      - "${mongo.port}:27017"
+      - "${mongo.port}:${mongoPort}"
     volumes:
       - mongo-data:/data/db
     networks:
-      - ms-network`;
+      - ${networkName}`;
 }
 
-function generateRedisDockerService(config: ServicesConfig): string {
+/** Redis: single or sentinel from config (infrastructure.redis.mode + sentinel). */
+function generateRedisDockerService(config: ServicesConfig, projectName: string, networkName: string): string {
   const redis = config.infrastructure.redis;
-  // Use dockerContainer name for Docker, fallback to a default
-  const redisContainer = (redis as any).dockerContainer || 'ms-redis';
+  const { versions } = getInfraConfig();
+  const { redisPort } = getInternalPorts(getInfraConfig());
+  const containerName = `${projectName}-redis`;
 
-  if (redis.mode === 'sentinel' && redis.sentinel) {
-    // Sentinel mode
-    const sentinel = redis.sentinel;
-    
-    return `  # Redis Master
-  ${redisContainer}:
-    image: redis:7-alpine
+  const singleRedisBlock = `  # Redis (Single)
+  redis:
+    container_name: ${containerName}
+    image: redis:${versions.redis}
     command: ["redis-server", "--appendonly", "yes"]
     ports:
-      - "${redis.port}:6379"
+      - "${redis.port}:${redisPort}"
     volumes:
       - redis-data:/data
     networks:
-      - ms-network
+      - ${networkName}`;
+
+  if (redis.mode === 'sentinel' && redis.sentinel != null) {
+    const sentinel = redis.sentinel;
+    const quorum = Math.min(2, sentinel.hosts.length);
+    const hostPortBase = sentinel.hostPortBase ?? 26380;
+    const sentinelBlock = sentinel.hosts
+      .map((h, i) => {
+        const sentinelHost = h.host.split('.')[0];
+        const sentinelHostPort = hostPortBase + i;
+        return `  ${sentinelHost}:
+    image: bitnami/redis-sentinel:latest
+    environment:
+      REDIS_MASTER_HOST: redis
+      REDIS_MASTER_PORT_NUMBER: "${redisPort}"
+      REDIS_MASTER_SET: ${sentinel.name}
+      REDIS_SENTINEL_QUORUM: "${quorum}"
+      REDIS_SENTINEL_DOWN_AFTER_MILLISECONDS: "5000"
+      REDIS_SENTINEL_FAILOVER_TIMEOUT: "60000"
+    ports:
+      - "${sentinelHostPort}:26379"
+    networks:
+      - ${networkName}
+    depends_on:
+      redis:
+        condition: service_healthy`;
+      })
+      .join('\n\n');
+    return `  # Redis Master (hostname: redis)
+  redis:
+    container_name: ${containerName}
+    image: redis:${versions.redis}
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${redis.port}:${redisPort}"
+    volumes:
+      - redis-data:/data
+    networks:
+      - ${networkName}
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
 
   # Redis Sentinels
-${sentinel.hosts.map((h, i) => {
-  const sentinelHost = h.host.split('.')[0];
-  return `  ${sentinelHost}:
-    image: redis:7-alpine
-    command: >
-      sh -c "echo 'sentinel monitor ${sentinel.name} ${redisHost} 6379 2' > /tmp/sentinel.conf &&
-             echo 'sentinel down-after-milliseconds ${sentinel.name} 5000' >> /tmp/sentinel.conf &&
-             echo 'sentinel failover-timeout ${sentinel.name} 60000' >> /tmp/sentinel.conf &&
-             redis-sentinel /tmp/sentinel.conf"
-    ports:
-      - "${h.port}:26379"
-    networks:
-      - ms-network
-    depends_on:
-      - ${redisHost}`;
-}).join('\n\n')}`;
+${sentinelBlock}`;
   }
 
-  // Single mode
-  return `  # Redis (Single)
-  ${redisContainer}:
-    image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes"]
-    ports:
-      - "${redis.port}:6379"
-    volumes:
-      - redis-data:/data
-    networks:
-      - ms-network`;
+  return singleRedisBlock;
 }
 
 function generateProdCompose(config: ServicesConfig, mode: ConfigMode): string {
   const gatewayPort = config.gateway.port;
   const mongo = config.infrastructure.mongodb;
   const redis = config.infrastructure.redis;
-  // Use dockerContainer name for Docker, fallback to defaults
-  const mongoContainer = (mongo as any).dockerContainer || 'ms-mongo';
-  const redisContainer = (redis as any).dockerContainer || 'ms-redis';
-  
-  // Build Redis URL with optional password
-  const redisPassword = (redis as any).password;
+  const { docker } = getInfraConfig();
+  const projectName = docker.projectName;
+  const networkName = docker.network;
+  const reuseInfra = config.reuseInfra && config.reuseFrom;
+  const reusedEntries = getReusedServiceEntries(config);
+  const reuseServicesSet = new Set(reusedEntries.map(e => e.serviceName));
+  const providerProject = reusedEntries[0]?.project ?? config.reuseFrom?.project ?? '';
+  const providerNetwork = config.reuseFrom?.network ?? `${providerProject}_network`;
+  const providerNetworkFull = `${providerProject}_${providerNetwork}`;
+  const mongoHost = config.reuseInfra?.mongodb && reuseInfra ? `${providerProject}-mongo` : 'mongo';
+  const redisHost = config.reuseInfra?.redis && reuseInfra ? `${providerProject}-redis` : 'redis';
+  const { mongoPort, redisPort } = getInternalPorts(getInfraConfig());
+  const { prod: runtimeProd } = getInfraConfig().defaults.runtime;
+  const jwtSecretProd = getJwtSecret(config, 'prod');
+  const redisPassword = (redis as { password?: string }).password;
   const redisAuth = redisPassword ? `:${redisPassword}@` : '';
-  const redisUrl = `redis://${redisAuth}${redisContainer}:${redis.port}`;
+  const redisUrl = `redis://${redisAuth}${redisHost}:${redisPort}`;
 
-  const serviceBlocks = config.services.map(svc => {
-    const replicas = (svc as any).replicas || 2;
+  let servicesToInclude =
+    config.mode === 'shared'
+      ? [config.services.find((s) => (s as { strategy?: string }).strategy === 'shared') ?? config.services[0]]
+      : config.services;
+  if (reuseServicesSet.size) {
+    servicesToInclude = servicesToInclude.filter((s) => !reuseServicesSet.has(s.name));
+  }
+
+  const imageTag = projectName === 'ms' ? 'latest' : projectName;
+  const serviceBlocks = servicesToInclude.map((svc) => {
+    const replicas = (svc as { replicas?: number }).replicas ?? 2;
+    const containerName = `${projectName}-${svc.name}-service`;
+    const dependsBlock = reuseInfra ? '' : `    depends_on:
+      - mongo
+      - redis
+`;
     return `  ${svc.name}-service:
-    image: ${svc.name}-service:latest
+    container_name: ${containerName}
+    image: ${svc.name}-service:${imageTag}
     environment:
       - PORT=${svc.port}
-      - NODE_ENV=production
-      - MONGO_URI=mongodb://${mongoContainer}:${mongo.port}/${svc.database}
+      - NODE_ENV=${runtimeProd.nodeEnv}
+      - JWT_SECRET=${jwtSecretProd}
+      - MONGO_URI=mongodb://${mongoHost}:${mongoPort}/${svc.database}
       - REDIS_URL=${redisUrl}
-    depends_on:
-      - ${mongoContainer}
-      - ${redisContainer}
-    networks:
-      - ms-network
+${dependsBlock}    networks:
+      - ${networkName}${reuseInfra ? `
+      - ${providerNetworkFull}` : ''}
     deploy:
       replicas: ${replicas}
       resources:
@@ -394,27 +522,48 @@ function generateProdCompose(config: ServicesConfig, mode: ConfigMode): string {
           memory: 512M`;
   }).join('\n\n');
 
-  const mongoService = generateMongoDockerService(config);
-  const redisService = generateRedisDockerService(config);
+  const mongoService = config.reuseInfra?.mongodb && reuseInfra ? '' : generateMongoDockerService(config, projectName, networkName);
+  const redisService = config.reuseInfra?.redis && reuseInfra ? '' : generateRedisDockerService(config, projectName, networkName);
+
+  const gatewayDepends = servicesToInclude.map((s) => `      - ${s.name}-service`).join('\n');
+  const gatewayNetworks = reuseInfra
+    ? `      - ${networkName}
+      - ${providerNetworkFull}`
+    : `      - ${networkName}`;
+  const networksBlock = reuseInfra
+    ? `  ${networkName}:
+    driver: bridge
+  ${providerNetworkFull}:
+    external: true`
+    : `  ${networkName}:
+    driver: bridge`;
+  const volumesBlock = reuseInfra ? '' : `
+volumes:
+  mongo-data:
+  redis-data:`;
 
   return `# Docker Compose - Production Mode (${mode})
 # Generated by gateway/scripts/generate.ts
 # Gateway port: ${gatewayPort}, MongoDB: ${mongo.mode}, Redis: ${redis.mode}
+# Docker Desktop group: ${projectName}${reuseInfra ? ' — combo: reuses ' + providerProject + ' Redis/Mongo' + (reuseServicesSet.size ? ' and ' + [...reuseServicesSet].join(',') : '') : ''}
+
+name: ${projectName}
 
 version: '3.8'
 
 services:
   # Nginx Gateway
   gateway:
+    container_name: ${projectName}-gateway
     image: nginx:alpine
     ports:
       - "${gatewayPort}:${gatewayPort}"
     volumes:
       - ../nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
-${config.services.map(s => `      - ${s.name}-service`).join('\n')}
+${gatewayDepends}
     networks:
-      - ms-network
+${gatewayNetworks}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:${gatewayPort}/health"]
       interval: 30s
@@ -428,12 +577,8 @@ ${mongoService}
 ${redisService}
 
 networks:
-  ms-network:
-    driver: bridge
-
-volumes:
-  mongo-data:
-  redis-data:
+${networksBlock}
+${volumesBlock}
 `;
 }
 
@@ -441,39 +586,42 @@ volumes:
 // Kubernetes Generation
 // ═══════════════════════════════════════════════════════════════════
 
+/** K8s output dir suffix: none for ms (default), otherwise -{projectName} so configs don't overwrite each other. */
+function getK8sDirSuffix(projectName: string): string {
+  return projectName === 'ms' ? '' : `-${projectName}`;
+}
+
 async function generateK8s(config: ServicesConfig, mode: ConfigMode): Promise<void> {
   console.log('🔧 Generating Kubernetes manifests...');
-  
-  const k8sDir = join(OUTPUT_DIR, 'k8s');
+  const { projectName } = getInfraConfig().docker;
+  const suffix = getK8sDirSuffix(projectName);
+  const k8sDir = join(OUTPUT_DIR, `k8s${suffix}`);
   await mkdir(k8sDir, { recursive: true });
 
-  const namespace = (config as any).kubernetes?.namespace || 'microservices';
+  const namespace = getInfraConfig().kubernetes.namespace;
 
-  // Namespace
   await writeFile(join(k8sDir, '00-namespace.yaml'), generateK8sNamespace(namespace));
-
-  // ConfigMap
   await writeFile(join(k8sDir, '01-configmap.yaml'), generateK8sConfigMap(config, namespace));
-
-  // Secrets template
   await writeFile(join(k8sDir, '02-secrets.yaml'), generateK8sSecrets(config, namespace, mode));
-
-  // MongoDB
-  await writeFile(join(k8sDir, '05-mongodb.yaml'), generateK8sMongoDB(config, namespace));
-
-  // Redis
-  await writeFile(join(k8sDir, '06-redis.yaml'), generateK8sRedis(config, namespace));
-
-  // Service deployments
+  if (!config.reuseInfra?.mongodb) {
+    await writeFile(join(k8sDir, '05-mongodb.yaml'), generateK8sMongoDB(config, namespace));
+  }
+  if (!config.reuseInfra?.redis) {
+    await writeFile(join(k8sDir, '06-redis.yaml'), generateK8sRedis(config, namespace));
+  }
+  const reusedEntries = getReusedServiceEntries(config);
+  const reuseServicesSet = new Set(reusedEntries.map(e => e.serviceName));
   for (const svc of config.services) {
+    if (reuseServicesSet.has(svc.name)) continue;
     const deployment = generateK8sDeployment(svc, config, namespace);
     await writeFile(join(k8sDir, `10-${svc.name}-deployment.yaml`), deployment);
   }
-
-  // Ingress
+  if (reusedEntries.length && config.reuseFrom) {
+    await writeFile(join(k8sDir, '07-external-services.yaml'), generateK8sExternalNameServices(reusedEntries.map(e => e.serviceName), namespace, config.reuseFrom.namespace));
+  }
   await writeFile(join(k8sDir, '20-ingress.yaml'), generateK8sIngress(config, namespace));
 
-  console.log('✅ Generated: generated/k8s/*.yaml');
+  console.log(`✅ Generated: generated/k8s${suffix}/*.yaml`);
 }
 
 function generateK8sNamespace(namespace: string): string {
@@ -500,15 +648,15 @@ ${config.services.map(s => `  ${s.name.toUpperCase().replace(/-/g, '_')}_PORT: "
 }
 
 function generateK8sSecrets(config: ServicesConfig, namespace: string, mode: ConfigMode): string {
-  const mongoHost = `mongodb.${namespace}.svc.cluster.local`;
-  const mongoPort = config.infrastructure.mongodb.port;
-  const redisHost = `redis.${namespace}.svc.cluster.local`;
-  const redisPort = config.infrastructure.redis.port;
+  const reuseNs = config.reuseInfra && config.reuseFrom ? config.reuseFrom.namespace : namespace;
+  const mongoHost = `mongodb.${reuseNs}.svc.cluster.local`;
+  const redisHost = `redis.${reuseNs}.svc.cluster.local`;
+  const { mongoPort, redisPort } = getInternalPorts(getInfraConfig());
+  const { prod: runtimeProd } = getInfraConfig().defaults.runtime;
   const redisPassword = config.infrastructure.redis.password;
   const redisAuth = redisPassword ? `:${redisPassword}@` : '';
 
-  // Generate per-service MongoDB URIs with database names
-  const perServiceMongoUris = config.services.map(svc => 
+  const perServiceMongoUris = config.services.map(svc =>
     `  ${svc.name}-mongodb-uri: "mongodb://${mongoHost}:${mongoPort}/${svc.database}"`
   ).join('\n');
 
@@ -531,12 +679,14 @@ metadata:
   namespace: ${namespace}
 type: Opaque
 stringData:
-  jwt-secret: "change-me-in-production"
+  jwt-secret: "${runtimeProd.jwtSecret}"
 `;
 }
 
 function generateK8sMongoDB(config: ServicesConfig, namespace: string): string {
   const mongo = config.infrastructure.mongodb;
+  const { versions } = getInfraConfig();
+  const { mongoPort } = getInternalPorts(getInfraConfig());
 
   if (mongo.mode === 'replicaSet') {
     return `# MongoDB StatefulSet (Replica Set)
@@ -546,7 +696,7 @@ metadata:
   name: mongodb
   namespace: ${namespace}
 spec:
-  serviceName: mongodb
+  serviceName: mongodb-pods
   replicas: 3
   selector:
     matchLabels:
@@ -558,10 +708,10 @@ spec:
     spec:
       containers:
       - name: mongodb
-        image: mongo:7
+        image: mongo:${versions.mongodb}
         command: ["mongod", "--replSet", "${mongo.replicaSet}", "--bind_ip_all"]
         ports:
-        - containerPort: 27017
+        - containerPort: ${mongoPort}
         volumeMounts:
         - name: mongo-data
           mountPath: /data/db
@@ -574,22 +724,35 @@ spec:
         requests:
           storage: 10Gi
 ---
+# Headless Service for StatefulSet pod DNS (clusterIP immutable, so separate from mongodb)
 apiVersion: v1
 kind: Service
 metadata:
-  name: mongodb
+  name: mongodb-pods
   namespace: ${namespace}
 spec:
   clusterIP: None
   selector:
     app: mongodb
   ports:
-  - port: 27017
-    targetPort: 27017
+  - port: ${mongoPort}
+    targetPort: ${mongoPort}
+---
+# ClusterIP Service for app connections (unchanged when upgrading from single)
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb
+  namespace: ${namespace}
+spec:
+  selector:
+    app: mongodb
+  ports:
+  - port: ${mongoPort}
+    targetPort: ${mongoPort}
 `;
   }
 
-  // Single mode
   return `# MongoDB Deployment (Single)
 apiVersion: apps/v1
 kind: Deployment
@@ -608,9 +771,9 @@ spec:
     spec:
       containers:
       - name: mongodb
-        image: mongo:7
+        image: mongo:${versions.mongodb}
         ports:
-        - containerPort: 27017
+        - containerPort: ${mongoPort}
         volumeMounts:
         - name: mongo-data
           mountPath: /data/db
@@ -627,13 +790,15 @@ spec:
   selector:
     app: mongodb
   ports:
-  - port: 27017
-    targetPort: 27017
+  - port: ${mongoPort}
+    targetPort: ${mongoPort}
 `;
 }
 
 function generateK8sRedis(config: ServicesConfig, namespace: string): string {
   const redis = config.infrastructure.redis;
+  const { versions } = getInfraConfig();
+  const { redisPort } = getInternalPorts(getInfraConfig());
 
   if (redis.mode === 'sentinel' && redis.sentinel) {
     return `# Redis with Sentinel
@@ -643,7 +808,7 @@ metadata:
   name: redis
   namespace: ${namespace}
 spec:
-  serviceName: redis
+  serviceName: redis-pods
   replicas: 3
   selector:
     matchLabels:
@@ -655,10 +820,10 @@ spec:
     spec:
       containers:
       - name: redis
-        image: redis:7-alpine
+        image: redis:${versions.redis}
         command: ["redis-server", "--appendonly", "yes"]
         ports:
-        - containerPort: 6379
+        - containerPort: ${redisPort}
         volumeMounts:
         - name: redis-data
           mountPath: /data
@@ -671,22 +836,35 @@ spec:
         requests:
           storage: 1Gi
 ---
+# Headless Service for StatefulSet pod DNS (clusterIP immutable, so separate from redis)
 apiVersion: v1
 kind: Service
 metadata:
-  name: redis
+  name: redis-pods
   namespace: ${namespace}
 spec:
   clusterIP: None
   selector:
     app: redis
   ports:
-  - port: 6379
-    targetPort: 6379
+  - port: ${redisPort}
+    targetPort: ${redisPort}
+---
+# ClusterIP Service for app connections (unchanged when upgrading from single)
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: ${namespace}
+spec:
+  selector:
+    app: redis
+  ports:
+  - port: ${redisPort}
+    targetPort: ${redisPort}
 `;
   }
 
-  // Single mode
   return `# Redis Deployment (Single)
 apiVersion: apps/v1
 kind: Deployment
@@ -705,10 +883,10 @@ spec:
     spec:
       containers:
       - name: redis
-        image: redis:7-alpine
+        image: redis:${versions.redis}
         command: ["redis-server", "--appendonly", "yes"]
         ports:
-        - containerPort: 6379
+        - containerPort: ${redisPort}
 ---
 apiVersion: v1
 kind: Service
@@ -719,8 +897,8 @@ spec:
   selector:
     app: redis
   ports:
-  - port: 6379
-    targetPort: 6379
+  - port: ${redisPort}
+    targetPort: ${redisPort}
 `;
 }
 
@@ -731,6 +909,7 @@ function generateK8sDeployment(svc: ServicesConfig['services'][0], config: Servi
     requests: { cpu: '100m', memory: '128Mi' },
     limits: { cpu: '500m', memory: '512Mi' }
   };
+  const { prod: runtimeProd } = getInfraConfig().defaults.runtime;
 
   return `apiVersion: apps/v1
 kind: Deployment
@@ -757,7 +936,7 @@ spec:
         - name: PORT
           value: "${svc.port}"
         - name: NODE_ENV
-          value: "production"
+          value: "${runtimeProd.nodeEnv}"
         - name: MONGO_URI
           valueFrom:
             secretKeyRef:
@@ -807,11 +986,33 @@ spec:
 `;
 }
 
+function getK8sServicePort(svc: { name: string; port: number }, config: ServicesConfig): number {
+  const entry = getReusedServiceEntries(config).find(e => e.serviceName === svc.name);
+  return entry ? entry.port : svc.port;
+}
+
+function generateK8sExternalNameServices(serviceNames: string[], namespace: string, reuseNamespace: string): string {
+  return serviceNames.map(name =>
+    `apiVersion: v1
+kind: Service
+metadata:
+  name: ${name}-service
+  namespace: ${namespace}
+spec:
+  type: ExternalName
+  externalName: ${name}-service.${reuseNamespace}.svc.cluster.local
+`
+  ).join('---\n');
+}
+
 function generateK8sIngress(config: ServicesConfig, namespace: string): string {
   const defaultSvc = config.services.find(s => s.name === config.gateway.defaultService);
-  const defaultPort = defaultSvc?.port || 9001;
+  const defaultPort = defaultSvc ? getK8sServicePort(defaultSvc, config) : (config.services[0]?.port ?? 9001);
+  const defaultBackend = `${config.gateway.defaultService}-service.${namespace}.svc.cluster.local:${defaultPort}`;
 
-  return `apiVersion: networking.k8s.io/v1
+  // Single backend: use spec.backend (no header-based routing needed)
+  if (config.services.length <= 1) {
+    return `apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: api-gateway
@@ -819,11 +1020,53 @@ metadata:
   annotations:
     nginx.ingress.kubernetes.io/rewrite-target: /graphql
     nginx.ingress.kubernetes.io/configuration-snippet: |
-      # Route based on X-Target-Service header
       set $target_service $http_x_target_service;
       if ($target_service = "") {
         set $target_service "${config.gateway.defaultService}";
       }
+spec:
+  ingressClassName: nginx
+  rules:
+  - http:
+      paths:
+      - path: /graphql
+        pathType: Prefix
+        backend:
+          service:
+            name: ${config.gateway.defaultService}-service
+            port:
+              number: ${defaultPort}
+`;
+  }
+
+  // Multiple services: route by X-Target-Service to each backend (e.g. combo: auth + kyc)
+  const backendLines = config.services
+    .map(
+      (s) =>
+        `    ${s.name} ${s.name}-service.${namespace}.svc.cluster.local:${getK8sServicePort(s, config)};`
+    )
+    .join('\n');
+  const serverSnippet = `  map $target_service $k8s_backend {
+    default ${defaultBackend};
+${backendLines}
+  }`;
+  const configSnippet = `      set $target_service $http_x_target_service;
+      if ($target_service = "") {
+        set $target_service "${config.gateway.defaultService}";
+      }
+      resolver kube-dns.kube-system.svc.cluster.local valid=10s;
+      proxy_pass http://$k8s_backend$request_uri;`;
+
+  return `apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api-gateway
+  namespace: ${namespace}
+  annotations:
+    nginx.ingress.kubernetes.io/server-snippet: |
+${serverSnippet.split('\n').map((l) => '      ' + l).join('\n')}
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+${configSnippet.split('\n').map((l) => '      ' + l).join('\n')}
 spec:
   ingressClassName: nginx
   rules:
@@ -913,6 +1156,7 @@ async function generateDockerfiles(config: ServicesConfig): Promise<void> {
   console.log('🔧 Generating Dockerfiles for services...');
   
   const PROJECT_ROOT = join(__dirname, '..', '..');
+  const { versions } = getInfraConfig();
   
   for (const service of config.services) {
     const servicePath = join(PROJECT_ROOT, `${service.name}-service`);
@@ -925,12 +1169,13 @@ async function generateDockerfiles(config: ServicesConfig): Promise<void> {
       name: `${service.name}-service`,
       port: service.port,
       healthPath: service.healthPath,
-      nodeVersion: '20',
+      nodeVersion: versions.node,
       entryPoint: 'dist/index.js',
       localDependencies,
     };
     
-    const dockerfile = generateDockerfile(dockerConfig);
+    // Use fast Dockerfile that extends from core-base image
+    const dockerfile = generateServiceDockerfile(dockerConfig);
     const outputPath = join(servicePath, 'Dockerfile');
     
     await writeFile(outputPath, dockerfile);

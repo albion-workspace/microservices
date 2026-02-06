@@ -1,45 +1,12 @@
 /**
  * Bonus Service Notification Handler
- * 
- * Handles bonus-related events and sends notifications:
- * - Bonus credited
- * - Bonus expired
- * - Wagering requirements completed
- * 
- * This handler is registered with notification-service to enable
- * bonus-related notifications.
- * 
- * Note: Types are defined locally per CODING_STANDARDS - services
- * should not depend on each other directly.
+ *
+ * Handles bonus-related events and sends notifications.
+ * Uses NotificationHandlerPlugin and HandlerContext from core-service.
  */
 
 import { logger, on } from 'core-service';
-import type { IntegrationEvent } from 'core-service';
-
-// ═══════════════════════════════════════════════════════════════════
-// Local Plugin Types (per CODING_STANDARDS - no service dependencies)
-// ═══════════════════════════════════════════════════════════════════
-
-/**
- * Handler plugin interface - matches notification-service plugin system
- */
-interface NotificationHandlerPlugin {
-  name: string;
-  description: string;
-  channels: string[];
-  eventTypes: string[];
-  initialize(notificationService: any): void;
-  isAvailable(): boolean;
-}
-
-/**
- * Handler context passed to handler functions
- */
-interface HandlerContext {
-  notificationService: any;
-  event: IntegrationEvent<any>;
-  logger: typeof logger;
-}
+import type { IntegrationEvent, NotificationHandlerPlugin, HandlerContext } from 'core-service';
 
 // ═══════════════════════════════════════════════════════════════════
 // Event Types
@@ -80,7 +47,7 @@ export const bonusNotificationHandler: NotificationHandlerPlugin = {
       const context: HandlerContext = {
         notificationService,
         event,
-        logger,
+        logger: logger as HandlerContext['logger'],
       };
 
       try {

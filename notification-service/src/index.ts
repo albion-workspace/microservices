@@ -1,6 +1,7 @@
 /**
  * Notification Service
- * 
+ * Aligned with service generator scaffold (accessors, config, createGateway). Domain-specific code below.
+ *
  * Multi-channel notification service supporting:
  * - Email (SMTP)
  * - SMS (Twilio)
@@ -30,7 +31,7 @@ import {
   resolveContext,
 } from 'core-service';
 
-import { loadConfig, validateConfig, printConfigSummary, type NotificationConfig } from './config.js';
+import { loadConfig, validateConfig, printConfigSummary, SERVICE_NAME, type NotificationConfig } from './config.js';
 import { NOTIFICATION_CONFIG_DEFAULTS } from './config-defaults.js';
 import { NotificationService } from './notification-service.js';
 import { notificationGraphQLTypes, createNotificationResolvers } from './graphql.js';
@@ -53,16 +54,16 @@ const buildGatewayConfig = (notificationService: NotificationService, notificati
   const config = notificationConfig; // Type narrowing helper
   
   return {
-    name: 'notification-service',
+    name: config.serviceName,
     port: config.port,
     cors: {
-      origins: (process.env.CORS_ORIGINS || 'http://localhost:5173,http://localhost:3000')
-        .split(',')
-        .map(o => o.trim()),
+      origins: config.corsOrigins,
     },
     jwt: {
-      secret: process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || 'shared-jwt-secret-change-in-production',
-      expiresIn: '1h',
+      secret: config.jwtSecret,
+      expiresIn: config.jwtExpiresIn,
+      refreshSecret: config.jwtRefreshSecret,
+      refreshExpiresIn: config.jwtRefreshExpiresIn,
     },
     services: [
       {
@@ -102,7 +103,7 @@ async function main() {
   registerServiceErrorCodes(NOTIFICATION_ERROR_CODES);
 
   // Register default configs (auto-created in DB if missing)
-  registerServiceConfigDefaults('notification-service', NOTIFICATION_CONFIG_DEFAULTS);
+  registerServiceConfigDefaults(SERVICE_NAME, NOTIFICATION_CONFIG_DEFAULTS);
 
   // Load config (MongoDB + env vars + defaults)
   // Resolve brand/tenantId dynamically (from user context, config store, or env vars)

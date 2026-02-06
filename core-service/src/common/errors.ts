@@ -157,7 +157,7 @@ export class GraphQLError extends Error {
    * Automatically logs the error
    */
   static format(error: Error | unknown): GraphQLError {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = getErrorMessage(error);
     const formattedMessage = formatToCapitalCamelCase(message);
     
     if (error instanceof GraphQLError) {
@@ -166,7 +166,7 @@ export class GraphQLError extends Error {
     
     // Create const instance and return (constructor will auto-log)
     const graphQLError = new GraphQLError(formattedMessage, {
-      originalError: error instanceof Error ? error.message : String(error),
+      originalError: message,
     });
     return graphQLError;
   }

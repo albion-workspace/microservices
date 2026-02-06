@@ -30,6 +30,7 @@ import {
 } from 'graphql-query-complexity';
 import { GraphQLSchema, DocumentNode, GraphQLError, parse } from 'graphql';
 import { logger } from '../logger.js';
+import { getErrorMessage } from '../errors.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -158,7 +159,7 @@ export function calculateComplexity(
     return complexity;
   } catch (error) {
     logger.warn('Failed to calculate query complexity', { 
-      error: error instanceof Error ? error.message : String(error),
+      error: getErrorMessage(error),
       operationName,
     });
     return 0;
@@ -230,7 +231,7 @@ export function analyzeQueryComplexity(
     };
   } catch (error) {
     logger.error('Query complexity analysis failed', { 
-      error: error instanceof Error ? error.message : String(error),
+      error: getErrorMessage(error),
       operationName,
     });
     

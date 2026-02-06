@@ -107,7 +107,7 @@ export function createPendingOperationStore(config: PendingOperationConfig = {})
 
   // Ensure jwtSecret is always a string (required for JWT backend)
   // TypeScript needs explicit type narrowing here
-  const jwtSecret: string = (configJwtSecret || process.env.JWT_SECRET || process.env.SHARED_JWT_SECRET || 'shared-jwt-secret-change-in-production') as string;
+  const jwtSecret: string = (configJwtSecret || process.env.JWT_SECRET || 'shared-jwt-secret-change-in-production') as string;
   
   // Validate jwtSecret is not empty (runtime check)
   if (!jwtSecret || typeof jwtSecret !== 'string') {

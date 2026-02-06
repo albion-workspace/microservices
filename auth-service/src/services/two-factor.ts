@@ -4,7 +4,7 @@
  */
 
 import { logger, findOneById, updateOneById, extractDocumentId, normalizeDocument, findById } from 'core-service';
-import { db } from '../database.js';
+import { db } from '../accessors.js';
 import speakeasy from 'speakeasy';
 import qrcode from 'qrcode';
 import type { Enable2FAInput, Verify2FAInput, User, TwoFactorSetupResponse } from '../types.js';

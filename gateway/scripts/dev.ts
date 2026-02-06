@@ -3,15 +3,16 @@
  * 
  * Single entry point for all development modes:
  * - per-service: Each service on its own port (default)
- * - shared: All services in one process (port 9999)
+ * - shared: Single app service (strategy shared) on its port; aligns with Docker/K8s shared.
  * - docker: Docker Compose development mode
  * 
  * Cross-platform (Windows, Linux, Mac)
  * 
  * Usage:
  *   npm run dev                          # Per-service mode (default, dev config)
- *   npm run dev -- --config=shared       # Per-service with shared config
- *   npm run dev -- --mode=docker         # Docker mode
+ *   npm run dev:shared                   # Shared: only the service with strategy shared (e.g. auth)
+ *   npm run dev -- --mode=docker         # Docker mode (default config)
+ *   npm run dev:docker:shared            # Docker mode with shared config
  *   npm run dev:shared                   # Alias for --config=shared
  */
 
@@ -20,7 +21,7 @@ import { access } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { loadConfigFromArgs, logConfigSummary, type ServicesConfig } from './config-loader.js';
+import { loadConfigFromArgs, logConfigSummary, getInfraConfig, type ServicesConfig } from './config-loader.js';
 import { runLongRunningScript, printHeader, printFooter } from './script-runner.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -111,22 +112,43 @@ async function runPerServiceMode(config: ServicesConfig): Promise<void> {
   console.log('');
 }
 
+function getSharedService(config: ServicesConfig): { name: string; port: number } {
+  const svc = config.services.find((s) => (s as { strategy?: string }).strategy === 'shared') ?? config.services[0];
+  if (!svc) throw new Error('No service found in config');
+  return { name: svc.name, port: svc.port };
+}
+
 async function runSharedMode(config: ServicesConfig): Promise<void> {
-  printHeader('Development Mode: Shared (Single Gateway)');
-  console.log(`Gateway port: ${config.gateway.port}`);
+  printHeader('Development Mode: Shared (Single Service)');
+  const { name, port } = getSharedService(config);
+  console.log(`Starting shared service: ${name}-service on port ${port}`);
+  console.log(`Gateway port (when using gateway): ${config.gateway.port}`);
   console.log('');
-  console.log('Shared mode not yet implemented.');
-  console.log('This will run all services in a single process.');
-  console.log('For now, use per-service mode: npm run dev');
+
+  const child = startService(name, config);
+  processes.push(child);
+
+  printFooter('Shared service starting...');
+  console.log('Endpoints:');
+  console.log(`  ${name.padEnd(15)} http://localhost:${port}/graphql`);
+  console.log(`  health            http://localhost:${port}/health`);
+  console.log('');
+  console.log('Press Ctrl+C to stop.');
+  console.log('Run "npm run health:shared" to check status.');
   console.log('');
 }
 
-async function runDockerMode(config: ServicesConfig): Promise<void> {
+function getDevComposePath(): string {
+  const projectName = getInfraConfig().docker.projectName;
+  const suffix = projectName === 'ms' ? '' : `.${projectName}`;
+  return join(GATEWAY_DIR, 'generated', 'docker', `docker-compose.dev${suffix}.yml`);
+}
+
+async function runDockerMode(config: ServicesConfig, configMode: string): Promise<void> {
   printHeader('Development Mode: Docker Compose');
 
-  // Check if docker-compose file exists
-  const composeFile = join(GATEWAY_DIR, 'generated', 'docker', 'docker-compose.dev.yml');
-  
+  const composeFile = getDevComposePath();
+
   let fileExists = false;
   try {
     await access(composeFile);
@@ -134,15 +156,14 @@ async function runDockerMode(config: ServicesConfig): Promise<void> {
   } catch {
     fileExists = false;
   }
-  
+
   if (!fileExists) {
     console.log('Docker Compose file not found. Generating...');
     console.log('');
-    
-    // Generate configs first
+
     const generateScript = join(__dirname, 'generate.ts');
     const tsxPath = join(ROOT_DIR, 'core-service', 'node_modules', 'tsx', 'dist', 'cli.mjs');
-    const generateProcess = spawn('node', [tsxPath, generateScript, '--docker'], {
+    const generateProcess = spawn('node', [tsxPath, generateScript, '--docker', `--config=${configMode}`], {
       cwd: GATEWAY_DIR,
       stdio: 'inherit',
       shell: true,
@@ -208,6 +229,7 @@ function setupShutdown(): void {
 async function main(): Promise<void> {
   const { mode } = parseArgs();
   const { config, mode: configMode } = await loadConfigFromArgs();
+  // configMode drives infra (e.g. shared → infra.shared.json → projectName "shared" for compose file)
 
   console.log('');
   logConfigSummary(config, configMode);
@@ -222,7 +244,7 @@ async function main(): Promise<void> {
       await runSharedMode(config);
       break;
     case 'docker':
-      await runDockerMode(config);
+      await runDockerMode(config, configMode);
       break;
   }
 }

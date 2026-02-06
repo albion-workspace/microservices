@@ -31,3 +31,4 @@
 
 export * from './BonusEligibility.js';
 export * from './KYCEligibility.js';
+export * from './jwt.js';

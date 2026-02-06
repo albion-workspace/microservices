@@ -15,6 +15,7 @@
 import crypto from 'crypto';
 
 // Internal packages
+import { getUseMongoTransactions } from '../config.js';
 import { 
   createService, 
   generateId, 
@@ -28,11 +29,13 @@ import {
   paginateCollection,
   extractDocumentId,
   createTransferWithTransactions,
+  buildConnectionTypeSDL,
+  buildSagaResultTypeSDL,
   type ClientSession,
 } from 'core-service';
 
 // Local imports
-import { db } from '../database.js';
+import { db } from '../accessors.js';
 import type { Transaction, Transfer } from '../types.js';
 
 /**
@@ -92,6 +95,32 @@ async function checkDuplicateTransfer(
   }
 }
 
+/** Calculate fee amount and net amount from a percentage. */
+function calculateFee(amount: number, feePercentage: number): { feeAmount: number; netAmount: number } {
+  const feeAmount = Math.round(amount * (feePercentage / 100) * 100) / 100;
+  return { feeAmount, netAmount: amount - feeAmount };
+}
+
+/** Build a human-readable transaction description from method and type. */
+function buildTransactionDescription(method: string | undefined, txType: 'Deposit' | 'Withdrawal'): string {
+  const methodDisplay = method || 'system';
+  const isGeneric = !methodDisplay || methodDisplay === 'system' || methodDisplay === txType.toLowerCase();
+  return isGeneric ? txType : `${txType} via ${methodDisplay.charAt(0).toUpperCase() + methodDisplay.slice(1)}`;
+}
+
+/** Build a MongoDB date range filter for createdAt from optional dateFrom/dateTo strings. */
+export function buildDateRangeFilter(dateFrom?: string, dateTo?: string): Record<string, unknown> | null {
+  if (!dateFrom && !dateTo) return null;
+  const dateFilter: Record<string, unknown> = {};
+  if (dateFrom) dateFilter.$gte = new Date(dateFrom);
+  if (dateTo) {
+    const toDate = new Date(dateTo);
+    toDate.setHours(23, 59, 59, 999);
+    dateFilter.$lte = toDate;
+  }
+  return dateFilter;
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Deposit Transaction Types & Validation
 // ═══════════════════════════════════════════════════════════════════
@@ -121,12 +150,9 @@ const depositSaga = [
     name: 'calculateFees',
     critical: true,
     execute: async ({ input, data, ...ctx }: DepositCtx): Promise<DepositCtx> => {
-      // Fee calculation (generic - can be customized based on permissions/config)
-      // Default fee: 2.9% (can be overridden by user permissions or configuration)
-      const feePercentage = 2.9;
-      const feeAmount = Math.round(input.amount * (feePercentage / 100) * 100) / 100;
+      const { feeAmount, netAmount } = calculateFee(input.amount, 2.9);
       data.feeAmount = feeAmount;
-      data.netAmount = input.amount - feeAmount;
+      data.netAmount = netAmount;
       return { ...ctx, input, data };
     },
   },
@@ -157,16 +183,7 @@ const depositSaga = [
       // Get session from saga context if available (for transaction support)
       const session = (data as any)._session as ClientSession | undefined;
       
-      // Create transfer using helper function (passes session if available)
-      // Generate a generic description (only add method detail if it's a specific payment method)
-      const methodDisplay = method || 'system';
-      const isGenericMethod = !methodDisplay || methodDisplay === 'system' || methodDisplay === 'deposit';
-      const description = isGenericMethod 
-        ? 'Deposit'
-        : `Deposit via ${methodDisplay.charAt(0).toUpperCase() + methodDisplay.slice(1)}`;
-      
-      // Ensure description is always set (never null/undefined)
-      const finalDescription = description || 'Deposit';
+      const finalDescription = buildTransactionDescription(method, 'Deposit');
       
       // Get database instance using service database accessor
       const database = await db.getDb();
@@ -228,9 +245,9 @@ export const depositService = createService<Transaction, CreateDepositInput>({
         description: String
         metadata: JSON
       }
-      type TransactionConnection { nodes: [Transaction!]! totalCount: Int! pageInfo: PageInfo! }
+      ${buildConnectionTypeSDL('TransactionConnection', 'Transaction')}
       # Transfer type will be defined by transferService (referenced here)
-      type CreateDepositResult { success: Boolean! deposit: Transaction transfer: Transfer sagaId: ID! errors: [String!] executionTimeMs: Int }
+      ${buildSagaResultTypeSDL('CreateDepositResult', 'deposit', 'Transaction', 'transfer: Transfer')}
     `,
     graphqlInput: `input CreateDepositInput { userId: String! amount: Float! currency: String! tenantId: String method: String fromUserId: String! }`,
     validateInput: (input) => {
@@ -247,7 +264,7 @@ export const depositService = createService<Transaction, CreateDepositInput>({
   },
   saga: depositSaga,
   sagaOptions: {
-    useTransaction: process.env.MONGO_TRANSACTIONS !== 'false',
+    get useTransaction() { return getUseMongoTransactions(); },
     maxRetries: 3,
   },
 });
@@ -285,10 +302,9 @@ const withdrawalSaga = [
     name: 'calculateFees',
     critical: true,
     execute: async ({ input, data, ...ctx }: WithdrawalCtx): Promise<WithdrawalCtx> => {
-      const feePercentage = 1.0; // 1% withdrawal fee
-      const feeAmount = Math.round(input.amount * (feePercentage / 100) * 100) / 100;
+      const { feeAmount, netAmount } = calculateFee(input.amount, 1.0);
       data.feeAmount = feeAmount;
-      data.netAmount = input.amount - feeAmount;
+      data.netAmount = netAmount;
       return { ...ctx, input, data };
     },
   },
@@ -345,16 +361,7 @@ const withdrawalSaga = [
       // Get session from saga context if available (for transaction support)
       const session = (data as any)._session as ClientSession | undefined;
       
-      // Create transfer using helper function (passes session if available)
-      // Generate a generic description (only add method detail if it's a specific payment method)
-      const methodDisplay = method || 'system';
-      const isGenericMethod = !methodDisplay || methodDisplay === 'system' || methodDisplay === 'withdrawal';
-      const description = isGenericMethod 
-        ? 'Withdrawal'
-        : `Withdrawal via ${methodDisplay.charAt(0).toUpperCase() + methodDisplay.slice(1)}`;
-      
-      // Ensure description is always set (never null/undefined)
-      const finalDescription = description || 'Withdrawal';
+      const finalDescription = buildTransactionDescription(method, 'Withdrawal');
       
       // Get database instance using service database accessor
       const database = await db.getDb();
@@ -391,7 +398,7 @@ export const withdrawalService = createService<Transaction, CreateWithdrawalInpu
     name: 'withdrawal',
     collection: 'transactions',
     graphqlType: `
-      type CreateWithdrawalResult { success: Boolean! withdrawal: Transaction transfer: Transfer sagaId: ID! errors: [String!] executionTimeMs: Int }
+      ${buildSagaResultTypeSDL('CreateWithdrawalResult', 'withdrawal', 'Transaction', 'transfer: Transfer')}
     `,
     graphqlInput: `input CreateWithdrawalInput { userId: String! amount: Float! currency: String! method: String! tenantId: String toUserId: String! bankAccount: String walletAddress: String }`,
     validateInput: (input) => {
@@ -407,7 +414,7 @@ export const withdrawalService = createService<Transaction, CreateWithdrawalInpu
   },
   saga: withdrawalSaga,
   sagaOptions: {
-    useTransaction: process.env.MONGO_TRANSACTIONS !== 'false',
+    get useTransaction() { return getUseMongoTransactions(); },
     maxRetries: 3,
   },
 });
@@ -451,19 +458,8 @@ export const transactionsQueryResolver = async (args: Record<string, unknown>) =
       // Note: Transactions don't have status (they're immutable)
       // Status filtering should be done on transfers, not transactions
       
-      // Filter by date range if specified
-      if (filter.dateFrom || filter.dateTo) {
-        const dateFilter: Record<string, unknown> = {};
-        if (filter.dateFrom) {
-          dateFilter.$gte = new Date(filter.dateFrom as string);
-        }
-        if (filter.dateTo) {
-          const toDate = new Date(filter.dateTo as string);
-          toDate.setHours(23, 59, 59, 999); // Include full day
-          dateFilter.$lte = toDate;
-        }
-        queryFilter.createdAt = dateFilter;
-      }
+      const dateRange = buildDateRangeFilter(filter.dateFrom as string, filter.dateTo as string);
+      if (dateRange) queryFilter.createdAt = dateRange;
       
       // Use cursor-based pagination (O(1) performance)
       const result = await paginateCollection(transactionsCollection, {

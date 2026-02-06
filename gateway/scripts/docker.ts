@@ -12,14 +12,21 @@
  *   npm run docker:build                           # Build all images (fresh)
  *   npm run docker:build -- --service=auth         # Build only auth-service (fresh)
  *   npm run docker:up                              # Start containers (dev config)
- *   npm run docker:up -- --service=auth            # Start only auth-service
+ *   npm run docker:up:infra                        # Start only mongo + redis (no gateway, no app services)
+ *   npm run docker:recovery:infra                  # Reset infra volumes and start mongo + redis (transition single ↔ replica)
+ *   npm run docker:up -- --service=auth             # Start only auth-service
  *   npm run docker:down                            # Stop containers
  *   npm run docker:logs                            # View logs
  *   npm run docker:logs -- --service=auth          # View logs for auth-service
  *   npm run docker:status                          # Check status
- *   npm run docker:fresh                           # Full fresh deploy: clean + build + start + health
+ *   npm run docker:fresh                           # Full fresh deploy: rebuild core-base + build + start + health
  *   npm run docker:fresh -- --service=auth         # Fresh deploy for single service
+ *   npm run docker:build -- --rebuild-base         # Force rebuild core-base (access-engine + core-service) then build images
  *   npm run docker:clean                           # Remove containers/images/generated files
+ *
+ * Core-base cache: Service images extend core-base (access-engine + core-service). docker:fresh always
+ * rebuilds core-base so services get the latest shared deps (e.g. DefaultServiceConfig). After changing
+ * core-service or access-engine, run docker:build with --rebuild-base (or docker:fresh) so the base is fresh.
  */
 
 import { spawn, execSync } from 'node:child_process';
@@ -27,7 +34,7 @@ import { access, rm } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { loadConfigFromArgs, logConfigSummary, type ServicesConfig, type ServiceConfig } from './config-loader.js';
+import { loadConfigFromArgs, logConfigSummary, getInfraConfig, getDockerContainerNames, getReusedServiceEntries, getJwtSecret, type ServicesConfig, type ServiceConfig, type InfraConfig, type ConfigMode } from './config-loader.js';
 import { runScript, runLongRunningScript, printHeader } from './script-runner.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -35,16 +42,15 @@ const ROOT_DIR = join(__dirname, '..', '..');
 const GATEWAY_DIR = join(__dirname, '..');
 const GENERATED_DIR = join(GATEWAY_DIR, 'generated');
 
-// Network name used by all services - must match ms-mongo/ms-redis network
-const DOCKER_NETWORK = 'ms_microservices-network';
-
-type DockerCommand = 'build' | 'up' | 'down' | 'logs' | 'status' | 'ps' | 'fresh' | 'clean';
+type DockerCommand = 'build' | 'up' | 'down' | 'logs' | 'status' | 'ps' | 'fresh' | 'clean' | 'recovery';
 
 interface ParsedArgs {
   command: DockerCommand;
   env: 'dev' | 'prod';
   service?: string;  // Optional: specific service to target
+  infra?: boolean;   // If true, only mongo + redis (no gateway, no app services)
   noHealthCheck?: boolean;
+  rebuildBase?: boolean;  // If true, rebuild core-base before building service images
 }
 
 function parseArgs(): ParsedArgs {
@@ -52,13 +58,15 @@ function parseArgs(): ParsedArgs {
   let command: DockerCommand = 'status';
   let env: 'dev' | 'prod' = 'dev';
   let noHealthCheck = false;
-  
+  let infra = false;
+  let rebuildBase = false;
+
   // Support SERVICE env var for PowerShell compatibility (npm doesn't pass -- args on Windows)
   // Usage: $env:SERVICE="auth"; npm run docker:fresh
   let service: string | undefined = process.env.SERVICE?.replace(/-service$/, '');
 
   for (const arg of args) {
-    if (['build', 'up', 'down', 'logs', 'status', 'ps', 'fresh', 'clean'].includes(arg)) {
+    if (['build', 'up', 'down', 'logs', 'status', 'ps', 'fresh', 'clean', 'recovery'].includes(arg)) {
       command = arg as DockerCommand;
     }
     if (arg === '--prod') {
@@ -67,13 +75,28 @@ function parseArgs(): ParsedArgs {
     if (arg === '--no-health') {
       noHealthCheck = true;
     }
+    if (arg === '--infra') {
+      infra = true;
+    }
+    if (arg === '--rebuild-base') {
+      rebuildBase = true;
+    }
     // Support --service=auth or --service=auth-service (command line overrides env var)
     if (arg.startsWith('--service=')) {
       service = arg.split('=')[1].replace(/-service$/, '');
     }
   }
 
-  return { command, env, service, noHealthCheck };
+  return { command, env, service, infra, noHealthCheck, rebuildBase };
+}
+
+/** Compose service names for infra only (mongo + redis). Matches keys in generated docker-compose. */
+function getInfraComposeServiceNames(config: ServicesConfig): [string, string] {
+  const mongo = config.infrastructure.mongodb;
+  const mongoService = mongo.mode === 'replicaSet' && mongo.members?.length
+    ? (mongo.members[0].host.split('.')[0] ?? 'mongo')
+    : 'mongo';
+  return [mongoService, 'redis'];
 }
 
 /**
@@ -111,10 +134,21 @@ function checkDockerRunning(): boolean {
   }
 }
 
+/** Compose filename suffix: none for default (ms), otherwise .{projectName} so configs don't overwrite each other. */
+function getComposeFileSuffix(): string {
+  const projectName = getInfraConfig().docker.projectName;
+  return projectName === 'ms' ? '' : `.${projectName}`;
+}
+
+/** Image tag per project: ms uses :latest, test/combo use :test / :combo so images don't overwrite each other. */
+function getImageTag(): string {
+  const projectName = getInfraConfig().docker.projectName;
+  return projectName === 'ms' ? 'latest' : projectName;
+}
+
 async function checkComposeFileExists(env: 'dev' | 'prod'): Promise<boolean> {
-  const composeFile = join(GENERATED_DIR, 'docker', `docker-compose.${env}.yml`);
   try {
-    await access(composeFile);
+    await access(getComposeFile(env));
     return true;
   } catch {
     return false;
@@ -122,17 +156,39 @@ async function checkComposeFileExists(env: 'dev' | 'prod'): Promise<boolean> {
 }
 
 function getComposeFile(env: 'dev' | 'prod'): string {
-  return join(GENERATED_DIR, 'docker', `docker-compose.${env}.yml`);
+  const suffix = getComposeFileSuffix();
+  return join(GENERATED_DIR, 'docker', `docker-compose.${env}${suffix}.yml`);
 }
 
-async function generateConfigs(): Promise<void> {
-  console.log('Generating Docker configs...');
+async function generateConfigs(mode: ConfigMode): Promise<void> {
+  console.log(`Generating Docker configs (--config=${mode})...`);
+  
+  const generateScript = join(__dirname, 'generate.ts');
+  const tsxPath = join(ROOT_DIR, 'core-service', 'node_modules', 'tsx', 'dist', 'cli.mjs');
+  
+  // Generate both Dockerfiles and docker-compose using same config mode (infra + services)
+  return new Promise((resolve, reject) => {
+    const proc = spawn('node', [tsxPath, generateScript, '--dockerfile', '--docker', `--config=${mode}`], {
+      cwd: GATEWAY_DIR,
+      stdio: 'inherit',
+      shell: true,
+    });
+
+    proc.on('exit', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`Generate failed with code ${code}`));
+    });
+  });
+}
+
+async function generateDockerfile(serviceName: string, mode: ConfigMode): Promise<void> {
+  console.log(`Generating Dockerfile for ${serviceName} (--config=${mode})...`);
   
   const generateScript = join(__dirname, 'generate.ts');
   const tsxPath = join(ROOT_DIR, 'core-service', 'node_modules', 'tsx', 'dist', 'cli.mjs');
   
   return new Promise((resolve, reject) => {
-    const proc = spawn('node', [tsxPath, generateScript, '--docker'], {
+    const proc = spawn('node', [tsxPath, generateScript, '--dockerfile', `--config=${mode}`], {
       cwd: GATEWAY_DIR,
       stdio: 'inherit',
       shell: true,
@@ -149,63 +205,186 @@ async function generateConfigs(): Promise<void> {
  * Ensure the Docker network exists
  */
 async function ensureNetworkExists(): Promise<void> {
+  const { docker } = getInfraConfig();
   try {
-    execSync(`docker network inspect ${DOCKER_NETWORK}`, { stdio: 'ignore' });
+    execSync(`docker network inspect ${docker.network}`, { stdio: 'ignore' });
   } catch {
-    console.log(`Creating Docker network: ${DOCKER_NETWORK}`);
-    execSync(`docker network create ${DOCKER_NETWORK}`, { stdio: 'inherit' });
+    console.log(`Creating Docker network: ${docker.network}`);
+    execSync(`docker network create ${docker.network}`, { stdio: 'inherit' });
   }
 }
 
 /**
- * Remove old container if exists (by name pattern)
+ * Check if a container is running. Name from infra: projectName-mongo, projectName-redis.
+ */
+function isContainerRunning(containerName: string): boolean {
+  try {
+    const result = execSync(`docker ps --filter "name=^${containerName}$" --filter "status=running" -q`, { encoding: 'utf8' });
+    return result.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Ensure MongoDB and Redis infrastructure containers are running
+ * Creates them if they don't exist (fresh install scenario)
+ */
+async function ensureInfrastructure(config: ServicesConfig): Promise<void> {
+  const { docker, versions } = getInfraConfig();
+  const { mongo: mongoContainer, redis: redisContainer } = getDockerContainerNames(getInfraConfig());
+  const mongo = config.infrastructure.mongodb;
+  const redis = config.infrastructure.redis;
+  
+  const mongoRunning = isContainerRunning(mongoContainer);
+  const redisRunning = isContainerRunning(redisContainer);
+  
+  if (mongoRunning && redisRunning) {
+    console.log(`✅ Infrastructure running (${mongoContainer}, ${redisContainer})`);
+    return;
+  }
+  
+  console.log('🔧 Starting infrastructure containers...');
+  
+  // Start MongoDB if not running
+  if (!mongoRunning) {
+    console.log(`  Starting ${mongoContainer}...`);
+    try {
+      execSync(`docker rm -f ${mongoContainer}`, { stdio: 'pipe', shell: true });
+    } catch {
+      // No existing container
+    }
+    try {
+      execSync(`docker run -d --name ${mongoContainer} --network ${docker.network} -p ${mongo.port}:27017 mongo:${versions.mongodb}`, {
+        stdio: 'inherit',
+        shell: true,
+      });
+      console.log(`  ✅ ${mongoContainer} started`);
+    } catch (err) {
+      console.error(`  ❌ Failed to start ${mongoContainer}`);
+      throw err;
+    }
+  }
+
+  // Start Redis if not running
+  if (!redisRunning) {
+    console.log(`  Starting ${redisContainer}...`);
+    try {
+      execSync(`docker rm -f ${redisContainer}`, { stdio: 'pipe', shell: true });
+    } catch {
+      // No existing container
+    }
+    try {
+      const redisPassword = redis.password;
+      const redisCmd = redisPassword
+        ? `docker run -d --name ${redisContainer} --network ${docker.network} -p ${redis.port}:6379 redis:${versions.redis} redis-server --appendonly yes --requirepass ${redisPassword}`
+        : `docker run -d --name ${redisContainer} --network ${docker.network} -p ${redis.port}:6379 redis:${versions.redis} redis-server --appendonly yes`;
+      execSync(redisCmd, { stdio: 'inherit', shell: true });
+      console.log(`  ✅ ${redisContainer} started`);
+    } catch (err) {
+      console.error(`  ❌ Failed to start ${redisContainer}`);
+      throw err;
+    }
+  }
+  
+  // Wait a moment for containers to be ready
+  console.log('  Waiting for infrastructure to be ready...');
+  await new Promise(resolve => setTimeout(resolve, 3000));
+}
+
+/**
+ * Remove old container if exists. Name from infra: projectName-{service}-service.
  */
 function removeOldContainer(serviceName: string): void {
-  const containerPatterns = [
-    `docker-${serviceName}-service-1`,
-    `${serviceName}-service`,
-  ];
-  
-  for (const pattern of containerPatterns) {
-    try {
-      // Check if container exists
-      const exists = execSync(`docker ps -aq --filter "name=${pattern}"`, { encoding: 'utf8' }).trim();
-      if (exists) {
-        console.log(`  Removing old container: ${pattern}`);
-        execSync(`docker rm -f ${pattern}`, { stdio: 'ignore' });
-      }
-    } catch {
-      // Container doesn't exist, that's fine
+  const { projectName } = getInfraConfig().docker;
+  const containerName = `${projectName}-${serviceName}-service`;
+
+  try {
+    const exists = execSync(`docker ps -aq --filter "name=^${containerName}$"`, { encoding: 'utf8' }).trim();
+    if (exists) {
+      console.log(`  Removing old container: ${containerName}`);
+      execSync(`docker rm -f ${containerName}`, { stdio: 'ignore' });
     }
+  } catch {
+    // Container doesn't exist
   }
 }
 
 /**
- * Remove old images if exist (both naming conventions)
+ * Remove old image if it exists. Image name: {service}-service:{tag}.
  */
-function removeOldImage(serviceName: string): void {
-  const imageNames = [
-    `${serviceName}-service:latest`,      // Our build naming
-    `docker-${serviceName}-service:latest` // Docker compose naming
-  ];
+function removeOldImage(serviceName: string, tag?: string): void {
+  const imageTag = tag ?? getImageTag();
+  const imageName = `${serviceName}-service:${imageTag}`;
+  try {
+    execSync(`docker image inspect ${imageName}`, { stdio: 'ignore' });
+    console.log(`  Removing old image: ${imageName}`);
+    execSync(`docker rmi -f ${imageName}`, { stdio: 'ignore' });
+  } catch {
+    // Image doesn't exist
+  }
+}
+
+/**
+ * Check if core-base image exists
+ */
+function coreBaseExists(): boolean {
+  try {
+    execSync('docker image inspect core-base:latest', { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Build the core-base image (access-engine + core-service)
+ * This is built once and reused by all service builds
+ */
+async function buildCoreBase(forceRebuild = false): Promise<void> {
+  if (!forceRebuild && coreBaseExists()) {
+    console.log('✅ core-base:latest exists (use --rebuild-base to force rebuild)');
+    return;
+  }
   
-  for (const imageName of imageNames) {
+  console.log('🔧 Building core-base:latest (shared dependencies)...');
+  console.log('   This includes: access-engine, core-service');
+  
+  const coreBaseDockerfile = join(ROOT_DIR, 'Dockerfile.core-base');
+  
+  // Generate core-base Dockerfile with version from infra config
+  const { generateCoreBaseDockerfile } = await import('core-service/infra');
+  const { writeFile } = await import('node:fs/promises');
+  const { versions } = getInfraConfig();
+  await writeFile(coreBaseDockerfile, generateCoreBaseDockerfile(versions.node));
+  
+  try {
+    execSync('docker build -f Dockerfile.core-base -t core-base:latest .', {
+      cwd: ROOT_DIR,
+      stdio: 'inherit',
+    });
+    console.log('✅ Built core-base:latest');
+  } catch (err) {
+    console.error('❌ Failed to build core-base:latest');
+    throw err;
+  } finally {
+    // Clean up generated Dockerfile
     try {
-      execSync(`docker image inspect ${imageName}`, { stdio: 'ignore' });
-      console.log(`  Removing old image: ${imageName}`);
-      execSync(`docker rmi -f ${imageName}`, { stdio: 'ignore' });
+      const { rm } = await import('node:fs/promises');
+      await rm(coreBaseDockerfile, { force: true });
     } catch {
-      // Image doesn't exist, that's fine
+      // Ignore cleanup errors
     }
   }
 }
 
 /**
- * Build a single Docker image - always fresh
+ * Build a single Docker image - uses core-base for fast builds. Tags with project (ms=latest, test=test, combo=combo).
  */
 async function buildSingleImage(service: ServiceConfig): Promise<void> {
   const svcName = `${service.name}-service`;
-  const imageName = `${svcName}:latest`;
+  const imageTag = getImageTag();
+  const imageName = `${svcName}:${imageTag}`;
   const dockerfilePath = `${svcName}/Dockerfile`;
   
   console.log(`\n🔧 Building ${imageName}...`);
@@ -213,12 +392,12 @@ async function buildSingleImage(service: ServiceConfig): Promise<void> {
   // Always clean before build for fresh images
   console.log(`  Removing old container/image for ${service.name}...`);
   removeOldContainer(service.name);
-  removeOldImage(service.name);
+  removeOldImage(service.name, imageTag);
   
   try {
-    // Build from project root with -f flag (as Dockerfile expects)
-    // Use --no-cache to ensure truly fresh build
-    execSync(`docker build --no-cache -f ${dockerfilePath} -t ${imageName} .`, {
+    // Build from project root with -f flag
+    // Uses core-base:latest for fast builds (core deps are pre-built)
+    execSync(`docker build -f ${dockerfilePath} -t ${imageName} .`, {
       cwd: ROOT_DIR,
       stdio: 'inherit',
     });
@@ -230,13 +409,18 @@ async function buildSingleImage(service: ServiceConfig): Promise<void> {
 }
 
 /**
- * Build Docker images - always fresh (removes old container and image first)
+ * Build Docker images - builds core-base once, then services fast
  */
-async function dockerBuild(config: ServicesConfig, serviceName?: string): Promise<void> {
+async function dockerBuild(config: ServicesConfig, serviceName?: string, rebuildBase = false): Promise<void> {
   const services = getTargetServices(config, serviceName);
   const count = services.length;
-  printHeader(`Building ${count} Docker Image(s) - Fresh Build`);
+  printHeader(`Building ${count} Docker Image(s) - Fast Build`);
 
+  // Step 1: Ensure core-base exists (build once, reuse for all services)
+  console.log('\n[Base] Checking core-base image...');
+  await buildCoreBase(rebuildBase);
+
+  // Step 2: Build service images (fast - uses pre-built core-base)
   for (let i = 0; i < services.length; i++) {
     console.log(`\n[${i + 1}/${count}] Processing ${services[i].name}...`);
     await buildSingleImage(services[i]);
@@ -251,49 +435,83 @@ async function dockerBuild(config: ServicesConfig, serviceName?: string): Promis
  * For single service: use docker run directly for better isolation
  * For all services: use docker compose
  */
-async function dockerUp(env: 'dev' | 'prod', config: ServicesConfig, serviceName?: string): Promise<void> {
+async function dockerUp(env: 'dev' | 'prod', config: ServicesConfig, mode: ConfigMode, serviceName?: string, infraOnly?: boolean): Promise<void> {
+  const { docker } = getInfraConfig();
   const services = getTargetServices(config, serviceName);
-  const targetMsg = serviceName ? ` - ${serviceName} only` : '';
+  const targetMsg = infraOnly ? ' (mongo + redis only)' : (serviceName ? ` - ${serviceName} only` : '');
   printHeader(`Starting Docker Containers (${env})${targetMsg}`);
 
-  // Ensure network exists
-  await ensureNetworkExists();
+  if (infraOnly) {
+    await generateConfigs(mode);
+    const [mongoService, redisService] = getInfraComposeServiceNames(config);
+    const reuseInfra = config.reuseInfra && config.reuseFrom;
+    if (!reuseInfra) {
+      const { mongo: mongoContainer, redis: redisContainer } = getDockerContainerNames(getInfraConfig());
+      try {
+        execSync(`docker rm -f ${mongoContainer} ${redisContainer}`, { stdio: 'pipe', shell: true });
+      } catch {
+        // None or one may not exist
+      }
+    }
+    const composeFile = getComposeFile(env);
+    const projectName = docker.projectName;
+    const composeArgs = ['-f', composeFile, '-p', projectName, 'up', '-d', '--force-recreate', mongoService, redisService];
+    console.log(`\nStarting infra only (${mongoService}, ${redisService}) on network: ${docker.network}`);
+    const proc = spawn('docker', ['compose', ...composeArgs], {
+      cwd: GATEWAY_DIR,
+      stdio: 'inherit',
+      shell: true,
+    });
+    return new Promise((resolve, reject) => {
+      proc.on('exit', (code) => {
+        if (code === 0) {
+          console.log('');
+          console.log('Mongo + Redis started. Run "npm run docker:logs" to view logs.');
+          resolve();
+        } else {
+          reject(new Error(`docker compose up failed with code ${code}`));
+        }
+      });
+    });
+  }
 
   if (serviceName) {
-    // Single service: use docker run directly for full isolation
+    await ensureNetworkExists();
+    await ensureInfrastructure(config);
     const service = services[0];
     const svcName = `${service.name}-service`;
-    const containerName = `docker-${svcName}-1`;
+    const containerName = `${getInfraConfig().docker.projectName}-${service.name}-service`;
     
     console.log(`Starting single service: ${svcName}`);
     
     // Remove old container
     removeOldContainer(service.name);
     
-    // Get MongoDB and Redis config from services config
-    // Use service.database from config (respects shared strategy for auth -> core_service)
-    const database = (service as any).database || `${service.name.replace(/-/g, '_')}_service`;
-    const mongoUri = `mongodb://ms-mongo:27017/${database}`;
-    const redisUrl = `redis://:${config.redis?.password || 'redis123'}@ms-redis:6379`;
-    
-    // Common environment variables needed for all services
+    const { mongo: mongoContainer, redis: redisContainer } = getDockerContainerNames(getInfraConfig());
+    const database = (service as { database?: string }).database ?? `${service.name.replace(/-/g, '_')}_service`;
+    const redisPassword = config.infrastructure.redis.password ?? 'redis123';
+    const mongoUri = `mongodb://${mongoContainer}:27017/${database}`;
+    const redisUrl = `redis://:${redisPassword}@${redisContainer}:6379`;
+    const jwtSecret = getJwtSecret(config, 'docker');
+    const runtimeEnv = getInfraConfig().defaults.runtime.dev;
+
+    // Common environment variables from config (services.*.json environments or infra.defaults.runtime)
     const envVars = [
       `MONGO_URI=${mongoUri}`,
       `REDIS_URL=${redisUrl}`,
       `PORT=${service.port}`,
-      'NODE_ENV=development',  // Use development to avoid strict validation
-      'JWT_SECRET=dev-secret-for-docker-testing',
-      'SHARED_JWT_SECRET=dev-shared-secret-for-docker-testing',
+      `NODE_ENV=${runtimeEnv.nodeEnv}`,
+      `JWT_SECRET=${jwtSecret}`,
     ];
     
     // Build docker run command
     const runArgs = [
       'run', '-d',
       '--name', containerName,
-      '--network', DOCKER_NETWORK,
+      '--network', docker.network,
       ...envVars.flatMap(e => ['-e', e]),
       '-p', `${service.port}:${service.port}`,
-      `${svcName}:latest`,
+      `${svcName}:${getImageTag()}`,
     ];
     
     try {
@@ -305,21 +523,32 @@ async function dockerUp(env: 'dev' | 'prod', config: ServicesConfig, serviceName
     return;
   }
 
-  // All services: use docker compose
-  if (!(await checkComposeFileExists(env))) {
-    await generateConfigs();
+  // All services: use docker compose - always regenerate so file matches current --config (infra + services)
+  await generateConfigs(mode);
+
+  // Remove any infra containers started outside compose so compose can create them (same group). Skip when reusing provider infra.
+  const reuseInfra = config.reuseInfra && config.reuseFrom;
+  if (!reuseInfra) {
+    const { mongo: mongoContainer, redis: redisContainer } = getDockerContainerNames(getInfraConfig());
+    try {
+      execSync(`docker rm -f ${mongoContainer} ${redisContainer}`, { stdio: 'pipe', shell: true });
+    } catch {
+      // None or one may not exist
+    }
   }
 
-  // Remove old containers for fresh start
+  // Only remove old containers for services we deploy (reused services have no container in this project)
+  const reusedSet = new Set(getReusedServiceEntries(config).map(e => e.serviceName));
   console.log('Cleaning old containers...');
   for (const service of services) {
-    removeOldContainer(service.name);
+    if (!reusedSet.has(service.name)) removeOldContainer(service.name);
   }
 
   const composeFile = getComposeFile(env);
-  const composeArgs = ['-f', composeFile, 'up', '-d', '--force-recreate'];
+  const projectName = docker.projectName;
+  const composeArgs = ['-f', composeFile, '-p', projectName, 'up', '-d', '--force-recreate'];
   
-  console.log(`\nStarting all containers on network: ${DOCKER_NETWORK}`);
+  console.log(`\nStarting all containers on network: ${docker.network} (Docker Desktop group: ${projectName})`);
   
   const proc = spawn('docker', ['compose', ...composeArgs], {
     cwd: GATEWAY_DIR,
@@ -340,6 +569,34 @@ async function dockerUp(env: 'dev' | 'prod', config: ServicesConfig, serviceName
   });
 }
 
+/**
+ * Recovery: infra only. Stops containers, removes infra volumes (mongo-data, redis-data),
+ * then starts mongo + redis with fresh data. Use when switching config (e.g. single ↔ replica set)
+ * and Mongo reports "config is invalid or we are not a member of it" — the volume had a different
+ * replica set layout. Avoids removing volumes by mistake; use this explicit command instead.
+ */
+async function dockerRecoveryInfra(env: 'dev' | 'prod', config: ServicesConfig, mode: ConfigMode): Promise<void> {
+  printHeader('Recovery: Infra (reset volumes, start mongo + redis)');
+  console.log('Stopping containers and removing infra volumes (mongo-data, redis-data)...');
+  await generateConfigs(mode);
+  const composeFile = getComposeFile(env);
+  const projectName = getInfraConfig().docker.projectName;
+  const procDown = spawn('docker', ['compose', '-f', composeFile, '-p', projectName, 'down', '-v', '--remove-orphans'], {
+    cwd: GATEWAY_DIR,
+    stdio: 'inherit',
+    shell: true,
+  });
+  await new Promise<void>((resolve, reject) => {
+    procDown.on('exit', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`docker compose down -v failed with code ${code}`));
+    });
+  });
+  console.log('');
+  console.log('Starting mongo + redis with fresh volumes...');
+  await dockerUp(env, config, mode, undefined, true);
+}
+
 async function dockerDown(env: 'dev' | 'prod', config: ServicesConfig, serviceName?: string): Promise<void> {
   const targetMsg = serviceName ? ` (${serviceName})` : '';
   console.log(`Stopping Docker containers${targetMsg}...`);
@@ -355,8 +612,9 @@ async function dockerDown(env: 'dev' | 'prod', config: ServicesConfig, serviceNa
   }
 
   const composeFile = getComposeFile(env);
+  const projectName = getInfraConfig().docker.projectName;
   
-  const proc = spawn('docker', ['compose', '-f', composeFile, 'down'], {
+  const proc = spawn('docker', ['compose', '-f', composeFile, '-p', projectName, 'down', '--remove-orphans'], {
     cwd: GATEWAY_DIR,
     stdio: 'inherit',
     shell: true,
@@ -376,9 +634,10 @@ async function dockerDown(env: 'dev' | 'prod', config: ServicesConfig, serviceNa
 
 async function dockerLogs(env: 'dev' | 'prod', serviceName?: string): Promise<void> {
   const composeFile = getComposeFile(env);
+  const projectName = getInfraConfig().docker.projectName;
   
-  // Build command args - optionally target specific service
-  const composeArgs = ['compose', '-f', composeFile, 'logs', '-f'];
+  // Build command args - optionally target specific service (-p so we follow the right project)
+  const composeArgs = ['compose', '-f', composeFile, '-p', projectName, 'logs', '-f'];
   if (serviceName) {
     composeArgs.push(`${serviceName}-service`);
   }
@@ -453,19 +712,10 @@ async function runHealthCheck(config: ServicesConfig, serviceName?: string): Pro
 }
 
 /**
- * Clean up generated Docker files (docker-compose and service Dockerfiles)
+ * Clean up generated Docker files (service Dockerfiles only).
+ * Compose files are kept so both brands (ms, test) can coexist and be run without regenerating.
  */
 async function cleanGeneratedFiles(config?: ServicesConfig, serviceName?: string): Promise<void> {
-  const dockerGenDir = join(GENERATED_DIR, 'docker');
-  
-  // Clean generated docker-compose files
-  try {
-    await rm(dockerGenDir, { recursive: true, force: true });
-    console.log('  ✅ Cleaned generated docker-compose files');
-  } catch {
-    // Directory might not exist
-  }
-  
   // Clean generated Dockerfiles in service directories
   const services = config ? getTargetServices(config, serviceName) : [];
   for (const service of services) {
@@ -519,32 +769,33 @@ async function dockerClean(config: ServicesConfig, serviceName?: string): Promis
 /**
  * Fresh deployment workflow:
  * 1. Generate configs (only if building all)
- * 2. Build fresh images
+ * 2. Build core-base once (always), then build service images
  * 3. Start containers
  * 4. Run health check
  * 5. Clean generated files on success
  */
-async function dockerFresh(env: 'dev' | 'prod', config: ServicesConfig, serviceName?: string, skipHealthCheck = false): Promise<void> {
+async function dockerFresh(env: 'dev' | 'prod', config: ServicesConfig, mode: ConfigMode, serviceName?: string, skipHealthCheck = false): Promise<void> {
   const services = getTargetServices(config, serviceName);
   const count = services.length;
   const targetMsg = serviceName ? ` (${serviceName} only)` : ` (all ${count} services)`;
   printHeader(`Fresh Docker Deployment${targetMsg}`);
 
-  // Step 1: Generate configs only when deploying all services
+  // Step 1: Generate configs (Dockerfile is always needed)
+  console.log('Step 1/5: Generating configurations...');
   if (!serviceName) {
-    console.log('Step 1/5: Generating configurations...');
-    await generateConfigs();
+    await generateConfigs(mode);
   } else {
-    console.log('Step 1/5: Skipping config generation (single service mode)');
+    // For single service, only generate Dockerfile
+    await generateDockerfile(serviceName, mode);
   }
 
-  // Step 2: Build fresh images (this also cleans old artifacts)
-  console.log('\nStep 2/5: Building fresh images...');
-  await dockerBuild(config, serviceName);
+  // Step 2: Build core-base once (every time on fresh), then build service images
+  console.log('\nStep 2/5: Building core-base (once), then service images...');
+  await dockerBuild(config, serviceName, true);
 
   // Step 3: Start containers
   console.log('\nStep 3/5: Starting containers...');
-  await dockerUp(env, config, serviceName);
+  await dockerUp(env, config, mode, serviceName);
 
   // Step 4 & 5: Health check and cleanup
   if (!skipHealthCheck) {
@@ -555,6 +806,8 @@ async function dockerFresh(env: 'dev' | 'prod', config: ServicesConfig, serviceN
       console.log('\n🎉 Fresh deployment successful!');
       console.log('\nStep 5/5: Cleaning up generated files...');
       await cleanGeneratedFiles(config, serviceName);
+      // Let Windows/libuv finish closing file handles before process exit (avoids UV_HANDLE_CLOSING assertion)
+      await new Promise<void>((r) => setTimeout(r, 150));
     } else {
       console.log('\n⚠️  Deployment completed but some services are unhealthy');
       console.log('Generated files preserved for debugging.');
@@ -567,6 +820,7 @@ async function dockerFresh(env: 'dev' | 'prod', config: ServicesConfig, serviceN
 }
 
 async function dockerStatus(env: 'dev' | 'prod', config: ServicesConfig): Promise<void> {
+  const { docker } = getInfraConfig();
   printHeader('Docker Status');
 
   // Check Docker
@@ -576,19 +830,21 @@ async function dockerStatus(env: 'dev' | 'prod', config: ServicesConfig): Promis
   }
   console.log('✅ Docker is running');
 
-  // Check network
+  // Check network (Docker Compose creates as {project}_{network}, e.g. combo_combo_network)
+  const networkFull = `${docker.projectName}_${docker.network}`;
   try {
-    execSync(`docker network inspect ${DOCKER_NETWORK}`, { stdio: 'ignore' });
-    console.log(`✅ Network ${DOCKER_NETWORK} exists`);
+    execSync(`docker network inspect ${networkFull}`, { stdio: 'ignore' });
+    console.log(`✅ Network ${networkFull} exists`);
   } catch {
-    console.log(`⚠️  Network ${DOCKER_NETWORK} not found`);
+    console.log(`⚠️  Network ${networkFull} not found`);
   }
 
-  // Check compose file
+  // Check compose file (filename includes project, e.g. docker-compose.dev.test.yml for test)
+  const composeFile = getComposeFile(env);
   if (await checkComposeFileExists(env)) {
-    console.log(`✅ docker-compose.${env}.yml exists`);
+    console.log(`✅ ${composeFile.split(/[/\\]/).pop()} exists`);
   } else {
-    console.log(`⚠️  docker-compose.${env}.yml not found. Run "npm run generate:docker"`);
+    console.log(`⚠️  ${composeFile.split(/[/\\]/).pop()} not found. Run "npm run generate:docker" or "npm run generate:test"`);
   }
 
   // List running containers
@@ -602,23 +858,25 @@ async function dockerStatus(env: 'dev' | 'prod', config: ServicesConfig): Promis
     console.log('  No containers running');
   }
 
-  // List images
+  // List images (use project-specific tag so test/combo show their own images)
+  const imageTag = getImageTag();
   console.log('');
   console.log('Service images:');
   for (const service of config.services) {
+    const imageRef = `${service.name}-service:${imageTag}`;
     try {
-      const imageId = execSync(`docker images -q ${service.name}-service:latest`, { encoding: 'utf8' }).trim();
+      const imageId = execSync(`docker images -q ${imageRef}`, { encoding: 'utf8' }).trim();
       if (imageId) {
         // Get image creation time
-        const created = execSync(`docker inspect --format='{{.Created}}' ${service.name}-service:latest`, { encoding: 'utf8' }).trim();
+        const created = execSync(`docker inspect --format='{{.Created}}' ${imageRef}`, { encoding: 'utf8' }).trim();
         const createdDate = new Date(created);
         const ago = getTimeAgo(createdDate);
-        console.log(`  ✅ ${service.name}-service:latest (built ${ago})`);
+        console.log(`  ✅ ${imageRef} (built ${ago})`);
       } else {
-        console.log(`  ❌ ${service.name}-service:latest (not built)`);
+        console.log(`  ❌ ${imageRef} (not built)`);
       }
     } catch {
-      console.log(`  ❌ ${service.name}-service:latest (not built)`);
+      console.log(`  ❌ ${imageRef} (not built)`);
     }
   }
 }
@@ -635,7 +893,7 @@ function getTimeAgo(date: Date): string {
 }
 
 async function main(): Promise<void> {
-  const { command, env, service, noHealthCheck } = parseArgs();
+  const { command, env, service, infra, noHealthCheck, rebuildBase } = parseArgs();
   const { config, mode } = await loadConfigFromArgs();
 
   console.log('');
@@ -644,6 +902,12 @@ async function main(): Promise<void> {
   if (service) {
     console.log(`   Target service: ${service}`);
   }
+  if (infra) {
+    console.log('   Infra only: mongo + redis');
+  }
+  if (rebuildBase) {
+    console.log('   Rebuild core-base: yes');
+  }
 
   if (!checkDockerRunning() && command !== 'status') {
     throw new Error('Docker is not running. Please start Docker Desktop.');
@@ -651,19 +915,25 @@ async function main(): Promise<void> {
 
   switch (command) {
     case 'build':
-      await dockerBuild(config, service);
+      await dockerBuild(config, service, rebuildBase);
       break;
     case 'up':
-      await dockerUp(env, config, service);
+      await dockerUp(env, config, mode, service, infra);
       break;
     case 'down':
       await dockerDown(env, config, service);
+      break;
+    case 'recovery':
+      if (!infra) {
+        throw new Error('Recovery requires --infra. Use: npm run docker:recovery:infra');
+      }
+      await dockerRecoveryInfra(env, config, mode);
       break;
     case 'logs':
       await dockerLogs(env, service);
       break;
     case 'fresh':
-      await dockerFresh(env, config, service, noHealthCheck);
+      await dockerFresh(env, config, mode, service, noHealthCheck);
       break;
     case 'clean':
       await dockerClean(config, service);

@@ -23,6 +23,7 @@
   "dependencies": {
     "@tanstack/react-query": "^5.90.16",
     "access-engine": "file:../access-engine",
+    "shared-validators": "file:../shared-validators",
     "lucide-react": "^0.562.0",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",

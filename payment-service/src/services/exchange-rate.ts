@@ -16,8 +16,8 @@
  * - Exchange rates are cached for 5 minutes to reduce API calls
  */
 
-import { logger, CircuitBreaker, GraphQLError } from 'core-service';
-import { db } from '../database.js';
+import { logger, getErrorMessage, CircuitBreaker, GraphQLError } from 'core-service';
+import { db } from '../accessors.js';
 import { PAYMENT_ERRORS } from '../error-codes.js';
 import { SYSTEM_CURRENCY } from '../constants.js';
 
@@ -122,7 +122,7 @@ export async function getExchangeRate(
     logger.warn('Failed to fetch exchange rate from API', {
       fromCurrency,
       toCurrency,
-      error: error instanceof Error ? error.message : String(error),
+      error: getErrorMessage(error),
       circuitBreakerState,
     });
     

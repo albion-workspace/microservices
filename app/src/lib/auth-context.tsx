@@ -4,6 +4,7 @@
  */
 
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { decodeJWT } from 'shared-validators';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -79,26 +80,6 @@ const STORAGE_KEYS = {
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
 // ═══════════════════════════════════════════════════════════════════
-// JWT Utilities
-// ═══════════════════════════════════════════════════════════════════
-
-/**
- * Decode JWT token without verification (client-side only, for reading claims)
- */
-function decodeJWT(token: string): { exp?: number; [key: string]: any } | null {
-  try {
-    const parts = token.split('.');
-    if (parts.length !== 3) return null;
-    const payload = parts[1];
-    const decoded = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
-    return decoded;
-  } catch (error) {
-    console.warn('[Auth] Failed to decode JWT:', error);
-    return null;
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════
 // GraphQL Helpers
 // ═══════════════════════════════════════════════════════════════════
 
@@ -150,6 +131,73 @@ async function graphqlRequest(query: string, variables?: any, token?: string) {
   return result.data;
 }
 
+/** Refresh mutation + optional me query; returns user + tokens or null. No state or localStorage. */
+async function doRefreshToken(refreshToken: string): Promise<{ user: User; tokens: AuthTokens } | null> {
+  try {
+    const data = await graphqlRequest(
+      `mutation RefreshToken($input: RefreshTokenInput!) {
+        refreshToken(input: $input) {
+          success
+          message
+          user {
+            id
+            email
+            username
+            status
+            roles
+            permissions
+            emailVerified
+            phoneVerified
+            twoFactorEnabled
+          }
+          tokens {
+            accessToken
+            refreshToken
+            expiresIn
+          }
+        }
+      }`,
+      { input: { tenantId: TENANT_ID, refreshToken } }
+    );
+    const result = data?.refreshToken;
+    if (!result?.success || !result?.tokens) return null;
+
+    let user = result.user;
+    if (!user && result.tokens.accessToken) {
+      try {
+        const userData = await graphqlRequest(
+          `query { me { id email username status roles permissions emailVerified phoneVerified twoFactorEnabled metadata createdAt lastLoginAt } }`,
+          {},
+          result.tokens.accessToken
+        );
+        user = userData.me;
+      } catch {
+        const userStr = localStorage.getItem(STORAGE_KEYS.USER);
+        if (userStr) {
+          try {
+            user = JSON.parse(userStr);
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    }
+    if (user && result.tokens) {
+      return {
+        user,
+        tokens: {
+          accessToken: result.tokens.accessToken,
+          refreshToken: result.tokens.refreshToken || refreshToken,
+          expiresIn: result.tokens.expiresIn ?? 3600,
+        },
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Provider Component
 // ═══════════════════════════════════════════════════════════════════
@@ -161,6 +209,35 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     isAuthenticated: false,
     isLoading: true,
   });
+
+  const clearAuth = useCallback(() => {
+    localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN);
+    localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN);
+    localStorage.removeItem(STORAGE_KEYS.USER);
+    localStorage.removeItem('auth_token_expires_at');
+    localStorage.removeItem('auth_token_lifetime');
+    setState({
+      user: null,
+      tokens: null,
+      isAuthenticated: false,
+      isLoading: false,
+    });
+  }, []);
+
+  const saveAuth = useCallback((user: User, tokens: AuthTokens) => {
+    localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN, tokens.accessToken);
+    localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, tokens.refreshToken);
+    localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(user));
+    const expiresAt = Date.now() + (tokens.expiresIn * 1000);
+    localStorage.setItem('auth_token_expires_at', expiresAt.toString());
+    localStorage.setItem('auth_token_lifetime', tokens.expiresIn.toString());
+    setState({
+      user,
+      tokens,
+      isAuthenticated: true,
+      isLoading: false,
+    });
+  }, []);
 
   // Initialize auth state from localStorage
   useEffect(() => {
@@ -176,121 +253,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         hasUser: !!userStr,
       });
 
-      // Local refresh function (doesn't depend on component state)
       const tryRefreshToken = async (token: string): Promise<boolean> => {
         console.log('[Auth] 🔄 Attempting token refresh...');
-        try {
-          const data = await graphqlRequest(
-            `mutation RefreshToken($input: RefreshTokenInput!) {
-              refreshToken(input: $input) {
-                success
-                message
-                user {
-                  id
-                  email
-                  username
-                  status
-                  roles
-                  permissions
-                  emailVerified
-                  phoneVerified
-                  twoFactorEnabled
-                }
-                tokens {
-                  accessToken
-                  refreshToken
-                  expiresIn
-                }
-              }
-            }`,
-            {
-              input: {
-                tenantId: TENANT_ID,
-                refreshToken: token,
-              },
-            }
-          );
-
-          const result = data?.refreshToken;
-          console.log('[Auth] Refresh token mutation response:', {
-            success: result?.success,
-            hasTokens: !!result?.tokens,
-            hasUser: !!result?.user,
-            message: result?.message,
-            resultKeys: result ? Object.keys(result) : [],
-            fullResult: JSON.stringify(result, null, 2),
-          });
-          
-          // Log the full data object to see if there are any errors
-          console.log('[Auth] Full GraphQL response:', JSON.stringify(data, null, 2));
-          
-          if (!result) {
-            console.error('[Auth] ❌ No refreshToken in response:', data);
-            return false;
-          }
-
-          if (result.success && result.tokens) {
-            console.log('[Auth] ✅ Refresh token mutation succeeded');
-            // Use user from refresh response, or fetch it if not provided
-            let user = result.user;
-            
-            // If still no user, fetch it with the new token
-            if (!user && result.tokens.accessToken) {
-              console.log('[Auth] User not in refresh response, fetching with me query...');
-              try {
-                const userData = await graphqlRequest(
-                  `query { me { id email username status roles permissions emailVerified phoneVerified twoFactorEnabled metadata createdAt lastLoginAt } }`,
-                  {},
-                  result.tokens.accessToken
-                );
-                user = userData.me;
-                console.log('[Auth] ✅ User fetched after refresh:', { id: user?.id, email: user?.email });
-              } catch (fetchError: any) {
-                console.warn('[Auth] ⚠️ Failed to fetch user after refresh:', fetchError.message);
-                // Use cached user if available
-                if (userStr) {
-                  try {
-                    user = JSON.parse(userStr);
-                    console.log('[Auth] Using cached user as fallback');
-                  } catch (parseError) {
-                    // Ignore parse error
-                  }
-                }
-              }
-            }
-            
-            if (user && result.tokens) {
-              console.log('[Auth] ✅ Saving refreshed auth state');
-              // Store expiration time and lifetime for proactive refresh
-              const expiresIn = result.tokens.expiresIn || 3600;
-              const expiresAt = Date.now() + (expiresIn * 1000);
-              localStorage.setItem('auth_token_expires_at', expiresAt.toString());
-              localStorage.setItem('auth_token_lifetime', expiresIn.toString());
-              
-              // Save auth state
-              localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN, result.tokens.accessToken);
-              localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, result.tokens.refreshToken);
-              localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(user));
-              
-              setState({
-                user,
-                tokens: result.tokens,
-                isAuthenticated: true,
-                isLoading: false,
-              });
-              return true;
-            } else {
-              console.warn('[Auth] ⚠️ Refresh succeeded but no user or tokens');
-            }
-          } else {
-            console.warn('[Auth] ⚠️ Refresh mutation returned success=false or no tokens');
-          }
-
-          return false;
-        } catch (error: any) {
-          console.warn('[Auth] ❌ Token refresh failed:', error.message, { status: error.status });
-          return false;
+        const result = await doRefreshToken(token);
+        if (result) {
+          console.log('[Auth] ✅ Saving refreshed auth state');
+          saveAuth(result.user, result.tokens);
+          return true;
         }
+        console.warn('[Auth] ❌ Token refresh failed');
+        return false;
       };
 
       if (accessToken && refreshToken && userStr) {
@@ -301,17 +273,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           cachedUser = JSON.parse(userStr);
           console.log('[Auth] Cached user parsed:', { id: cachedUser?.id, email: cachedUser?.email });
         } catch (parseError) {
-          // Invalid user data in localStorage, clear everything
           console.warn('[Auth] Invalid user data in localStorage, clearing auth');
-          setState({
-            user: null,
-            tokens: null,
-            isAuthenticated: false,
-            isLoading: false,
-          });
-          localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN);
-          localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN);
-          localStorage.removeItem(STORAGE_KEYS.USER);
+          clearAuth();
           return;
         }
         
@@ -322,17 +285,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         
         if (refreshTokenExpired) {
           console.warn('[Auth] ❌ Refresh token is expired, clearing auth and redirecting to login');
-          setState({
-            user: null,
-            tokens: null,
-            isAuthenticated: false,
-            isLoading: false,
-          });
-          localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN);
-          localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN);
-          localStorage.removeItem(STORAGE_KEYS.USER);
-          localStorage.removeItem('auth_token_expires_at');
-          // Redirect will happen automatically because isAuthenticated is false
+          clearAuth();
           return;
         }
         
@@ -364,36 +317,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
           if (data.me) {
             console.log('[Auth] ✅ Token valid, user authenticated:', { id: data.me.id, email: data.me.email });
-            
-            // Calculate expiration from JWT if available, otherwise use existing or default
             const tokenPayload = decodeJWT(accessToken);
-            let expiresIn = 3600; // Default 1 hour
-            let expiresAt: number;
-            
-            if (tokenPayload?.exp) {
-              // Use actual expiration from JWT
-              expiresAt = tokenPayload.exp * 1000;
-              // Calculate remaining time as expiresIn
-              expiresIn = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
-            } else {
-              // Fallback to default
-              expiresAt = Date.now() + (expiresIn * 1000);
-            }
-            
-            localStorage.setItem('auth_token_expires_at', expiresAt.toString());
-            // Preserve existing token lifetime or use calculated one
-            const existingLifetime = localStorage.getItem('auth_token_lifetime');
-            if (!existingLifetime) {
-              localStorage.setItem('auth_token_lifetime', expiresIn.toString());
-            }
-            
-            setState({
-              user: data.me,
-              tokens: { accessToken, refreshToken, expiresIn },
-              isAuthenticated: true,
-              isLoading: false,
-            });
-            localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(data.me));
+            const expiresIn = tokenPayload?.exp
+              ? Math.max(0, Math.floor((tokenPayload.exp * 1000 - Date.now()) / 1000))
+              : 3600;
+            saveAuth(data.me, { accessToken, refreshToken, expiresIn });
             return;
           }
         } catch (error: any) {
@@ -415,28 +343,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           
           if (isUserNotFoundError) {
             console.warn('[Auth] ⚠️ User not found in database - user may have been deleted, clearing auth...');
-            setState({
-              user: null,
-              tokens: null,
-              isAuthenticated: false,
-              isLoading: false,
-            });
-            localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN);
-            localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN);
-            localStorage.removeItem(STORAGE_KEYS.USER);
-            localStorage.removeItem('auth_token_expires_at');
+            clearAuth();
             return;
           }
           
           // Network errors (no response) - keep cached user
           if (!httpStatus && (error.message?.includes('Failed to fetch') || error.message?.includes('NetworkError'))) {
             console.warn('Network error detected, keeping cached user');
-            setState({
-              user: cachedUser,
-              tokens: { accessToken, refreshToken, expiresIn: 3600 },
-              isAuthenticated: true,
-              isLoading: false,
-            });
+            saveAuth(cachedUser, { accessToken, refreshToken, expiresIn: 3600 });
             return;
           }
           
@@ -458,113 +372,43 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             const refreshed = await tryRefreshToken(refreshToken);
             if (refreshed) {
               console.log('[Auth] ✅ Token refreshed successfully, staying logged in');
-              return; // tryRefreshToken will update state
-            } else {
-              console.warn('[Auth] ❌ Token refresh failed, clearing auth and redirecting to login');
-              // Clear auth and redirect
-              setState({
-                user: null,
-                tokens: null,
-                isAuthenticated: false,
-                isLoading: false,
-              });
-              localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN);
-              localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN);
-              localStorage.removeItem(STORAGE_KEYS.USER);
-              localStorage.removeItem('auth_token_expires_at');
               return;
             }
-          } else if (!isPermissionError && (isHttp401 || errorCode.includes('AuthenticationRequired'))) {
-            // "Authentication required" without 401 - might be expired token, try refresh
+            console.warn('[Auth] ❌ Token refresh failed, clearing auth and redirecting to login');
+            clearAuth();
+            return;
+          }
+          if (!isPermissionError && (isHttp401 || errorCode.includes('AuthenticationRequired'))) {
             console.log('[Auth] 🔄 "Authentication required" error detected, attempting token refresh...');
             const refreshed = await tryRefreshToken(refreshToken);
             if (refreshed) {
               console.log('[Auth] ✅ Token refreshed successfully, staying logged in');
-              return; // tryRefreshToken will update state
-            } else {
-              console.warn('[Auth] ❌ Token refresh failed, clearing auth and redirecting to login');
-              // Clear auth and redirect
-              setState({
-                user: null,
-                tokens: null,
-                isAuthenticated: false,
-                isLoading: false,
-              });
-              localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN);
-              localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN);
-              localStorage.removeItem(STORAGE_KEYS.USER);
-              localStorage.removeItem('auth_token_expires_at');
               return;
             }
-          } else if (!isAuthError) {
+            console.warn('[Auth] ❌ Token refresh failed, clearing auth and redirecting to login');
+            clearAuth();
+            return;
+          }
+          if (!isAuthError) {
             // Permission error, network error, GraphQL error, or other non-auth error
             // Use cached user - user is authenticated, just might have permission issues
             console.warn('[Auth] ⚠️ Non-auth error detected, keeping cached user');
-            setState({
-              user: cachedUser,
-              tokens: { accessToken, refreshToken, expiresIn: 3600 },
-              isAuthenticated: true,
-              isLoading: false,
-            });
+            saveAuth(cachedUser, { accessToken, refreshToken, expiresIn: 3600 });
             return;
           }
-          
-          // If we get here, auth failed and refresh failed - clear auth
+
           console.warn('[Auth] ❌ Clearing auth due to failed authentication, redirecting to login');
         }
       } else {
         console.log('[Auth] ⚠️ No tokens found in localStorage');
       }
 
-      // No valid auth
       console.log('[Auth] Setting state to unauthenticated');
-      setState({
-        user: null,
-        tokens: null,
-        isAuthenticated: false,
-        isLoading: false,
-      });
+      clearAuth();
     };
 
     initAuth();
-  }, []);
-
-  // Save tokens to localStorage
-  const saveAuth = useCallback((user: User, tokens: AuthTokens) => {
-    localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN, tokens.accessToken);
-    localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, tokens.refreshToken);
-    localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(user));
-    
-    // Store token expiration time for proactive refresh
-    // Calculate expiration: current time + expiresIn seconds
-    const expiresAt = Date.now() + (tokens.expiresIn * 1000);
-    localStorage.setItem('auth_token_expires_at', expiresAt.toString());
-    // Store token lifetime for dynamic refresh buffer calculation
-    localStorage.setItem('auth_token_lifetime', tokens.expiresIn.toString());
-
-    setState({
-      user,
-      tokens,
-      isAuthenticated: true,
-      isLoading: false,
-    });
-  }, []);
-
-  // Clear auth
-  const clearAuth = useCallback(() => {
-    localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN);
-    localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN);
-    localStorage.removeItem(STORAGE_KEYS.USER);
-    localStorage.removeItem('auth_token_expires_at');
-    localStorage.removeItem('auth_token_lifetime');
-
-    setState({
-      user: null,
-      tokens: null,
-      isAuthenticated: false,
-      isLoading: false,
-    });
-  }, []);
+  }, [clearAuth, saveAuth]);
 
   // Login
   const login = useCallback(async (identifier: string, password: string, twoFactorCode?: string) => {
@@ -709,85 +553,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     clearAuth();
   }, [state.tokens, clearAuth]);
 
-  // Refresh token
-  const refreshTokenFn = useCallback(async (refreshToken?: string): Promise<boolean> => {
-    const token = refreshToken || state.tokens?.refreshToken;
-
-    if (!token) return false;
-
-    try {
-      const data = await graphqlRequest(
-        `mutation RefreshToken($input: RefreshTokenInput!) {
-          refreshToken(input: $input) {
-            success
-            user {
-              id
-              email
-              username
-              status
-              roles
-              permissions
-              emailVerified
-              phoneVerified
-              twoFactorEnabled
-            }
-            tokens {
-              accessToken
-              refreshToken
-              expiresIn
-            }
-          }
-        }`,
-        {
-          input: {
-            tenantId: TENANT_ID,
-            refreshToken: token,
-          },
-        }
-      );
-
-      const result = data.refreshToken;
-
-      if (result.success && result.tokens) {
-        // Use user from refresh response, or fetch it if not provided
-        let user = result.user || state.user;
-        
-        // If still no user, fetch it with the new token
-        if (!user && result.tokens.accessToken) {
-          try {
-            const userData = await graphqlRequest(
-              `query { me { id email username status roles permissions emailVerified phoneVerified twoFactorEnabled metadata createdAt lastLoginAt } }`,
-              {},
-              result.tokens.accessToken
-            );
-            user = userData.me;
-          } catch (fetchError) {
-            console.warn('Failed to fetch user after refresh:', fetchError);
-            // Use cached user if available
-            const cachedUserStr = localStorage.getItem(STORAGE_KEYS.USER);
-            if (cachedUserStr) {
-              try {
-                user = JSON.parse(cachedUserStr);
-              } catch (parseError) {
-                // Ignore parse error
-              }
-            }
-          }
-        }
-        
-        if (user && result.tokens) {
-          saveAuth(user, result.tokens);
-          return true;
-        }
-      }
-
-      return false;
-    } catch (error: any) {
-      console.warn('Token refresh failed:', error.message);
-      // Don't clear auth here - let the caller decide
-      return false;
+  // Refresh token (uses single doRefreshToken path)
+  const refreshTokenFn = useCallback(async (token?: string): Promise<boolean> => {
+    const t = token || state.tokens?.refreshToken;
+    if (!t) return false;
+    const result = await doRefreshToken(t);
+    if (result) {
+      saveAuth(result.user, result.tokens);
+      return true;
     }
-  }, [state.tokens, state.user, saveAuth]);
+    return false;
+  }, [state.tokens, saveAuth]);
 
   // Update user
   const updateUser = useCallback((user: User) => {
@@ -802,23 +578,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const refreshLockRef = React.useRef<Promise<string | null> | null>(null);
 
   // Token refresh callback for graphql-utils (returns new access token or null)
-  // This is called automatically when graphql-utils encounters a 401 error
   const getRefreshedToken = useCallback(async (): Promise<string | null> => {
-    // If refresh is already in progress, wait for it
     if (refreshLockRef.current) {
       console.log('[Auth] ⏳ Token refresh already in progress, waiting...');
       return refreshLockRef.current;
     }
-    
-    // Read refresh token from localStorage directly to avoid stale state
+
     const refreshToken = localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN);
     if (!refreshToken) {
       console.warn('[Auth] No refresh token available for automatic refresh');
       return null;
     }
-    
-    // Check if refresh token is expired before attempting refresh
-    // Only check if we can successfully decode the token
+
     const refreshTokenPayload = decodeJWT(refreshToken);
     const refreshTokenExpired = refreshTokenPayload?.exp ? (refreshTokenPayload.exp * 1000 < Date.now()) : false;
     if (refreshTokenExpired) {
@@ -826,102 +597,34 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       clearAuth();
       return null;
     }
-    
-    // Create refresh promise and store in lock
+
     const refreshPromise = (async (): Promise<string | null> => {
       try {
         console.log('[Auth] 🔄 Automatic token refresh triggered by graphql-utils...');
-        const data = await graphqlRequest(
-        `mutation RefreshToken($input: RefreshTokenInput!) {
-          refreshToken(input: $input) {
-            success
-            message
-            user {
-              id
-              email
-              username
-              status
-              roles
-              permissions
-              emailVerified
-              phoneVerified
-              twoFactorEnabled
-            }
-            tokens {
-              accessToken
-              refreshToken
-              expiresIn
-              refreshExpiresIn
-            }
-          }
-        }`,
-        {
-          input: {
-            tenantId: TENANT_ID,
-            refreshToken: refreshToken,
-          },
+        const result = await doRefreshToken(refreshToken);
+        if (result) {
+          saveAuth(result.user, result.tokens);
+          console.log('[Auth] ✅ Token refreshed successfully via automatic callback');
+          return result.tokens.accessToken;
         }
-      );
-
-      const result = data?.refreshToken;
-      if (result?.success && result?.tokens?.accessToken) {
-        // Update state and localStorage
-        const newTokens = {
-          accessToken: result.tokens.accessToken,
-          refreshToken: result.tokens.refreshToken || refreshToken,
-          expiresIn: result.tokens.expiresIn || 3600,
-        };
-        
-        // Store expiration time
-        const expiresAt = Date.now() + (newTokens.expiresIn * 1000);
-        localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN, newTokens.accessToken);
-        localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, newTokens.refreshToken);
-        localStorage.setItem('auth_token_expires_at', expiresAt.toString());
-        
-        // Update user if provided, otherwise keep existing
-        const user = result.user || state.user;
-        if (user) {
-          localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(user));
+        console.warn('[Auth] ⚠️ Token refresh failed via callback');
+        clearAuth();
+        return null;
+      } catch (error: any) {
+        console.error('[Auth] ❌ Token refresh error via callback:', error.message);
+        const errorCode = error.code || error.extensions?.code || error.message || '';
+        if (errorCode.includes('TokenExpired') || errorCode.includes('InvalidToken') || errorCode.includes('RefreshToken')) {
+          clearAuth();
         }
-        
-        // Update state
-        setState(prev => ({
-          ...prev,
-          tokens: newTokens,
-          user: user || prev.user,
-        }));
-        
-        console.log('[Auth] ✅ Token refreshed successfully via automatic callback');
-        return newTokens.accessToken;
+        return null;
+      } finally {
+        refreshLockRef.current = null;
       }
-      
-      console.warn('[Auth] ⚠️ Token refresh failed via callback:', result?.message);
-      // If refresh failed, check if refresh token might be expired using error code
-      const errorCode = result?.extensions?.code || result?.message || '';
-      if (errorCode.includes('TokenExpired') || errorCode.includes('InvalidToken') || errorCode.includes('RefreshToken')) {
-        console.warn('[Auth] ❌ Refresh token appears to be expired, clearing auth');
-        clearAuth();
-      }
-      return null;
-    } catch (error: any) {
-      console.error('[Auth] ❌ Token refresh error via callback:', error.message);
-      // Check if error indicates refresh token is expired using error code
-      const errorCode = error.code || error.extensions?.code || error.message || '';
-      if (errorCode.includes('TokenExpired') || errorCode.includes('InvalidToken') || errorCode.includes('RefreshToken')) {
-        console.warn('[Auth] ❌ Refresh token appears to be expired, clearing auth');
-        clearAuth();
-      }
-      return null;
-    } finally {
-      // Clear lock when done
-      refreshLockRef.current = null;
-    }
     })();
-    
-    // Store promise in lock
+
     refreshLockRef.current = refreshPromise;
     return refreshPromise;
-  }, [state.tokens, state.user, clearAuth]);
+  }, [clearAuth, saveAuth]);
 
   // Proactive token refresh - refresh before expiration
   // Use ref to track scheduled refresh and prevent loops

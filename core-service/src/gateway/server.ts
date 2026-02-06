@@ -703,12 +703,11 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
   const startTime = Date.now();
   logger.info(`Starting ${name}...`);
 
-  // Connect to databases with error handling
-  // IMPORTANT: No localhost fallbacks - URI must come from config or environment
-  // This follows CODING_STANDARDS: no fallback, no legacy, single source of truth
-  const dbUri = mongoUri || process.env.MONGO_URI;
+  // Connect to databases: config > env > local dev default (same as strategy-config)
+  let dbUri = mongoUri || process.env.MONGO_URI;
   if (!dbUri) {
-    throw new Error(`MONGO_URI environment variable or mongoUri config required for ${name}`);
+    const dbName = (name === 'auth-service' || name === 'core-service') ? 'core_service' : name.replace(/-/g, '_');
+    dbUri = `mongodb://localhost:27017/${dbName}`;
   }
   try {
     await connectDatabase(dbUri);

@@ -15,6 +15,7 @@ import {
   dropAllDatabases as dropDatabases,
   closeAllConnections,
   parseBrandTenantArgs,
+  getErrorMessage,
 } from './scripts.js';
 
 async function main() {
@@ -56,7 +57,7 @@ async function main() {
       ]);
     } catch (error) {
       // Non-fatal - connections will be recreated when needed
-      console.warn(`⚠️  Connection close: ${error instanceof Error ? error.message : String(error)} (non-fatal)`);
+      console.warn(`⚠️  Connection close: ${getErrorMessage(error)} (non-fatal)`);
     }
   }
 }

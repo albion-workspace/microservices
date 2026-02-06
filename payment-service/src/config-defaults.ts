@@ -8,17 +8,14 @@
  */
 
 export const PAYMENT_CONFIG_DEFAULTS = {
-  // NOTE: Database configuration is handled by core-service strategy-config.ts
-  // Do NOT define database config here - it uses MONGO_URI/REDIS_URL from environment
-  // See CODING_STANDARDS.md for database access patterns
-  
-  // Service Configuration
-  port: {
-    value: 9002,
-    description: 'Payment service port',
+  port: { value: 9002, description: 'Payment service port' },
+  serviceName: { value: 'payment-service', description: 'Service name' },
+  nodeEnv: { value: 'development', description: 'Node environment' },
+  database: {
+    value: { mongoUri: '', redisUrl: '' },
+    sensitivePaths: ['database.mongoUri', 'database.redisUrl'] as string[],
+    description: 'MongoDB and Redis URLs (set via config store or deployment)',
   },
-  
-  // CORS Configuration
   corsOrigins: {
     value: [
       'http://localhost:5173',
@@ -57,8 +54,9 @@ export const PAYMENT_CONFIG_DEFAULTS = {
       minAmount: 0.01,
       maxAmount: 1000000,
       allowNegativeBalance: false,
+      useTransactions: true,
     },
-    description: 'Transaction limits and rules',
+    description: 'Transaction limits and rules; useTransactions for MongoDB transactions',
   },
   
   // Wallet Configuration
