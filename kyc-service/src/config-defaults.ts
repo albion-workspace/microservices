@@ -12,7 +12,7 @@ export const KYC_CONFIG_DEFAULTS = {
     serviceName: { value: 'kyc-service', description: 'Service name' },
     nodeEnv: { value: 'development', description: 'Node environment' },
     corsOrigins: {
-      value: ['http://localhost:3000', 'http://localhost:5173'],
+      value: ['http://localhost:5173', 'http://localhost:3000', 'http://127.0.0.1:5173'],
       description: 'Allowed CORS origins',
     },
     jwt: {
