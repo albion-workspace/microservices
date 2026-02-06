@@ -26,6 +26,7 @@ import {
   startListening,
   getUserId,
   getTenantId,
+  getErrorMessage,
   configureRedisStrategy,
   type ResolverContext,
   type IntegrationEvent,
@@ -259,13 +260,13 @@ async function main() {
         await initializeEventHandlers();
       } catch (err) {
         logger.warn('Could not initialize Redis/event handlers', {
-          error: err instanceof Error ? err.message : 'Unknown error',
+          error: getErrorMessage(err),
         });
       }
     }
   } catch (error) {
     logger.error('Failed to start KYC service', {
-      error: error instanceof Error ? error.message : 'Unknown error',
+      error: getErrorMessage(error),
     });
     process.exit(1);
   }

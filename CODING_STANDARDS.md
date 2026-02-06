@@ -569,7 +569,7 @@ service-name/
 ├── src/
 │   ├── index.ts           # Entry point with createGateway; imports from ./accessors.js
 │   ├── accessors.ts       # db + redis via createServiceAccessors (single factory call)
-│   ├── config.ts          # Service configuration (getConfigWithDefault / getServiceConfigKey)
+│   ├── config.ts          # Service configuration (getServiceConfigKey only)
 │   ├── config-defaults.ts # registerServiceConfigDefaults values
 │   ├── error-codes.ts     # SERVICE_ERRORS, SERVICE_ERROR_CODES
 │   ├── graphql.ts         # Types + createResolvers
@@ -1713,6 +1713,7 @@ async send(notification) {
 - **Always**: Maintain service boundaries (no direct cross-service imports)
 - **Always**: Use `core-service` for generic utilities, add service-specific logic on top
 - **Always**: Use event-driven communication (`emit`/`on`) instead of direct HTTP calls
+- **Always**: Wrap integration event handlers (registered with `on()`) with `withEventHandlerError(errorCode, handler)` so failures throw GraphQLError with eventId and a consistent error code (payment, bonus, kyc use it)
 - **Always**: Import access-engine through `core-service/access`, not directly
 - **Never**: Add generic utilities to service code - use `core-service` instead
 
@@ -1888,7 +1889,7 @@ npx service-infra service --name <name> [--port 9006] [--output ..] [--webhooks]
 
 Example: `service-infra service --name test --port 9006 --output ..` creates `test-service/` with:
 
-- `config.ts` / `config-defaults.ts` (dynamic config via `getConfigWithDefault` / `getServiceConfigKey`, `registerServiceConfigDefaults`)
+- `config.ts` / `config-defaults.ts` (dynamic config via `getServiceConfigKey`, `registerServiceConfigDefaults`)
 - **`accessors.ts`** (`createServiceAccessors` → `{ db, redis }`); no separate `database.ts` or `redis.ts`
 - `error-codes.ts`, `graphql.ts` (types + `createResolvers`), `index.ts` (bootstrap: `resolveContext`, `loadConfig`, `db.initialize`, `createGateway`, `startListening`)
 - `services/index.ts`, `types.ts`
@@ -1904,11 +1905,11 @@ Then:
 
 ### Microservice naming conventions (auth, payment, bonus, notification, generator)
 
-All microservices that use core-service should follow the same naming so patterns stay consistent. The service generator produces this structure; existing services (auth, payment, bonus, notification) match it.
+All microservices that use core-service should follow the same naming so patterns stay consistent. The service generator produces this structure; existing services (auth, payment, bonus, notification, kyc) match it.
 
 | Area | Convention | Example (auth / test) |
 |------|------------|----------------------|
-| **Config** | **Export** `SERVICE_NAME = '{service}-service'` from config.ts. `loadConfig(brand?, tenantId?)` **via getConfigWithDefault only** (no `process.env`), `validateConfig`, `printConfigSummary`. Interface `{Service}Config` **extends `DefaultServiceConfig`** (from core-service) in types.ts; add only service-specific properties. | `auth-service`, `AuthConfig`, `loadConfig`, `SERVICE_NAME` |
+| **Config** | **Export** `SERVICE_NAME = '{service}-service'` from config.ts. `loadConfig(brand?, tenantId?)` **via getServiceConfigKey** (common keys with `fallbackService: 'gateway'`, service-only keys with `{ brand, tenantId }`; no `process.env`), `validateConfig`, `printConfigSummary`. Interface `{Service}Config` **extends `DefaultServiceConfig`** (from core-service) in types.ts; add only service-specific properties. | `auth-service`, `AuthConfig`, `loadConfig`, `SERVICE_NAME` |
 | **Config defaults** | Export `{SERVICE}_CONFIG_DEFAULTS` with **every** key used by loadConfig: `port`, `serviceName`, `nodeEnv`, `corsOrigins`, `jwt`, `database` (mongoUri, redisUrl). Each key: `{ value, description }`; use `sensitivePaths` for secrets. **No** registration in config-defaults; index calls `registerServiceConfigDefaults(SERVICE_NAME, {SERVICE}_CONFIG_DEFAULTS)`. | `AUTH_CONFIG_DEFAULTS`, `TEST_CONFIG_DEFAULTS` |
 | **Error codes** | `{SERVICE}_ERRORS` (object), `{SERVICE}_ERROR_CODES` (array), code values `MS{Service}*`, type `{Service}ErrorCode` | `AUTH_ERRORS`, `AUTH_ERROR_CODES`, `MSAuthUserNotFound`, `AuthErrorCode` |
 | **GraphQL** | Types: `{shortName}GraphQLTypes` (camelCase short name). Resolvers: `create{Service}Resolvers(config)` | `authGraphQLTypes`, `createAuthResolvers`; `testGraphQLTypes`, `createTestResolvers` |
@@ -1919,15 +1920,15 @@ All microservices that use core-service should follow the same naming so pattern
 
 **Service configuration – no process.env (dynamic config only):**
 
-- **Do not use `process.env` in microservices.** All config must come from the MongoDB config store via `getConfigWithDefault(SERVICE_NAME, key, { brand, tenantId })` in `config.ts`.
-- **Exception:** `process.env` is allowed **only** in core-service or in auth-service when required for **bootstrap/core DB** (e.g. strategy resolution before the config store is available). Document which env vars are used there. All other services must use **dynamic config only** (getConfigWithDefault / config store).
+- **Do not use `process.env` in microservices.** All config must come from the MongoDB config store. Use **`getServiceConfigKey`** (from core-service) as the single pattern in `config.ts` and anywhere a service reads its own or shared config.
+- **Exception:** `process.env` is allowed **only** in core-service or in auth-service when required for **bootstrap/core DB** (e.g. strategy resolution before the config store is available). Document which env vars are used there. All other services must use **dynamic config only** (getServiceConfigKey / config store).
 - **Legacy fallback:** Remove; do not keep `process.env` as fallback in config.ts or index. Remove legacy/deprecated code instead of keeping it (see Refactoring Guidelines).
 - **Config interface:** Use `DefaultServiceConfig` from core-service for common properties (port, nodeEnv, serviceName, mongoUri, redisUrl, corsOrigins, jwtSecret, jwtExpiresIn, jwtRefreshSecret, jwtRefreshExpiresIn). Each service defines `export interface {Service}Config extends DefaultServiceConfig { ... }` and adds **only** service-specific properties. Reduces duplication and keeps config shape consistent; see SERVICE_GENERATOR.md.
 - Register **every** value used at runtime in `config-defaults.ts`: `port`, `serviceName`, `nodeEnv`, `corsOrigins`, `jwt` (secret, expiresIn, refreshSecret, refreshExpiresIn), `database` (mongoUri, redisUrl). Use `{ value, description }` per key; add `sensitivePaths` for secrets.
-- In `loadConfig`, load each key with `getConfigWithDefault(SERVICE_NAME, key, { brand, tenantId }) ?? defaultFromSameFile`. No fallback to `process.env`. Deployment/infra can set values in the config store or via admin; the app reads only from the config store.
+- **In `loadConfig`:** Use `getServiceConfigKey(SERVICE_NAME, key, defaultVal, opts)` for every key. For **common keys** (port, serviceName, nodeEnv, corsOrigins, jwt, database) use `opts = { brand, tenantId, fallbackService: 'gateway' }` so missing service key falls back to gateway. For **service-only keys** use `opts = { brand, tenantId }`. No fallback to `process.env`. Same pattern elsewhere when reading config (e.g. provider config): use `getServiceConfigKey` with an appropriate default.
 - **File separation:** Keep instructions in the correct file: **types.ts** = type/interface definitions only (no defaults, no loadConfig). **config.ts** = loadConfig, validateConfig, printConfigSummary only (no config interface definition, no default constants). **config-defaults.ts** = default value object `{SERVICE}_CONFIG_DEFAULTS` only (no loadConfig, no registration call; index calls `registerServiceConfigDefaults(SERVICE_NAME, {SERVICE}_CONFIG_DEFAULTS)`). See SERVICE_GENERATOR.md §3.1.
 - **SERVICE_NAME constant:** Export `SERVICE_NAME` from config.ts (`export const SERVICE_NAME = '{service}-service'`). Use it in index.ts for `registerServiceConfigDefaults(SERVICE_NAME, ...)` and `ensureDefaultConfigsCreated(SERVICE_NAME, ...)`; do not use a static string for the service name there. Same pattern in the service generator.
-- **Current state:** All five services (auth, bonus, payment, notification, kyc) use this pattern; new services get it from the generator. You can run and test all services; see **README.md** (repo root) § Config and standards status and **core-service/src/infra/SERVICE_GENERATOR.md** for alignment status and maintenance rules.
+- **Current state:** All five services (auth, bonus, payment, notification, kyc) use `getServiceConfigKey` in loadConfig; the service generator emits the same pattern. You can run and test all services; see **README.md** (repo root) § Config and standards status and **core-service/src/infra/SERVICE_GENERATOR.md** for alignment status and maintenance rules.
 
 ---
 

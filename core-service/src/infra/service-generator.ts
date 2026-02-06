@@ -184,8 +184,8 @@ export type ${serviceNamePascal}ErrorCode = typeof ${serviceNameConst.toUpperCas
  * ${serviceNamePascal} Service Configuration Defaults
  *
  * Pass to registerServiceConfigDefaults('${serviceNameKebab}', ...) in index.ts.
- * Stored in core_service.service_configs; use loadConfig() in config.ts.
- * No process.env: all config via getConfigWithDefault (CODING_STANDARDS).
+ * Stored in core_service.service_configs. config.ts loadConfig() uses getServiceConfigKey(SERVICE_NAME, key, defaultVal, opts) with these keys; common keys use opts with fallbackService: 'gateway'.
+ * No process.env (CODING_STANDARDS).
  */
 
 export const ${serviceNameConst.toUpperCase()}_CONFIG_DEFAULTS = {

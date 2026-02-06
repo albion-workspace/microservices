@@ -33,6 +33,7 @@ import {
   registerServiceErrorCodes,
   registerServiceConfigDefaults,
   ensureDefaultConfigsCreated,
+  getErrorMessage,
   resolveContext,
   initializeWebhooks,
   configureRedisStrategy,
@@ -657,7 +658,7 @@ export type {
 
 main().catch((err) => {
   logger.error('Failed to start auth-service', {
-    error: err instanceof Error ? err.message : String(err),
+    error: getErrorMessage(err),
     stack: err instanceof Error ? err.stack : undefined,
   });
   process.exit(1);
@@ -666,15 +667,15 @@ main().catch((err) => {
 // Setup process-level error handlers
 process.on('uncaughtException', (error) => {
   logger.error('Uncaught exception in auth-service', {
-    error: error.message,
-    stack: error.stack,
+    error: getErrorMessage(error),
+    stack: error instanceof Error ? error.stack : undefined,
   });
   process.exit(1);
 });
 
 process.on('unhandledRejection', (reason) => {
   logger.error('Unhandled rejection in auth-service', {
-    reason: reason instanceof Error ? reason.message : String(reason),
+    reason: getErrorMessage(reason),
     stack: reason instanceof Error ? reason.stack : undefined,
   });
   // Don't exit - log and continue (some rejections are acceptable)

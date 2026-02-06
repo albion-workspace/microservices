@@ -5,9 +5,8 @@
  * if they don't exist. Sensitive paths are filtered for non-admin users.
  *
  * JWT is common across microservices when using a shared strategy (like database).
- * Optional: register GATEWAY_JWT_DEFAULTS so getConfigWithDefault('gateway', 'jwt')
- * can be used as a fallback; gateway config (services.*.json environments.jwtSecret)
- * drives Docker/K8s env and can seed the store.
+ * Optional: register GATEWAY_JWT_DEFAULTS so getServiceConfigKey(..., { fallbackService: 'gateway' })
+ * can resolve gateway 'jwt'; gateway config (services.*.json) drives Docker/K8s and can seed the store.
  */
 
 /** Shared JWT defaults (key 'gateway') – same default everywhere; override via JSON or dynamic config. */
@@ -196,6 +195,6 @@ export const AUTH_CONFIG_DEFAULTS = {
   },
 } as const;
 
-/** Type of config default values (per key); derived from AUTH_CONFIG_DEFAULTS for getConfigWithDefault. */
+/** Type of config default values (per key); derived from AUTH_CONFIG_DEFAULTS for getServiceConfigKey. */
 type ConfigDefaultValues<T> = { [K in keyof T]: T[K] extends { value: infer V } ? V : never };
 export type AuthConfigDefaults = ConfigDefaultValues<typeof AUTH_CONFIG_DEFAULTS>;
