@@ -629,7 +629,7 @@ export const { db, redis } = createServiceAccessors('service-name');
 ### Step 3: Create Service with GraphQL (`services/feature.ts`)
 
 ```typescript
-import { createService, type SagaContext, type Repository } from 'core-service';
+import { createService, type SagaContext, type Repository, buildConnectionTypeSDL, buildSagaResultTypeSDL, timestampFieldsSDL } from 'core-service';
 import { type } from 'arktype';
 
 // Define input validation schema
@@ -689,6 +689,7 @@ export const featureService = createService<Feature, CreateFeatureInput>({
   entity: {
     name: 'feature',
     collection: 'features',
+    // Use SDL helpers from core-service (single source of truth – no inline duplication)
     graphqlType: `
       type Feature {
         id: ID!
@@ -696,12 +697,11 @@ export const featureService = createService<Feature, CreateFeatureInput>({
         name: String!
         description: String
         status: String!
-        createdAt: String
-        updatedAt: String
+        ${timestampFieldsSDL()}
       }
-      
-      type FeatureConnection { nodes: [Feature!]! totalCount: Int! pageInfo: PageInfo! }
-      type CreateFeatureResult { success: Boolean! feature: Feature sagaId: ID! errors: [String!] executionTimeMs: Int }
+
+      ${buildConnectionTypeSDL('FeatureConnection', 'Feature')}
+      ${buildSagaResultTypeSDL('CreateFeatureResult', 'feature', 'Feature')}
     `,
     graphqlInput: `input CreateFeatureInput { name: String! description: String }`,
     validateInput: (input) => {
@@ -934,7 +934,7 @@ extend type Query {
   - Database types (`Db`, `ClientSession`, `Collection`, `Filter`, `MongoClient`)
   - Redis abstractions (`createServiceRedisAccess`, `configureRedisStrategy`; prefer `createServiceAccessors` for new code)
   - Generic utilities (logging, retry, circuit breaker, `getErrorMessage`, `getServiceConfigKey`)
-  - Generic patterns (saga, gateway, event system, `withEventHandlerError`, `createTransferRecoverySetup`, `buildConnectionTypeSDL`)
+  - Generic patterns (saga, gateway, event system, `withEventHandlerError`, `createTransferRecoverySetup`, `buildConnectionTypeSDL`, `timestampFieldsSDL` / `timestampFieldsRequiredSDL` / `timestampFieldsOptionalSDL`, `buildSagaResultTypeSDL`, `paginationArgsSDL`)
   - Type definitions and interfaces (e.g. `NotificationHandlerPlugin`, `HandlerContext` in core-service)
   - Shared helpers (pagination, validation, wallet operations)
 - **Core-Service**: Must NOT include:
@@ -1213,6 +1213,8 @@ return wallet.balance;
 - **Always**: Keep GraphQL schemas and TypeScript types in sync
 - **Always**: Use cursor-based pagination (not offset)
 - **Always**: Remove deprecated fields from both schema and types immediately (no backward compatibility needed pre-production)
+- **Reuse**: For list types use `buildConnectionTypeSDL(connectionName, nodeTypeName)` from core; for common fields (e.g. `createdAt`, `updatedAt`) use `timestampFieldsSDL()`, `timestampFieldsRequiredSDL()`, or `timestampFieldsOptionalSDL()` from core so SDL is a single source of truth
+- **Reuse**: For saga result types use `buildSagaResultTypeSDL(resultName, entityField, entityType, extraFields?)` from core; for pagination arguments use `paginationArgsSDL()` from core
 
 #### GraphQL Schema ↔ TypeScript Type Sync Verification
 
@@ -1522,7 +1524,7 @@ for (const key of keys) { /* check if stuck */ }
 
 ### Generic Helpers in Core-Service
 - **Always**: Add generic, reusable helpers to `core-service`
-- **Examples**: `extractDocumentId()`, `retry()`, `circuitBreaker()`, pagination helpers; `getErrorMessage(error)` for consistent error messages; `getServiceConfigKey()` for config with optional gateway fallback; `createServiceAccessors()`, `buildConnectionTypeSDL()`, `createUniqueIndexSafe()`, `normalizeWalletForGraphQL()`, `withEventHandlerError()`, `createTransferRecoverySetup()`, notification handler plugin types (`NotificationHandlerPlugin`, `HandlerContext`)
+- **Examples**: `extractDocumentId()`, `retry()`, `circuitBreaker()`, pagination helpers; `getErrorMessage(error)` for consistent error messages; `getServiceConfigKey()` for config with optional gateway fallback; `createServiceAccessors()`, `buildConnectionTypeSDL()`, `timestampFieldsSDL()` / `timestampFieldsRequiredSDL()`, `createUniqueIndexSafe()`, `normalizeWalletForGraphQL()`, `withEventHandlerError()`, `createTransferRecoverySetup()`, notification handler plugin types (`NotificationHandlerPlugin`, `HandlerContext`)
 - **Never**: Add service-specific logic to `core-service`
 - **Pattern**: If a helper can be used by multiple services, it belongs in `core-service`
 

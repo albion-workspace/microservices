@@ -18,6 +18,8 @@ import {
   createPendingOperationStore,
   GraphQLError,
   buildConnectionTypeSDL,
+  timestampFieldsRequiredSDL,
+  paginationArgsSDL,
   type CursorPaginationOptions,
   type CursorPaginationResult,
 } from 'core-service';
@@ -67,8 +69,7 @@ export const authGraphQLTypes = `
     roles: [String!]!
     permissions: [String!]!
     metadata: JSON
-    createdAt: String!
-    updatedAt: String!
+    ${timestampFieldsRequiredSDL()}
     lastLoginAt: String
   }
   
@@ -262,10 +263,10 @@ export const authGraphQLTypes = `
     getUser(id: ID!, tenantId: String!): User
     
     # List all users (system only) - cursor-based pagination
-    users(tenantId: String, first: Int, after: String, last: Int, before: String): UserConnection!
-    
+    users(tenantId: String, ${paginationArgsSDL()}): UserConnection!
+
     # Get users by role (system only) - cursor-based pagination
-    usersByRole(role: String!, tenantId: String, first: Int, after: String, last: Int, before: String): UserConnection!
+    usersByRole(role: String!, tenantId: String, ${paginationArgsSDL()}): UserConnection!
     
     # Get user's active sessions
     mySessions: [Session!]!
@@ -342,6 +343,121 @@ export const authGraphQLTypes = `
 `;
 
 import type { Resolvers } from 'core-service';
+
+// ═══════════════════════════════════════════════════════════════════
+// Shared resolver helpers (eliminate duplication across mutations/queries)
+// ═══════════════════════════════════════════════════════════════════
+
+/** Shared update-user-field resolver (roles, permissions, status). */
+async function updateUserFieldResolver(
+  args: Record<string, unknown>,
+  ctx: ResolverContext,
+  opts: {
+    fieldName: string;
+    validate: (input: Record<string, unknown>) => unknown;
+    failureError: string;
+    logLabel: string;
+    logExtra?: (value: unknown) => Record<string, unknown>;
+  },
+) {
+  requireAuth(ctx);
+  const targetUserId = (args as any).input?.userId;
+  if (!checkSystemOrPermission(ctx.user, 'user', 'update', '*')) {
+    logger.warn(`Unauthorized ${opts.logLabel} attempt`, {
+      userId: ctx.user!.userId, targetUserId,
+    });
+    throw new GraphQLError(AUTH_ERRORS.InsufficientPermissions, {
+      action: `update user ${opts.logLabel}`,
+    });
+  }
+  const database = await db.getDb();
+  const { userId, tenantId } = (args as any).input;
+  if (!userId) throw new GraphQLError(AUTH_ERRORS.UserIdRequired, {});
+  if (!tenantId) throw new GraphQLError(AUTH_ERRORS.TenantIdRequired, {});
+  const fieldValue = opts.validate((args as any).input);
+  try {
+    const result = await findOneAndUpdateById(
+      database.collection('users'),
+      userId,
+      { $set: { [opts.fieldName]: fieldValue, updatedAt: new Date() } },
+      { tenantId },
+      { returnDocument: 'after' },
+    );
+    if (!result) {
+      logger.warn(`User not found for ${opts.logLabel} update`, { userId, tenantId });
+      throw new GraphQLError(AUTH_ERRORS.UserNotFound, { userId, tenantId });
+    }
+    logger.info(`User ${opts.logLabel} updated`, {
+      userId, tenantId, updatedBy: ctx.user!.userId,
+      ...(opts.logExtra ? opts.logExtra(fieldValue) : { [opts.fieldName]: fieldValue }),
+    });
+    return normalizeUser(result);
+  } catch (error) {
+    throw new GraphQLError(opts.failureError, {
+      userId, tenantId, originalError: getErrorMessage(error),
+    });
+  }
+}
+
+/** Shared paginated user connection query (users, usersByRole). */
+async function fetchPaginatedUsers(
+  filter: Record<string, unknown>,
+  args: { first?: number; after?: string; last?: number; before?: string },
+  errorCode: string,
+  errorContext: Record<string, unknown>,
+) {
+  const database = await db.getDb();
+  try {
+    const result = await paginateCollection(
+      database.collection('users'),
+      {
+        first: args.first ? Math.min(Math.max(1, args.first), 100) : undefined,
+        after: args.after,
+        last: args.last ? Math.min(Math.max(1, args.last), 100) : undefined,
+        before: args.before,
+        filter,
+        sortField: 'createdAt',
+        sortDirection: 'desc',
+      }
+    );
+    const normalizedNodes = result.edges.map(edge => normalizeUser(edge.node));
+    let totalCount = result.totalCount;
+    if (totalCount === undefined || totalCount === null) {
+      totalCount = await database.collection('users').countDocuments(filter);
+    }
+    return {
+      nodes: normalizedNodes,
+      totalCount: totalCount || 0,
+      pageInfo: result.pageInfo,
+    };
+  } catch (error) {
+    throw new GraphQLError(errorCode, {
+      ...errorContext,
+      originalError: getErrorMessage(error),
+    });
+  }
+}
+
+/** Parse a Redis pending operation payload into a GraphQL-compatible object. */
+function parsePendingOperation(
+  payload: Record<string, unknown>,
+  token: string,
+  ttl: number,
+) {
+  const operationData = (payload.data || {}) as Record<string, unknown>;
+  const otp = (operationData.otp || {}) as Record<string, unknown>;
+  return {
+    token,
+    operationType: (payload.operationType as string) || 'unknown',
+    recipient: operationData.recipient as string | undefined,
+    channel: (operationData.channel || otp.channel) as string | undefined,
+    purpose: (operationData.purpose || otp.purpose) as string | undefined,
+    createdAt: new Date((payload.createdAt as number) || Date.now()).toISOString(),
+    expiresAt: ttl > 0 ? new Date(Date.now() + ttl * 1000).toISOString() : null,
+    expiresIn: ttl,
+    metadata: sanitizePendingOperationMetadata(operationData),
+  };
+}
 
 /**
  * Create resolvers with service instances
@@ -456,59 +572,14 @@ export function createAuthResolvers(
        */
       users: async (args: Record<string, unknown>, ctx: ResolverContext) => {
         requireAuth(ctx);
-        
-        // Check permissions: system or user:list permission
         if (!checkSystemOrPermission(ctx.user, 'user', 'list', '*')) {
           logger.warn('Unauthorized users query attempt', { userId: ctx.user!.userId });
-          throw new GraphQLError(AUTH_ERRORS.InsufficientPermissions, { 
-            action: 'list users' 
-          });
+          throw new GraphQLError(AUTH_ERRORS.InsufficientPermissions, { action: 'list users' });
         }
-        
-        const database = await db.getDb();
         const { tenantId, first, after, last, before } = args as any;
-        
         const filter: Record<string, unknown> = {};
-        if (tenantId) {
-          filter.tenantId = tenantId;
-        }
-        
-        try {
-          // Use cursor-based pagination (performance-optimized, sharding-friendly)
-          const result = await paginateCollection(
-            database.collection('users'),
-            {
-              first: first ? Math.min(Math.max(1, first), 100) : undefined, // Max 100 per page
-              after,
-              last: last ? Math.min(Math.max(1, last), 100) : undefined,
-              before,
-              filter,
-              sortField: 'createdAt',
-              sortDirection: 'desc',
-            }
-          );
-          
-          // Normalize users from edges
-          const normalizedNodes = result.edges.map(edge => normalizeUser(edge.node));
-          
-          // Ensure totalCount is always a number (GraphQL requires Int!)
-          // If filters are present, paginateCollection may return undefined, so count manually
-          let totalCount = result.totalCount;
-          if (totalCount === undefined || totalCount === null) {
-            totalCount = await database.collection('users').countDocuments(filter);
-          }
-          
-          return {
-            nodes: normalizedNodes,
-            totalCount: totalCount || 0, // Ensure it's never null/undefined
-            pageInfo: result.pageInfo,
-          };
-        } catch (error) {
-          throw new GraphQLError(AUTH_ERRORS.FailedToFetchUsers, { 
-            tenantId,
-            originalError: getErrorMessage(error),
-          });
-        }
+        if (tenantId) filter.tenantId = tenantId;
+        return fetchPaginatedUsers(filter, { first, after, last, before }, AUTH_ERRORS.FailedToFetchUsers, { tenantId });
       },
       
       /**
@@ -517,78 +588,25 @@ export function createAuthResolvers(
        */
       usersByRole: async (args: Record<string, unknown>, ctx: ResolverContext) => {
         requireAuth(ctx);
-        
-        // Check permissions: system or user:list permission
         if (!checkSystemOrPermission(ctx.user, 'user', 'list', '*')) {
-          logger.warn('Unauthorized usersByRole query attempt', { 
-            userId: ctx.user!.userId,
-            requestedRole: (args as any).role 
+          logger.warn('Unauthorized usersByRole query attempt', {
+            userId: ctx.user!.userId, requestedRole: (args as any).role,
           });
-          throw new GraphQLError(AUTH_ERRORS.InsufficientPermissions, { 
-            action: 'list users by role' 
-          });
+          throw new GraphQLError(AUTH_ERRORS.InsufficientPermissions, { action: 'list users by role' });
         }
-        
-        const database = await db.getDb();
         const { role, tenantId, first, after, last, before } = args as any;
-        
-        if (!role || typeof role !== 'string') {
-          throw new GraphQLError(AUTH_ERRORS.RoleRequired, {});
-        }
-        
+        if (!role || typeof role !== 'string') throw new GraphQLError(AUTH_ERRORS.RoleRequired, {});
         const finalTenantId = tenantId || 'default-tenant';
-        
-        // MongoDB query: roles array contains the role
-        // Handle both UserRole[] objects and string[] arrays
+        // MongoDB query: roles array contains the role (handles both UserRole[] objects and string[])
         const filter: Record<string, unknown> = {
           $or: [
-            // Match UserRole[] objects: { role: "system", active: true, ... }
             { roles: { $elemMatch: { role: role, active: { $ne: false } } } },
-            // Match string[] arrays: ["system", "user"] - MongoDB handles { roles: "role" } for arrays
             { roles: role },
           ],
           tenantId: finalTenantId,
         };
-        
         logger.debug('Querying users by role', { role, tenantId: finalTenantId });
-        
-        try {
-          // Use cursor-based pagination (performance-optimized, sharding-friendly)
-          const result = await paginateCollection(
-            database.collection('users'),
-            {
-              first: first ? Math.min(Math.max(1, first), 100) : undefined, // Max 100 per page
-              after,
-              last: last ? Math.min(Math.max(1, last), 100) : undefined,
-              before,
-              filter,
-              sortField: 'createdAt',
-              sortDirection: 'desc',
-            }
-          );
-          
-          // Normalize users from edges
-          const normalizedNodes = result.edges.map(edge => normalizeUser(edge.node));
-          
-          // Ensure totalCount is always a number (GraphQL requires Int!)
-          // If filters are present, paginateCollection may return undefined, so count manually
-          let totalCount = result.totalCount;
-          if (totalCount === undefined || totalCount === null) {
-            totalCount = await database.collection('users').countDocuments(filter);
-          }
-          
-          return {
-            nodes: normalizedNodes,
-            totalCount: totalCount || 0, // Ensure it's never null/undefined
-            pageInfo: result.pageInfo,
-          };
-        } catch (error) {
-          throw new GraphQLError(AUTH_ERRORS.FailedToFetchUsersByRole, { 
-            role,
-            tenantId: finalTenantId,
-            originalError: getErrorMessage(error),
-          });
-        }
+        return fetchPaginatedUsers(filter, { first, after, last, before }, AUTH_ERRORS.FailedToFetchUsersByRole, { role, tenantId: finalTenantId });
       },
       
       /**
@@ -833,217 +851,49 @@ export function createAuthResolvers(
        * Update user roles (system or user:update permission)
        */
       updateUserRoles: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-        requireAuth(ctx);
-        
-        const targetUserId = (args as any).input?.userId;
-        
-        // Check permissions: system or user:update permission
-        if (!checkSystemOrPermission(ctx.user, 'user', 'update', '*')) {
-          logger.warn('Unauthorized updateUserRoles attempt', { 
-            userId: ctx.user!.userId,
-            targetUserId
-          });
-          throw new GraphQLError(AUTH_ERRORS.InsufficientPermissions, { 
-            action: 'update user roles' 
-          });
-        }
-        
-        const database = await db.getDb();
-        const { userId, tenantId, roles } = (args as any).input;
-        
-        if (!userId) {
-          throw new GraphQLError(AUTH_ERRORS.UserIdRequired, {});
-        }
-        
-        if (!tenantId) {
-          throw new GraphQLError(AUTH_ERRORS.TenantIdRequired, {});
-        }
-        
-        if (!Array.isArray(roles)) {
-          throw new GraphQLError(AUTH_ERRORS.RolesMustBeArray, {});
-        }
-        
-        try {
-          // Use optimized helper function for findOneAndUpdate (performance-optimized)
-          const result = await findOneAndUpdateById(
-            database.collection('users'),
-            userId,
-            { 
-              $set: { 
-                roles,
-                updatedAt: new Date(),
-              } 
-            },
-            { tenantId },
-            { returnDocument: 'after' }
-          );
-          
-          if (!result || !result.value) {
-            logger.warn('User not found for role update', { userId, tenantId });
-            throw new GraphQLError(AUTH_ERRORS.UserNotFound, { userId, tenantId });
-          }
-          
-          logger.info('User roles updated', { 
-            userId, 
-            tenantId,
-            updatedBy: ctx.user!.userId,
-            roles 
-          });
-          
-          return normalizeUser(result.value);
-        } catch (error) {
-          throw new GraphQLError(AUTH_ERRORS.FailedToUpdateUserRoles, { 
-            userId,
-            tenantId,
-            originalError: getErrorMessage(error),
-          });
-        }
+        return updateUserFieldResolver(args, ctx, {
+          fieldName: 'roles',
+          validate: (input) => {
+            if (!Array.isArray(input.roles)) throw new GraphQLError(AUTH_ERRORS.RolesMustBeArray, {});
+            return input.roles;
+          },
+          failureError: AUTH_ERRORS.FailedToUpdateUserRoles,
+          logLabel: 'roles',
+        });
       },
       
       /**
        * Update user permissions (system or user:update permission)
        */
       updateUserPermissions: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-        requireAuth(ctx);
-        
-        const targetUserId = (args as any).input?.userId;
-        
-        // Check permissions: system or user:update permission
-        if (!checkSystemOrPermission(ctx.user, 'user', 'update', '*')) {
-          logger.warn('Unauthorized updateUserPermissions attempt', { 
-            userId: ctx.user!.userId,
-            targetUserId
-          });
-          throw new GraphQLError(AUTH_ERRORS.InsufficientPermissions, { 
-            action: 'update user permissions' 
-          });
-        }
-        
-        const database = await db.getDb();
-        const { userId, tenantId, permissions } = (args as any).input;
-        
-        if (!userId) {
-          throw new GraphQLError(AUTH_ERRORS.UserIdRequired, {});
-        }
-        
-        if (!tenantId) {
-          throw new GraphQLError(AUTH_ERRORS.TenantIdRequired, {});
-        }
-        
-        if (!Array.isArray(permissions)) {
-          throw new GraphQLError(AUTH_ERRORS.PermissionsMustBeArray, {});
-        }
-        
-        try {
-          // Use optimized helper function for findOneAndUpdate (performance-optimized)
-          const result = await findOneAndUpdateById(
-            database.collection('users'),
-            userId,
-            { 
-              $set: { 
-                permissions,
-                updatedAt: new Date(),
-              } 
-            },
-            { tenantId },
-            { returnDocument: 'after' }
-          );
-          
-          if (!result) {
-            logger.warn('User not found for permission update', { userId, tenantId });
-            throw new GraphQLError(AUTH_ERRORS.UserNotFound, { userId, tenantId });
-          }
-          
-          logger.info('User permissions updated', { 
-            userId, 
-            tenantId,
-            updatedBy: ctx.user!.userId,
-            permissionsCount: permissions.length 
-          });
-          
-          return normalizeUser(result);
-        } catch (error) {
-          throw new GraphQLError(AUTH_ERRORS.FailedToUpdateUserPermissions, { 
-            userId,
-            tenantId,
-            originalError: getErrorMessage(error),
-          });
-        }
+        return updateUserFieldResolver(args, ctx, {
+          fieldName: 'permissions',
+          validate: (input) => {
+            if (!Array.isArray(input.permissions)) throw new GraphQLError(AUTH_ERRORS.PermissionsMustBeArray, {});
+            return input.permissions;
+          },
+          failureError: AUTH_ERRORS.FailedToUpdateUserPermissions,
+          logLabel: 'permissions',
+          logExtra: (v) => ({ permissionsCount: (v as unknown[]).length }),
+        });
       },
       
       /**
        * Update user status (system or user:update permission)
        */
       updateUserStatus: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-        requireAuth(ctx);
-        
-        const targetUserId = (args as any).input?.userId;
-        
-        // Check permissions: system or user:update permission
-        if (!checkSystemOrPermission(ctx.user, 'user', 'update', '*')) {
-          logger.warn('Unauthorized updateUserStatus attempt', { 
-            userId: ctx.user!.userId,
-            targetUserId
-          });
-          throw new Error('Unauthorized: Insufficient permissions to update user status');
-        }
-        
-        const database = await db.getDb();
-        const { userId, tenantId, status } = (args as any).input;
-        
-        if (!userId) {
-          throw new Error('User ID is required');
-        }
-        
-        if (!tenantId) {
-          throw new Error('Tenant ID is required');
-        }
-        
-        if (!status || typeof status !== 'string') {
-          throw new Error('Status is required and must be a string');
-        }
-        
         const validStatuses = ['active', 'pending', 'suspended', 'locked'];
-        if (!validStatuses.includes(status)) {
-          throw new Error(`Invalid status. Must be one of: ${validStatuses.join(', ')}`);
-        }
-        
-        try {
-          // Use optimized helper function for findOneAndUpdate (performance-optimized)
-          const result = await findOneAndUpdateById(
-            database.collection('users'),
-            userId,
-            { 
-              $set: { 
-                status,
-                updatedAt: new Date(),
-              } 
-            },
-            { tenantId },
-            { returnDocument: 'after' }
-          );
-          
-          if (!result) {
-            logger.warn('User not found for status update', { userId, tenantId });
-            throw new GraphQLError(AUTH_ERRORS.UserNotFound, { userId, tenantId });
-          }
-          
-          logger.info('User status updated', { 
-            userId, 
-            tenantId,
-            updatedBy: ctx.user!.userId,
-            status 
-          });
-          
-          return normalizeUser(result);
-        } catch (error) {
-          throw new GraphQLError(AUTH_ERRORS.FailedToUpdateUserStatus, { 
-            userId,
-            tenantId,
-            status,
-            originalError: getErrorMessage(error),
-          });
-        }
+        return updateUserFieldResolver(args, ctx, {
+          fieldName: 'status',
+          validate: (input) => {
+            const { status } = input;
+            if (!status || typeof status !== 'string') throw new GraphQLError(AUTH_ERRORS.StatusRequired, {});
+            if (!validStatuses.includes(status as string)) throw new GraphQLError(AUTH_ERRORS.InvalidStatus, { validStatuses });
+            return status;
+          },
+          failureError: AUTH_ERRORS.FailedToUpdateUserStatus,
+          logLabel: 'status',
+        });
       },
       
       /**
@@ -1137,23 +987,8 @@ export function createAuthResolvers(
               }
             }
             
-            // Get TTL (time to live in seconds)
             const ttl = await redisClient.ttl(key);
-            
-            // Sanitize metadata (remove sensitive data)
-            const sanitizedMetadata = sanitizePendingOperationMetadata(operationData);
-            
-            operations.push({
-              token,
-              operationType: payload.operationType || 'unknown',
-              recipient: operationData.recipient,
-              channel: operationData.channel || operationData.otp?.channel,
-              purpose: operationData.purpose || operationData.otp?.purpose,
-              createdAt: new Date(payload.createdAt || Date.now()).toISOString(),
-              expiresAt: ttl > 0 ? new Date(Date.now() + ttl * 1000).toISOString() : null,
-              expiresIn: ttl,
-              metadata: sanitizedMetadata,
-            });
+            operations.push(parsePendingOperation(payload, token, ttl));
           } catch (error) {
             logger.warn('Error parsing pending operation', { key, error });
             continue;
@@ -1220,20 +1055,8 @@ export function createAuthResolvers(
               if (value && typeof value === 'string') {
                 try {
                   const payload = JSON.parse(value);
-                  const operationData = payload.data || {};
                   const ttl = await redisClient.ttl(key);
-                  
-                  return {
-                    token,
-                    operationType: payload.operationType || 'unknown',
-                    recipient: operationData.recipient,
-                    channel: operationData.channel || operationData.otp?.channel,
-                    purpose: operationData.purpose || operationData.otp?.purpose,
-                    createdAt: new Date(payload.createdAt || Date.now()).toISOString(),
-                    expiresAt: ttl > 0 ? new Date(Date.now() + ttl * 1000).toISOString() : null,
-                    expiresIn: ttl,
-                    metadata: sanitizePendingOperationMetadata(operationData),
-                  };
+                  return parsePendingOperation(payload, token, ttl);
                 } catch (error) {
                   logger.warn('Error parsing Redis pending operation', { key, error });
                 }

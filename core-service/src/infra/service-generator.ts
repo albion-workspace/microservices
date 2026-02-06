@@ -12,6 +12,7 @@
  * - Config: getServiceConfigKey(serviceName, key, defaultVal, { fallbackService: 'gateway' }) for common keys;
  *   service-only keys use getServiceConfigKey(..., { brand, tenantId }) (no fallback).
  * - GraphQL types + resolvers, permissions, createGateway
+ * - SDL helpers: timestampFieldsSDL, buildSagaResultTypeSDL, buildConnectionTypeSDL, paginationArgsSDL
  * - Error codes (registerServiceErrorCodes), optional Redis, optional webhooks
  *
  * Usage: service-infra service --name <name> [--port 9006] [--output ../../] [--redis] [--webhooks] [--core-db]
@@ -306,10 +307,35 @@ export interface ${serviceNamePascal}Config extends DefaultServiceConfig {}
  * GraphQL schema and resolvers for ${serviceNamePascal} Service
  *
  * Follow auth-service/notification-service pattern: types string + createResolvers(config).
+ *
+ * REUSABLE SDL HELPERS (from core-service – single source of truth, see CODING_STANDARDS § GraphQL):
+ *   timestampFieldsSDL()         → createdAt: String!  updatedAt: String   (default)
+ *   timestampFieldsRequiredSDL() → createdAt: String!  updatedAt: String!  (User, Config, Webhook)
+ *   timestampFieldsOptionalSDL() → createdAt: String   updatedAt: String   (KYC, Bonus)
+ *   buildSagaResultTypeSDL(name, field, type, extra?) → type XResult { success … sagaId … }
+ *   paginationArgsSDL()          → first: Int, after: String, last: Int, before: String
+ *   buildConnectionTypeSDL(conn, node) → type XConnection { nodes … totalCount … pageInfo … }
+ *
+ * Example usage in SDL template literals:
+ *   type Item { id: ID! name: String! \${timestampFieldsSDL()} }
+ *   \${buildSagaResultTypeSDL('CreateItemResult', 'item', 'Item')}
+ *   \${buildConnectionTypeSDL('ItemConnection', 'Item')}
+ *   extend type Query { items(\${paginationArgsSDL()}): ItemConnection! }
  */
 
 import type { ResolverContext } from 'core-service';
-import { allow, getUserId, getTenantId } from 'core-service';
+import {
+  allow,
+  getUserId,
+  getTenantId,
+  // SDL helpers – use these instead of writing inline SDL (single source of truth):
+  buildConnectionTypeSDL,
+  timestampFieldsSDL,
+  timestampFieldsRequiredSDL,
+  timestampFieldsOptionalSDL,
+  buildSagaResultTypeSDL,
+  paginationArgsSDL,
+} from 'core-service';
 import type { ${serviceNamePascal}Config } from './types.js';
 
 export const ${graphqlTypesName} = \`
@@ -345,7 +371,21 @@ export function create${serviceNamePascal}Resolvers(config: ${serviceNamePascal}
     `/**
  * ${serviceNamePascal} domain services
  *
- * Add service classes and repositories here; export from index.
+ * Add createService definitions here; export from index.
+ *
+ * REUSABLE PATTERNS (from core-service – avoid reinventing, see CODING_STANDARDS):
+ *   createService<Entity, Input>({ name, entity, saga, ... })  → saga-based CRUD service
+ *   buildSagaResultTypeSDL(name, field, type, extra?)           → saga result SDL (in graphql.ts)
+ *   buildConnectionTypeSDL(connectionName, nodeType)            → connection type SDL (in graphql.ts)
+ *   timestampFieldsSDL() / Required / Optional                  → timestamp fields SDL (in graphql.ts)
+ *   paginationArgsSDL()                                         → cursor pagination args (in graphql.ts)
+ *   withEventHandlerError(errorCode, handler)                   → event handler error wrapper
+ *   createUniqueIndexSafe(collection, key, options)             → safe unique index creation
+ *   getErrorMessage(error)                                      → consistent error string extraction
+ *   normalizeWalletForGraphQL(wallet)                           → wallet null-coalescing (payment only)
+ *   paginateCollection(collection, opts)                        → cursor-based pagination
+ *
+ * See existing services (auth, payment, bonus, kyc, notification) for real examples.
  */
 
 // Placeholder - add your service exports

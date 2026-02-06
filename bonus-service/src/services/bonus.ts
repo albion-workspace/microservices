@@ -7,7 +7,7 @@
  * - Transfers = User-to-user operations (creates 2 transactions)
  */
 
-import { createService, type, type Repository, type SagaContext, validateInput, logger, getErrorMessage, findUserIdByRole, GraphQLError, buildConnectionTypeSDL, type DatabaseResolutionOptions } from 'core-service';
+import { createService, type, type Repository, type SagaContext, validateInput, logger, getErrorMessage, findUserIdByRole, GraphQLError, buildConnectionTypeSDL, timestampFieldsOptionalSDL, buildSagaResultTypeSDL, type DatabaseResolutionOptions } from 'core-service';
 import { getUseMongoTransactions } from '../config.js';
 import { BONUS_ERRORS } from '../error-codes.js';
 import type { BonusTemplate, UserBonus, BonusTransaction, BonusStatus } from '../types.js';
@@ -190,12 +190,11 @@ export const bonusTemplateService = createService<BonusTemplate, CreateBonusTemp
         # Approval
         requiresApproval: Boolean
         approvalThreshold: Float
-        
-        createdAt: String
-        updatedAt: String
+
+        ${timestampFieldsOptionalSDL()}
       }
       ${buildConnectionTypeSDL('BonusTemplateConnection', 'BonusTemplate')}
-      type CreateBonusTemplateResult { success: Boolean! bonusTemplate: BonusTemplate sagaId: ID! errors: [String!] executionTimeMs: Int }
+      ${buildSagaResultTypeSDL('CreateBonusTemplateResult', 'bonusTemplate', 'BonusTemplate')}
     `,
     graphqlInput: `input CreateBonusTemplateInput { name: String! code: String! type: String! domain: String! valueType: String! value: Float! currency: String! supportedCurrencies: [String!] maxValue: Float minDeposit: Float turnoverMultiplier: Float! validFrom: String! validUntil: String! eligibleTiers: [String!] minSelections: Int maxSelections: Int priority: Int description: String isActive: Boolean stackable: Boolean requiresApproval: Boolean approvalThreshold: Float }`,
     validateInput: (input) => {
@@ -497,7 +496,7 @@ export const bonusTransactionService = createService<BonusTransaction, CreateBon
     graphqlType: `
       type BonusTransaction { id: ID! userBonusId: String! userId: String! type: String! currency: String! amount: Float! balanceBefore: Float! balanceAfter: Float! originalCurrency: String originalAmount: Float exchangeRate: Float }
       ${buildConnectionTypeSDL('BonusTransactionConnection', 'BonusTransaction')}
-      type CreateBonusTransactionResult { success: Boolean! bonusTransaction: BonusTransaction sagaId: ID! errors: [String!] executionTimeMs: Int }
+      ${buildSagaResultTypeSDL('CreateBonusTransactionResult', 'bonusTransaction', 'BonusTransaction')}
     `,
     graphqlInput: `input CreateBonusTransactionInput { userBonusId: String! userId: String! type: String! currency: String! amount: Float! originalCurrency: String originalAmount: Float exchangeRate: Float relatedTransactionId: String }`,
     validateInput: (input) => {

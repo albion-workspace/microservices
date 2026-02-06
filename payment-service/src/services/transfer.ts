@@ -12,6 +12,8 @@ import {
   validateInput, 
   createTransferWithTransactions,
   buildConnectionTypeSDL,
+  buildSagaResultTypeSDL,
+  timestampFieldsSDL,
   type ClientSession,
 } from 'core-service';
 import { getUseMongoTransactions } from '../config.js';
@@ -117,9 +119,11 @@ export const transferService = createService<PaymentTransfer, CreateTransferInpu
     name: 'transfer',
     collection: 'transfers',
     graphqlType: `
-      type Transfer { id: ID! fromUserId: String! toUserId: String! amount: Float! status: String! charge: String! meta: JSON createdAt: String! updatedAt: String }
+      type Transfer { id: ID! fromUserId: String! toUserId: String! amount: Float! status: String! charge: String! meta: JSON
+    ${timestampFieldsSDL()}
+  }
       ${buildConnectionTypeSDL('TransferConnection', 'Transfer')}
-      type CreateTransferResult { success: Boolean! transfer: Transfer debitTransaction: Transaction creditTransaction: Transaction sagaId: ID! errors: [String!] executionTimeMs: Int }
+      ${buildSagaResultTypeSDL('CreateTransferResult', 'transfer', 'Transfer', 'debitTransaction: Transaction creditTransaction: Transaction')}
     `,
     graphqlInput: `input CreateTransferInput { fromUserId: String! toUserId: String! amount: Float! currency: String! tenantId: String feeAmount: Float method: String externalRef: String description: String approvalMode: String }`,
     validateInput: (input) => {

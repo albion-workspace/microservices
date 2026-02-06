@@ -51,13 +51,14 @@
  *    - Consistent across all entities
  */
 
-import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, resolveDatabase, deleteCache, deleteCachePattern, logger, getErrorMessage, normalizeWalletForGraphQL, validateInput, findOneById, findOneAndUpdateById, requireAuth, getUserId, getTenantId, getOrCreateWallet, paginateCollection, extractDocumentId, GraphQLError, buildConnectionTypeSDL, type DatabaseResolutionOptions } from 'core-service';
+import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, resolveDatabase, deleteCache, deleteCachePattern, logger, getErrorMessage, normalizeWalletForGraphQL, validateInput, findOneById, findOneAndUpdateById, requireAuth, getUserId, getTenantId, getOrCreateWallet, paginateCollection, extractDocumentId, GraphQLError, buildConnectionTypeSDL, buildSagaResultTypeSDL, type DatabaseResolutionOptions } from 'core-service';
 import { getUseMongoTransactions } from '../config.js';
 import { db } from '../accessors.js';
 import { PAYMENT_ERRORS } from '../error-codes.js';
 import type { Wallet, WalletCategory } from '../types.js';
 import { SYSTEM_CURRENCY } from '../constants.js';
 import { emitPaymentEvent } from '../event-dispatcher.js';
+import { buildDateRangeFilter } from './transaction.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // User Wallets API - Clean client response format
@@ -508,19 +509,8 @@ export const walletResolvers = {
         queryFilter.externalRef = { $regex: filter.externalRef, $options: 'i' };
       }
       
-      // Filter by date range if specified
-      if (filter.dateFrom || filter.dateTo) {
-        const dateFilter: Record<string, unknown> = {};
-        if (filter.dateFrom) {
-          dateFilter.$gte = new Date(filter.dateFrom as string);
-        }
-        if (filter.dateTo) {
-          const toDate = new Date(filter.dateTo as string);
-          toDate.setHours(23, 59, 59, 999); // Include full day
-          dateFilter.$lte = toDate;
-        }
-        queryFilter.createdAt = dateFilter;
-      }
+      const dateRange = buildDateRangeFilter(filter.dateFrom as string, filter.dateTo as string);
+      if (dateRange) queryFilter.createdAt = dateRange;
       
       // Use cursor-based pagination (O(1) performance)
       const result = await paginateCollection(transactionsCollection, {
@@ -687,7 +677,7 @@ export const walletService = createService<Wallet, CreateWalletInput>({
         creditLimit: Float
       }
       ${buildConnectionTypeSDL('WalletConnection', 'Wallet')}
-      type CreateWalletResult { success: Boolean! wallet: Wallet sagaId: ID! errors: [String!] executionTimeMs: Int }
+      ${buildSagaResultTypeSDL('CreateWalletResult', 'wallet', 'Wallet')}
     `,
     graphqlInput: `input CreateWalletInput { userId: String! currency: String! category: String tenantId: String allowNegative: Boolean creditLimit: Float }`,
     validateInput: (input) => {

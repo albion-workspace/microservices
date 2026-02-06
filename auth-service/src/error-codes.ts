@@ -26,6 +26,8 @@ export const AUTH_ERRORS = {
   FailedToUpdateUserRoles: 'MSAuthFailedToUpdateUserRoles',
   PermissionsMustBeArray: 'MSAuthPermissionsMustBeArray',
   FailedToUpdateUserPermissions: 'MSAuthFailedToUpdateUserPermissions',
+  StatusRequired: 'MSAuthStatusRequired',
+  InvalidStatus: 'MSAuthInvalidStatus',
   FailedToUpdateUserStatus: 'MSAuthFailedToUpdateUserStatus',
   TokenRequired: 'MSAuthTokenRequired',
   SystemOrAdminAccessRequired: 'MSAuthSystemOrAdminAccessRequired',

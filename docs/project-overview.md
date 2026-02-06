@@ -564,6 +564,35 @@ The following items from §14.1 and §14.5 have been implemented:
 - **Database/Redis accessor factory:** `createServiceAccessors(serviceName, options?)` in core-service (`databases/accessors.ts`); returns `{ db, redis }`. Each service has a single `accessors.ts`; all code imports `db`/`redis` (and for KYC, `COLLECTIONS`, `registerKYCIndexes`) directly from `./accessors.js`. No `database.ts` or `redis.ts` re-export files. All microservices are aligned with the service generator: same accessors comment style (per-service database name or core_service), same index import order (core-service then accessors then local), and index header line "Aligned with service generator scaffold (accessors, config, createGateway). Domain-specific code below."
 - **Config loadConfig (single pattern):** `getServiceConfigKey(serviceName, key, defaultVal, options?)` with `fallbackService: 'gateway'` in core-service. All five microservices (auth, payment, bonus, notification, kyc) use it in `loadConfig` for common keys; service-specific keys use `getServiceConfigKey` with `{ brand, tenantId }` only. Payment also uses it for exchangeRate, transaction, wallet, transfer. Service generator emits the same config template for new services.
 
+**Second phase (SDL fragment unification):**
+
+- **Timestamp SDL fragments:** `timestampFieldsOptionalSDL()` added to core-service `sdl-fragments.ts`. KYC service (KYCProfile, KYCDocument, KYCVerification) and bonus service (BonusTemplate) now use it. Core-service internal config (ConfigEntry) and webhooks (Webhook) now use `timestampFieldsRequiredSDL()`. Auth-service (User type) uses `timestampFieldsRequiredSDL()`.
+- **Saga result type SDL builder:** `buildSagaResultTypeSDL(resultName, entityField, entityType, extraFields?)` in core-service. Adopted across all 5 microservices (9 result types total): payment (CreateWalletResult, CreateTransferResult with extra debit/credit fields, CreateDepositResult, CreateWithdrawalResult with extra transfer field), bonus (CreateBonusTemplateResult, CreateBonusTransactionResult), kyc (CreateKYCProfileResult, CreateKycDocumentResult, CreateKycVerificationResult).
+- **Pagination args SDL:** `paginationArgsSDL()` in core-service. Auth-service queries (users, usersByRole) use it instead of inline `first: Int, after: String, last: Int, before: String`.
+
+**Third phase (auth-service resolver deduplication):**
+
+- **Update user field helper:** `updateUserFieldResolver(args, ctx, opts)` local helper in `auth-service/src/graphql.ts` consolidates `updateUserRoles`, `updateUserPermissions`, `updateUserStatus` (3 mutations × ~65 lines each → 3 × ~10 lines + 40-line helper = **~115 lines saved**). Also fixes `updateUserStatus` which used `throw new Error(...)` instead of `GraphQLError` — added `AUTH_ERRORS.StatusRequired` and `AUTH_ERRORS.InvalidStatus` error codes.
+- **Paginated users helper:** `fetchPaginatedUsers(filter, args, errorCode, errorContext)` local helper consolidates `users` and `usersByRole` queries (**~45 lines saved**). Pagination setup, edge normalization, totalCount fallback, and error handling now defined once.
+- **Pending operation parser:** `parsePendingOperation(payload, token, ttl)` local helper consolidates Redis payload parsing in `pendingOperations` and `pendingOperation` resolvers (**~18 lines saved**).
+
+**Fourth phase (payment-service helper deduplication):**
+
+- **Fee calculator:** `calculateFee(amount, feePercentage)` in `transaction.ts` replaces inline fee math in deposit saga (2.9%) and withdrawal saga (1.0%) (**~6 lines saved**).
+- **Transaction description builder:** `buildTransactionDescription(method, txType)` in `transaction.ts` replaces duplicated 8-line description generation blocks in deposit and withdrawal sagas (**~14 lines saved**).
+- **Date range filter builder:** `buildDateRangeFilter(dateFrom?, dateTo?)` exported from `transaction.ts`, used by both `transactionsQueryResolver` and `transactionHistory` in `wallet.ts` (**~18 lines saved**).
+
+**Line savings summary (all phases):**
+
+| Phase | Area | Lines Saved |
+|-------|------|-------------|
+| Phase 2 | SDL fragments (timestamps, saga results, pagination args) | ~50 |
+| Phase 3 | Auth-service resolver dedup (3 helpers) | ~178 |
+| Phase 4 | Payment-service helper dedup (3 helpers) | ~38 |
+| **Total** | **Across all services** | **~266** |
+
+Combined with Phase 1 items (accessors, config, error normalization, recovery setup, etc.): **~770+ total lines reduced** from original codebase.
+
 ---
 
 *Generated: Technical Analysis by Senior Engineering Review*
