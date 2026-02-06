@@ -54,6 +54,7 @@ export type {
 
 // Role type from core-service/access
 export type { Role } from 'core-service/access';
+import type { DefaultServiceConfig } from 'core-service';
 
 // SocialProfile is exported from user-types.ts
 
@@ -303,58 +304,49 @@ export interface TwoFactorSetupResponse {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Service Configuration
+// Service Configuration (align with service generator: one config extends DefaultServiceConfig)
 // ═══════════════════════════════════════════════════════════════════
 
-export interface AuthConfig {
-  // JWT
-  jwtSecret: string;
-  jwtExpiresIn: string;
-  jwtRefreshSecret?: string;
-  jwtRefreshExpiresIn: string;
-  
+/** Auth service config: extends DefaultServiceConfig from core-service, adds only auth-specific properties. */
+export interface AuthConfig extends DefaultServiceConfig {
   // Security
   passwordMinLength: number;
   passwordRequireUppercase: boolean;
   passwordRequireNumbers: boolean;
   passwordRequireSymbols: boolean;
-  
   // OTP
   otpLength: number;
   otpExpiryMinutes: number;
-  
   // Session
   sessionMaxAge: number; // days
   maxActiveSessions: number;
-  
+  // URLs (from config store)
+  frontendUrl: string;
+  appUrl: string;
+  notificationServiceUrl?: string;
+  notificationServiceToken?: string;
   // Social providers
   googleClientId?: string;
   googleClientSecret?: string;
   googleCallbackUrl: string;
-  
   facebookAppId?: string;
   facebookAppSecret?: string;
   facebookCallbackUrl: string;
-  
   linkedinClientId?: string;
   linkedinClientSecret?: string;
   linkedinCallbackUrl: string;
-  
   instagramClientId?: string;
   instagramClientSecret?: string;
   instagramCallbackUrl: string;
-  
   // Communication providers
   twilioAccountSid?: string;
   twilioAuthToken?: string;
   twilioPhoneNumber?: string;
-  
   smtpHost?: string;
   smtpPort: number;
   smtpUser?: string;
   smtpPassword?: string;
   smtpFrom?: string;
-  
   whatsappApiKey?: string;
   telegramBotToken?: string;
 }

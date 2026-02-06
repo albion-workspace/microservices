@@ -1,6 +1,7 @@
 /**
  * Authentication Service
- * 
+ * Aligned with service generator scaffold (accessors, config, createGateway). Domain-specific code below.
+ *
  * Comprehensive authentication and authorization service with:
  * - Multi-identifier registration (username/email/phone)
  * - Social authentication (Google, Facebook, LinkedIn, Instagram)
@@ -32,6 +33,7 @@ import {
   registerServiceErrorCodes,
   registerServiceConfigDefaults,
   ensureDefaultConfigsCreated,
+  getErrorMessage,
   resolveContext,
   initializeWebhooks,
   configureRedisStrategy,
@@ -40,11 +42,10 @@ import {
   type DatabaseStrategyResolver,
   type DatabaseContext,
 } from 'core-service';
-import { db } from './database.js';
-import { redis } from './redis.js';
+import { db, redis } from './accessors.js';
 
-import { loadConfig, validateConfig, printConfigSummary } from './config.js';
-import { AUTH_CONFIG_DEFAULTS } from './config-defaults.js';
+import { loadConfig, validateConfig, printConfigSummary, setAuthConfig, SERVICE_NAME } from './config.js';
+import { AUTH_CONFIG_DEFAULTS, GATEWAY_JWT_DEFAULTS, GATEWAY_DATABASE_DEFAULTS, GATEWAY_COMMON_DEFAULTS } from './config-defaults.js';
 import { configurePassport } from './providers/passport-strategies.js';
 import { setupOAuthRoutes } from './oauth-routes.js';
 import { OTPProviderFactory } from './providers/otp-provider.js';
@@ -349,13 +350,15 @@ async function main() {
   // ═══════════════════════════════════════════════════════════════════
 
   // Register default configs (auto-created in DB if missing)
-  registerServiceConfigDefaults('auth-service', AUTH_CONFIG_DEFAULTS);
+  registerServiceConfigDefaults(SERVICE_NAME, AUTH_CONFIG_DEFAULTS);
+  registerServiceConfigDefaults('gateway', { ...GATEWAY_JWT_DEFAULTS, ...GATEWAY_DATABASE_DEFAULTS, ...GATEWAY_COMMON_DEFAULTS });
 
-  // Load config (MongoDB + env vars + defaults)
+  // Load config (MongoDB config store; JWT can fall back to gateway key)
   // Resolve brand/tenantId dynamically (from user context, config store, or env vars)
   const context = await resolveContext();
   authConfig = await loadConfig(context.brand, context.tenantId);
   validateConfig(authConfig);
+  setAuthConfig(authConfig);
 
   // ═══════════════════════════════════════════════════════════════════
   // Initialize Services
@@ -537,11 +540,11 @@ async function main() {
   });
 
   // Initialize Redis accessor (after gateway connects to Redis)
-  if (process.env.REDIS_URL) {
+  if (authConfig.redisUrl) {
     try {
       await configureRedisStrategy({
         strategy: 'shared',
-        defaultUrl: process.env.REDIS_URL,
+        defaultUrl: authConfig.redisUrl,
       });
       await redis.initialize({ brand: context.brand });
       logger.info('Redis accessor initialized', { brand: context.brand });
@@ -553,7 +556,7 @@ async function main() {
   // Ensure all registered default configs are created in database
   // This happens after database connection is established
   try {
-    const createdCount = await ensureDefaultConfigsCreated('auth-service', {
+    const createdCount = await ensureDefaultConfigsCreated(SERVICE_NAME, {
       brand: context.brand,
       tenantId: context.tenantId,
     });
@@ -610,7 +613,7 @@ async function main() {
   logger.info('OAuth strategies configured and ready');
   
   // Start listening to Redis events
-  if (process.env.REDIS_URL) {
+  if (authConfig.redisUrl) {
     try {
       const channels = [
         'integration:auth',      // Auth service events
@@ -655,7 +658,7 @@ export type {
 
 main().catch((err) => {
   logger.error('Failed to start auth-service', {
-    error: err instanceof Error ? err.message : String(err),
+    error: getErrorMessage(err),
     stack: err instanceof Error ? err.stack : undefined,
   });
   process.exit(1);
@@ -664,15 +667,15 @@ main().catch((err) => {
 // Setup process-level error handlers
 process.on('uncaughtException', (error) => {
   logger.error('Uncaught exception in auth-service', {
-    error: error.message,
-    stack: error.stack,
+    error: getErrorMessage(error),
+    stack: error instanceof Error ? error.stack : undefined,
   });
   process.exit(1);
 });
 
 process.on('unhandledRejection', (reason) => {
   logger.error('Unhandled rejection in auth-service', {
-    reason: reason instanceof Error ? reason.message : String(reason),
+    reason: getErrorMessage(reason),
     stack: reason instanceof Error ? reason.stack : undefined,
   });
   // Don't exit - log and continue (some rejections are acceptable)

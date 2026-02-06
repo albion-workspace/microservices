@@ -18,6 +18,7 @@ import type {
   StatusHistoryEntry,
   ValueType,
   BalanceType as SharedBalanceType,
+  DefaultServiceConfig,
 } from 'core-service';
 
 // Re-export for consumers
@@ -27,6 +28,25 @@ export type Currency = SharedCurrency;
 export type VerificationLevel = SharedVerificationLevel;
 export type TriggeredBy = SharedTriggeredBy;
 export type BalanceType = SharedBalanceType;
+
+// ═══════════════════════════════════════════════════════════════════
+// Service Configuration (single config type, aligned with service generator)
+// ═══════════════════════════════════════════════════════════════════
+
+/** Payment service config: extends DefaultServiceConfig, adds only payment-specific properties. */
+export interface PaymentConfig extends DefaultServiceConfig {
+  exchangeRateDefaultSource: string;
+  exchangeRateCacheTtl: number;
+  exchangeRateAutoUpdateInterval: number;
+  transactionMinAmount: number;
+  transactionMaxAmount: number;
+  allowNegativeBalance: boolean;
+  defaultCurrency: string;
+  supportedCurrencies: string[];
+  transferRequireApproval: boolean;
+  maxPendingTransfers: number;
+  approvalTimeout: number;
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // Provider Types

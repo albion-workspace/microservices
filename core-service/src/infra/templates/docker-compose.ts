@@ -64,7 +64,7 @@ services:
       - PORT=${port}
 ${mongoEnv}
 ${redisEnv}
-      - JWT_SECRET=\${JWT_SECRET:-your-256-bit-secret-change-me}
+      - JWT_SECRET=\${JWT_SECRET:-shared-jwt-secret-change-in-production}
 ${envLines}
 ${dependsOnSection}
     labels:

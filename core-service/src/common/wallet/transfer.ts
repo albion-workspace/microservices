@@ -32,7 +32,7 @@
 import type { ClientSession, Db, MongoClient } from 'mongodb';
 
 // Local imports
-import { generateId, generateMongoId, logger, deleteCachePattern } from '../../index.js';
+import { generateId, generateMongoId, logger, deleteCachePattern, getErrorMessage } from '../../index.js';
 import type { DatabaseStrategyResolver, DatabaseContext } from '../../databases/mongodb/strategy.js';
 import { createTransactionDocument, type CreateTransactionParams, type Transaction } from './transaction.js';
 import { getOperationStateTracker } from '../resilience/recovery.js';
@@ -467,7 +467,7 @@ export async function createTransferWithTransactions(
       // If role check fails, assume not system user (safe default)
       logger.debug('Could not verify if user is system user, assuming not', {
         userId: fromUserId,
-        error: error instanceof Error ? error.message : String(error),
+        error: getErrorMessage(error),
       });
     }
     
@@ -812,7 +812,7 @@ export async function createTransferWithTransactions(
     
     return result;
   } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
+    const errorMsg = getErrorMessage(error);
     
     // Mark as failed
     await stateTracker.markFailed(operationId, 'transfer', errorMsg);

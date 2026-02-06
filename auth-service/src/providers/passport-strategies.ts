@@ -17,9 +17,10 @@ import { Strategy as GoogleStrategy } from 'passport-google-oauth20';
 import { Strategy as FacebookStrategy } from 'passport-facebook';
 import { Strategy as LinkedInStrategy } from 'passport-linkedin-oauth2';
 import speakeasy from 'speakeasy';
-import type { AuthConfig, User, SocialProfile, AuthProvider } from '../types.js';
+import type { AuthConfig } from '../config.js';
+import type { User, SocialProfile, AuthProvider } from '../types.js';
 import { logger } from 'core-service';
-import { db } from '../database.js';
+import { db } from '../accessors.js';
 import { normalizeEmail, normalizePhone, detectIdentifierType, verifyPassword } from '../utils.js';
 
 // ═══════════════════════════════════════════════════════════════════

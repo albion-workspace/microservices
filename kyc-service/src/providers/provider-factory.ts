@@ -4,8 +4,9 @@
  * Factory for creating and managing KYC providers
  */
 
-import { logger, getConfigWithDefault } from 'core-service';
+import { getErrorMessage, getServiceConfigKey, logger } from 'core-service';
 
+import { SERVICE_NAME } from '../config.js';
 import type {
   KYCProvider,
   ProviderFactory,
@@ -115,7 +116,7 @@ interface ProvidersConfig {
  * Initialize KYC providers from configuration
  */
 export async function initializeProviders(): Promise<void> {
-  const config = await getConfigWithDefault<ProvidersConfig>('kyc-service', 'providers');
+  const config = await getServiceConfigKey<ProvidersConfig | null>(SERVICE_NAME, 'providers', null, {});
   
   if (!config) {
     logger.warn('No KYC provider configuration found, using mock provider');
@@ -145,7 +146,7 @@ export async function initializeProviders(): Promise<void> {
     } catch (error) {
       logger.error('Failed to initialize KYC provider', {
         provider: name,
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: getErrorMessage(error),
       });
     }
   }

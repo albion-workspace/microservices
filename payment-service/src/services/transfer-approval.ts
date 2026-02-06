@@ -11,7 +11,7 @@ import {
   approveTransfer,
   declineTransfer,
 } from 'core-service';
-import { db } from '../database.js';
+import { db } from '../accessors.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Transfer Approval Resolvers

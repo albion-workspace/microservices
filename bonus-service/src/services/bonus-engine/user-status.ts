@@ -17,7 +17,7 @@
  */
 
 import { resolveDatabase, findById, logger, type DatabaseResolutionOptions, type Db, CORE_DATABASE_NAME } from 'core-service';
-import { db } from '../../database.js';
+import { db } from '../../accessors.js';
 
 export interface UserStatusOptions extends DatabaseResolutionOptions {
   // Can extend with user-status-specific options if needed

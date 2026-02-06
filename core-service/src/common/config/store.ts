@@ -26,6 +26,7 @@ import { CORE_DATABASE_NAME } from '../../databases/mongodb/constants.js';
 import { getCache, setCache, deleteCache, deleteCachePattern } from '../../databases/cache.js';
 import { resolveDatabaseStrategyFromConfig } from '../../databases/mongodb/strategy-config.js';
 import { logger } from '../logger.js';
+import { getErrorMessage } from '../errors.js';
 import { hasAnyRole } from '../auth/permissions.js';
 import { generateMongoId } from '../../databases/mongodb/utils.js';
 
@@ -266,7 +267,7 @@ export async function ensureDefaultConfigsCreated(
       logger.debug('Could not ensure config creation (DB may not be connected)', { 
         service, 
         key, 
-        error: error instanceof Error ? error.message : String(error)
+        error: getErrorMessage(error)
       });
       skippedCount++;
     }
@@ -642,7 +643,7 @@ export class ConfigStore {
         logger.debug('Could not auto-create config (DB may not be connected yet), will retry on next access', { 
           service, 
           key, 
-          error: error instanceof Error ? error.message : String(error)
+          error: getErrorMessage(error)
         });
       }
       
@@ -1178,6 +1179,37 @@ export async function getConfigWithDefault<T = unknown>(
   }
   
   return configStore.get<T>(service, key, { brand, tenantId, user });
+}
+
+export interface GetServiceConfigKeyOptions {
+  brand?: string;
+  tenantId?: string;
+  user?: UserContext | null;
+  /** If set, use this service's value when the primary service has no value (e.g. 'gateway' for nodeEnv, corsOrigins) */
+  fallbackService?: string;
+}
+
+/**
+ * Get a config key with optional gateway (or other) fallback and default.
+ * Shortens loadConfig patterns: service key ?? fallbackService key ?? default.
+ *
+ * @example
+ * const nodeEnv = await getServiceConfigKey(SERVICE_NAME, 'nodeEnv', 'development', { brand, tenantId, fallbackService: 'gateway' });
+ */
+export async function getServiceConfigKey<T>(
+  serviceName: string,
+  key: string,
+  defaultVal: T,
+  options?: GetServiceConfigKeyOptions
+): Promise<T> {
+  const opts = { brand: options?.brand, tenantId: options?.tenantId, user: options?.user };
+  const v = await getConfigWithDefault<T>(serviceName, key, opts);
+  if (v != null) return v;
+  if (options?.fallbackService) {
+    const v2 = await getConfigWithDefault<T>(options.fallbackService, key, opts);
+    if (v2 != null) return v2;
+  }
+  return defaultVal;
 }
 
 /**

@@ -3,8 +3,10 @@
  * All OTPs are sent via the notification service
  */
 
-import type { AuthConfig, OTPChannel } from '../types.js';
+import type { AuthConfig } from '../config.js';
+import type { OTPChannel } from '../types.js';
 import { logger } from 'core-service';
+import { getAuthConfig } from '../config.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Base OTP Provider Interface
@@ -19,7 +21,9 @@ export interface IOTPProvider {
 // Notification Service Client
 // ═══════════════════════════════════════════════════════════════════
 
-const NOTIFICATION_SERVICE_URL = process.env.NOTIFICATION_SERVICE_URL || 'http://localhost:9004/graphql';
+function getNotificationServiceUrl(): string {
+  return getAuthConfig().notificationServiceUrl || 'http://localhost:9004/graphql';
+}
 
 /**
  * Send notification via notification service GraphQL API
@@ -61,16 +65,14 @@ async function sendViaNotificationService(
   };
 
   try {
-    // For service-to-service calls, we might need a service token
-    // For now, try without auth (notification service should allow this for internal services)
-    const response = await fetch(NOTIFICATION_SERVICE_URL, {
+    const authConfig = getAuthConfig();
+    const notificationUrl = getNotificationServiceUrl();
+    const token = authConfig.notificationServiceToken;
+    const response = await fetch(notificationUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        // Add service token if available
-        ...(process.env.NOTIFICATION_SERVICE_TOKEN ? {
-          'Authorization': `Bearer ${process.env.NOTIFICATION_SERVICE_TOKEN}`
-        } : {}),
+        ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
       },
       body: JSON.stringify({ query: mutation, variables }),
     });
@@ -102,7 +104,7 @@ async function sendViaNotificationService(
     });
     
     // In development, log the OTP instead of failing
-    if (process.env.NODE_ENV === 'development') {
+    if (getAuthConfig().nodeEnv === 'development') {
       logger.warn('OTP (dev mode - notification service unavailable)', { 
         recipient, 
         code: body.match(/\d{4,8}/)?.[0] || 'N/A',

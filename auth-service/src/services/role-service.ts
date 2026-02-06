@@ -6,7 +6,7 @@
  */
 
 import { logger, findOneById, updateOneById, extractDocumentId } from 'core-service';
-import { db } from '../database.js';
+import { db } from '../accessors.js';
 import { RoleResolver, type BaseRole as Role } from 'core-service/access';
 import type {
   UserRole,

@@ -1,41 +1,12 @@
 /**
  * Auth Service Notification Handler
- * 
- * Handles authentication-related events and sends notifications:
- * - User registration
- * - Email verification
- * - Password changes/resets
- * - 2FA events
- * - Account locking
- * 
- * This handler is registered with notification-service to enable
- * auth-related notifications.
- * 
- * Note: Types are defined locally per CODING_STANDARDS - services
- * should not depend on each other directly.
+ *
+ * Handles authentication-related events and sends notifications.
+ * Uses NotificationHandlerPlugin and HandlerContext from core-service.
  */
 
 import { logger, on } from 'core-service';
-import type { IntegrationEvent } from 'core-service';
-
-// ═══════════════════════════════════════════════════════════════════
-// Local Plugin Types (per CODING_STANDARDS - no service dependencies)
-// ═══════════════════════════════════════════════════════════════════
-
-interface NotificationHandlerPlugin {
-  name: string;
-  description: string;
-  channels: string[];
-  eventTypes: string[];
-  initialize(notificationService: any): void;
-  isAvailable(): boolean;
-}
-
-interface HandlerContext {
-  notificationService: any;
-  event: IntegrationEvent<any>;
-  logger: typeof logger;
-}
+import type { IntegrationEvent, NotificationHandlerPlugin, HandlerContext } from 'core-service';
 
 // ═══════════════════════════════════════════════════════════════════
 // Event Types
@@ -79,7 +50,7 @@ export const authNotificationHandler: NotificationHandlerPlugin = {
       const context: HandlerContext = {
         notificationService,
         event,
-        logger,
+        logger: logger as HandlerContext['logger'],
       };
 
       try {

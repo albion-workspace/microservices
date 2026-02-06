@@ -78,12 +78,11 @@ export async function resolveDatabaseStrategyFromConfig(
     (service === 'core-service' || service === 'auth-service') ? CORE_DATABASE_NAME : '{service}'
   );
   
-  // Build MongoDB URI: environment takes priority over stored config
+  // Build MongoDB URI: env > stored config > local dev default (single place)
   let mongoUri: string;
   if (envMongoUri) {
     // Use environment variable - this is the Docker/K8s case
     if (strategy === 'per-service') {
-      // Replace database name with service-specific one
       mongoUri = envMongoUri.replace(/\/[^\/\?]+(\?|$)/, `/{service}$1`);
     } else {
       mongoUri = envMongoUri;
@@ -92,8 +91,9 @@ export async function resolveDatabaseStrategyFromConfig(
     // Use stored config (local development case)
     mongoUri = dbConfig.mongoUri;
   } else {
-    // No config anywhere - throw error (following CODING_STANDARDS: no silent fallbacks)
-    throw new Error(`MONGO_URI environment variable required for service: ${service}`);
+    // Local dev: no env, no config – build default URI from service
+    const dbName = strategy === 'shared' ? CORE_DATABASE_NAME : service.replace(/-/g, '_');
+    mongoUri = `mongodb://localhost:27017/${dbName}`;
   }
   
   // Build Redis URL: environment takes priority
@@ -261,14 +261,20 @@ export async function initializeServiceDatabase(options: ServiceDatabaseOptions)
   try {
     getDatabase();
   } catch {
-    // Connect to MongoDB using environment variable (required)
-    const mongoUri = process.env.MONGO_URI;
+    // Connect: env > config > local dev default (same logic as resolveDatabaseStrategyFromConfig)
+    let mongoUri = process.env.MONGO_URI;
     if (!mongoUri) {
-      throw new Error('MONGO_URI environment variable required for database initialization');
+      const dbConfig = await getConfigWithDefault<{ mongoUri?: string; strategy?: string }>(serviceName, 'database', { brand, tenantId });
+      mongoUri = dbConfig?.mongoUri;
+      if (!mongoUri) {
+        const strat = dbConfig?.strategy ?? ((serviceName === 'core-service' || serviceName === 'auth-service') ? 'shared' : 'per-service');
+        const dbName = strat === 'shared' ? CORE_DATABASE_NAME : serviceName.replace(/-/g, '_');
+        mongoUri = `mongodb://localhost:27017/${dbName}`;
+      }
     }
     await connectDatabase(mongoUri);
   }
-  
+
   const strategy = await getServiceStrategy(serviceName, { brand, tenantId });
   const db = await getServiceDatabase(serviceName, { brand, tenantId });
   

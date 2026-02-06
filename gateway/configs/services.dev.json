@@ -51,10 +51,13 @@
   ],
   "infrastructure": {
     "mongodb": {
-      "mode": "single",
-      "host": "localhost",
+      "mode": "replicaSet",
+      "host": "mongo",
       "port": 27017,
-      "replicaSet": null
+      "replicaSet": "rs0",
+      "members": [
+        { "host": "mongo", "port": 27017 }
+      ]
     },
     "redis": {
       "mode": "single",
@@ -71,7 +74,13 @@
     },
     "docker": {
       "mongoUri": "mongodb://mongo:27017",
-      "redisUrl": "redis://:redis123@redis:6379"
+      "redisUrl": "redis://:redis123@redis:6379",
+      "jwtSecret": "shared-jwt-secret-change-in-production"
+    },
+    "prod": {
+      "mongoUri": "",
+      "redisUrl": "",
+      "jwtSecret": "shared-jwt-secret-change-in-production"
     }
   }
 }

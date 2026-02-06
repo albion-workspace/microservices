@@ -37,7 +37,7 @@ import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 
 // External packages (core-service)
-import { connectRedis, getRedis, checkRedisHealth } from '../../../core-service/src/index.js';
+import { connectRedis, getRedis, checkRedisHealth, getErrorMessage } from '../../../core-service/src/index.js';
 import { 
   recoverOperation,
   recoverStuckOperations,
@@ -1721,9 +1721,9 @@ async function testRecovery() {
   console.log('║        TESTING GENERIC TRANSFER RECOVERY SYSTEM                 ║');
   console.log('╚═══════════════════════════════════════════════════════════════════╝\n');
 
-  // Try to connect to Redis (default: redis://:redis123@localhost:6379)
+  // Try to connect to Redis (default: redis://localhost:6379 when no password; use REDIS_URL if set)
   console.log('🔌 Connecting to Redis...');
-  const redisUrl = process.env.REDIS_URL || `redis://:${process.env.REDIS_PASSWORD || 'redis123'}@localhost:6379`;
+  const redisUrl = process.env.REDIS_URL || (process.env.REDIS_PASSWORD ? `redis://:${process.env.REDIS_PASSWORD}@localhost:6379` : 'redis://localhost:6379');
   
   let redisConnected = false;
   try {
@@ -2377,7 +2377,7 @@ async function testProvider() {
         name: test.name,
         passed: false,
         duration: Date.now() - start,
-        error: error instanceof Error ? error.message : String(error),
+        error: getErrorMessage(error),
       };
       results.push(result);
       console.log(`❌ ${test.name} - ${result.error}`);

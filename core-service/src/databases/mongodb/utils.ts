@@ -10,6 +10,8 @@
 
 import { ObjectId, type Collection, type Filter, type Document } from 'mongodb';
 import { logger } from '../../common/logger.js';
+import { getErrorMessage } from '../../common/errors.js';
+import { isDuplicateKeyError } from './errors.js';
 
 // Re-export MongoDB types for convenience
 // This allows microservices to use MongoDB types without depending on mongodb package directly
@@ -382,4 +384,104 @@ export async function findOneAndUpdateById<T = Document>(
   );
   
   return (result?.value as T) || null;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Index creation (safe, non-throwing)
+// ═══════════════════════════════════════════════════════════════════
+
+export interface CreateUniqueIndexOptions {
+  unique?: boolean;
+  sparse?: boolean;
+  name?: string;
+  /** Drop existing index names before create (for conflict resolution) */
+  dropConflictNames?: string[];
+}
+
+/**
+ * Create a unique index safely. Handles duplicate key, IndexOptionsConflict (85), and optional drop+recreate.
+ * Logs warnings/errors but does not throw so service can keep running.
+ *
+ * @param collection - MongoDB collection
+ * @param key - Index key (e.g. { 'metadata.externalRef': 1 })
+ * @param options - unique, sparse, name, dropConflictNames
+ * @returns true if index exists or was created, false on non-recoverable failure
+ */
+export async function createUniqueIndexSafe(
+  collection: Collection,
+  key: Record<string, 1 | -1>,
+  options: CreateUniqueIndexOptions = {}
+): Promise<boolean> {
+  const opts = { unique: true, sparse: true, ...options };
+  const indexName = opts.name ?? Object.keys(key).join('_') + '_unique';
+
+  try {
+    const indexes = await collection.indexes();
+    const keyField = Object.keys(key)[0];
+    const hasUnique = indexes.some(
+      (idx) => idx.key && typeof idx.key === 'object' && keyField in idx.key && idx.unique === true
+    );
+    if (hasUnique) {
+      logger.debug('Unique index already exists', { collection: collection.collectionName, key: keyField });
+      return true;
+    }
+
+    const existing = indexes.find(
+      (idx) => idx.key && typeof idx.key === 'object' && keyField in idx.key
+    );
+    if (existing?.name && !existing.unique) {
+      try {
+        await collection.dropIndex(existing.name);
+        logger.debug('Dropped existing non-unique index', { name: existing.name });
+      } catch (dropErr) {
+        logger.warn('Could not drop existing index', { error: getErrorMessage(dropErr) });
+      }
+    }
+
+    try {
+      await collection.createIndex(key, {
+        unique: opts.unique,
+        sparse: opts.sparse ?? true,
+        name: indexName,
+      });
+      logger.info('Unique index created', { collection: collection.collectionName, name: indexName });
+      return true;
+    } catch (createErr: unknown) {
+      const err = createErr as { code?: number; codeName?: string; message?: string };
+      if (isDuplicateKeyError(createErr)) {
+        logger.warn('Cannot create unique index - duplicate values exist', {
+          collection: collection.collectionName,
+          error: getErrorMessage(createErr),
+        });
+        return false;
+      }
+      if (err.code === 85 || err.codeName === 'IndexOptionsConflict') {
+        logger.warn('Index options conflict, attempting drop and recreate', { name: indexName });
+        for (const name of opts.dropConflictNames ?? [indexName, keyField.replace('.', '_') + '_1']) {
+          await collection.dropIndex(name).catch(() => {});
+        }
+        try {
+          await collection.createIndex(key, {
+            unique: opts.unique,
+            sparse: opts.sparse ?? true,
+            name: indexName,
+          });
+          logger.info('Unique index recreated', { collection: collection.collectionName, name: indexName });
+          return true;
+        } catch (recreateErr) {
+          logger.warn('Failed to recreate unique index', { error: getErrorMessage(recreateErr) });
+          return false;
+        }
+      }
+      logger.error('Failed to create unique index', {
+        collection: collection.collectionName,
+        error: getErrorMessage(createErr),
+        code: err.code,
+      });
+      return false;
+    }
+  } catch (e) {
+    logger.error('Failed to ensure unique index', { collection: collection.collectionName, error: getErrorMessage(e) });
+    return false;
+  }
 }

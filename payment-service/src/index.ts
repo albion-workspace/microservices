@@ -1,7 +1,8 @@
 /**
- * Payment Service - Generic user-to-user transaction processing
- * 
- * Generic payment service that handles:
+ * Payment Service
+ * Aligned with service generator scaffold (accessors, config, createGateway). Domain-specific code below.
+ *
+ * Generic user-to-user transaction processing:
  * - User-to-user deposits and withdrawals
  * - Multi-currency wallet management
  * - Transaction history & tracking
@@ -20,10 +21,12 @@ import {
   isAuthenticated,
   allow,
   logger,
+  getErrorMessage,
   on,
   startListening,
   extractDocumentId,
   GraphQLError,
+  withEventHandlerError,
   registerServiceErrorCodes,
   registerServiceConfigDefaults,
   ensureDefaultConfigsCreated,
@@ -32,16 +35,17 @@ import {
   createWebhookService,
   findOneById,
   generateMongoId,
-  isDuplicateKeyError,
+  createUniqueIndexSafe,
   createObjectModelQueryResolver,
   findUserIdByRole,
   createTransferWithTransactions,
+  normalizeWalletForGraphQL,
   type IntegrationEvent,
   type ResolverContext,
   type DatabaseStrategyResolver,
   type DatabaseContext,
 } from 'core-service';
-import { db } from './database.js';
+import { db, redis } from './accessors.js';
 
 // Local imports
 import {
@@ -51,7 +55,7 @@ import {
   type PaymentWebhookEvents,
 } from './event-dispatcher.js';
 import { PAYMENT_ERROR_CODES, PAYMENT_ERRORS } from './error-codes.js';
-import { loadConfig, validateConfig, printConfigSummary, type PaymentConfig } from './config.js';
+import { loadConfig, validateConfig, printConfigSummary, setUseMongoTransactions, SERVICE_NAME, type PaymentConfig } from './config.js';
 import { PAYMENT_CONFIG_DEFAULTS } from './config-defaults.js';
 
 // Re-export for consumers
@@ -125,7 +129,7 @@ async function getSystemUserId(tenantId?: string): Promise<string> {
     return systemUserId;
   } catch (error) {
     throw new GraphQLError(PAYMENT_ERRORS.FailedToGetSystemUserId, { 
-      error: error instanceof Error ? error.message : String(error),
+      error: getErrorMessage(error),
       tenantId 
     });
   }
@@ -243,17 +247,9 @@ const buildGatewayConfig = (): Parameters<typeof createGateway>[0] => {
               await Promise.allSettled(syncPromises);
             }
             
-            // Normalize null values to 0 for bonusBalance, lockedBalance, and lifetimeFees
             if (result && result.nodes && Array.isArray(result.nodes)) {
-              result.nodes = result.nodes.map((wallet: any) => ({
-                ...wallet,
-                bonusBalance: wallet.bonusBalance ?? 0,
-                lockedBalance: wallet.lockedBalance ?? 0,
-                balance: wallet.balance ?? 0,
-                lifetimeFees: wallet.lifetimeFees ?? 0,
-              }));
+              result.nodes = result.nodes.map((wallet: any) => normalizeWalletForGraphQL(wallet));
             }
-            
             return result;
           },
           wallet: async (args: Record<string, unknown>, ctx: any) => {
@@ -264,17 +260,7 @@ const buildGatewayConfig = (): Parameters<typeof createGateway>[0] => {
               return wallet;
             }
             
-            // Wallets are updated atomically via createTransferWithTransactions
-            // No sync needed - wallets are the source of truth
-            
-            // Normalize null values to 0 for bonusBalance, lockedBalance, and lifetimeFees
-            return {
-              ...wallet,
-              bonusBalance: wallet.bonusBalance ?? 0,
-              lockedBalance: wallet.lockedBalance ?? 0,
-              balance: wallet.balance ?? 0,
-              lifetimeFees: wallet.lifetimeFees ?? 0,
-            };
+            return normalizeWalletForGraphQL(wallet);
           },
         },
         Mutation: walletService.resolvers.Mutation,
@@ -429,7 +415,7 @@ function setupBonusEventHandlers() {
   // Bonus Awarded → Credit Bonus Balance
   // ═══════════════════════════════════════════════════════════════════
   
-  on<BonusAwardedData>('bonus.awarded', async (event: IntegrationEvent<BonusAwardedData>) => {
+  on<BonusAwardedData>('bonus.awarded', withEventHandlerError<IntegrationEvent<BonusAwardedData>>(PAYMENT_ERRORS.FailedToCreditBonusToWallet, async (event) => {
     logger.info('Processing bonus.awarded - crediting wallet', {
       eventId: event.eventId,
       userId: event.userId,
@@ -437,18 +423,12 @@ function setupBonusEventHandlers() {
       value: event.data.value,
       currency: event.data.currency,
     });
-    
-    // Early return if userId is missing
     if (!event.userId) {
       logger.warn('No userId in bonus.awarded event, cannot sync wallet', { eventId: event.eventId });
       return;
     }
-    
-    // TypeScript type narrowing - userId is guaranteed to be string after the check above
     const userId = event.userId;
-    
-    try {
-      const database = await db.getDb();
+    const database = await db.getDb();
       const walletsCollection = database.collection('wallets');
       
       // Find user's wallet (use provided walletId or find by user/currency)
@@ -524,58 +504,36 @@ function setupBonusEventHandlers() {
         }, { skipInternal: true });
       } catch (transferError) {
         throw new GraphQLError(PAYMENT_ERRORS.FailedToCreateBonusTransfer, { 
-          error: transferError instanceof Error ? transferError.message : String(transferError), 
+          error: getErrorMessage(transferError), 
           eventId: event.eventId,
           walletId,
           userId: event.userId,
         });
       }
-    } catch (err) {
-      throw new GraphQLError(PAYMENT_ERRORS.FailedToCreditBonusToWallet, {
-        error: err instanceof Error ? err.message : String(err),
-        eventId: event.eventId,
-      });
-    }
-  });
+  }));
   
-  // ═══════════════════════════════════════════════════════════════════
-  // Bonus Converted → Move from Bonus to Real Balance
-  // ═══════════════════════════════════════════════════════════════════
-  
-  on<BonusConvertedData>('bonus.converted', async (event: IntegrationEvent<BonusConvertedData>) => {
+  on<BonusConvertedData>('bonus.converted', withEventHandlerError<IntegrationEvent<BonusConvertedData>>(PAYMENT_ERRORS.FailedToConvertBonusToRealBalance, async (event) => {
     logger.info('Processing bonus.converted - moving to real balance', {
       eventId: event.eventId,
       userId: event.userId,
       bonusId: event.data.bonusId,
       amount: event.data.amount,
     });
-    
+    const database = await db.getDb();
+    const walletsCollection = database.collection('wallets');
+    const wallet = await findOneById(walletsCollection, event.data.walletId, {});
+    if (!wallet) {
+      logger.warn('Wallet not found for bonus conversion', { walletId: event.data.walletId });
+      return;
+    }
+    const currentBonusBalance = (wallet as any).bonusBalance || 0;
+    const convertAmount = Math.min(event.data.amount, currentBonusBalance);
+    if (convertAmount <= 0) {
+      logger.warn('No bonus balance to convert', { walletId: event.data.walletId });
+      return;
+    }
     try {
-      const database = await db.getDb();
-      const walletsCollection = database.collection('wallets');
-      
-      // Find wallet
-      // Use optimized findOneById utility (performance-optimized)
-      const wallet = await findOneById(walletsCollection, event.data.walletId, {});
-      
-      if (!wallet) {
-        logger.warn('Wallet not found for bonus conversion', { walletId: event.data.walletId });
-        return;
-      }
-      
-      const currentBonusBalance = (wallet as any).bonusBalance || 0;
-      
-      // Can't convert more than available bonus balance
-      const convertAmount = Math.min(event.data.amount, currentBonusBalance);
-      
-      if (convertAmount <= 0) {
-        logger.warn('No bonus balance to convert', { walletId: event.data.walletId });
-        return;
-      }
-      
-      // Create transfer: user (bonus) -> user (real) - same user, different balance types
-      try {
-        const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
+      const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
           fromUserId: event.userId!,
           toUserId: event.userId!,  // Same user
           amount: convertAmount,
@@ -610,48 +568,31 @@ function setupBonusEventHandlers() {
           to: 'real',
           transferId: transfer.id,
         }, { skipInternal: true });
-      } catch (transferError) {
-        throw new GraphQLError(PAYMENT_ERRORS.FailedToCreateBonusConversionTransfer, { 
-          error: transferError instanceof Error ? transferError.message : String(transferError), 
-          eventId: event.eventId,
-          walletId: event.data.walletId,
-          userId: event.userId,
-        });
-      }
-    } catch (err) {
-      throw new GraphQLError(PAYMENT_ERRORS.FailedToConvertBonusToRealBalance, {
-        error: err instanceof Error ? err.message : String(err),
+    } catch (transferError) {
+      throw new GraphQLError(PAYMENT_ERRORS.FailedToCreateBonusConversionTransfer, { 
+        error: getErrorMessage(transferError), 
         eventId: event.eventId,
+        walletId: event.data.walletId,
+        userId: event.userId,
       });
     }
-  });
+  }));
   
-  // ═══════════════════════════════════════════════════════════════════
-  // Bonus Forfeited → Debit Bonus Balance
-  // ═══════════════════════════════════════════════════════════════════
-  
-  on<BonusForfeitedData>('bonus.forfeited', async (event: IntegrationEvent<BonusForfeitedData>) => {
+  on<BonusForfeitedData>('bonus.forfeited', withEventHandlerError<IntegrationEvent<BonusForfeitedData>>(PAYMENT_ERRORS.FailedToForfeitBonusFromWallet, async (event) => {
     logger.info('Processing bonus.forfeited - debiting bonus balance', {
       eventId: event.eventId,
       userId: event.userId,
       bonusId: event.data.bonusId,
       forfeitedValue: event.data.forfeitedValue,
     });
-    
+    if (!event.data.walletId) {
+      logger.warn('No walletId in forfeited event, skipping wallet update');
+      return;
+    }
+    const systemUserId = await getSystemUserId(event.tenantId);
     try {
-      if (!event.data.walletId) {
-        logger.warn('No walletId in forfeited event, skipping wallet update');
-        return;
-      }
-      
-      // Get system user ID (bonus pool is system user's bonusBalance)
-      const systemUserId = await getSystemUserId(event.tenantId);
-      
-      // Create transfer: user (bonus) -> system (bonus)
-      // Returns forfeited bonus to system user's bonusBalance (bonus pool)
-      try {
-        const database = await db.getDb();
-        const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
+      const database = await db.getDb();
+      const { transfer, debitTx, creditTx } = await createTransferWithTransactions({
           fromUserId: event.userId!,
           toUserId: systemUserId,
           amount: event.data.forfeitedValue,
@@ -685,25 +626,19 @@ function setupBonusEventHandlers() {
           reason: event.data.reason,
           transferId: transfer.id,
         }, { skipInternal: true });
-      } catch (transferError) {
-        logger.error('Failed to create bonus forfeit transfer', { 
-          error: transferError, 
-          eventId: event.eventId,
-          walletId: event.data.walletId,
-          userId: event.userId,
-        });
-      }
-    } catch (err) {
+    } catch (transferError) {
+      logger.error('Failed to create bonus forfeit transfer', { 
+        error: getErrorMessage(transferError), 
+        eventId: event.eventId,
+        walletId: event.data.walletId,
+        userId: event.userId,
+      });
       throw new GraphQLError(PAYMENT_ERRORS.FailedToForfeitBonusFromWallet, {
-        error: err instanceof Error ? err.message : String(err),
+        error: getErrorMessage(transferError),
         eventId: event.eventId,
       });
     }
-  });
-  
-  // ═══════════════════════════════════════════════════════════════════
-  // Bonus Expired → Debit Bonus Balance
-  // ═══════════════════════════════════════════════════════════════════
+  }));
   
   on<BonusForfeitedData>('bonus.expired', async (event: IntegrationEvent<BonusForfeitedData>) => {
     // Treat expiration same as forfeiture - use same transfer logic
@@ -776,7 +711,7 @@ async function main() {
   registerServiceErrorCodes(PAYMENT_ERROR_CODES);
 
   // Register default configs (auto-created in DB if missing)
-  registerServiceConfigDefaults('payment-service', PAYMENT_CONFIG_DEFAULTS);
+  registerServiceConfigDefaults(SERVICE_NAME, PAYMENT_CONFIG_DEFAULTS);
 
   // Load config (MongoDB + env vars + defaults)
   // Resolve brand/tenantId dynamically (from user context, config store, or env vars)
@@ -784,6 +719,7 @@ async function main() {
   paymentConfig = await loadConfig(context.brand, context.tenantId);
   validateConfig(paymentConfig);
   printConfigSummary(paymentConfig);
+  setUseMongoTransactions(paymentConfig.useMongoTransactions ?? true);
 
   // ═══════════════════════════════════════════════════════════════════
   // Initialize Services
@@ -802,7 +738,7 @@ async function main() {
   // Ensure all registered default configs are created in database
   // This happens after database connection is established
   try {
-    const createdCount = await ensureDefaultConfigsCreated('payment-service', {
+    const createdCount = await ensureDefaultConfigsCreated(SERVICE_NAME, {
       brand: context.brand,
       tenantId: context.tenantId,
     });
@@ -836,102 +772,21 @@ async function main() {
     // Continue - webhooks are optional
   }
   
-  // ✅ CRITICAL: Ensure unique index on metadata.externalRef exists
-  // This prevents duplicate transactions at the database level
+  // ✅ CRITICAL: Ensure unique index on metadata.externalRef for duplicate protection
   try {
     const database = await db.getDb();
     const transactionsCollection = database.collection('transactions');
-    
-    // Check if unique index exists
-    const indexes = await transactionsCollection.indexes();
-    const uniqueExternalRefIndex = indexes.find(idx => 
-      idx.key && 
-      typeof idx.key === 'object' && 
-      'metadata.externalRef' in idx.key && 
-      idx.unique === true
+    await createUniqueIndexSafe(
+      transactionsCollection,
+      { 'metadata.externalRef': 1 },
+      { name: 'metadata.externalRef_1_unique', dropConflictNames: ['metadata.externalRef_1', 'metadata.externalRef_1_unique'] }
     );
-    
-    if (!uniqueExternalRefIndex) {
-      logger.info('Creating unique index on metadata.externalRef for duplicate protection');
-      
-      // Drop any existing non-unique index on metadata.externalRef
-      const existingIndex = indexes.find(idx => 
-        idx.key && 
-        typeof idx.key === 'object' && 
-        'metadata.externalRef' in idx.key
-      );
-      
-      if (existingIndex && existingIndex.name && !existingIndex.unique) {
-        try {
-          await transactionsCollection.dropIndex(existingIndex.name);
-          logger.info(`Dropped existing non-unique index: ${existingIndex.name}`);
-        } catch (dropError: any) {
-          logger.warn('Could not drop existing index, will try to create unique index anyway', {
-            error: dropError.message
-          });
-        }
-      }
-      
-      // Create unique index
-      try {
-        await transactionsCollection.createIndex(
-          { 'metadata.externalRef': 1 },
-          { 
-            unique: true,
-            sparse: true,
-            name: 'metadata.externalRef_1_unique'
-          }
-        );
-        logger.info('✅ Unique index on metadata.externalRef created successfully');
-      } catch (createError: any) {
-        if (isDuplicateKeyError(createError)) {
-          logger.warn('Cannot create unique index - duplicate values exist. Please clean duplicates first.', {
-            error: createError.message
-          });
-        } else if (createError.code === 85 || createError.codeName === 'IndexOptionsConflict') {
-          logger.warn('Index exists with different options. Attempting to recreate...');
-          try {
-            // Try to drop conflicting indexes
-            await transactionsCollection.dropIndex('metadata.externalRef_1').catch(() => {});
-            await transactionsCollection.dropIndex('metadata.externalRef_1_unique').catch(() => {});
-            
-            // Recreate with correct options
-            await transactionsCollection.createIndex(
-              { 'metadata.externalRef': 1 },
-              { 
-                unique: true,
-                sparse: true,
-                name: 'metadata.externalRef_1_unique'
-              }
-            );
-            logger.info('✅ Unique index on metadata.externalRef recreated successfully');
-          } catch (recreateError: any) {
-            // Log but don't throw - index recreation failure is non-critical
-            logger.warn('Failed to recreate unique index on metadata.externalRef', {
-              error: recreateError.message
-            });
-            // Don't throw - service can still run, but duplicates won't be prevented at DB level
-          }
-        } else {
-          logger.error('Failed to create unique index on metadata.externalRef', {
-            error: createError.message,
-            code: createError.code
-          });
-          // Don't throw - service can still run, but duplicates won't be prevented at DB level
-        }
-      }
-    } else {
-      logger.debug('Unique index on metadata.externalRef already exists', {
-        indexName: uniqueExternalRefIndex.name
-      });
-    }
-  } catch (indexError: any) {
+  } catch (indexError: unknown) {
     logger.error('Failed to ensure unique index on metadata.externalRef', {
-      error: indexError.message
+      error: getErrorMessage(indexError),
     });
-    // Don't throw - service can still run, but duplicates won't be prevented at DB level
   }
-  
+
   // Ledger initialization removed - wallets are the source of truth, updated atomically via createTransferWithTransactions
   // Transaction recovery is handled by saga state manager (Redis-backed)
   logger.info('Payment service initialized - using wallets + transactions architecture');
@@ -958,7 +813,7 @@ async function main() {
   }, 24 * 60 * 60 * 1000); // Daily
   
   // Start listening to events from Redis
-  if (process.env.REDIS_URL) {
+  if (paymentConfig.redisUrl) {
     try {
       // Subscribe to event channels
       const channels = [

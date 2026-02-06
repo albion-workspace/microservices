@@ -48,6 +48,7 @@ import { CircuitBreaker, CircuitBreakerOpenError } from '../resilience/circuit-b
 import { retry, RetryConfigs } from '../resilience/retry.js';
 import type { Db } from 'mongodb';
 import type { DatabaseStrategyResolver, DatabaseContext } from '../../databases/mongodb/strategy.js';
+import { timestampFieldsRequiredSDL } from '../graphql/sdl-fragments.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -1137,8 +1138,7 @@ export const webhookGraphQLTypes = `
     disabledReason: String
     deliveries: [WebhookDelivery!]!
     deliveryCount: Int!
-    createdAt: String!
-    updatedAt: String!
+    ${timestampFieldsRequiredSDL()}
   }
 
   type WebhookDelivery {

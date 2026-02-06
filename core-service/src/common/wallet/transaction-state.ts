@@ -10,6 +10,7 @@
 
 import { getRedis } from '../../databases/redis/connection.js';
 import { logger } from '../logger.js';
+import { getErrorMessage } from '../errors.js';
 
 /**
  * Transaction state for crash recovery tracking
@@ -69,7 +70,7 @@ export class TransactionStateManager {
     } catch (error) {
       logger.error('Failed to set transaction state in Redis', {
         stateId: state._id,
-        error: error instanceof Error ? error.message : String(error),
+        error: getErrorMessage(error),
       });
     }
   }
@@ -102,7 +103,7 @@ export class TransactionStateManager {
     } catch (error) {
       logger.error('Failed to get transaction state from Redis', {
         stateId,
-        error: error instanceof Error ? error.message : String(error),
+        error: getErrorMessage(error),
       });
       return null;
     }
@@ -149,7 +150,7 @@ export class TransactionStateManager {
     } catch (error) {
       logger.debug('Failed to update transaction heartbeat', {
         stateId,
-        error: error instanceof Error ? error.message : String(error),
+        error: getErrorMessage(error),
       });
     }
   }
@@ -203,7 +204,7 @@ export class TransactionStateManager {
       logger.error('Failed to update transaction state status', {
         stateId,
         status,
-        error: error instanceof Error ? error.message : String(error),
+        error: getErrorMessage(error),
       });
     }
   }
@@ -224,7 +225,7 @@ export class TransactionStateManager {
     } catch (error) {
       logger.debug('Failed to delete transaction state', {
         stateId,
-        error: error instanceof Error ? error.message : String(error),
+        error: getErrorMessage(error),
       });
     }
   }
@@ -302,7 +303,7 @@ export class TransactionStateManager {
           // Skip invalid keys
           logger.debug('Failed to parse transaction state during scan', {
             key,
-            error: error instanceof Error ? error.message : String(error),
+            error: getErrorMessage(error),
           });
         }
       }
@@ -315,7 +316,7 @@ export class TransactionStateManager {
       return stuckTransactions;
     } catch (error) {
       logger.error('Failed to find stuck transactions', {
-        error: error instanceof Error ? error.message : String(error),
+        error: getErrorMessage(error),
       });
       return [];
     }
@@ -357,7 +358,7 @@ export class TransactionStateManager {
       } catch (error) {
         logger.error('Failed to recover stuck transaction', {
           txId: tx._id,
-          error: error instanceof Error ? error.message : String(error),
+          error: getErrorMessage(error),
         });
       }
     }

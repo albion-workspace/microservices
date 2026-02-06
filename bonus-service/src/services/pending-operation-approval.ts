@@ -23,7 +23,7 @@
 import { createPendingOperationStore, scanKeysIterator } from 'core-service';
 import { logger, requireAuth } from 'core-service';
 import type { ResolverContext } from 'core-service';
-import { redis } from '../redis.js';
+import { redis } from '../accessors.js';
 
 export interface PendingOperationData extends Record<string, unknown> {
   requestedAt: number;

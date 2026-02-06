@@ -11,9 +11,13 @@ import {
   type SagaContext, 
   validateInput, 
   createTransferWithTransactions,
+  buildConnectionTypeSDL,
+  buildSagaResultTypeSDL,
+  timestampFieldsSDL,
   type ClientSession,
 } from 'core-service';
-import { db } from '../database.js';
+import { getUseMongoTransactions } from '../config.js';
+import { db } from '../accessors.js';
 import type { Transfer as PaymentTransfer, Transaction } from '../types.js';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -115,9 +119,11 @@ export const transferService = createService<PaymentTransfer, CreateTransferInpu
     name: 'transfer',
     collection: 'transfers',
     graphqlType: `
-      type Transfer { id: ID! fromUserId: String! toUserId: String! amount: Float! status: String! charge: String! meta: JSON createdAt: String! updatedAt: String }
-      type TransferConnection { nodes: [Transfer!]! totalCount: Int! pageInfo: PageInfo! }
-      type CreateTransferResult { success: Boolean! transfer: Transfer debitTransaction: Transaction creditTransaction: Transaction sagaId: ID! errors: [String!] executionTimeMs: Int }
+      type Transfer { id: ID! fromUserId: String! toUserId: String! amount: Float! status: String! charge: String! meta: JSON
+    ${timestampFieldsSDL()}
+  }
+      ${buildConnectionTypeSDL('TransferConnection', 'Transfer')}
+      ${buildSagaResultTypeSDL('CreateTransferResult', 'transfer', 'Transfer', 'debitTransaction: Transaction creditTransaction: Transaction')}
     `,
     graphqlInput: `input CreateTransferInput { fromUserId: String! toUserId: String! amount: Float! currency: String! tenantId: String feeAmount: Float method: String externalRef: String description: String approvalMode: String }`,
     validateInput: (input) => {
@@ -135,7 +141,7 @@ export const transferService = createService<PaymentTransfer, CreateTransferInpu
   // CRITICAL: Financial operations MUST use transaction mode
   // Recovery system relies on this - see README "Saga, Transaction, and Recovery Boundaries"
   sagaOptions: {
-    useTransaction: process.env.MONGO_TRANSACTIONS !== 'false', // Should always be true for financial ops
+    get useTransaction() { return getUseMongoTransactions(); }, // Financial ops
     maxRetries: 3,
   },
 });

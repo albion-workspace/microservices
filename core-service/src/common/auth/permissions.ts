@@ -148,3 +148,19 @@ export const sameTenant = sameTenantEngine;
  * All other roles (admin, moderator, etc.) are business logic and use permissions
  */
 export const isSystem = (): PermissionRule => hasRole('system');
+
+/**
+ * Check if user has system role or specific permission (URN: resource:action:target).
+ * Use in resolvers for "system or permission" checks. Only 'system' role has full access;
+ * other roles use permissions via access-engine URN format.
+ */
+export function checkSystemOrPermission(
+  user: UserContext | null,
+  resource: string,
+  action: string,
+  target: string = '*'
+): boolean {
+  if (!user) return false;
+  if (hasRole('system')(user)) return true;
+  return matchAnyUrn(user.permissions || [], `${resource}:${action}:${target}`);
+}

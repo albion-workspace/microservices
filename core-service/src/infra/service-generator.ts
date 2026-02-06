@@ -1,10 +1,18 @@
 /**
  * Microservice scaffold generator
  *
- * Generates a new microservice folder that follows project coding standards:
- * - Dynamic config from MongoDB (getConfigWithDefault, registerServiceConfigDefaults)
- * - createServiceDatabaseAccess (per-service or core_service)
+ * Single source of truth for generic microservice structure. Emitted files use
+ * ONLY getServiceConfigKey / getConfigWithDefault and the config object—no process.env. Exception:
+ * core-service itself or auth-service when using core DB may need process.env
+ * for bootstrap/strategy resolution (outside this generator; generator never emits process.env).
+ *
+ * - Dynamic config from MongoDB (getServiceConfigKey with fallbackService, registerServiceConfigDefaults)
+ * - Per-service/per-brand DB init: createServiceDatabaseAccess, createServiceRedisAccess;
+ *   db.initialize({ brand, tenantId }), redis.initialize({ brand }) after resolveContext/loadConfig
+ * - Config: getServiceConfigKey(serviceName, key, defaultVal, { fallbackService: 'gateway' }) for common keys;
+ *   service-only keys use getServiceConfigKey(..., { brand, tenantId }) (no fallback).
  * - GraphQL types + resolvers, permissions, createGateway
+ * - SDL helpers: timestampFieldsSDL, buildSagaResultTypeSDL, buildConnectionTypeSDL, paginationArgsSDL
  * - Error codes (registerServiceErrorCodes), optional Redis, optional webhooks
  *
  * Usage: service-infra service --name <name> [--port 9006] [--output ../../] [--redis] [--webhooks] [--core-db]
@@ -136,17 +144,15 @@ export async function generateService(options: ServiceGeneratorOptions): Promise
 
   // ─── src/database.ts ─────────────────────────────────────────────────────
   await write(
-    'src/database.ts',
+    'src/accessors.ts',
     `/**
- * ${serviceNamePascal} Service Database Access
- *
- * Uses createServiceDatabaseAccess from core-service for consistent database access.
- * ${useCoreDatabase ? `${serviceNamePascal} uses shared core_service database.` : `Per-service database: ${databaseName}.`}
+ * ${serviceNamePascal} service accessors (db + redis) from one factory call.
+ * ${useCoreDatabase ? `Uses core_service database.` : `Per-service database: ${databaseName}.`}
  */
 
-import { createServiceDatabaseAccess } from 'core-service';
+import { createServiceAccessors } from 'core-service';
 
-export const db = createServiceDatabaseAccess('${dbAccessorName}');
+export const { db, redis } = createServiceAccessors('${serviceNameKebab}'${useCoreDatabase ? ", { databaseServiceName: 'core-service' }" : ''});
 `
   );
 
@@ -179,8 +185,8 @@ export type ${serviceNamePascal}ErrorCode = typeof ${serviceNameConst.toUpperCas
  * ${serviceNamePascal} Service Configuration Defaults
  *
  * Pass to registerServiceConfigDefaults('${serviceNameKebab}', ...) in index.ts.
- * Stored in core_service.service_configs; use loadConfig() in config.ts.
- * No process.env: all config via getConfigWithDefault (CODING_STANDARDS).
+ * Stored in core_service.service_configs. config.ts loadConfig() uses getServiceConfigKey(SERVICE_NAME, key, defaultVal, opts) with these keys; common keys use opts with fallbackService: 'gateway'.
+ * No process.env (CODING_STANDARDS).
  */
 
 export const ${serviceNameConst.toUpperCase()}_CONFIG_DEFAULTS = {
@@ -226,29 +232,33 @@ export const ${serviceNameConst.toUpperCase()}_CONFIG_DEFAULTS = {
  * ${serviceNamePascal} Service Configuration
  *
  * Dynamic config only: MongoDB config store + registered defaults. No process.env (CODING_STANDARDS).
+ * Single pattern: getServiceConfigKey(serviceName, key, defaultVal, opts). Common keys use opts with fallbackService: 'gateway'.
+ * Service-only keys use { brand, tenantId } only. Add service-specific keys and register in config-defaults.ts.
  */
 
-import { getConfigWithDefault } from 'core-service';
+import { getServiceConfigKey } from 'core-service';
 import type { ${serviceNamePascal}Config } from './types.js';
 
-const SERVICE_NAME = '${serviceNameKebab}';
+export const SERVICE_NAME = '${serviceNameKebab}';
+
+const opts = (brand?: string, tenantId?: string) => ({ brand, tenantId, fallbackService: 'gateway' as const });
 
 export async function loadConfig(brand?: string, tenantId?: string): Promise<${serviceNamePascal}Config> {
-  const port = (await getConfigWithDefault<number>(SERVICE_NAME, 'port', { brand, tenantId })) ?? ${port};
-  const serviceName = (await getConfigWithDefault<string>(SERVICE_NAME, 'serviceName', { brand, tenantId })) ?? SERVICE_NAME;
-  const nodeEnv = (await getConfigWithDefault<string>(SERVICE_NAME, 'nodeEnv', { brand, tenantId })) ?? 'development';
-  const corsOrigins = await getConfigWithDefault<string[]>(SERVICE_NAME, 'corsOrigins', { brand, tenantId }) ?? [
+  const port = await getServiceConfigKey<number>(SERVICE_NAME, 'port', ${port}, opts(brand, tenantId));
+  const serviceName = await getServiceConfigKey<string>(SERVICE_NAME, 'serviceName', SERVICE_NAME, opts(brand, tenantId));
+  const nodeEnv = await getServiceConfigKey<string>(SERVICE_NAME, 'nodeEnv', 'development', opts(brand, tenantId));
+  const corsOrigins = await getServiceConfigKey<string[]>(SERVICE_NAME, 'corsOrigins', [
     'http://localhost:5173',
     'http://localhost:3000',
     'http://127.0.0.1:5173',
-  ];
-  const jwtConfig = await getConfigWithDefault<{ secret: string; expiresIn: string; refreshSecret: string; refreshExpiresIn: string }>(SERVICE_NAME, 'jwt', { brand, tenantId }) ?? {
+  ], opts(brand, tenantId));
+  const jwtConfig = await getServiceConfigKey<{ secret: string; expiresIn: string; refreshSecret: string; refreshExpiresIn: string }>(SERVICE_NAME, 'jwt', {
     secret: '',
     expiresIn: '1h',
     refreshSecret: '',
     refreshExpiresIn: '7d',
-  };
-  const databaseConfig = await getConfigWithDefault<{ mongoUri?: string; redisUrl?: string }>(SERVICE_NAME, 'database', { brand, tenantId }) ?? { mongoUri: '', redisUrl: '' };
+  }, opts(brand, tenantId));
+  const databaseConfig = await getServiceConfigKey<{ mongoUri?: string; redisUrl?: string }>(SERVICE_NAME, 'database', { mongoUri: '', redisUrl: '' }, opts(brand, tenantId));
 
   return {
     port: typeof port === 'number' ? port : parseInt(String(port), 10),
@@ -257,7 +267,7 @@ export async function loadConfig(brand?: string, tenantId?: string): Promise<${s
     corsOrigins,
     mongoUri: databaseConfig.mongoUri || undefined,
     redisUrl: databaseConfig.redisUrl || undefined,
-    jwtSecret: jwtConfig.secret || 'change-in-production',
+    jwtSecret: jwtConfig.secret || 'shared-jwt-secret-change-in-production',
     jwtExpiresIn: jwtConfig.expiresIn,
     jwtRefreshSecret: jwtConfig.refreshSecret,
     jwtRefreshExpiresIn: jwtConfig.refreshExpiresIn,
@@ -265,7 +275,7 @@ export async function loadConfig(brand?: string, tenantId?: string): Promise<${s
 }
 
 export function validateConfig(config: ${serviceNamePascal}Config): void {
-  if (!config.jwtSecret || config.jwtSecret === 'change-in-production') {
+  if (!config.jwtSecret || config.jwtSecret === 'shared-jwt-secret-change-in-production') {
     console.warn('JWT secret should be set in config store for production');
   }
 }
@@ -281,20 +291,12 @@ export function printConfigSummary(config: ${serviceNamePascal}Config): void {
     'src/types.ts',
     `/**
  * ${serviceNamePascal} Service shared types
+ * Config extends DefaultServiceConfig (common props from core-service); add only service-specific props here.
  */
 
-export interface ${serviceNamePascal}Config {
-  port: number;
-  nodeEnv: string;
-  serviceName: string;
-  corsOrigins: string[];
-  mongoUri?: string;
-  redisUrl?: string;
-  jwtSecret: string;
-  jwtExpiresIn: string;
-  jwtRefreshSecret?: string;
-  jwtRefreshExpiresIn?: string;
-}
+import type { DefaultServiceConfig } from 'core-service';
+
+export interface ${serviceNamePascal}Config extends DefaultServiceConfig {}
 `
   );
 
@@ -305,10 +307,35 @@ export interface ${serviceNamePascal}Config {
  * GraphQL schema and resolvers for ${serviceNamePascal} Service
  *
  * Follow auth-service/notification-service pattern: types string + createResolvers(config).
+ *
+ * REUSABLE SDL HELPERS (from core-service – single source of truth, see CODING_STANDARDS § GraphQL):
+ *   timestampFieldsSDL()         → createdAt: String!  updatedAt: String   (default)
+ *   timestampFieldsRequiredSDL() → createdAt: String!  updatedAt: String!  (User, Config, Webhook)
+ *   timestampFieldsOptionalSDL() → createdAt: String   updatedAt: String   (KYC, Bonus)
+ *   buildSagaResultTypeSDL(name, field, type, extra?) → type XResult { success … sagaId … }
+ *   paginationArgsSDL()          → first: Int, after: String, last: Int, before: String
+ *   buildConnectionTypeSDL(conn, node) → type XConnection { nodes … totalCount … pageInfo … }
+ *
+ * Example usage in SDL template literals:
+ *   type Item { id: ID! name: String! \${timestampFieldsSDL()} }
+ *   \${buildSagaResultTypeSDL('CreateItemResult', 'item', 'Item')}
+ *   \${buildConnectionTypeSDL('ItemConnection', 'Item')}
+ *   extend type Query { items(\${paginationArgsSDL()}): ItemConnection! }
  */
 
 import type { ResolverContext } from 'core-service';
-import { allow, getUserId, getTenantId } from 'core-service';
+import {
+  allow,
+  getUserId,
+  getTenantId,
+  // SDL helpers – use these instead of writing inline SDL (single source of truth):
+  buildConnectionTypeSDL,
+  timestampFieldsSDL,
+  timestampFieldsRequiredSDL,
+  timestampFieldsOptionalSDL,
+  buildSagaResultTypeSDL,
+  paginationArgsSDL,
+} from 'core-service';
 import type { ${serviceNamePascal}Config } from './types.js';
 
 export const ${graphqlTypesName} = \`
@@ -344,7 +371,21 @@ export function create${serviceNamePascal}Resolvers(config: ${serviceNamePascal}
     `/**
  * ${serviceNamePascal} domain services
  *
- * Add service classes and repositories here; export from index.
+ * Add createService definitions here; export from index.
+ *
+ * REUSABLE PATTERNS (from core-service – avoid reinventing, see CODING_STANDARDS):
+ *   createService<Entity, Input>({ name, entity, saga, ... })  → saga-based CRUD service
+ *   buildSagaResultTypeSDL(name, field, type, extra?)           → saga result SDL (in graphql.ts)
+ *   buildConnectionTypeSDL(connectionName, nodeType)            → connection type SDL (in graphql.ts)
+ *   timestampFieldsSDL() / Required / Optional                  → timestamp fields SDL (in graphql.ts)
+ *   paginationArgsSDL()                                         → cursor pagination args (in graphql.ts)
+ *   withEventHandlerError(errorCode, handler)                   → event handler error wrapper
+ *   createUniqueIndexSafe(collection, key, options)             → safe unique index creation
+ *   getErrorMessage(error)                                      → consistent error string extraction
+ *   normalizeWalletForGraphQL(wallet)                           → wallet null-coalescing (payment only)
+ *   paginateCollection(collection, opts)                        → cursor-based pagination
+ *
+ * See existing services (auth, payment, bonus, kyc, notification) for real examples.
  */
 
 // Placeholder - add your service exports
@@ -353,10 +394,8 @@ export {};
   );
 
   // ─── src/index.ts ────────────────────────────────────────────────────────
-  const redisImport = useRedis
-    ? `
-import { redis } from './redis.js';`
-    : '';
+  const accessorsImport = `
+import { db, redis } from './accessors.js';`;
   const redisInit = useRedis
     ? `
   if (config.redisUrl) {
@@ -400,15 +439,15 @@ import {
   configureRedisStrategy,
   startListening,
 } from 'core-service';
-import { db } from './database.js';${redisImport}${eventDispatcherImport}
+${accessorsImport}${eventDispatcherImport}
 
-import { loadConfig, validateConfig, printConfigSummary } from './config.js';
+import { loadConfig, validateConfig, printConfigSummary, SERVICE_NAME } from './config.js';
 import { ${serviceNameConst.toUpperCase()}_CONFIG_DEFAULTS } from './config-defaults.js';
 import { ${serviceNameConst.toUpperCase()}_ERROR_CODES } from './error-codes.js';
 import { ${graphqlTypesName}, create${serviceNamePascal}Resolvers } from './graphql.js';
 
 async function main() {
-  registerServiceConfigDefaults('${serviceNameKebab}', ${serviceNameConst.toUpperCase()}_CONFIG_DEFAULTS);
+  registerServiceConfigDefaults(SERVICE_NAME, ${serviceNameConst.toUpperCase()}_CONFIG_DEFAULTS);
   const context = await resolveContext();
   const config = await loadConfig(context.brand, context.tenantId);
   validateConfig(config);
@@ -443,7 +482,7 @@ async function main() {
   });${redisInit}
 
   try {
-    const created = await ensureDefaultConfigsCreated('${serviceNameKebab}', { brand: context.brand, tenantId: context.tenantId });
+    const created = await ensureDefaultConfigsCreated(SERVICE_NAME, { brand: context.brand, tenantId: context.tenantId });
     if (created > 0) logger.info(\`Created \${created} default config(s)\`);
   } catch (e) {
     logger.warn('ensureDefaultConfigsCreated failed', { error: (e as Error).message });
@@ -470,19 +509,6 @@ main().catch((err) => {
   await write('src/index.ts', indexContent);
 
   if (useRedis) {
-    await write(
-      'src/redis.ts',
-      `/**
- * ${serviceNamePascal} Service Redis accessor
- *
- * Uses createServiceRedisAccess from core-service. Initialize after createGateway (configureRedisStrategy).
- */
-
-import { createServiceRedisAccess } from 'core-service';
-
-export const redis = createServiceRedisAccess('${serviceNameKebab}');
-`
-    );
   }
 
   if (useWebhooks) {

@@ -1,9 +1,8 @@
 /**
- * Bonus Service - Multi-domain bonus and reward management
- * 
- * Supports: betting, crypto, social, gaming, ecommerce, fintech
- * 
- * Features:
+ * Bonus Service
+ * Aligned with service generator scaffold (accessors, config, createGateway). Domain-specific code below.
+ *
+ * Multi-domain bonus and reward management (betting, crypto, social, gaming, ecommerce, fintech). Features:
  * - Multiple bonus types (welcome, deposit, referral, wagering, etc.)
  * - Saga-based state management with rollback
  * - Wagering requirements tracking
@@ -34,16 +33,14 @@ import {
   type IntegrationEvent,
   type ResolverContext,
 } from 'core-service';
-
-// Local Redis accessor
-import { redis } from './redis.js';
+import { db, redis } from './accessors.js';
 import { hasAnyRole as hasAnyRoleAccess } from 'core-service/access';
 
 // Local imports
 import { BONUS_ERRORS, BONUS_ERROR_CODES } from './error-codes.js';
 import { setupRecovery } from './recovery-setup.js';
 import { createBonusEngine, type BonusEngineOptions } from './services/bonus-engine/index.js';
-import { loadConfig, validateConfig, printConfigSummary, type BonusConfig } from './config.js';
+import { loadConfig, validateConfig, printConfigSummary, setUseMongoTransactions, SERVICE_NAME, type BonusConfig } from './config.js';
 import { BONUS_CONFIG_DEFAULTS } from './config-defaults.js';
 import {
   bonusWebhooks,
@@ -968,7 +965,7 @@ async function main() {
   registerServiceErrorCodes(BONUS_ERROR_CODES);
 
   // Register default configs (auto-created in DB if missing)
-  registerServiceConfigDefaults('bonus-service', BONUS_CONFIG_DEFAULTS);
+  registerServiceConfigDefaults(SERVICE_NAME, BONUS_CONFIG_DEFAULTS);
 
   // Load config (MongoDB + env vars + defaults)
   // Resolve brand/tenantId dynamically (from user context, config store, or env vars)
@@ -976,7 +973,7 @@ async function main() {
   bonusConfig = await loadConfig(context.brand, context.tenantId);
   validateConfig(bonusConfig);
   printConfigSummary(bonusConfig);
-
+  setUseMongoTransactions(bonusConfig.useMongoTransactions ?? true);
 
   // ═══════════════════════════════════════════════════════════════════
   // Initialize Services
@@ -1002,11 +999,11 @@ async function main() {
   await createGateway(buildGatewayConfig());
 
   // Initialize Redis accessor (after gateway connects to Redis)
-  if (process.env.REDIS_URL) {
+  if (bonusConfig.redisUrl) {
     try {
       await configureRedisStrategy({
         strategy: 'shared',
-        defaultUrl: process.env.REDIS_URL,
+        defaultUrl: bonusConfig.redisUrl,
       });
       await redis.initialize({ brand: context.brand });
       logger.info('Redis accessor initialized', { brand: context.brand });
@@ -1018,7 +1015,7 @@ async function main() {
   // Ensure all registered default configs are created in database
   // This happens after database connection is established
   try {
-    const createdCount = await ensureDefaultConfigsCreated('bonus-service', {
+    const createdCount = await ensureDefaultConfigsCreated(SERVICE_NAME, {
       brand: context.brand,
       tenantId: context.tenantId,
     });
@@ -1074,7 +1071,7 @@ async function main() {
   }, 24 * 60 * 60 * 1000); // Daily
   
   // Start listening to Redis channels after gateway is up
-  if (process.env.REDIS_URL) {
+  if (bonusConfig.redisUrl) {
     try {
       // Subscribe to all relevant event channels
       const channels = [

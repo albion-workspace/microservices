@@ -5,12 +5,11 @@
  * that work with the microservices.
  */
 
-// Service JWT secrets (must match service configuration)
-// Use shared secret to match all services' default configuration
-const sharedSecret = (import.meta.env as any).VITE_JWT_SECRET || (import.meta.env as any).VITE_SHARED_JWT_SECRET || 'shared-jwt-secret-change-in-production';
+// Service JWT secrets (must match service configuration; single secret, can be shared or customized)
+const jwtSecret = (import.meta.env as any).VITE_JWT_SECRET || 'shared-jwt-secret-change-in-production';
 export const JWT_SECRETS = {
-  payment: sharedSecret,
-  bonus: sharedSecret,
+  payment: jwtSecret,
+  bonus: jwtSecret,
 }
 
 // Service URLs

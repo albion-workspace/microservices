@@ -16,7 +16,8 @@ import { RoleResolver, type UserRole, type User as AccessEngineUser } from 'core
 import { normalizeDocument, logger } from 'core-service';
 
 // Local imports
-import type { AuthConfig, IdentifierType, User } from './types.js';
+import type { AuthConfig } from './config.js';
+import type { IdentifierType, User } from './types.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Token Utilities

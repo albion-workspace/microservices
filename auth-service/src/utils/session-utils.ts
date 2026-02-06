@@ -4,7 +4,7 @@
  */
 
 import { normalizeDocument, generateMongoId, extractDocumentId, findById } from 'core-service';
-import { db } from '../database.js';
+import { db } from '../accessors.js';
 import type { Session, DeviceInfo } from '../types.js';
 import { hashToken, generateRefreshToken, addSeconds } from '../utils.js';
 

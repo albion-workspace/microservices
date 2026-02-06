@@ -1343,7 +1343,7 @@ async function getPendingOperations(recipient?: string, operationType?: 'registr
   
   try {
     // Connect to Redis
-    const redisUrl = process.env.REDIS_URL || `redis://:${process.env.REDIS_PASSWORD || 'redis123'}@localhost:6379`;
+    const redisUrl = process.env.REDIS_URL || (process.env.REDIS_PASSWORD ? `redis://:${process.env.REDIS_PASSWORD}@localhost:6379` : 'redis://localhost:6379');
     await connectRedis(redisUrl);
     const redis = getRedis();
     
