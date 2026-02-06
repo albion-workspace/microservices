@@ -1,6 +1,7 @@
 /**
  * Notification Service
- * 
+ * Aligned with service generator scaffold (accessors, config, createGateway). Domain-specific code below.
+ *
  * Multi-channel notification service supporting:
  * - Email (SMTP)
  * - SMS (Twilio)

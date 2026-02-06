@@ -1,6 +1,6 @@
 /**
- * Auth service accessors (db + redis) from a single factory call.
- * Uses core-service DB for users/sessions/configs.
+ * Auth service accessors (db + redis) from one factory call.
+ * Uses core_service database.
  */
 
 import { createServiceAccessors } from 'core-service';

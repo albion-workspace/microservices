@@ -1,9 +1,8 @@
 /**
- * Bonus Service - Multi-domain bonus and reward management
- * 
- * Supports: betting, crypto, social, gaming, ecommerce, fintech
- * 
- * Features:
+ * Bonus Service
+ * Aligned with service generator scaffold (accessors, config, createGateway). Domain-specific code below.
+ *
+ * Multi-domain bonus and reward management (betting, crypto, social, gaming, ecommerce, fintech). Features:
  * - Multiple bonus types (welcome, deposit, referral, wagering, etc.)
  * - Saga-based state management with rollback
  * - Wagering requirements tracking
@@ -34,9 +33,7 @@ import {
   type IntegrationEvent,
   type ResolverContext,
 } from 'core-service';
-
-// Local Redis accessor
-import { redis } from './accessors.js';
+import { db, redis } from './accessors.js';
 import { hasAnyRole as hasAnyRoleAccess } from 'core-service/access';
 
 // Local imports

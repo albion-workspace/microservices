@@ -1,5 +1,6 @@
 /**
- * Bonus service accessors (db + redis) from a single factory call.
+ * Bonus service accessors (db + redis) from one factory call.
+ * Per-service database: bonus_service.
  */
 
 import { createServiceAccessors } from 'core-service';

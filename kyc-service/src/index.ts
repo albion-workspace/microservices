@@ -1,6 +1,7 @@
 /**
- * KYC Service Entry Point
- * 
+ * KYC Service
+ * Aligned with service generator scaffold (accessors, config, createGateway). Domain-specific code below.
+ *
  * Generic KYC/Identity Verification Service supporting:
  * - Multi-tier verification (basic → standard → enhanced → full → professional)
  * - Provider-agnostic (Onfido, Sumsub, Jumio, etc.)

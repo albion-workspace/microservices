@@ -4,7 +4,7 @@
 
 **Project Status**: Pre-Production - This project has not yet been released to production. Code cleanup rules are simplified (no backward compatibility concerns). After production/release, these rules will be updated to include backward compatibility and legacy code management.
 
-**Last Updated**: 2026-02-02
+**Last Updated**: 2026-02-06
 
 ---
 
@@ -89,12 +89,13 @@ Before making any changes, follow this checklist:
 
 3. **Internal Packages** (core-service, core-service/access, etc.)
    ```typescript
-   import { logger, createServiceDatabaseAccess } from 'core-service';
+   import { logger, createServiceAccessors } from 'core-service';
    import { matchAnyUrn } from 'core-service/access';
    ```
 
 4. **Local Imports** (relative paths: `./`, `../`)
    ```typescript
+   import { db, redis } from './accessors.js';
    import { rolesToArray, normalizeUser } from './utils.js';
    import { SYSTEM_CURRENCY } from '../constants.js';
    ```
@@ -124,10 +125,11 @@ import { Server as SocketIOServer } from 'socket.io';
 import { GraphQLSchema, GraphQLObjectType } from 'graphql';
 
 // Internal packages
-import { logger, createServiceDatabaseAccess } from 'core-service';
+import { logger, createServiceAccessors } from 'core-service';
 import { matchAnyUrn } from 'core-service/access';
 
 // Local imports
+import { db, redis } from './accessors.js';
 import { rolesToArray } from './utils.js';
 import { SYSTEM_CURRENCY } from '../constants.js';
 
@@ -288,11 +290,15 @@ export async function verifyPassword(password: string, hash: string): Promise<bo
 
 ### shared-validators Package
 
-**Purpose**: Client-safe eligibility validators for bonus and KYC validation. Pure functions with no database dependencies.
+**Purpose**: Client-safe validators and utilities. Pure functions with no database dependencies. Used by the React app and services.
 
 **Usage**:
 ```typescript
-import { BonusEligibility, KYCEligibility } from 'shared-validators';
+import { BonusEligibility, KYCEligibility, decodeJWT, isExpired } from 'shared-validators';
+
+// JWT (client-safe decode only; no verification)
+const payload = decodeJWT(accessToken);
+if (payload && isExpired(payload)) { /* refresh or clear */ }
 
 // Bonus eligibility
 const result = BonusEligibility.check(template, { kycTier: 'standard' });
@@ -309,14 +315,15 @@ const txResult = KYCEligibility.checkTransaction(limits, {
 const requirements = KYCEligibility.getTierRequirements('enhanced');
 ```
 
-**Classes**:
-- `BonusEligibility` - Check bonus template eligibility (active, date range, tier, country, KYC tier)
-- `KYCEligibility` - Check transaction limits, tier requirements, action permissions
+**Exports**:
+- `decodeJWT`, `isExpired`, `JwtPayload` – client-safe JWT decode (e.g. auth-context, token expiry checks)
+- `BonusEligibility` – bonus template eligibility (active, date range, tier, country, KYC tier)
+- `KYCEligibility` – transaction limits, tier requirements, action permissions
 
 **Key Principles**:
 - All types are self-contained (no external dependencies)
-- Static classes with pure functions
-- No database calls - validation only
+- Pure functions / static classes
+- No database calls – validation and decode only
 - Same code runs on client and server
 
 
@@ -555,19 +562,21 @@ See `gateway/README.md` for full documentation.
 
 ### Service Structure
 
-Every microservice follows this standard structure:
+Every microservice follows this standard structure (aligned with the service generator). Use a single **accessors** module for db + redis; do not add separate `database.ts` or `redis.ts` re-exports.
 
 ```
 service-name/
 ├── src/
-│   ├── index.ts           # Entry point with createGateway
-│   ├── database.ts        # MongoDB accessor
-│   ├── redis.ts           # Redis accessor
-│   ├── config.ts          # Service configuration
+│   ├── index.ts           # Entry point with createGateway; imports from ./accessors.js
+│   ├── accessors.ts       # db + redis via createServiceAccessors (single factory call)
+│   ├── config.ts          # Service configuration (getConfigWithDefault / getServiceConfigKey)
+│   ├── config-defaults.ts # registerServiceConfigDefaults values
+│   ├── error-codes.ts     # SERVICE_ERRORS, SERVICE_ERROR_CODES
+│   ├── graphql.ts         # Types + createResolvers
 │   ├── services/
 │   │   └── feature.ts     # createService definitions
 │   ├── repositories/
-│   │   └── feature-repository.ts  # Extends BaseRepository
+│   │   └── feature-repository.ts  # Extends BaseRepository; import db from ../accessors.js
 │   └── types/
 │       └── feature-types.ts
 ├── package.json
@@ -595,35 +604,29 @@ service-name/
 }
 ```
 
-### Step 2: Create Database Accessor (`database.ts`)
+### Step 2: Create accessors (`accessors.ts`) – db + redis in one call
+
+Use a single **accessors** module. Do not create separate `database.ts` or `redis.ts`; all code imports `db` and `redis` from `./accessors.js`.
 
 ```typescript
-import { createServiceDatabaseAccess } from 'core-service';
+/**
+ * {ServiceName} service accessors (db + redis) from one factory call.
+ * Per-service database: {service_name}.   (or: Uses core_service database. for auth)
+ */
 
-// Create the database accessor for this service
-export const db = createServiceDatabaseAccess('service-name');
+import { createServiceAccessors } from 'core-service';
 
-// Usage in service code:
-// await db.initialize({ brand: 'default', tenantId: 'default' });
-// const database = await db.getDb();
-// const collection = database.collection('my_collection');
+export const { db, redis } = createServiceAccessors('service-name');
+
+// Auth-service uses shared DB: createServiceAccessors('auth-service', { databaseServiceName: 'core-service' });
 ```
 
-### Step 3: Create Redis Accessor (`redis.ts`)
+**Usage in service code:**
+- `await db.initialize({ brand, tenantId });` then `const database = await db.getDb();`
+- `await redis.initialize({ brand });` then `await redis.set('key', value, ttl);` / `redis.get<T>('key')`
+- All other files import: `import { db, redis } from './accessors.js';` or `from '../accessors.js';`
 
-```typescript
-import { createServiceRedisAccess } from 'core-service';
-
-// Create the Redis accessor for this service
-export const redis = createServiceRedisAccess('service-name');
-
-// Usage in service code:
-// await redis.initialize({ brand: 'default' });
-// await redis.set('key', value, ttlSeconds);
-// const value = await redis.get<T>('key');
-```
-
-### Step 4: Create Service with GraphQL (`services/feature.ts`)
+### Step 3: Create Service with GraphQL (`services/feature.ts`)
 
 ```typescript
 import { createService, type SagaContext, type Repository } from 'core-service';
@@ -718,9 +721,18 @@ export const featureService = createService<Feature, CreateFeatureInput>({
 });
 ```
 
-### Step 5: Create Entry Point (`index.ts`)
+### Step 4: Create Entry Point (`index.ts`)
+
+Keep import order: core-service → accessors → local. Index header should include: "Aligned with service generator scaffold (accessors, config, createGateway). Domain-specific code below."
 
 ```typescript
+/**
+ * {ServiceName} Service
+ * Aligned with service generator scaffold (accessors, config, createGateway). Domain-specific code below.
+ *
+ * (Domain description...)
+ */
+
 import {
   createGateway,
   logger,
@@ -728,17 +740,14 @@ import {
   type ResolverContext,
   type GatewayConfig,
 } from 'core-service';
+import { db, redis } from './accessors.js';
 
-import { db } from './database.js';
-import { redis } from './redis.js';
+import { loadConfig, validateConfig, printConfigSummary, SERVICE_NAME } from './config.js';
 import { featureService } from './services/feature.js';
 
-// Configuration
-const config = {
-  port: parseInt(process.env.PORT || '9006', 10),
-  mongoUri: process.env.MONGODB_URI || 'mongodb://localhost:27017/service_name',
-  redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
-};
+// Configuration from config store only (no process.env in microservices)
+const context = await resolveContext();
+const config = await loadConfig(context.brand, context.tenantId);
 
 // Helper functions for resolvers
 function getUserId(ctx: ResolverContext): string {
@@ -919,13 +928,14 @@ extend type Query {
 
 ### Dependencies & Infrastructure
 - **Core-Service**: Provides (single source of truth):
-  - Database abstractions (`getDatabase`, `getClient`, `connectDatabase`, `createServiceDatabaseAccess`)
-  - Database utilities (`findOneById`, `paginateCollection`, `buildIdQuery`)
+  - **Accessors**: `createServiceAccessors(serviceName, options?)` returns `{ db, redis }` in one call; microservices use a single `accessors.ts` and import from `./accessors.js` (no separate `database.ts` or `redis.ts`).
+  - Database abstractions (`createServiceDatabaseAccess`, `createServiceAccessors`, `getDatabase`, `getClient`, `connectDatabase`)
+  - Database utilities (`findOneById`, `paginateCollection`, `buildIdQuery`, `createUniqueIndexSafe`, `normalizeWalletForGraphQL`)
   - Database types (`Db`, `ClientSession`, `Collection`, `Filter`, `MongoClient`)
-  - Redis abstractions (`createServiceRedisAccess`, `configureRedisStrategy`)
-  - Generic utilities (logging, retry, circuit breaker)
-  - Generic patterns (saga, gateway, event system)
-  - Type definitions and interfaces
+  - Redis abstractions (`createServiceRedisAccess`, `configureRedisStrategy`; prefer `createServiceAccessors` for new code)
+  - Generic utilities (logging, retry, circuit breaker, `getErrorMessage`, `getServiceConfigKey`)
+  - Generic patterns (saga, gateway, event system, `withEventHandlerError`, `createTransferRecoverySetup`, `buildConnectionTypeSDL`)
+  - Type definitions and interfaces (e.g. `NotificationHandlerPlugin`, `HandlerContext` in core-service)
   - Shared helpers (pagination, validation, wallet operations)
 - **Core-Service**: Must NOT include:
   - Service-specific database schemas
@@ -943,11 +953,14 @@ This project uses **MongoDB Node.js Driver 7.x**. Follow these practices:
 
 **Database Access Pattern**:
 ```typescript
-// ✅ Correct: Use ServiceDatabaseAccessor
-import { createServiceDatabaseAccess } from 'core-service';
-export const db = createServiceDatabaseAccess('payment-service');
+// ✅ Correct: Single accessors module (db + redis from one factory)
+// In accessors.ts:
+import { createServiceAccessors } from 'core-service';
+export const { db, redis } = createServiceAccessors('payment-service');
 
-// Initialize once at startup
+// In other files: import { db } from './accessors.js'; or from '../accessors.js';
+
+// Initialize once at startup (in index)
 await db.initialize({ brand, tenantId });
 
 // Use in service code
@@ -1002,11 +1015,10 @@ This project uses **node-redis v5.10.0+**. Follow these practices:
 
 **Service Redis Accessor Pattern**:
 ```typescript
-// ✅ Correct: Use ServiceRedisAccessor
-import { createServiceRedisAccess } from 'core-service';
-export const redis = createServiceRedisAccess('payment-service');
+// ✅ Correct: Obtain redis from accessors.ts (same file as db)
+import { db, redis } from './accessors.js';
 
-// Initialize with brand context
+// Initialize with brand context (in index, after gateway/config)
 await redis.initialize({ brand: 'acme' });
 
 // Keys are auto-prefixed: {brand}:{service}:{key}
@@ -1510,9 +1522,14 @@ for (const key of keys) { /* check if stuck */ }
 
 ### Generic Helpers in Core-Service
 - **Always**: Add generic, reusable helpers to `core-service`
-- **Examples**: `extractDocumentId()`, `retry()`, `circuitBreaker()`, pagination helpers
+- **Examples**: `extractDocumentId()`, `retry()`, `circuitBreaker()`, pagination helpers; `getErrorMessage(error)` for consistent error messages; `getServiceConfigKey()` for config with optional gateway fallback; `createServiceAccessors()`, `buildConnectionTypeSDL()`, `createUniqueIndexSafe()`, `normalizeWalletForGraphQL()`, `withEventHandlerError()`, `createTransferRecoverySetup()`, notification handler plugin types (`NotificationHandlerPlugin`, `HandlerContext`)
 - **Never**: Add service-specific logic to `core-service`
 - **Pattern**: If a helper can be used by multiple services, it belongs in `core-service`
+
+### Service Generator Alignment
+- **Always**: New and existing microservices should look as if generated by the service generator (same structure, comments, naming). Only domain-specific code (resolvers, sagas, event handlers) should differ.
+- **Accessors**: One `accessors.ts` per service with generator-style comment: "[Name] service accessors (db + redis) from one factory call." then "Per-service database: {name}_service." or "Uses core_service database." for auth.
+- **Index**: Include the line "Aligned with service generator scaffold (accessors, config, createGateway). Domain-specific code below." in the top comment block; keep import order: core-service → accessors → local.
 
 ### Service-Specific Patterns
 - **Always**: Create service-specific utilities when logic is unique to that service
@@ -1641,9 +1658,9 @@ for (const key of keys) { /* check if stuck */ }
 - **Risk**: "Field can only be defined once" errors
 
 ### 15. Missing Redis/MongoDB Accessor ⚠️
-- ❌ **Wrong**: Using `getRedis()` directly without accessor initialization
-- ✅ **Right**: Create `redis.ts` with `createServiceRedisAccess()` and initialize after gateway
-- **Risk**: "Redis not connected" errors
+- ❌ **Wrong**: Using `getRedis()` or raw DB without accessor initialization; or adding separate `database.ts` / `redis.ts` instead of a single `accessors.ts`
+- ✅ **Right**: Use single `accessors.ts` with `createServiceAccessors('service-name')` exporting `{ db, redis }`; import from `./accessors.js`; initialize `db` and (if used) `redis` after gateway/config
+- **Risk**: "Redis not connected" or "database not initialized" errors
 
 ### 16. Wrong Initialization Order ⚠️
 - ❌ **Wrong**: Initialize event handlers before Redis is connected
@@ -1871,8 +1888,8 @@ npx service-infra service --name <name> [--port 9006] [--output ..] [--webhooks]
 
 Example: `service-infra service --name test --port 9006 --output ..` creates `test-service/` with:
 
-- `config.ts` / `config-defaults.ts` (dynamic config via `getConfigWithDefault`, `registerServiceConfigDefaults`)
-- `database.ts` (`createServiceDatabaseAccess`), optional `redis.ts` (`createServiceRedisAccess`)
+- `config.ts` / `config-defaults.ts` (dynamic config via `getConfigWithDefault` / `getServiceConfigKey`, `registerServiceConfigDefaults`)
+- **`accessors.ts`** (`createServiceAccessors` → `{ db, redis }`); no separate `database.ts` or `redis.ts`
 - `error-codes.ts`, `graphql.ts` (types + `createResolvers`), `index.ts` (bootstrap: `resolveContext`, `loadConfig`, `db.initialize`, `createGateway`, `startListening`)
 - `services/index.ts`, `types.ts`
 
@@ -1895,8 +1912,7 @@ All microservices that use core-service should follow the same naming so pattern
 | **Config defaults** | Export `{SERVICE}_CONFIG_DEFAULTS` with **every** key used by loadConfig: `port`, `serviceName`, `nodeEnv`, `corsOrigins`, `jwt`, `database` (mongoUri, redisUrl). Each key: `{ value, description }`; use `sensitivePaths` for secrets. **No** registration in config-defaults; index calls `registerServiceConfigDefaults(SERVICE_NAME, {SERVICE}_CONFIG_DEFAULTS)`. | `AUTH_CONFIG_DEFAULTS`, `TEST_CONFIG_DEFAULTS` |
 | **Error codes** | `{SERVICE}_ERRORS` (object), `{SERVICE}_ERROR_CODES` (array), code values `MS{Service}*`, type `{Service}ErrorCode` | `AUTH_ERRORS`, `AUTH_ERROR_CODES`, `MSAuthUserNotFound`, `AuthErrorCode` |
 | **GraphQL** | Types: `{shortName}GraphQLTypes` (camelCase short name). Resolvers: `create{Service}Resolvers(config)` | `authGraphQLTypes`, `createAuthResolvers`; `testGraphQLTypes`, `createTestResolvers` |
-| **Database** | `db = createServiceDatabaseAccess('{service}-service')` or `'core-service'` for shared | `createServiceDatabaseAccess('auth-service')` |
-| **Redis** | `redis = createServiceRedisAccess('{service}-service')` | `createServiceRedisAccess('auth-service')` |
+| **Accessors** | Single `accessors.ts`: `createServiceAccessors('{service}-service')` → `{ db, redis }`; auth uses `{ databaseServiceName: 'core-service' }`. All code imports from `./accessors.js`. | `export const { db, redis } = createServiceAccessors('auth-service', { databaseServiceName: 'core-service' });` |
 | **Index** | Import `SERVICE_NAME` from config; `registerServiceConfigDefaults(SERVICE_NAME, …)`, `resolveContext`, `loadConfig`, `validateConfig`, `printConfigSummary`, `db.initialize`, `createGateway`, optional Redis (`config.redisUrl`) / `ensureDefaultConfigsCreated(SERVICE_NAME, …)` / `startListening`, `registerServiceErrorCodes` | Same order as template; see SERVICE_GENERATOR.md §2.1 |
 
 **Short name** for GraphQL: service name without `-service` (e.g. auth, payment, notification, test). Use camelCase for multi-word: `my-api` → `myApiGraphQLTypes`.

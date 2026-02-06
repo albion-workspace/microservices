@@ -1,7 +1,8 @@
 /**
- * Payment Service - Generic user-to-user transaction processing
- * 
- * Generic payment service that handles:
+ * Payment Service
+ * Aligned with service generator scaffold (accessors, config, createGateway). Domain-specific code below.
+ *
+ * Generic user-to-user transaction processing:
  * - User-to-user deposits and withdrawals
  * - Multi-currency wallet management
  * - Transaction history & tracking
@@ -44,7 +45,7 @@ import {
   type DatabaseStrategyResolver,
   type DatabaseContext,
 } from 'core-service';
-import { db } from './accessors.js';
+import { db, redis } from './accessors.js';
 
 // Local imports
 import {

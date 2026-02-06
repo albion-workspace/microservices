@@ -1,6 +1,7 @@
 /**
  * Authentication Service
- * 
+ * Aligned with service generator scaffold (accessors, config, createGateway). Domain-specific code below.
+ *
  * Comprehensive authentication and authorization service with:
  * - Multi-identifier registration (username/email/phone)
  * - Social authentication (Google, Facebook, LinkedIn, Instagram)

@@ -559,7 +559,7 @@ The following items from §14.1 and §14.5 have been implemented:
 
 **Also completed (optional):**
 - **Auth context refactor:** Single `doRefreshToken()` (no state/localStorage), `clearAuth`/`saveAuth` defined once and used in init and callbacks; init and `getRefreshedToken`/`refreshTokenFn` use the same path. Repeated setState + localStorage blocks in `app/src/lib/auth-context.tsx` replaced with `clearAuth()` or `saveAuth()`.
-- **Database/Redis accessor factory:** `createServiceAccessors(serviceName, options?)` in core-service (`databases/accessors.ts`); returns `{ db, redis }`. Each service has a single `accessors.ts`; all code imports `db`/`redis` (and for KYC, `COLLECTIONS`, `registerKYCIndexes`) directly from `./accessors.js`. No `database.ts` or `redis.ts` re-export files.
+- **Database/Redis accessor factory:** `createServiceAccessors(serviceName, options?)` in core-service (`databases/accessors.ts`); returns `{ db, redis }`. Each service has a single `accessors.ts`; all code imports `db`/`redis` (and for KYC, `COLLECTIONS`, `registerKYCIndexes`) directly from `./accessors.js`. No `database.ts` or `redis.ts` re-export files. All microservices are aligned with the service generator: same accessors comment style (per-service database name or core_service), same index import order (core-service then accessors then local), and index header line "Aligned with service generator scaffold (accessors, config, createGateway). Domain-specific code below."
 - **Config loadConfig helper:** `getServiceConfigKey(serviceName, key, defaultVal, options?)` with `fallbackService` in core-service; payment-service `loadConfig` uses it for port, serviceName, nodeEnv, corsOrigins, jwt, database.
 
 ---

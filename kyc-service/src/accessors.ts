@@ -1,5 +1,7 @@
 /**
- * KYC service accessors: db + redis from one factory; COLLECTIONS and index registration.
+ * KYC service accessors (db + redis) from one factory call.
+ * Per-service database: kyc_service.
+ * Domain: COLLECTIONS and registerKYCIndexes exported here.
  */
 
 import { createServiceAccessors } from 'core-service';

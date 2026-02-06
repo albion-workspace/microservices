@@ -1,5 +1,6 @@
 /**
- * Notification service accessors (db + redis) from a single factory call.
+ * Notification service accessors (db + redis) from one factory call.
+ * Per-service database: notification_service.
  */
 
 import { createServiceAccessors } from 'core-service';
