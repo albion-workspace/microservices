@@ -22,7 +22,8 @@ import {
 import { db } from './database.js';
 import { redis } from './redis.js';
 import { AUTH_ERRORS } from './error-codes.js';
-import { matchAnyUrn, hasRole, hasAnyRole } from 'core-service/access';
+import { matchAnyUrn, hasAnyRole } from 'core-service/access';
+import { checkSystemOrPermission } from 'core-service';
 import { 
   rolesToArray, 
   normalizeUser, 
@@ -348,33 +349,6 @@ export const authGraphQLTypes = `
 `;
 
 import type { Resolvers } from 'core-service';
-
-/**
- * Check if user has system role or specific permission
- * Helper function for resolver permission checks
- * Uses access-engine URN format: resource:action:target (e.g., 'user:read:*', 'user:read:own')
- * 
- * NOTE: Only 'system' role has full access. 'admin' and other roles use permissions.
- * Uses matchAnyUrn from core-service/access (access-engine) for proper URN matching.
- */
-function checkSystemOrPermission(
-  user: UserContext | null,
-  resource: string,
-  action: string,
-  target: string = '*'
-): boolean {
-  if (!user) return false;
-  
-  // Check system role (only role with full access) - use hasRole from access-engine
-  if (hasRole('system')(user)) return true;
-  
-  // Check permissions using access-engine's matchAnyUrn (handles wildcards properly)
-  const requiredUrn = `${resource}:${action}:${target}`;
-  const permissions = user.permissions || [];
-  
-  // Use matchAnyUrn from access-engine for proper URN matching with wildcard support
-  return matchAnyUrn(permissions, requiredUrn);
-}
 
 /**
  * Create resolvers with service instances

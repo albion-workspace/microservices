@@ -4,6 +4,7 @@
  */
 
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { decodeJWT } from 'shared-validators';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -77,26 +78,6 @@ const STORAGE_KEYS = {
 // ═══════════════════════════════════════════════════════════════════
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
-
-// ═══════════════════════════════════════════════════════════════════
-// JWT Utilities
-// ═══════════════════════════════════════════════════════════════════
-
-/**
- * Decode JWT token without verification (client-side only, for reading claims)
- */
-function decodeJWT(token: string): { exp?: number; [key: string]: any } | null {
-  try {
-    const parts = token.split('.');
-    if (parts.length !== 3) return null;
-    const payload = parts[1];
-    const decoded = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
-    return decoded;
-  } catch (error) {
-    console.warn('[Auth] Failed to decode JWT:', error);
-    return null;
-  }
-}
 
 // ═══════════════════════════════════════════════════════════════════
 // GraphQL Helpers

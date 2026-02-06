@@ -209,7 +209,7 @@ export {
 } from './common/auth/jwt.js';
 
 // Permissions & Authorization
-export { allow, deny, isAuthenticated, hasRole, hasAnyRole, can, and, or, isOwner, sameTenant, hasPermission, isSystem } from './common/auth/permissions.js';
+export { allow, deny, isAuthenticated, hasRole, hasAnyRole, can, and, or, isOwner, sameTenant, hasPermission, isSystem, checkSystemOrPermission } from './common/auth/permissions.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Configuration Management

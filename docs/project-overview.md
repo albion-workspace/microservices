@@ -275,34 +275,21 @@ throw new Error('User ID is required');
 
 ### 6.2 Code Duplication Opportunities
 
-#### 6.2.1 Permission Check Patterns
-**Current:** `checkSystemOrPermission` function duplicated conceptually
+See **§14 Code Reduction and Reusable Patterns (Detailed Analysis)** for file-level locations, line estimates, and regression-safe implementation order. Summary:
 
-**Recommendation:** Move to `core-service` as a shared utility:
-```typescript
-// core-service/src/common/auth/permissions.ts
-export function requirePermission(user, urn) { ... }
-```
-
-#### 6.2.2 GraphQL Connection Types
-**Current:** Same pagination types defined multiple times
-
-**Recommendation:** Create generic connection type generator in core-service
-
-#### 6.2.3 Event Handler Boilerplate
-**Current:** Similar try/catch patterns in event handlers
-
-**Recommendation:** Create event handler wrapper with built-in error handling
+- **Permission checks** – `checkSystemOrPermission` in auth-service only; extract to `core-service` for reuse.
+- **GraphQL connection types** – Same `type XConnection { nodes ... pageInfo: PageInfo! }` SDL in 6+ places; centralize via connection-builder.
+- **Event handler boilerplate** – Repeated try/catch + GraphQLError in payment-service and similar in KYC; use a handler wrapper.
 
 ### 6.3 Reusable Patterns to Extract
 
-| Pattern | Current Location | Recommended Extraction |
-|---------|-----------------|----------------------|
-| Permission check | Each resolver | `core-service/auth/require-permission.ts` |
-| Wallet normalization | payment-service | `core-service/common/wallet/normalize.ts` |
-| Pagination response | Multiple services | `core-service/graphql/connection-builder.ts` |
-| Event handler wrapper | Multiple services | `core-service/events/handler-wrapper.ts` |
-| JWT decode (client) | app/auth-context.tsx | `shared-validators/jwt.ts` |
+| Pattern | Current Location | Recommended Extraction | Standards ref |
+|---------|------------------|------------------------|---------------|
+| Permission check | auth-service/graphql.ts | `core-service/auth/require-permission.ts` | CODING_STANDARDS § Code Reuse – generic in core-service |
+| Wallet normalization | payment-service (index, wallet.ts) | `core-service/common/wallet/normalize.ts` | Same – generic helper in core-service |
+| GraphQL connection SDL | auth, payment, bonus, kyc, notification | `core-service/graphql/connection-builder.ts` | Same |
+| Event handler wrapper | payment index, KYC event-dispatcher | `core-service/events/handler-wrapper.ts` | Same |
+| JWT decode (client) | app/src/lib/auth-context.tsx | `shared-validators/jwt.ts` | Client-safe; no Node – shared-validators |
 
 ---
 
@@ -488,6 +475,73 @@ This section compares the existing `.md` documentation against the independent c
 | DevOps | 95% | Docker/K8s well documented |
 
 **Overall Documentation Accuracy: 97%**
+
+---
+
+## 14. Code Reduction and Reusable Patterns (Detailed Analysis)
+
+This section refines the code reduction opportunities using all docs (including `README.md`, `CODING_STANDARDS.md`, and `docs/*.md`) and a **full codebase pass over all packages under the repo root** (auth-, payment-, bonus-, notification-, kyc-service, core-service, gateway, app, scripts, access-engine, shared-validators). §14.1–14.4 focus on the originally identified areas; §14.5 adds opportunities found when scanning every folder under root. It aligns with **CODING_STANDARDS § Code Reuse & DRY**: extract patterns repeated 3+ times; generic helpers in `core-service`; client-safe, platform-agnostic code in `shared-validators`. Target: **350+ line reduction** without regressions and without blurring service boundaries.
+
+### 14.1 Code Reduction Opportunities (with locations and estimates)
+
+| Opportunity | Est. lines | Primary locations | Approach |
+|-------------|------------|-------------------|----------|
+| **Wallet normalization** | **~100** | `payment-service/src/index.ts` (246–256, 270–277), `payment-service/src/services/wallet.ts` (171–176, 265–267, 283–286, 326–327, 379, 445–446, 644–646) | Single `normalizeWalletForGraphQL(wallet)` in `core-service/common/wallet/normalize.ts`; use for single wallet and for `nodes.map()`. Eliminates repeated `balance ?? 0`, `bonusBalance ?? 0`, `lockedBalance ?? 0`, `lifetimeFees ?? 0` and equivalent `\|\| 0` blocks. |
+| **Auth context refactor** | **~180–200** | `app/src/lib/auth-context.tsx` | (1) Move `decodeJWT()` to `shared-validators/jwt.ts` (~15 lines). (2) Extract auth state reducers (e.g. `setUnauthenticated`, `setAuthenticated`, `setCachedUser`) to collapse repeated `setState({ user: null, tokens: null, isAuthenticated: false, isLoading: false })` and localStorage clear (~80–100 lines). (3) Single `tryRefreshToken` used from both `initAuth` and `getRefreshedToken` to remove duplicated refresh + save logic (~50–80 lines). |
+| **Index creation utility** | **~50–60** | `payment-service/src/index.ts` (878–922), `scripts/typescript/payment/payment-command-db-check.ts` (multiple createIndex blocks) | Add `createUniqueIndexSafe(collection, key, options)` in `core-service/databases/mongodb` (or `utils.ts`) that handles duplicate key (11000), code 85/IndexOptionsConflict, and optional drop+recreate. Replace verbose try/catch blocks with one call per index. |
+| **Event handler wrapper** | **~45–60** | `payment-service/src/index.ts` `setupBonusEventHandlers` (4 handlers with outer try/catch + GraphQLError), `kyc-service/src/event-dispatcher.ts` (try/catch + logger.error) | Add `withEventHandlerError<T>(eventType, errorCode, handler)` in `core-service/events/handler-wrapper.ts` that wraps async handler in try/catch and maps to GraphQLError with `eventId` and `error` message. Handlers pass only business logic. |
+| **Permission check extraction** | **~25–30** | `auth-service/src/graphql.ts` (360–379, 8+ call sites) | Implement `requireSystemOrPermission(user, resource, action, target)` in `core-service/auth/require-permission.ts` (or under `common/auth`). Auth-service imports and uses it; keeps resolver logic, removes local helper. |
+| **GraphQL connection builder** | **~15–25** | `auth-service/graphql.ts`, `payment-service` (wallet, transfer, transaction), `bonus-service`, `kyc-service`, `notification-service` – each defines `type XConnection { nodes: [X!]! totalCount: Int! pageInfo: PageInfo! }` | Add `buildConnectionTypeSDL(connectionName, nodeTypeName)` in `core-service/graphql/connection-builder.ts` returning the SDL string. Services call it in their type defs. Single place to extend (e.g. edges later) and ~6–10 fewer repeated blocks. |
+| **JWT decode (client)** | **~12–15** | `app/src/lib/auth-context.tsx` (86–98, 5 call sites) | Add `decodeJWT(token)`, optional `isExpired(decoded)`, in `shared-validators/jwt.ts`. No verification (client-side read-only). App imports from `shared-validators`; removes in-file implementation and keeps call sites simple. |
+
+**Total estimated reduction: ~427–490 lines** (conservative ~350+ achievable with the first four items).
+
+### 14.2 Reusable Patterns – Where They Live (standards-aligned)
+
+- **core-service**: Permission helper, wallet normalization, index creation helper, event handler wrapper, connection SDL builder. All are generic and used by more than one service or by app + server.
+- **shared-validators**: JWT decode (and optional expiry helper) only. Client-safe, no Node-only APIs; same code for React app and any other client.
+
+No service-specific business rules move into core-service; payment remains the authority for wallet semantics, auth for permissions semantics.
+
+### 14.3 Implementation Order (regression-safe)
+
+1. **Add new utilities without changing callers**  
+   Implement `normalizeWalletForGraphQL`, `requireSystemOrPermission`, `decodeJWT` in shared-validators, `createUniqueIndexSafe`, `withEventHandlerError`, `buildConnectionTypeSDL` with tests where feasible.
+
+2. **Switch call sites one area at a time**  
+   - payment-service: use `normalizeWalletForGraphQL` in index and wallet.ts; use `createUniqueIndexSafe` in index.  
+   - auth-service: use `requireSystemOrPermission` from core-service.  
+   - app: use `decodeJWT` from shared-validators; then refactor auth context (reducers, single refresh path).
+
+3. **Event handlers and connection SDL**  
+   - payment-service: wrap bonus event handlers with `withEventHandlerError`.  
+   - Optionally KYC: use same wrapper for consistency.  
+   - Services: optionally migrate connection type defs to `buildConnectionTypeSDL` when touching those files.
+
+4. **Verify**  
+   Run existing scripts (auth, payment, bonus tests), gateway health, and a quick manual login/refresh in the app after each change.
+
+### 14.4 References
+
+- **CODING_STANDARDS.md**: § Code Reuse & DRY, § Generic Helpers in Core-Service, § Shared Structures Pattern, § Refactoring Guidelines.
+- **docs/architecture.md**: Patterns (repository, event-driven) – extractions stay within these.
+- **docs/core-service.md**: Wallet utilities and pagination – new helpers extend this surface.
+
+### 14.5 Additional opportunities (full root scan)
+
+Scan covered **all packages under repo root** (auth-service, payment-service, bonus-service, notification-service, kyc-service, core-service, gateway, app, scripts, access-engine, shared-validators), not only the areas in §14.1. Below are extra duplication/reduction opportunities.
+
+| Opportunity | Est. lines | Locations (root-wide) | Approach |
+|-------------|------------|------------------------|----------|
+| **Error message normalization** | **~25–35** | 30+ occurrences across: `core-service` (errors.ts, recovery.ts, transfer.ts, transaction-state.ts, config/store.ts, complexity.ts, redis/connection.ts), `auth-service` (graphql.ts, oauth-routes.ts), `payment-service` (index.ts, wallet.ts, exchange-rate.ts, recovery-setup.ts), `bonus-service` (bonus.ts, recovery-setup.ts), `kyc-service`, `notification-service`, `scripts/typescript/*` | Export `toErrorMessage(error: unknown): string` from `core-service/common/errors.ts` (or a small errors util). Replace every `error instanceof Error ? error.message : String(error)` with `toErrorMessage(error)`. Single source of truth; easier to add logging or sanitization later. |
+| **Notification handler plugin types** | **~50–75** | `auth-service/src/notifications/auth-handler.ts`, `payment-service/src/notifications/payment-handler.ts`, `bonus-service/src/notifications/bonus-handler.ts` – each file duplicates the same `NotificationHandlerPlugin` and `HandlerContext` interface blocks (~25 lines each). `notification-service/src/plugins/types.ts` already defines the canonical interfaces. | Move plugin types to **core-service** (e.g. `core-service/notifications/plugin-types.ts`) so auth/payment/bonus and notification-service can all import from core-service without cross-service dependency. Remove the duplicated interface blocks from the three handler files. |
+| **Recovery setup (transfer)** | **~25–35** | `payment-service/src/recovery-setup.ts`, `bonus-service/src/recovery-setup.ts` – nearly identical: register transfer recovery handler, start recovery job (5 min / 60 s), onShutdown stop. Only log text differs. | Add `createTransferRecoverySetup(options?: { serviceLabel?: string })` in `core-service` (e.g. common/resilience/recovery.ts or a small recovery-setup helper). Both services call it; one of the two files can become a one-liner or both delegate to core. |
+| **database.ts / redis.ts per service** | **~40–50** | `auth-service`, `payment-service`, `bonus-service`, `notification-service`, `kyc-service` – each has a 5–15 line `database.ts` and a similar `redis.ts` that only differ by service name (and auth uses `'core-service'` for db). | Already aligned with infra generator (service-generator emits these). Optional: reduce to a single factory or generated file so the boilerplate is not hand-maintained (e.g. `createServiceAccessors('payment-service')` returning `{ db, redis }`). Lower priority; small but repetitive. |
+| **Config loadConfig pattern** | **Optional** | All five services’ `config.ts`: same pattern `getConfigWithDefault(SERVICE_NAME, 'port', { brand, tenantId }) ?? (gateway fallback) ?? default` for port, serviceName, nodeEnv, corsOrigins, jwt, database. Keys and defaults are service-specific. | Optional helper in core-service, e.g. `getServiceConfigKey(service, key, defaultVal, options?)` that encapsulates service + optional gateway fallback. Would shorten each loadConfig and ensure consistent fallback semantics. Only do if adding a new service or touching all configs. |
+
+**Scope of scan:** All `.ts` and `.tsx` under `auth-service/`, `payment-service/`, `bonus-service/`, `notification-service/`, `kyc-service/`, `core-service/`, `gateway/`, `app/`, `scripts/`, `access-engine/`, `shared-validators/`. Patterns searched: `createServiceDatabaseAccess` / `createServiceRedisAccess`, `registerServiceErrorCodes` / `registerServiceConfigDefaults`, `requireAuth` / `getUserId` / `getTenantId`, `createGateway` / `buildGatewayConfig`, `throw new GraphQLError`, `error instanceof Error ? error.message : String(error)`, `findById` / `findOneById`, config `loadConfig`, `database.ts` / `redis.ts`, notification handler interfaces, recovery-setup, error-codes structure.
+
+**Combined total (§14.1 + §14.5):** ~577–685 lines potential reduction (or ~500+ conservative) if all items are implemented.
 
 ---
 
