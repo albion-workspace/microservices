@@ -1827,7 +1827,7 @@ This makes CI/CD bulletproof - works in both scenarios.
 
 ### Adding a New Service
 
-**Use the service generator** so the new microservice follows coding standards (dynamic config from MongoDB, GraphQL, database accessor, error codes, optional Redis/webhooks). All current services (auth, bonus, payment, notification, kyc) are aligned to this pattern—you can run and test them now. For the template contents and maintenance rules, see **`core-service/src/infra/SERVICE_GENERATOR.md`**; for status and optional next steps, see **STATUS_CONFIG_AND_STANDARDS.md** (repo root).
+**Use the service generator** so the new microservice follows coding standards (dynamic config from MongoDB, GraphQL, database accessor, error codes, optional Redis/webhooks). All current services (auth, bonus, payment, notification, kyc) are aligned to this pattern—you can run and test them now. For the template contents and maintenance rules, see **`core-service/src/infra/SERVICE_GENERATOR.md`**; for status and optional next steps, see **README.md** (repo root) § Config and standards status.
 
 ```bash
 # From repo root or core-service
@@ -1877,7 +1877,7 @@ All microservices that use core-service should follow the same naming so pattern
 - In `loadConfig`, load each key with `getConfigWithDefault(SERVICE_NAME, key, { brand, tenantId }) ?? defaultFromSameFile`. No fallback to `process.env`. Deployment/infra can set values in the config store or via admin; the app reads only from the config store.
 - **File separation:** Keep instructions in the correct file: **types.ts** = type/interface definitions only (no defaults, no loadConfig). **config.ts** = loadConfig, validateConfig, printConfigSummary only (no config interface definition, no default constants). **config-defaults.ts** = default value object `{SERVICE}_CONFIG_DEFAULTS` only (no loadConfig, no registration call; index calls `registerServiceConfigDefaults(SERVICE_NAME, {SERVICE}_CONFIG_DEFAULTS)`). See SERVICE_GENERATOR.md §3.1.
 - **SERVICE_NAME constant:** Export `SERVICE_NAME` from config.ts (`export const SERVICE_NAME = '{service}-service'`). Use it in index.ts for `registerServiceConfigDefaults(SERVICE_NAME, ...)` and `ensureDefaultConfigsCreated(SERVICE_NAME, ...)`; do not use a static string for the service name there. Same pattern in the service generator.
-- **Current state:** All five services (auth, bonus, payment, notification, kyc) use this pattern; new services get it from the generator. You can run and test all services; see **STATUS_CONFIG_AND_STANDARDS.md** (repo root) and **core-service/src/infra/SERVICE_GENERATOR.md** for alignment status and maintenance rules.
+- **Current state:** All five services (auth, bonus, payment, notification, kyc) use this pattern; new services get it from the generator. You can run and test all services; see **README.md** (repo root) § Config and standards status and **core-service/src/infra/SERVICE_GENERATOR.md** for alignment status and maintenance rules.
 
 ---
 

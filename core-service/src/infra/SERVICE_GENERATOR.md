@@ -2,7 +2,7 @@
 
 The **service generator** (`service-infra service --name <name> ...`) is the single source of truth for microservice structure. New services are generated from this template. **All current services** (auth, bonus, payment, notification, kyc) are aligned to this pattern and use dynamic config only.
 
-**Alignment status (done):** auth, bonus, payment, notification, kyc all use `getConfigWithDefault` only in config.ts; index uses `config.redisUrl` and `SERVICE_NAME`; no `process.env` in code (only in comments). Verification: `grep process.env` in each service `src/` returns only comment lines. You can run and test all services; see **STATUS_CONFIG_AND_STANDARDS.md** (repo root) for summary and optional next steps.
+**Alignment status (done):** auth, bonus, payment, notification, kyc all use `getConfigWithDefault` only in config.ts; index uses `config.redisUrl` and `SERVICE_NAME`; no `process.env` in code (only in comments). Verification: `grep process.env` in each service `src/` returns only comment lines. You can run and test all services; see **README.md** (repo root) § Config and standards status for summary and optional next steps.
 
 ---
 
@@ -149,6 +149,6 @@ All services are built from the same generator pattern and share **core-base** (
 
 - **Gateway:** Add the new service to `gateway/configs/services.dev.json` (and other profiles); run `npm run generate` from gateway; use same port as in config-defaults.
 
-- **Status:** See **STATUS_CONFIG_AND_STANDARDS.md** (repo root) for what’s done and optional next steps. All five services are aligned; you can run and test them now.
+- **Status:** See **README.md** (repo root) § Config and standards status for what’s done and optional next steps. All five services are aligned; you can run and test them now.
 
 - **Verification:** `grep -r "process\.env" src/` in a service should only return comment lines (or documented bootstrap exception). Use this when adding config or touching a service.

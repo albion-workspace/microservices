@@ -23,9 +23,11 @@
 13. [Configuration](#configuration)
 14. [Quick Start](#quick-start)
 15. [Testing](#testing)
-16. [Sharding Guide](#sharding-guide)
-17. [Disaster Recovery](#disaster-recovery)
-18. [Roadmap](#roadmap)
+16. [Verification and test plan](#verification-and-test-plan)
+17. [Config and standards status](#config-and-standards-status)
+18. [Sharding Guide](#sharding-guide)
+19. [Disaster Recovery](#disaster-recovery)
+20. [Roadmap](#roadmap)
 
 ---
 
@@ -1096,6 +1098,50 @@ npm run channels:test
 
 1. **Payment tests first** - Creates users, drops databases
 2. **Bonus tests second** - Depends on users from payment tests
+
+For step-by-step commands (build, health, Docker, K8s, script suites), see [scripts/bin/TEST_PLAN_COMMANDS.md](scripts/bin/TEST_PLAN_COMMANDS.md).
+
+---
+
+## Verification and test plan
+
+After the config/JWT/standards refactor, verification runs in order: **local services → gateway → Docker → K8s → API**.
+
+| Phase | What to do | Status |
+|-------|------------|--------|
+| **1. Local** | Build: `access-engine` → `core-service` → `shared-validators`. Start: `cd gateway && npm run dev` (or [scripts/bin/clean-build-run.ps1](scripts/bin/clean-build-run.ps1)). Health: `cd gateway && npm run health` (ports 9001–9005). | Done |
+| **2. Gateway** | With services up, call `http://localhost:9999` with header `X-Target-Service: auth|payment|bonus|notification|kyc`. Example: `Invoke-RestMethod -Uri "http://localhost:9999/health" -Headers @{ "X-Target-Service" = "auth" }`. | Optional |
+| **3. Docker** | From gateway: `npm run docker:fresh` (rebuilds core-base + all images, then start) or `npm run docker:build` + `npm run docker:up`. Health: `npm run health:docker`. | Done |
+| **4. K8s** | From gateway: `npm run generate:local-k8s`, `npm run k8s:load-images`, `npm run k8s:apply:local` (or `npm run k8s:fresh`). Health: `npm run health:k8s`. | Done |
+| **5. API tests** | `.\scripts\bin\test-all-api.ps1`, `.\scripts\bin\auth-test.ps1`; from `scripts/`: `npm run payment:test`, `npm run bonus:test`, `npm run channels-test`, `npm run auth:test`. | Optional |
+
+**Order of operations:** Build deps → Start dev (gateway `npm run dev` or clean-build-run.ps1) → Health → Gateway routing (optional) → Docker build/up → health:docker → K8s generate/apply → health:k8s → API scripts.
+
+**Gaps addressed:** [scripts/bin/start-service-dev.ps1](scripts/bin/start-service-dev.ps1) exists for per-service dev; [scripts/bin/clean-build-run.ps1](scripts/bin/clean-build-run.ps1) health checks include KYC (9005). See [core-service/src/infra/SERVICE_GENERATOR.md](core-service/src/infra/SERVICE_GENERATOR.md) and [CODING_STANDARDS.md](CODING_STANDARDS.md).
+
+---
+
+## Config and standards status
+
+Configuration consolidation and service-generator alignment (single JWT, `DefaultServiceConfig`, file separation, `SERVICE_NAME`) are in place across auth, payment, bonus, notification, and kyc services.
+
+**Done:**
+
+- **JWT:** Single `jwtSecret` (default `shared-jwt-secret-change-in-production`); gateway and services use `getConfigWithDefault(..., 'jwt')` with gateway fallback.
+- **Config pattern:** Each service has one config type extending `DefaultServiceConfig` in `types.ts`; `config.ts` does loading only; `config-defaults.ts` holds `{SERVICE}_CONFIG_DEFAULTS`; index calls `registerServiceConfigDefaults(SERVICE_NAME, ...)`.
+- **SERVICE_NAME:** Exported from `config.ts`; used in index for registration and `ensureDefaultConfigsCreated`. No static service name string in index.
+- **Docs:** [CODING_STANDARDS.md](CODING_STANDARDS.md) (config, file separation, SERVICE_NAME); [core-service/src/infra/SERVICE_GENERATOR.md](core-service/src/infra/SERVICE_GENERATOR.md) §3.
+
+**Quick reference:**
+
+| Area | Pattern |
+|------|--------|
+| Service config | `{Service}Config extends DefaultServiceConfig` in `types.ts` |
+| Loading | `config.ts`: `loadConfig`, `validateConfig`, `printConfigSummary` |
+| Defaults | `config-defaults.ts`: `{SERVICE}_CONFIG_DEFAULTS`; index registers with `SERVICE_NAME` |
+| JWT | One `jwtSecret`; gateway fallback via `getConfigWithDefault('gateway', 'jwt')` |
+
+**Optional follow-ups:** process.env audit in service `src/` (align or document exceptions); DRY default values from config-defaults in `loadConfig`; use service generator for new microservices.
 
 ---
 
