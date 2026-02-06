@@ -31,7 +31,9 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "infra": "node dist/infra/cli.js"
+    "infra": "node dist/infra/cli.js",
+    "clean": "node dist/infra/cli.js clean",
+    "clean:full": "node dist/infra/cli.js clean --full"
   },
   "dependencies": {
     "access-engine": "file:../access-engine",

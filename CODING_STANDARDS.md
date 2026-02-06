@@ -1791,6 +1791,40 @@ npm run health:docker:test              # Docker (test config)
 npm run health:k8s                      # K8s services
 ```
 
+### Cleaning build artifacts and generated files
+
+**Always** use the standard infra clean command. **Do not** add or use custom delete/clean scripts (e.g. ad‑hoc `rm -rf` or one-off PowerShell/Node scripts) for removing `dist`, `node_modules`, generated Dockerfiles, or gateway output. The single source of truth is the core-service infra CLI.
+
+**Commands** (run from repo root or from `core-service` after `npm run build` there):
+
+| Command | What it removes |
+|--------|------------------------------------------|
+| **Default clean** | Generated files only: `gateway/generated`, `Dockerfile.core-base` at repo root, and each package’s `Dockerfile` (e.g. `auth-service/Dockerfile`, `payment-service/Dockerfile`). Use when you want to wipe generated infra without touching build artifacts or dependencies. |
+| **Full clean** | Everything above **plus** in every package under repo root: `dist`, `node_modules`, `package-lock.json`. Use for a full reset before a clean install/build. |
+
+**How to run:**
+
+```bash
+# From core-service (requires core-service to be built first: npm run build)
+cd core-service
+npm run clean        # default: generated only
+npm run clean:full   # generated + dist, node_modules, package-lock.json in all packages
+
+# Or via CLI directly (from repo root or core-service)
+npx service-infra clean
+npx service-infra clean --full
+# or: node core-service/dist/infra/cli.js clean
+# or: node core-service/dist/infra/cli.js clean -f
+```
+
+- **When to use default clean:** After changing gateway config and wanting to regenerate everything; or to remove only generated Dockerfiles and gateway output without deleting `node_modules` or `dist`.
+- **When to use full clean:** When preparing for a clean install (e.g. after dependency or Node version changes), or when you want to ensure no stale build artifacts anywhere.
+
+**Rules:**
+
+- **Do not** introduce project-specific or one-off scripts that delete `dist`, `node_modules`, `package-lock.json`, or generated files (e.g. in `scripts/bin/` or service folders). Use `service-infra clean` / `npm run clean` and `npm run clean:full` only.
+- **Do not** hardcode service names or paths in clean logic; the infra CLI discovers packages by `package.json` under repo root and cleans generically.
+
 ### Dockerfile Generation Patterns
 
 Dockerfiles are **generated dynamically** based on each service's `package.json` dependencies:
