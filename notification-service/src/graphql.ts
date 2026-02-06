@@ -3,7 +3,7 @@
  */
 
 import { logger, requireAuth, getUserId, getErrorMessage, generateMongoId, paginateCollection, GraphQLError, hasRole, buildConnectionTypeSDL } from 'core-service';
-import { db } from './database.js';
+import { db } from './accessors.js';
 import { NOTIFICATION_ERRORS } from './error-codes.js';
 import type { ResolverContext } from 'core-service';
 import type { NotificationService } from './notification-service.js';

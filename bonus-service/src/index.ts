@@ -36,7 +36,7 @@ import {
 } from 'core-service';
 
 // Local Redis accessor
-import { redis } from './redis.js';
+import { redis } from './accessors.js';
 import { hasAnyRole as hasAnyRoleAccess } from 'core-service/access';
 
 // Local imports

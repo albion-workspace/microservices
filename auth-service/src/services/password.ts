@@ -7,7 +7,7 @@
  */
 
 import { logger, normalizeDocument, findById, createPendingOperationStore } from 'core-service';
-import { db } from '../database.js';
+import { db } from '../accessors.js';
 import type { 
   ForgotPasswordInput, 
   ResetPasswordInput, 

@@ -30,10 +30,7 @@ import {
   type IntegrationEvent,
 } from 'core-service';
 
-// Local Redis accessor
-import { redis } from './redis.js';
-
-import { db, registerKYCIndexes } from './database.js';
+import { db, redis, registerKYCIndexes } from './accessors.js';
 import { KYC_CONFIG_DEFAULTS } from './config-defaults.js';
 import { loadConfig, validateConfig, printConfigSummary, SERVICE_NAME, type KYCConfig } from './config.js';
 import { initializeProviders } from './providers/provider-factory.js';

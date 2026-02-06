@@ -6,7 +6,7 @@
  */
 
 import type { PaymentConfig } from './types.js';
-import { logger, getConfigWithDefault } from 'core-service';
+import { logger, getConfigWithDefault, getServiceConfigKey } from 'core-service';
 
 export type { PaymentConfig } from './types.js';
 
@@ -20,22 +20,24 @@ export function getUseMongoTransactions(): boolean {
   return _useMongoTransactions;
 }
 
+const opts = (brand?: string, tenantId?: string) => ({ brand, tenantId, fallbackService: 'gateway' as const });
+
 export async function loadConfig(brand?: string, tenantId?: string): Promise<PaymentConfig> {
-  const port = (await getConfigWithDefault<number>(SERVICE_NAME, 'port', { brand, tenantId })) ?? 9002;
-  const serviceName = (await getConfigWithDefault<string>(SERVICE_NAME, 'serviceName', { brand, tenantId })) ?? SERVICE_NAME;
-  const nodeEnv = (await getConfigWithDefault<string>(SERVICE_NAME, 'nodeEnv', { brand, tenantId })) ?? (await getConfigWithDefault<string>('gateway', 'nodeEnv', { brand, tenantId })) ?? 'development';
-  const corsOrigins = (await getConfigWithDefault<string[]>(SERVICE_NAME, 'corsOrigins', { brand, tenantId })) ?? (await getConfigWithDefault<string[]>('gateway', 'corsOrigins', { brand, tenantId })) ?? [
+  const port = await getServiceConfigKey<number>(SERVICE_NAME, 'port', 9002, opts(brand, tenantId));
+  const serviceName = await getServiceConfigKey<string>(SERVICE_NAME, 'serviceName', SERVICE_NAME, opts(brand, tenantId));
+  const nodeEnv = await getServiceConfigKey<string>(SERVICE_NAME, 'nodeEnv', 'development', opts(brand, tenantId));
+  const corsOrigins = await getServiceConfigKey<string[]>(SERVICE_NAME, 'corsOrigins', [
     'http://localhost:5173',
     'http://localhost:3000',
     'http://127.0.0.1:5173',
-  ];
-  const jwtConfig = (await getConfigWithDefault<{ expiresIn: string; secret: string; refreshExpiresIn: string; refreshSecret: string }>(SERVICE_NAME, 'jwt', { brand, tenantId })) ?? (await getConfigWithDefault<{ expiresIn: string; secret: string; refreshExpiresIn: string; refreshSecret: string }>('gateway', 'jwt', { brand, tenantId })) ?? {
+  ], opts(brand, tenantId));
+  const jwtConfig = await getServiceConfigKey<{ expiresIn: string; secret: string; refreshExpiresIn: string; refreshSecret: string }>(SERVICE_NAME, 'jwt', {
     expiresIn: '8h',
     secret: '',
     refreshExpiresIn: '7d',
     refreshSecret: '',
-  };
-  const databaseConfig = (await getConfigWithDefault<{ mongoUri?: string; redisUrl?: string }>(SERVICE_NAME, 'database', { brand, tenantId })) ?? (await getConfigWithDefault<{ mongoUri?: string; redisUrl?: string }>('gateway', 'database', { brand, tenantId })) ?? { mongoUri: '', redisUrl: '' };
+  }, opts(brand, tenantId));
+  const databaseConfig = await getServiceConfigKey<{ mongoUri?: string; redisUrl?: string }>(SERVICE_NAME, 'database', { mongoUri: '', redisUrl: '' }, opts(brand, tenantId));
   const exchangeRateConfig = await getConfigWithDefault<{ defaultSource: string; cacheTtl: number; autoUpdateInterval: number; manualRates: Record<string, unknown> }>(SERVICE_NAME, 'exchangeRate', { brand, tenantId }) ?? {
     defaultSource: 'manual',
     cacheTtl: 300,
@@ -59,8 +61,10 @@ export async function loadConfig(brand?: string, tenantId?: string): Promise<Pay
     approvalTimeout: 3600,
   };
 
+  const portNum = typeof port === 'number' ? port : parseInt(String(port), 10);
+
   return {
-    port: typeof port === 'number' ? port : parseInt(String(port), 10),
+    port: portNum,
     nodeEnv,
     serviceName,
     mongoUri: databaseConfig.mongoUri || undefined,

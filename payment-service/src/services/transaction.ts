@@ -34,7 +34,7 @@ import {
 } from 'core-service';
 
 // Local imports
-import { db } from '../database.js';
+import { db } from '../accessors.js';
 import type { Transaction, Transfer } from '../types.js';
 
 /**

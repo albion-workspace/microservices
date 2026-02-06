@@ -20,7 +20,7 @@ import speakeasy from 'speakeasy';
 import type { AuthConfig } from '../config.js';
 import type { User, SocialProfile, AuthProvider } from '../types.js';
 import { logger } from 'core-service';
-import { db } from '../database.js';
+import { db } from '../accessors.js';
 import { normalizeEmail, normalizePhone, detectIdentifierType, verifyPassword } from '../utils.js';
 
 // ═══════════════════════════════════════════════════════════════════

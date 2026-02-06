@@ -13,7 +13,7 @@ import {
   type RepositoryPaginationInput as PaginationInput,
 } from 'core-service';
 
-import { db, COLLECTIONS } from '../database.js';
+import { db, COLLECTIONS } from '../accessors.js';
 import type {
   KYCProfile,
   KYCTier,

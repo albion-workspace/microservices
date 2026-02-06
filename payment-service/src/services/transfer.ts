@@ -15,7 +15,7 @@ import {
   type ClientSession,
 } from 'core-service';
 import { getUseMongoTransactions } from '../config.js';
-import { db } from '../database.js';
+import { db } from '../accessors.js';
 import type { Transfer as PaymentTransfer, Transaction } from '../types.js';
 
 // ═══════════════════════════════════════════════════════════════════

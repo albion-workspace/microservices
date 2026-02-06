@@ -21,8 +21,7 @@ import {
   type CursorPaginationOptions,
   type CursorPaginationResult,
 } from 'core-service';
-import { db } from './database.js';
-import { redis } from './redis.js';
+import { db, redis } from './accessors.js';
 import { AUTH_ERRORS } from './error-codes.js';
 import { matchAnyUrn, hasAnyRole } from 'core-service/access';
 import { checkSystemOrPermission } from 'core-service';

@@ -40,8 +40,7 @@ import {
   type DatabaseStrategyResolver,
   type DatabaseContext,
 } from 'core-service';
-import { db } from './database.js';
-import { redis } from './redis.js';
+import { db, redis } from './accessors.js';
 
 import { loadConfig, validateConfig, printConfigSummary, setAuthConfig, SERVICE_NAME } from './config.js';
 import { AUTH_CONFIG_DEFAULTS, GATEWAY_JWT_DEFAULTS, GATEWAY_DATABASE_DEFAULTS, GATEWAY_COMMON_DEFAULTS } from './config-defaults.js';

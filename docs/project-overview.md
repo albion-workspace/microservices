@@ -557,7 +557,10 @@ The following items from §14.1 and §14.5 have been implemented:
 - **Recovery setup:** `createTransferRecoverySetup(handler, options?)` in core-service; payment-service and bonus-service recovery-setup call it.
 - **Notification handler plugin types:** `NotificationHandlerPlugin`, `HandlerContext`, `EventHandler` in core-service `common/notifications/plugin-types.ts`; auth-, payment-, bonus-service handlers import from core-service; notification-service re-exports from core and keeps typed `HandlerContext` for internal use.
 
-**Not done (optional):** Auth context refactor (§14.1 – reducers + single refresh path), database/redis boilerplate factory (§14.5), config loadConfig helper (§14.5).
+**Also completed (optional):**
+- **Auth context refactor:** Single `doRefreshToken()` (no state/localStorage), `clearAuth`/`saveAuth` defined once and used in init and callbacks; init and `getRefreshedToken`/`refreshTokenFn` use the same path. Repeated setState + localStorage blocks in `app/src/lib/auth-context.tsx` replaced with `clearAuth()` or `saveAuth()`.
+- **Database/Redis accessor factory:** `createServiceAccessors(serviceName, options?)` in core-service (`databases/accessors.ts`); returns `{ db, redis }`. Each service has a single `accessors.ts`; all code imports `db`/`redis` (and for KYC, `COLLECTIONS`, `registerKYCIndexes`) directly from `./accessors.js`. No `database.ts` or `redis.ts` re-export files.
+- **Config loadConfig helper:** `getServiceConfigKey(serviceName, key, defaultVal, options?)` with `fallbackService` in core-service; payment-service `loadConfig` uses it for port, serviceName, nodeEnv, corsOrigins, jwt, database.
 
 ---
 

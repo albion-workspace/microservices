@@ -17,7 +17,7 @@
  */
 
 import { logger, getErrorMessage, CircuitBreaker, GraphQLError } from 'core-service';
-import { db } from '../database.js';
+import { db } from '../accessors.js';
 import { PAYMENT_ERRORS } from '../error-codes.js';
 import { SYSTEM_CURRENCY } from '../constants.js';
 

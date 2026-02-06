@@ -12,7 +12,7 @@
  */
 
 import { logger, findOneById, CORE_DATABASE_NAME } from 'core-service';
-import { db } from '../database.js';
+import { db } from '../accessors.js';
 
 /**
  * Collection mapping for reference types

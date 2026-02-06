@@ -143,17 +143,15 @@ export async function generateService(options: ServiceGeneratorOptions): Promise
 
   // ─── src/database.ts ─────────────────────────────────────────────────────
   await write(
-    'src/database.ts',
+    'src/accessors.ts',
     `/**
- * ${serviceNamePascal} Service Database Access
- *
- * Uses createServiceDatabaseAccess from core-service for consistent database access.
- * ${useCoreDatabase ? `${serviceNamePascal} uses shared core_service database.` : `Per-service database: ${databaseName}.`}
+ * ${serviceNamePascal} service accessors (db + redis) from one factory call.
+ * ${useCoreDatabase ? `Uses core_service database.` : `Per-service database: ${databaseName}.`}
  */
 
-import { createServiceDatabaseAccess } from 'core-service';
+import { createServiceAccessors } from 'core-service';
 
-export const db = createServiceDatabaseAccess('${dbAccessorName}');
+export const { db, redis } = createServiceAccessors('${serviceNameKebab}'${useCoreDatabase ? ", { databaseServiceName: 'core-service' }" : ''});
 `
   );
 
@@ -355,10 +353,8 @@ export {};
   );
 
   // ─── src/index.ts ────────────────────────────────────────────────────────
-  const redisImport = useRedis
-    ? `
-import { redis } from './redis.js';`
-    : '';
+  const accessorsImport = `
+import { db, redis } from './accessors.js';`;
   const redisInit = useRedis
     ? `
   if (config.redisUrl) {
@@ -402,7 +398,7 @@ import {
   configureRedisStrategy,
   startListening,
 } from 'core-service';
-import { db } from './database.js';${redisImport}${eventDispatcherImport}
+${accessorsImport}${eventDispatcherImport}
 
 import { loadConfig, validateConfig, printConfigSummary, SERVICE_NAME } from './config.js';
 import { ${serviceNameConst.toUpperCase()}_CONFIG_DEFAULTS } from './config-defaults.js';
@@ -472,19 +468,6 @@ main().catch((err) => {
   await write('src/index.ts', indexContent);
 
   if (useRedis) {
-    await write(
-      'src/redis.ts',
-      `/**
- * ${serviceNamePascal} Service Redis accessor
- *
- * Uses createServiceRedisAccess from core-service. Initialize after createGateway (configureRedisStrategy).
- */
-
-import { createServiceRedisAccess } from 'core-service';
-
-export const redis = createServiceRedisAccess('${serviceNameKebab}');
-`
-    );
   }
 
   if (useWebhooks) {

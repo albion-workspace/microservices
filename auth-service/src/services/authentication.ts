@@ -14,7 +14,7 @@ import {
   findById,
   normalizeDocument,
 } from 'core-service';
-import { db } from '../database.js';
+import { db } from '../accessors.js';
 import type { UserContext } from 'core-service';
 import type { LoginInput, User, AuthResponse, TokenPair, Session, DeviceInfo } from '../types.js';
 import { 

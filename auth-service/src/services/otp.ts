@@ -5,7 +5,7 @@
  */
 
 import { logger, createPendingOperationStore } from 'core-service';
-import { db } from '../database.js';
+import { db } from '../accessors.js';
 import type { SendOTPInput, VerifyOTPInput, OTPResponse, OTPChannel, OTPPurpose } from '../types.js';
 import { generateOTP, hashToken } from '../utils.js';
 import type { AuthConfig } from '../config.js';

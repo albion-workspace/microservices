@@ -44,7 +44,7 @@ import {
   type DatabaseStrategyResolver,
   type DatabaseContext,
 } from 'core-service';
-import { db } from './database.js';
+import { db } from './accessors.js';
 
 // Local imports
 import {

@@ -73,6 +73,10 @@ export type {
   RedisStats,
 } from './databases/redis/service-accessor.js';
 
+// Optional: create db + redis in one call: const { db, redis } = createServiceAccessors('my-service');
+export { createServiceAccessors } from './databases/accessors.js';
+export type { CreateServiceAccessorsOptions, ServiceAccessors } from './databases/accessors.js';
+
 // ═══════════════════════════════════════════════════════════════════
 // Saga Pattern (Business Logic)
 // ═══════════════════════════════════════════════════════════════════
@@ -232,6 +236,7 @@ export {
   clearServiceConfigStores,
   registerServiceConfigDefaults,
   getConfigWithDefault,
+  getServiceConfigKey,
   ensureDefaultConfigsCreated,
   ConfigStore,
 } from './common/config/store.js';
@@ -241,6 +246,7 @@ export type {
   GetConfigOptions,
   GetAllConfigOptions,
   SetConfigOptions,
+  GetServiceConfigKeyOptions,
 } from './common/config/store.js';
 
 // Shared defaults (simple constants services can optionally use)
