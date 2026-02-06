@@ -46,6 +46,7 @@
 
 import type { ClientSession, Db, MongoClient } from 'mongodb';
 import { logger } from '../../index.js';
+import { getErrorMessage } from '../errors.js';
 import { getRedis, scanKeysArray } from '../../databases/redis/connection.js';
 import type { DatabaseStrategyResolver, DatabaseContext } from '../../databases/mongodb/strategy.js';
 import { DEFAULT_TRANSACTION_OPTIONS } from '../wallet/wallet.js';
@@ -465,7 +466,7 @@ export async function recoverOperation<TOperation extends RecoverableOperation>(
 
       return { recovered: false, action: 'no_action_needed', reason: 'unknown_status' };
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
+      const errorMsg = getErrorMessage(error);
       logger.error(`Failed to recover operation ${operationId}`, {
         operationType: handler.getOperationType(),
         error: errorMsg,
@@ -570,7 +571,7 @@ async function reverseOperation<TOperation extends RecoverableOperation>(
       reverseOperationId: reverseResult.operationId,
     };
   } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
+    const errorMsg = getErrorMessage(error);
     logger.error(`Failed to reverse operation ${operation.id}`, {
       operationType: handler.getOperationType(),
       error: errorMsg,
@@ -649,7 +650,7 @@ export async function recoverStuckOperations(
       logger.error(`Failed to recover ${operationType} operation`, {
         operationType,
         operationId: state.operationId,
-        error: error instanceof Error ? error.message : String(error),
+        error: getErrorMessage(error),
       });
     }
   }
@@ -733,7 +734,7 @@ export class RecoveryJob {
       }
     } catch (error) {
       logger.error('Recovery job failed', {
-        error: error instanceof Error ? error.message : String(error),
+        error: getErrorMessage(error),
       });
     }
   }

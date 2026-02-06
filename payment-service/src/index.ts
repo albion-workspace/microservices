@@ -20,6 +20,7 @@ import {
   isAuthenticated,
   allow,
   logger,
+  getErrorMessage,
   on,
   startListening,
   extractDocumentId,
@@ -36,6 +37,7 @@ import {
   createObjectModelQueryResolver,
   findUserIdByRole,
   createTransferWithTransactions,
+  normalizeWalletForGraphQL,
   type IntegrationEvent,
   type ResolverContext,
   type DatabaseStrategyResolver,
@@ -125,7 +127,7 @@ async function getSystemUserId(tenantId?: string): Promise<string> {
     return systemUserId;
   } catch (error) {
     throw new GraphQLError(PAYMENT_ERRORS.FailedToGetSystemUserId, { 
-      error: error instanceof Error ? error.message : String(error),
+      error: getErrorMessage(error),
       tenantId 
     });
   }
@@ -243,17 +245,9 @@ const buildGatewayConfig = (): Parameters<typeof createGateway>[0] => {
               await Promise.allSettled(syncPromises);
             }
             
-            // Normalize null values to 0 for bonusBalance, lockedBalance, and lifetimeFees
             if (result && result.nodes && Array.isArray(result.nodes)) {
-              result.nodes = result.nodes.map((wallet: any) => ({
-                ...wallet,
-                bonusBalance: wallet.bonusBalance ?? 0,
-                lockedBalance: wallet.lockedBalance ?? 0,
-                balance: wallet.balance ?? 0,
-                lifetimeFees: wallet.lifetimeFees ?? 0,
-              }));
+              result.nodes = result.nodes.map((wallet: any) => normalizeWalletForGraphQL(wallet));
             }
-            
             return result;
           },
           wallet: async (args: Record<string, unknown>, ctx: any) => {
@@ -264,17 +258,7 @@ const buildGatewayConfig = (): Parameters<typeof createGateway>[0] => {
               return wallet;
             }
             
-            // Wallets are updated atomically via createTransferWithTransactions
-            // No sync needed - wallets are the source of truth
-            
-            // Normalize null values to 0 for bonusBalance, lockedBalance, and lifetimeFees
-            return {
-              ...wallet,
-              bonusBalance: wallet.bonusBalance ?? 0,
-              lockedBalance: wallet.lockedBalance ?? 0,
-              balance: wallet.balance ?? 0,
-              lifetimeFees: wallet.lifetimeFees ?? 0,
-            };
+            return normalizeWalletForGraphQL(wallet);
           },
         },
         Mutation: walletService.resolvers.Mutation,

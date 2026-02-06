@@ -140,6 +140,7 @@ export {
   buildWalletUpdate,
   withTransaction,
 } from './common/wallet/wallet.js';
+export { normalizeWalletForGraphQL } from './common/wallet/normalize.js';
 export type {
   Wallet,
   BalanceType as WalletBalanceType,

@@ -5,7 +5,7 @@
 
 import passport from 'passport';
 import type { Request, Response } from 'express';
-import { createTokenPair, logger } from 'core-service';
+import { createTokenPair, logger, getErrorMessage } from 'core-service';
 import type { User } from './types.js';
 import { createUserContext } from './utils.js';
 import { getAuthConfig } from './config.js';
@@ -64,7 +64,7 @@ async function handleOAuthCallback(
   } catch (error) {
     logger.error('OAuth callback error', { 
       provider, 
-      error: error instanceof Error ? error.message : String(error),
+      error: getErrorMessage(error),
       stack: error instanceof Error ? error.stack : undefined
     });
     res.redirect(`/login?error=auth_failed&provider=${provider}`);

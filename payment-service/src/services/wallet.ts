@@ -51,7 +51,7 @@
  *    - Consistent across all entities
  */
 
-import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, resolveDatabase, deleteCache, deleteCachePattern, logger, validateInput, findOneById, findOneAndUpdateById, requireAuth, getUserId, getTenantId, getOrCreateWallet, paginateCollection, extractDocumentId, GraphQLError, type DatabaseResolutionOptions } from 'core-service';
+import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, resolveDatabase, deleteCache, deleteCachePattern, logger, getErrorMessage, normalizeWalletForGraphQL, validateInput, findOneById, findOneAndUpdateById, requireAuth, getUserId, getTenantId, getOrCreateWallet, paginateCollection, extractDocumentId, GraphQLError, type DatabaseResolutionOptions } from 'core-service';
 import { getUseMongoTransactions } from '../config.js';
 import { db } from '../database.js';
 import { PAYMENT_ERRORS } from '../error-codes.js';
@@ -164,17 +164,19 @@ export const walletResolvers = {
         return null;
       }
       
-      // Map wallets to clean format
-      const wallets = walletDocs.map((w: any) => ({
-        id: w.id,
-        category: w.category || 'main',
-        realBalance: w.balance || 0,
-        bonusBalance: w.bonusBalance || 0,
-        lockedBalance: w.lockedBalance || 0,
-        totalBalance: (w.balance || 0) + (w.bonusBalance || 0),
-        status: w.status || 'active',
-        lastActivityAt: w.lastActivityAt,
-      }));
+      const wallets = walletDocs.map((w: any) => {
+        const n = normalizeWalletForGraphQL(w);
+        return {
+          id: w.id,
+          category: w.category || 'main',
+          realBalance: n.balance,
+          bonusBalance: n.bonusBalance,
+          lockedBalance: n.lockedBalance,
+          totalBalance: n.balance + n.bonusBalance,
+          status: w.status || 'active',
+          lastActivityAt: w.lastActivityAt,
+        };
+      });
       
       // Calculate totals across all wallets
       const totals = wallets.reduce((acc, w) => ({
@@ -261,37 +263,31 @@ export const walletResolvers = {
           }
         }
         
-        const balance = (wallet as any).balance || 0;
-        const bonusBalance = (wallet as any).bonusBalance || 0;
-        const lockedBalance = (wallet as any).lockedBalance || 0;
-        const availableBalance = balance - lockedBalance;
-        
-        // Get allowNegative directly from wallet (wallet-level permissions)
+        const n = normalizeWalletForGraphQL(wallet as Record<string, unknown>);
+        const availableBalance = n.balance - n.lockedBalance;
         const allowNegative = (wallet as any).allowNegative ?? false;
-        
-        // Return unified format (supports both GraphQL types)
         return {
           walletId: (wallet as any).id,
           userId: (wallet as any).userId || userId,
           category: (wallet as any).category || category,
           currency: (wallet as any).currency || currency,
-          balance,
+          balance: n.balance,
           availableBalance,
-          pendingIn: 0, // Not tracked separately - use transactions for pending
-          pendingOut: 0, // Not tracked separately - use transactions for pending
+          pendingIn: 0,
+          pendingOut: 0,
           allowNegative,
-          realBalance: balance,
-          bonusBalance,
-          lockedBalance,
-          totalBalance: balance + bonusBalance,
-          withdrawableBalance: balance,
+          realBalance: n.balance,
+          bonusBalance: n.bonusBalance,
+          lockedBalance: n.lockedBalance,
+          totalBalance: n.balance + n.bonusBalance,
+          withdrawableBalance: n.balance,
           status: (wallet as any).status || 'active',
         };
       } catch (error) {
         throw new GraphQLError(PAYMENT_ERRORS.FailedToGetWalletBalance, {
           userId,
           category,
-          originalError: error instanceof Error ? error.message : String(error),
+          originalError: getErrorMessage(error),
         });
       }
     },
@@ -319,19 +315,13 @@ export const walletResolvers = {
         }> = [];
         
         for (const currency of currencies) {
-          // Get or create wallet (creates if doesn't exist)
           const wallet = await getOrCreateWallet(userId, currency, tenantId, { database });
-          
-          const balance = (wallet as any).balance || 0;
-          const lockedBalance = (wallet as any).lockedBalance || 0;
-          const availableBalance = balance - lockedBalance;
-          
-          // Get allowNegative directly from wallet (wallet-level permissions)
+          const n = normalizeWalletForGraphQL(wallet as Record<string, unknown>);
+          const availableBalance = n.balance - n.lockedBalance;
           const allowNegative = (wallet as any).allowNegative ?? false;
-          
           balances.push({
             currency,
-            balance,
+            balance: n.balance,
             availableBalance,
             allowNegative,
           });
@@ -344,7 +334,7 @@ export const walletResolvers = {
       } catch (error) {
         throw new GraphQLError(PAYMENT_ERRORS.FailedToGetUserBalances, {
           userId,
-          originalError: error instanceof Error ? error.message : String(error),
+          originalError: getErrorMessage(error),
         });
       }
     },
@@ -441,18 +431,14 @@ export const walletResolvers = {
             }
           }
           
-          const balance = wallet.balance || 0;
-          const lockedBalance = wallet.lockedBalance || 0;
-          const availableBalance = balance - lockedBalance;
-          
-          // Get allowNegative directly from wallet (wallet-level permissions)
+          const n = normalizeWalletForGraphQL(wallet as Record<string, unknown>);
+          const availableBalance = n.balance - n.lockedBalance;
           const allowNegative = wallet.allowNegative ?? false;
-          
           const walletId = extractDocumentId(wallet);
           balances.push({
             userId,
             walletId: walletId || '',
-            balance,
+            balance: n.balance,
             availableBalance,
             pendingIn: 0,
             pendingOut: 0,
@@ -465,7 +451,7 @@ export const walletResolvers = {
         };
       } catch (error) {
         logger.error('Failed to get bulk wallet balances', { error, userIds });
-        throw new Error(`Failed to get bulk wallet balances: ${error instanceof Error ? error.message : String(error)}`);
+        throw new Error(`Failed to get bulk wallet balances: ${getErrorMessage(error)}`);
       }
     },
     

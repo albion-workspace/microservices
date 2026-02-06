@@ -26,6 +26,7 @@ import { CORE_DATABASE_NAME } from '../../databases/mongodb/constants.js';
 import { getCache, setCache, deleteCache, deleteCachePattern } from '../../databases/cache.js';
 import { resolveDatabaseStrategyFromConfig } from '../../databases/mongodb/strategy-config.js';
 import { logger } from '../logger.js';
+import { getErrorMessage } from '../errors.js';
 import { hasAnyRole } from '../auth/permissions.js';
 import { generateMongoId } from '../../databases/mongodb/utils.js';
 
@@ -266,7 +267,7 @@ export async function ensureDefaultConfigsCreated(
       logger.debug('Could not ensure config creation (DB may not be connected)', { 
         service, 
         key, 
-        error: error instanceof Error ? error.message : String(error)
+        error: getErrorMessage(error)
       });
       skippedCount++;
     }
@@ -642,7 +643,7 @@ export class ConfigStore {
         logger.debug('Could not auto-create config (DB may not be connected yet), will retry on next access', { 
           service, 
           key, 
-          error: error instanceof Error ? error.message : String(error)
+          error: getErrorMessage(error)
         });
       }
       

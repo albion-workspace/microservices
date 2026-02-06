@@ -36,7 +36,9 @@ import {
   initializeServiceDatabase as coreInitializeServiceDatabase,
   clearDatabaseCaches,
   clearServiceConfigStores,
+  getErrorMessage,
 } from '../../../core-service/src/index.js';
+export { getErrorMessage } from '../../../core-service/src/index.js';
 
 // Type imports
 import type {
@@ -774,7 +776,7 @@ export async function dropAllDatabases(options?: { brand?: string; tenantId?: st
       dropped.push(dbName);
       console.log(`✅ Successfully dropped: ${dbName}`);
     } catch (error) {
-      console.error(`❌ Error dropping ${dbName}:`, error instanceof Error ? error.message : String(error));
+      console.error(`❌ Error dropping ${dbName}:`, getErrorMessage(error));
       // Continue with other databases even if one fails
     }
   }
@@ -826,7 +828,7 @@ export async function dropAllDatabases(options?: { brand?: string; tenantId?: st
     console.log('✅ core_service database ready for service_configs');
     console.log('   Note: Config defaults will be auto-created when services start or when getConfigWithDefault() is called\n');
   } catch (error) {
-    console.warn('⚠️  Warning: Could not recreate core_service database:', error instanceof Error ? error.message : String(error));
+    console.warn('⚠️  Warning: Could not recreate core_service database:', getErrorMessage(error));
     console.warn('   Config loading may fail until services restart and recreate configs\n');
   }
 

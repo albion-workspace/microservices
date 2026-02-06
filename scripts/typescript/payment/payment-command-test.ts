@@ -37,7 +37,7 @@ import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 
 // External packages (core-service)
-import { connectRedis, getRedis, checkRedisHealth } from '../../../core-service/src/index.js';
+import { connectRedis, getRedis, checkRedisHealth, getErrorMessage } from '../../../core-service/src/index.js';
 import { 
   recoverOperation,
   recoverStuckOperations,
@@ -2377,7 +2377,7 @@ async function testProvider() {
         name: test.name,
         passed: false,
         duration: Date.now() - start,
-        error: error instanceof Error ? error.message : String(error),
+        error: getErrorMessage(error),
       };
       results.push(result);
       console.log(`❌ ${test.name} - ${result.error}`);

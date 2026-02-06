@@ -17,6 +17,7 @@ import {
   registerRecoveryHandler,
   getRecoveryJob,
   logger,
+  getErrorMessage,
   createTransferRecoveryHandler,
   onShutdown,
 } from 'core-service';
@@ -43,7 +44,7 @@ export async function setupRecovery(): Promise<void> {
     });
   } catch (error) {
     logger.error('Failed to setup recovery system', {
-      error: error instanceof Error ? error.message : String(error),
+      error: getErrorMessage(error),
     });
     throw error;
   }

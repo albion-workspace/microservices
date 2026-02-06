@@ -20,6 +20,7 @@ import {
   connectRedis, 
   checkRedisHealth, 
   getClient,
+  getErrorMessage,
   findUserIdByRole,
   findUserIdsByRole,
 } from '../../../core-service/src/index.js';
@@ -393,7 +394,7 @@ async function runTest(name: string, testFn: () => Promise<void>): Promise<TestR
       name,
       passed: false,
       duration: Date.now() - start,
-      error: error instanceof Error ? error.message : String(error),
+      error: getErrorMessage(error),
     };
     results.push(result);
     console.log(`  ❌ ${name} - ${result.error}`);

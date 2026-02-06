@@ -8,6 +8,7 @@ import {
   getUserId, 
   getTenantId, 
   logger,
+  getErrorMessage,
   findById,
   extractDocumentId,
   normalizeDocument,
@@ -513,7 +514,7 @@ export function createAuthResolvers(
         } catch (error) {
           throw new GraphQLError(AUTH_ERRORS.FailedToFetchUsers, { 
             tenantId,
-            originalError: error instanceof Error ? error.message : String(error),
+            originalError: getErrorMessage(error),
           });
         }
       },
@@ -593,7 +594,7 @@ export function createAuthResolvers(
           throw new GraphQLError(AUTH_ERRORS.FailedToFetchUsersByRole, { 
             role,
             tenantId: finalTenantId,
-            originalError: error instanceof Error ? error.message : String(error),
+            originalError: getErrorMessage(error),
           });
         }
       },
@@ -902,7 +903,7 @@ export function createAuthResolvers(
           throw new GraphQLError(AUTH_ERRORS.FailedToUpdateUserRoles, { 
             userId,
             tenantId,
-            originalError: error instanceof Error ? error.message : String(error),
+            originalError: getErrorMessage(error),
           });
         }
       },
@@ -973,7 +974,7 @@ export function createAuthResolvers(
           throw new GraphQLError(AUTH_ERRORS.FailedToUpdateUserPermissions, { 
             userId,
             tenantId,
-            originalError: error instanceof Error ? error.message : String(error),
+            originalError: getErrorMessage(error),
           });
         }
       },
@@ -1048,7 +1049,7 @@ export function createAuthResolvers(
             userId,
             tenantId,
             status,
-            originalError: error instanceof Error ? error.message : String(error),
+            originalError: getErrorMessage(error),
           });
         }
       },

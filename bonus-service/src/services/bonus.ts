@@ -7,7 +7,7 @@
  * - Transfers = User-to-user operations (creates 2 transactions)
  */
 
-import { createService, type, type Repository, type SagaContext, validateInput, logger, findUserIdByRole, GraphQLError, type DatabaseResolutionOptions } from 'core-service';
+import { createService, type, type Repository, type SagaContext, validateInput, logger, getErrorMessage, findUserIdByRole, GraphQLError, type DatabaseResolutionOptions } from 'core-service';
 import { getUseMongoTransactions } from '../config.js';
 import { BONUS_ERRORS } from '../error-codes.js';
 import type { BonusTemplate, UserBonus, BonusTransaction, BonusStatus } from '../types.js';
@@ -551,7 +551,7 @@ async function getSystemUserId(tenantId?: string): Promise<string> {
     return systemUserId;
   } catch (error) {
     throw new GraphQLError(BONUS_ERRORS.FailedToGetSystemUserId, { 
-      error: error instanceof Error ? error.message : String(error),
+      error: getErrorMessage(error),
       tenantId 
     });
   }
