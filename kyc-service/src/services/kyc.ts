@@ -13,6 +13,7 @@ import {
   validateInput, 
   logger, 
   GraphQLError,
+  buildConnectionTypeSDL,
 } from 'core-service';
 
 import { KYC_ERRORS } from '../error-codes.js';
@@ -137,7 +138,7 @@ export const kycProfileService = createService<KYCProfile, CreateKYCProfileInput
         countryOfResidence: String
       }
       
-      type KYCProfileConnection { nodes: [KYCProfile!]! totalCount: Int! pageInfo: PageInfo! }
+      ${buildConnectionTypeSDL('KYCProfileConnection', 'KYCProfile')}
       type CreateKYCProfileResult { success: Boolean! kycProfile: KYCProfile sagaId: ID! errors: [String!] executionTimeMs: Int }
     `,
     graphqlInput: `input CreateKYCProfileInput { userId: String! tenantId: String! jurisdictionCode: String! firstName: String lastName: String dateOfBirth: String nationality: String }`,
@@ -244,7 +245,7 @@ export const kycDocumentService = createService<KYCDocument, UploadDocumentInput
         updatedAt: String
       }
       
-      type KYCDocumentConnection { nodes: [KYCDocument!]! totalCount: Int! pageInfo: PageInfo! }
+      ${buildConnectionTypeSDL('KYCDocumentConnection', 'KYCDocument')}
       type CreateKycDocumentResult { success: Boolean! kycDocument: KYCDocument sagaId: ID! errors: [String!] executionTimeMs: Int }
     `,
     graphqlInput: `input UploadKYCDocumentInput { profileId: String! type: String! documentNumber: String issuingCountry: String expiresAt: String }`,
@@ -330,7 +331,7 @@ export const kycVerificationService = createService<KYCVerification, StartVerifi
         updatedAt: String
       }
       
-      type KYCVerificationConnection { nodes: [KYCVerification!]! totalCount: Int! pageInfo: PageInfo! }
+      ${buildConnectionTypeSDL('KYCVerificationConnection', 'KYCVerification')}
       type CreateKycVerificationResult { success: Boolean! kycVerification: KYCVerification sagaId: ID! errors: [String!] executionTimeMs: Int }
     `,
     graphqlInput: `input StartKYCVerificationInput { profileId: String! targetTier: String! redirectUrl: String }`,

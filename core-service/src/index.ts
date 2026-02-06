@@ -164,6 +164,7 @@ export {
   getRecoveryHandler,
   getOperationStateTracker,
   getRecoveryJob,
+  createTransferRecoverySetup,
   OperationStateTracker,
   RecoveryJob,
 } from './common/resilience/recovery.js';
@@ -172,6 +173,7 @@ export type {
   RecoveryResult,
   RecoveryHandler,
   OperationState,
+  TransferRecoverySetupOptions,
 } from './common/resilience/recovery.js';
 
 export {
@@ -438,6 +440,7 @@ export {
   createResolverBuilder,
 } from './common/graphql/builder.js';
 export type { ResolverFunction, ServiceResolvers } from './common/graphql/builder.js';
+export { buildConnectionTypeSDL } from './common/graphql/connection-builder.js';
 
 // GraphQL Query Complexity
 export {
@@ -510,6 +513,10 @@ export {
   buildEvent,
 } from './common/events/integration.js';
 export type { IntegrationEvent, EmitOptions, UnifiedEmitOptions } from './common/events/integration.js';
+export { withEventHandlerError } from './common/events/handler-wrapper.js';
+export type { EventWithId } from './common/events/handler-wrapper.js';
+
+export type { NotificationHandlerPlugin, HandlerContext, EventHandler } from './common/notifications/plugin-types.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Webhooks
@@ -753,6 +760,7 @@ export {
   updateOneById,
   deleteOneById,
   findOneAndUpdateById,
+  createUniqueIndexSafe,
 } from './databases/mongodb/utils.js';
 
 export type {
@@ -762,6 +770,7 @@ export type {
   ClientSession,
   Db,
   MongoClient,
+  CreateUniqueIndexOptions,
 } from './databases/mongodb/utils.js';
 
 // MongoDB Error Handling

@@ -543,6 +543,22 @@ Scan covered **all packages under repo root** (auth-service, payment-service, bo
 
 **Combined total (§14.1 + §14.5):** ~577–685 lines potential reduction (or ~500+ conservative) if all items are implemented.
 
+### 14.6 Implementation status (completed in codebase)
+
+The following items from §14.1 and §14.5 have been implemented:
+
+- **JWT decode (client):** `shared-validators/src/jwt.ts` – `decodeJWT`, `isExpired`, `JwtPayload`; app uses it in auth-context.
+- **Error message normalization:** `getErrorMessage(error)` from core-service used across core, auth, payment, bonus, scripts (replacing `error instanceof Error ? error.message : String(error)`).
+- **Permission check:** `checkSystemOrPermission` in core-service; auth-service imports and uses it.
+- **Wallet normalization:** `normalizeWalletForGraphQL(wallet)` in core-service; payment-service index and wallet.ts use it.
+- **Index creation utility:** `createUniqueIndexSafe` in core-service mongodb utils; payment-service uses it for `metadata.externalRef`.
+- **Event handler wrapper:** `withEventHandlerError` in core-service; payment-service bonus event handlers use it.
+- **GraphQL connection builder:** `buildConnectionTypeSDL(connectionName, nodeTypeName)` in core-service; auth, payment, bonus, kyc, notification services use it for connection type SDL.
+- **Recovery setup:** `createTransferRecoverySetup(handler, options?)` in core-service; payment-service and bonus-service recovery-setup call it.
+- **Notification handler plugin types:** `NotificationHandlerPlugin`, `HandlerContext`, `EventHandler` in core-service `common/notifications/plugin-types.ts`; auth-, payment-, bonus-service handlers import from core-service; notification-service re-exports from core and keeps typed `HandlerContext` for internal use.
+
+**Not done (optional):** Auth context refactor (§14.1 – reducers + single refresh path), database/redis boilerplate factory (§14.5), config loadConfig helper (§14.5).
+
 ---
 
 *Generated: Technical Analysis by Senior Engineering Review*

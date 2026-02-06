@@ -47,6 +47,7 @@
 import type { ClientSession, Db, MongoClient } from 'mongodb';
 import { logger } from '../../index.js';
 import { getErrorMessage } from '../errors.js';
+import { onShutdown } from '../lifecycle/shutdown.js';
 import { getRedis, scanKeysArray } from '../../databases/redis/connection.js';
 import type { DatabaseStrategyResolver, DatabaseContext } from '../../databases/mongodb/strategy.js';
 import { DEFAULT_TRANSACTION_OPTIONS } from '../wallet/wallet.js';
@@ -751,4 +752,39 @@ export function getRecoveryJob(): RecoveryJob {
     recoveryJob = new RecoveryJob();
   }
   return recoveryJob;
+}
+
+/** Options for transfer recovery setup (register handler + start job + shutdown hook) */
+export interface TransferRecoverySetupOptions {
+  /** Optional label for logs (e.g. "payment service", "bonus service") */
+  serviceLabel?: string;
+  /** Poll interval in ms (default: 5 * 60 * 1000) */
+  intervalMs?: number;
+  /** Max age in seconds for stuck operations (default: 60) */
+  maxAgeSeconds?: number;
+}
+
+/**
+ * One-shot setup: register a transfer recovery handler, start the recovery job, and register shutdown cleanup.
+ * Use in payment-service and bonus-service to avoid duplicating register + start + onShutdown logic.
+ */
+export function createTransferRecoverySetup(
+  handler: RecoveryHandler<RecoverableOperation>,
+  options?: TransferRecoverySetupOptions
+): void {
+  const intervalMs = options?.intervalMs ?? 5 * 60 * 1000;
+  const maxAgeSeconds = options?.maxAgeSeconds ?? 60;
+  const label = options?.serviceLabel ? ` for ${options.serviceLabel}` : '';
+
+  registerRecoveryHandler('transfer', handler);
+  logger.info(`✅ Transfer recovery handler registered${label}`);
+
+  const recoveryJob = getRecoveryJob();
+  recoveryJob.start(intervalMs, maxAgeSeconds);
+  logger.info(`✅ Recovery job started (interval: ${intervalMs / 1000 / 60} minutes, max age: ${maxAgeSeconds} seconds)`);
+
+  onShutdown(() => {
+    recoveryJob.stop();
+    logger.info('Recovery job stopped');
+  });
 }

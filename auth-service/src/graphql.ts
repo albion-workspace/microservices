@@ -17,6 +17,7 @@ import {
   scanKeysIterator,
   createPendingOperationStore,
   GraphQLError,
+  buildConnectionTypeSDL,
   type CursorPaginationOptions,
   type CursorPaginationResult,
 } from 'core-service';
@@ -146,11 +147,7 @@ export const authGraphQLTypes = `
     # Note: Sensitive data (OTP codes, passwords) is NOT exposed
   }
   
-  type PendingOperationConnection {
-    nodes: [PendingOperation!]!
-    totalCount: Int!
-    pageInfo: PageInfo!
-  }
+  ${buildConnectionTypeSDL('PendingOperationConnection', 'PendingOperation')}
   
   # Note: BasicResponse and PageInfo are defined in core-service base schema
   
@@ -305,11 +302,7 @@ export const authGraphQLTypes = `
     ): JSON
   }
   
-  type UserConnection {
-    nodes: [User!]!
-    totalCount: Int!
-    pageInfo: PageInfo!
-  }
+  ${buildConnectionTypeSDL('UserConnection', 'User')}
   
   # ═══════════════════════════════════════════════════════════════
   # Mutations

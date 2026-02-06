@@ -29,6 +29,7 @@ import {
   paginateCollection,
   extractDocumentId,
   createTransferWithTransactions,
+  buildConnectionTypeSDL,
   type ClientSession,
 } from 'core-service';
 
@@ -229,7 +230,7 @@ export const depositService = createService<Transaction, CreateDepositInput>({
         description: String
         metadata: JSON
       }
-      type TransactionConnection { nodes: [Transaction!]! totalCount: Int! pageInfo: PageInfo! }
+      ${buildConnectionTypeSDL('TransactionConnection', 'Transaction')}
       # Transfer type will be defined by transferService (referenced here)
       type CreateDepositResult { success: Boolean! deposit: Transaction transfer: Transfer sagaId: ID! errors: [String!] executionTimeMs: Int }
     `,

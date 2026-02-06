@@ -51,7 +51,7 @@
  *    - Consistent across all entities
  */
 
-import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, resolveDatabase, deleteCache, deleteCachePattern, logger, getErrorMessage, normalizeWalletForGraphQL, validateInput, findOneById, findOneAndUpdateById, requireAuth, getUserId, getTenantId, getOrCreateWallet, paginateCollection, extractDocumentId, GraphQLError, type DatabaseResolutionOptions } from 'core-service';
+import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, resolveDatabase, deleteCache, deleteCachePattern, logger, getErrorMessage, normalizeWalletForGraphQL, validateInput, findOneById, findOneAndUpdateById, requireAuth, getUserId, getTenantId, getOrCreateWallet, paginateCollection, extractDocumentId, GraphQLError, buildConnectionTypeSDL, type DatabaseResolutionOptions } from 'core-service';
 import { getUseMongoTransactions } from '../config.js';
 import { db } from '../database.js';
 import { PAYMENT_ERRORS } from '../error-codes.js';
@@ -686,7 +686,7 @@ export const walletService = createService<Wallet, CreateWalletInput>({
         allowNegative: Boolean
         creditLimit: Float
       }
-      type WalletConnection { nodes: [Wallet!]! totalCount: Int! pageInfo: PageInfo! }
+      ${buildConnectionTypeSDL('WalletConnection', 'Wallet')}
       type CreateWalletResult { success: Boolean! wallet: Wallet sagaId: ID! errors: [String!] executionTimeMs: Int }
     `,
     graphqlInput: `input CreateWalletInput { userId: String! currency: String! category: String tenantId: String allowNegative: Boolean creditLimit: Float }`,
@@ -775,11 +775,7 @@ export const walletTypes = `
     metadata: JSON
   }
   
-  type TransactionHistoryConnection {
-    nodes: [TransactionHistory!]!
-    totalCount: Int!
-    pageInfo: PageInfo!
-  }
+  ${buildConnectionTypeSDL('TransactionHistoryConnection', 'TransactionHistory')}
   
   extend type Query {
     """

@@ -2,7 +2,7 @@
  * Notification Service GraphQL Schema & Resolvers
  */
 
-import { logger, requireAuth, getUserId, getErrorMessage, generateMongoId, paginateCollection, GraphQLError, hasRole } from 'core-service';
+import { logger, requireAuth, getUserId, getErrorMessage, generateMongoId, paginateCollection, GraphQLError, hasRole, buildConnectionTypeSDL } from 'core-service';
 import { db } from './database.js';
 import { NOTIFICATION_ERRORS } from './error-codes.js';
 import type { ResolverContext } from 'core-service';
@@ -88,11 +88,7 @@ export const notificationGraphQLTypes = `
     configured: Boolean!
   }
   
-  type NotificationConnection {
-    nodes: [Notification!]!
-    pageInfo: PageInfo!
-    totalCount: Int!
-  }
+  ${buildConnectionTypeSDL('NotificationConnection', 'Notification')}
   
   extend type Query {
     notificationHealth: String!

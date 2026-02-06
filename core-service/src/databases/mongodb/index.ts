@@ -39,12 +39,14 @@ export {
   extractDocumentId,
   normalizeDocument,
   normalizeDocuments,
+  createUniqueIndexSafe,
   type Collection,
   type Filter,
   type Document,
   type ClientSession,
   type Db,
   type MongoClient,
+  type CreateUniqueIndexOptions,
 } from './utils.js';
 
 // Errors
