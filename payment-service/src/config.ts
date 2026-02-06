@@ -6,7 +6,7 @@
  */
 
 import type { PaymentConfig } from './types.js';
-import { logger, getConfigWithDefault, getServiceConfigKey } from 'core-service';
+import { logger, getServiceConfigKey } from 'core-service';
 
 export type { PaymentConfig } from './types.js';
 
@@ -38,28 +38,29 @@ export async function loadConfig(brand?: string, tenantId?: string): Promise<Pay
     refreshSecret: '',
   }, opts(brand, tenantId));
   const databaseConfig = await getServiceConfigKey<{ mongoUri?: string; redisUrl?: string }>(SERVICE_NAME, 'database', { mongoUri: '', redisUrl: '' }, opts(brand, tenantId));
-  const exchangeRateConfig = await getConfigWithDefault<{ defaultSource: string; cacheTtl: number; autoUpdateInterval: number; manualRates: Record<string, unknown> }>(SERVICE_NAME, 'exchangeRate', { brand, tenantId }) ?? {
+  const optsService = (b?: string, t?: string) => ({ brand: b, tenantId: t });
+  const exchangeRateConfig = await getServiceConfigKey<{ defaultSource: string; cacheTtl: number; autoUpdateInterval: number; manualRates: Record<string, unknown> }>(SERVICE_NAME, 'exchangeRate', {
     defaultSource: 'manual',
     cacheTtl: 300,
     autoUpdateInterval: 3600,
     manualRates: {},
-  };
-  const transactionConfig = await getConfigWithDefault<{ minAmount: number; maxAmount: number; allowNegativeBalance: boolean; useTransactions?: boolean }>(SERVICE_NAME, 'transaction', { brand, tenantId }) ?? {
+  }, optsService(brand, tenantId));
+  const transactionConfig = await getServiceConfigKey<{ minAmount: number; maxAmount: number; allowNegativeBalance: boolean; useTransactions?: boolean }>(SERVICE_NAME, 'transaction', {
     minAmount: 0.01,
     maxAmount: 1000000,
     allowNegativeBalance: false,
     useTransactions: true,
-  };
-  const walletConfig = await getConfigWithDefault<{ defaultCurrency: string; supportedCurrencies: string[]; allowNegativeBalance: boolean }>(SERVICE_NAME, 'wallet', { brand, tenantId }) ?? {
+  }, optsService(brand, tenantId));
+  const walletConfig = await getServiceConfigKey<{ defaultCurrency: string; supportedCurrencies: string[]; allowNegativeBalance: boolean }>(SERVICE_NAME, 'wallet', {
     defaultCurrency: 'USD',
     supportedCurrencies: ['USD', 'EUR', 'GBP'],
     allowNegativeBalance: false,
-  };
-  const transferConfig = await getConfigWithDefault<{ requireApproval: boolean; maxPendingTransfers: number; approvalTimeout: number }>(SERVICE_NAME, 'transfer', { brand, tenantId }) ?? {
+  }, optsService(brand, tenantId));
+  const transferConfig = await getServiceConfigKey<{ requireApproval: boolean; maxPendingTransfers: number; approvalTimeout: number }>(SERVICE_NAME, 'transfer', {
     requireApproval: false,
     maxPendingTransfers: 10,
     approvalTimeout: 3600,
-  };
+  }, optsService(brand, tenantId));
 
   const portNum = typeof port === 'number' ? port : parseInt(String(port), 10);
 

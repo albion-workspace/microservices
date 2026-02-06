@@ -6,27 +6,29 @@
  */
 
 import type { KYCConfig } from './types.js';
-import { getConfigWithDefault } from 'core-service';
+import { getServiceConfigKey } from 'core-service';
+
+const opts = (brand?: string, tenantId?: string) => ({ brand, tenantId, fallbackService: 'gateway' as const });
 
 export type { KYCConfig } from './types.js';
 
 export const SERVICE_NAME = 'kyc-service';
 
 export async function loadConfig(brand?: string, tenantId?: string): Promise<KYCConfig> {
-  const port = (await getConfigWithDefault<number>(SERVICE_NAME, 'port', { brand, tenantId })) ?? 9005;
-  const serviceName = (await getConfigWithDefault<string>(SERVICE_NAME, 'serviceName', { brand, tenantId })) ?? SERVICE_NAME;
-  const nodeEnv = (await getConfigWithDefault<string>(SERVICE_NAME, 'nodeEnv', { brand, tenantId })) ?? (await getConfigWithDefault<string>('gateway', 'nodeEnv', { brand, tenantId })) ?? 'development';
-  const corsOrigins = (await getConfigWithDefault<string[]>(SERVICE_NAME, 'corsOrigins', { brand, tenantId })) ?? (await getConfigWithDefault<string[]>('gateway', 'corsOrigins', { brand, tenantId })) ?? [
+  const port = await getServiceConfigKey<number>(SERVICE_NAME, 'port', 9005, opts(brand, tenantId));
+  const serviceName = await getServiceConfigKey<string>(SERVICE_NAME, 'serviceName', SERVICE_NAME, opts(brand, tenantId));
+  const nodeEnv = await getServiceConfigKey<string>(SERVICE_NAME, 'nodeEnv', 'development', opts(brand, tenantId));
+  const corsOrigins = await getServiceConfigKey<string[]>(SERVICE_NAME, 'corsOrigins', [
     'http://localhost:3000',
     'http://localhost:5173',
-  ];
-  const jwtConfig = (await getConfigWithDefault<{ secret: string; expiresIn: string; refreshSecret?: string; refreshExpiresIn?: string }>(SERVICE_NAME, 'jwt', { brand, tenantId })) ?? (await getConfigWithDefault<{ secret: string; expiresIn: string; refreshSecret?: string; refreshExpiresIn?: string }>('gateway', 'jwt', { brand, tenantId })) ?? {
+  ], opts(brand, tenantId));
+  const jwtConfig = await getServiceConfigKey<{ secret: string; expiresIn: string; refreshSecret?: string; refreshExpiresIn?: string }>(SERVICE_NAME, 'jwt', {
     secret: '',
     expiresIn: '1h',
     refreshSecret: '',
     refreshExpiresIn: '7d',
-  };
-  const databaseConfig = (await getConfigWithDefault<{ mongoUri?: string; redisUrl?: string }>(SERVICE_NAME, 'database', { brand, tenantId })) ?? (await getConfigWithDefault<{ mongoUri?: string; redisUrl?: string }>('gateway', 'database', { brand, tenantId })) ?? { mongoUri: '', redisUrl: '' };
+  }, opts(brand, tenantId));
+  const databaseConfig = await getServiceConfigKey<{ mongoUri?: string; redisUrl?: string }>(SERVICE_NAME, 'database', { mongoUri: '', redisUrl: '' }, opts(brand, tenantId));
 
   return {
     port: typeof port === 'number' ? port : parseInt(String(port), 10),

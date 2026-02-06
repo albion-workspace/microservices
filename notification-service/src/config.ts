@@ -5,56 +5,58 @@
  * NotificationConfig extends DefaultServiceConfig (core-service); single config type in types.ts.
  */
 
-import { logger, getConfigWithDefault } from 'core-service';
+import { logger, getServiceConfigKey } from 'core-service';
 import type { NotificationConfig } from './types.js';
+
+const opts = (brand?: string, tenantId?: string) => ({ brand, tenantId, fallbackService: 'gateway' as const });
 
 export type { NotificationConfig };
 
 export const SERVICE_NAME = 'notification-service';
 
 export async function loadConfig(brand?: string, tenantId?: string): Promise<NotificationConfig> {
-  const port = (await getConfigWithDefault<number>(SERVICE_NAME, 'port', { brand, tenantId })) ?? 9004;
-  const serviceName = (await getConfigWithDefault<string>(SERVICE_NAME, 'serviceName', { brand, tenantId })) ?? SERVICE_NAME;
-  const nodeEnv = (await getConfigWithDefault<string>(SERVICE_NAME, 'nodeEnv', { brand, tenantId })) ?? (await getConfigWithDefault<string>('gateway', 'nodeEnv', { brand, tenantId })) ?? 'development';
-  const corsOrigins = (await getConfigWithDefault<string[]>(SERVICE_NAME, 'corsOrigins', { brand, tenantId })) ?? (await getConfigWithDefault<string[]>('gateway', 'corsOrigins', { brand, tenantId })) ?? [
+  const port = await getServiceConfigKey<number>(SERVICE_NAME, 'port', 9004, opts(brand, tenantId));
+  const serviceName = await getServiceConfigKey<string>(SERVICE_NAME, 'serviceName', SERVICE_NAME, opts(brand, tenantId));
+  const nodeEnv = await getServiceConfigKey<string>(SERVICE_NAME, 'nodeEnv', 'development', opts(brand, tenantId));
+  const corsOrigins = await getServiceConfigKey<string[]>(SERVICE_NAME, 'corsOrigins', [
     'http://localhost:5173',
     'http://localhost:3000',
     'http://127.0.0.1:5173',
-  ];
-  const jwtConfig = (await getConfigWithDefault<{ secret: string; expiresIn: string; refreshSecret?: string; refreshExpiresIn?: string }>(SERVICE_NAME, 'jwt', { brand, tenantId })) ?? (await getConfigWithDefault<{ secret: string; expiresIn: string; refreshSecret?: string; refreshExpiresIn?: string }>('gateway', 'jwt', { brand, tenantId })) ?? {
+  ], opts(brand, tenantId));
+  const jwtConfig = await getServiceConfigKey<{ secret: string; expiresIn: string; refreshSecret?: string; refreshExpiresIn?: string }>(SERVICE_NAME, 'jwt', {
     secret: '',
     expiresIn: '1h',
     refreshSecret: '',
     refreshExpiresIn: '7d',
-  };
-  const databaseConfig = (await getConfigWithDefault<{ mongoUri?: string; redisUrl?: string }>(SERVICE_NAME, 'database', { brand, tenantId })) ?? (await getConfigWithDefault<{ mongoUri?: string; redisUrl?: string }>('gateway', 'database', { brand, tenantId })) ?? { mongoUri: '', redisUrl: '' };
-  const smtpConfig = await getConfigWithDefault<{ host: string; port: number; user: string; password: string; from: string; secure: boolean }>(SERVICE_NAME, 'smtp', { brand, tenantId }) ?? {
+  }, opts(brand, tenantId));
+  const databaseConfig = await getServiceConfigKey<{ mongoUri?: string; redisUrl?: string }>(SERVICE_NAME, 'database', { mongoUri: '', redisUrl: '' }, opts(brand, tenantId));
+  const smtpConfig = await getServiceConfigKey<{ host: string; port: number; user: string; password: string; from: string; secure: boolean }>(SERVICE_NAME, 'smtp', {
     host: '',
     port: 587,
     user: '',
     password: '',
     from: 'noreply@example.com',
     secure: false,
-  };
-  const twilioConfig = await getConfigWithDefault<{ accountSid: string; authToken: string; phoneNumber: string; whatsappNumber: string }>(SERVICE_NAME, 'twilio', { brand, tenantId }) ?? {
+  }, { brand, tenantId });
+  const twilioConfig = await getServiceConfigKey<{ accountSid: string; authToken: string; phoneNumber: string; whatsappNumber: string }>(SERVICE_NAME, 'twilio', {
     accountSid: '',
     authToken: '',
     phoneNumber: '',
     whatsappNumber: '',
-  };
-  const pushConfig = await getConfigWithDefault<{ apiKey: string; projectId: string }>(SERVICE_NAME, 'push', { brand, tenantId }) ?? {
+  }, { brand, tenantId });
+  const pushConfig = await getServiceConfigKey<{ apiKey: string; projectId: string }>(SERVICE_NAME, 'push', {
     apiKey: '',
     projectId: '',
-  };
-  const queueConfig = await getConfigWithDefault<{ concurrency: number; maxRetries: number; retryDelay: number }>(SERVICE_NAME, 'queue', { brand, tenantId }) ?? {
+  }, { brand, tenantId });
+  const queueConfig = await getServiceConfigKey<{ concurrency: number; maxRetries: number; retryDelay: number }>(SERVICE_NAME, 'queue', {
     concurrency: 5,
     maxRetries: 3,
     retryDelay: 5000,
-  };
-  const realtimeConfig = await getConfigWithDefault<{ sseHeartbeatInterval: number; socketNamespace: string }>(SERVICE_NAME, 'realtime', { brand, tenantId }) ?? {
+  }, { brand, tenantId });
+  const realtimeConfig = await getServiceConfigKey<{ sseHeartbeatInterval: number; socketNamespace: string }>(SERVICE_NAME, 'realtime', {
     sseHeartbeatInterval: 30000,
     socketNamespace: '/notifications',
-  };
+  }, { brand, tenantId });
 
   return {
     port: typeof port === 'number' ? port : parseInt(String(port), 10),

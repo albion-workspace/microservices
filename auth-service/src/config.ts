@@ -7,8 +7,12 @@
  */
 
 import type { AuthConfig } from './types.js';
-import { logger, getConfigWithDefault } from 'core-service';
+import { logger, getServiceConfigKey } from 'core-service';
 import type { AuthConfigDefaults } from './config-defaults.js';
+
+/** Options for config keys that fall back to gateway (port, nodeEnv, corsOrigins, jwt, database) */
+const optsGateway = (brand?: string, tenantId?: string) => ({ brand, tenantId, fallbackService: 'gateway' as const });
+const optsService = (brand?: string, tenantId?: string) => ({ brand, tenantId });
 
 export type { AuthConfig } from './types.js';
 
@@ -25,60 +29,56 @@ export function getAuthConfig(): AuthConfig {
 }
 
 export async function loadConfig(brand?: string, tenantId?: string): Promise<AuthConfig> {
-  const port = (await getConfigWithDefault<number>(SERVICE_NAME, 'port', { brand, tenantId })) ?? 9001;
-  const serviceName = (await getConfigWithDefault<string>(SERVICE_NAME, 'serviceName', { brand, tenantId })) ?? SERVICE_NAME;
-  const nodeEnv = (await getConfigWithDefault<string>(SERVICE_NAME, 'nodeEnv', { brand, tenantId })) ?? (await getConfigWithDefault<string>('gateway', 'nodeEnv', { brand, tenantId })) ?? 'development';
-  const otpLength = (await getConfigWithDefault<number>(SERVICE_NAME, 'otpLength', { brand, tenantId })) ?? 6;
-  const otpExpiryMinutes = (await getConfigWithDefault<number>(SERVICE_NAME, 'otpExpiryMinutes', { brand, tenantId })) ?? 10;
-  const sessionMaxAge = (await getConfigWithDefault<number>(SERVICE_NAME, 'sessionMaxAge', { brand, tenantId })) ?? 30;
-  const maxActiveSessions = (await getConfigWithDefault<number>(SERVICE_NAME, 'maxActiveSessions', { brand, tenantId })) ?? 5;
-  const passwordMinLength = (await getConfigWithDefault<number>(SERVICE_NAME, 'passwordMinLength', { brand, tenantId })) ?? 8;
-  const passwordRequireUppercase = (await getConfigWithDefault<boolean>(SERVICE_NAME, 'passwordRequireUppercase', { brand, tenantId })) ?? true;
-  const passwordRequireNumbers = (await getConfigWithDefault<boolean>(SERVICE_NAME, 'passwordRequireNumbers', { brand, tenantId })) ?? true;
-  const passwordRequireSymbols = (await getConfigWithDefault<boolean>(SERVICE_NAME, 'passwordRequireSymbols', { brand, tenantId })) ?? true;
+  const port = await getServiceConfigKey<number>(SERVICE_NAME, 'port', 9001, optsGateway(brand, tenantId));
+  const serviceName = await getServiceConfigKey<string>(SERVICE_NAME, 'serviceName', SERVICE_NAME, optsGateway(brand, tenantId));
+  const nodeEnv = await getServiceConfigKey<string>(SERVICE_NAME, 'nodeEnv', 'development', optsGateway(brand, tenantId));
+  const corsOrigins = await getServiceConfigKey<string[]>(SERVICE_NAME, 'corsOrigins', [
+    'http://localhost:5173',
+    'http://localhost:3000',
+    'http://127.0.0.1:5173',
+  ], optsGateway(brand, tenantId));
+  const jwtConfig = await getServiceConfigKey<AuthConfigDefaults['jwt']>(SERVICE_NAME, 'jwt', {
+    expiresIn: '2m',
+    refreshExpiresIn: '7d',
+    secret: '',
+    refreshSecret: '',
+  }, optsGateway(brand, tenantId));
+  const databaseConfig = await getServiceConfigKey<{ mongoUri?: string; redisUrl?: string }>(SERVICE_NAME, 'database', { mongoUri: '', redisUrl: '' }, optsGateway(brand, tenantId));
 
-  // Per-service JWT first; fallback to shared 'gateway' key (like database strategy)
-  const jwtConfig =
-    (await getConfigWithDefault<AuthConfigDefaults['jwt']>(SERVICE_NAME, 'jwt', { brand, tenantId })) ??
-    (await getConfigWithDefault<AuthConfigDefaults['jwt']>('gateway', 'jwt', { brand, tenantId })) ??
-    {
-      expiresIn: '1h',
-      refreshExpiresIn: '7d',
-      secret: '',
-      refreshSecret: '',
-    };
-  const oauthConfig = await getConfigWithDefault<AuthConfigDefaults['oauth']>(SERVICE_NAME, 'oauth', { brand, tenantId }) ?? {
+  const otpLength = await getServiceConfigKey<number>(SERVICE_NAME, 'otpLength', 6, optsService(brand, tenantId));
+  const otpExpiryMinutes = await getServiceConfigKey<number>(SERVICE_NAME, 'otpExpiryMinutes', 10, optsService(brand, tenantId));
+  const sessionMaxAge = await getServiceConfigKey<number>(SERVICE_NAME, 'sessionMaxAge', 30, optsService(brand, tenantId));
+  const maxActiveSessions = await getServiceConfigKey<number>(SERVICE_NAME, 'maxActiveSessions', 5, optsService(brand, tenantId));
+  const passwordMinLength = await getServiceConfigKey<number>(SERVICE_NAME, 'passwordMinLength', 8, optsService(brand, tenantId));
+  const passwordRequireUppercase = await getServiceConfigKey<boolean>(SERVICE_NAME, 'passwordRequireUppercase', true, optsService(brand, tenantId));
+  const passwordRequireNumbers = await getServiceConfigKey<boolean>(SERVICE_NAME, 'passwordRequireNumbers', true, optsService(brand, tenantId));
+  const passwordRequireSymbols = await getServiceConfigKey<boolean>(SERVICE_NAME, 'passwordRequireSymbols', true, optsService(brand, tenantId));
+  const oauthConfig = await getServiceConfigKey<AuthConfigDefaults['oauth']>(SERVICE_NAME, 'oauth', {
     google: { clientId: '', clientSecret: '', callbackUrl: '' },
     facebook: { appId: '', appSecret: '', callbackUrl: '' },
     linkedin: { clientId: '', clientSecret: '', callbackUrl: '' },
     instagram: { clientId: '', clientSecret: '', callbackUrl: '' },
-  };
-  const smtpConfig = await getConfigWithDefault<AuthConfigDefaults['smtp']>(SERVICE_NAME, 'smtp', { brand, tenantId }) ?? {
+  }, optsService(brand, tenantId));
+  const smtpConfig = await getServiceConfigKey<AuthConfigDefaults['smtp']>(SERVICE_NAME, 'smtp', {
     host: '',
     port: 587,
     user: '',
     password: '',
     from: '',
-  };
-  const twilioConfig = await getConfigWithDefault<AuthConfigDefaults['twilio']>(SERVICE_NAME, 'twilio', { brand, tenantId }) ?? {
+  }, optsService(brand, tenantId));
+  const twilioConfig = await getServiceConfigKey<AuthConfigDefaults['twilio']>(SERVICE_NAME, 'twilio', {
     accountSid: '',
     authToken: '',
     phoneNumber: '',
-  };
-  const whatsappConfig = await getConfigWithDefault<AuthConfigDefaults['whatsapp']>(SERVICE_NAME, 'whatsapp', { brand, tenantId }) ?? { apiKey: '' };
-  const telegramConfig = await getConfigWithDefault<AuthConfigDefaults['telegram']>(SERVICE_NAME, 'telegram', { brand, tenantId }) ?? { botToken: '' };
-  const urlsConfig = await getConfigWithDefault<AuthConfigDefaults['urls'] & { notificationServiceUrl?: string; notificationServiceToken?: string }>(SERVICE_NAME, 'urls', { brand, tenantId }) ?? {
+  }, optsService(brand, tenantId));
+  const whatsappConfig = await getServiceConfigKey<AuthConfigDefaults['whatsapp']>(SERVICE_NAME, 'whatsapp', { apiKey: '' }, optsService(brand, tenantId));
+  const telegramConfig = await getServiceConfigKey<AuthConfigDefaults['telegram']>(SERVICE_NAME, 'telegram', { botToken: '' }, optsService(brand, tenantId));
+  const urlsConfig = await getServiceConfigKey<AuthConfigDefaults['urls'] & { notificationServiceUrl?: string; notificationServiceToken?: string }>(SERVICE_NAME, 'urls', {
     frontendUrl: 'http://localhost:5173',
     appUrl: 'http://localhost:3000',
     notificationServiceUrl: 'http://localhost:9004/graphql',
     notificationServiceToken: '',
-  };
-  const corsOrigins = (await getConfigWithDefault<string[]>(SERVICE_NAME, 'corsOrigins', { brand, tenantId })) ?? (await getConfigWithDefault<string[]>('gateway', 'corsOrigins', { brand, tenantId })) ?? [
-    'http://localhost:5173',
-    'http://localhost:3000',
-    'http://127.0.0.1:5173',
-  ];
-  const databaseConfig = (await getConfigWithDefault<{ mongoUri?: string; redisUrl?: string }>(SERVICE_NAME, 'database', { brand, tenantId })) ?? (await getConfigWithDefault<{ mongoUri?: string; redisUrl?: string }>('gateway', 'database', { brand, tenantId })) ?? { mongoUri: '', redisUrl: '' };
+  }, optsService(brand, tenantId));
 
   const portNum = typeof port === 'number' ? port : parseInt(String(port), 10);
 
