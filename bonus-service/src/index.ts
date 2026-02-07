@@ -27,10 +27,9 @@ import {
   GraphQLError,
   registerServiceErrorCodes,
   registerServiceConfigDefaults,
-  ensureServiceDefaultConfigsCreated,
   resolveContext,
   initializeWebhooks,
-  withRedis,
+  runServiceStartup,
   type IntegrationEvent,
   type ResolverContext,
 } from 'core-service';
@@ -886,125 +885,72 @@ function setupEventHandlers() {
 }
 
 async function main() {
-  // ═══════════════════════════════════════════════════════════════════
-  // Configuration
-  // ═══════════════════════════════════════════════════════════════════
-
-  // Register error codes
-  registerServiceErrorCodes(BONUS_ERROR_CODES);
-
-  // Register default configs (auto-created in DB if missing)
-  registerServiceConfigDefaults(SERVICE_NAME, BONUS_CONFIG_DEFAULTS);
-
-  // Load config (MongoDB + env vars + defaults)
-  // Resolve brand/tenantId dynamically (from user context, config store, or env vars)
-  const context = await resolveContext();
-  bonusConfig = await loadConfig(context.brand, context.tenantId);
-  validateConfig(bonusConfig);
-  printConfigSummary(bonusConfig);
-  setUseMongoTransactions(bonusConfig.useMongoTransactions ?? true);
-
-  // ═══════════════════════════════════════════════════════════════════
-  // Initialize Services
-  // ═══════════════════════════════════════════════════════════════════
-
-  // Register event handlers before starting gateway
-  setupEventHandlers();
-
-  // ═══════════════════════════════════════════════════════════════════
-  // Initialize Handler Registry BEFORE Gateway
-  // ═══════════════════════════════════════════════════════════════════
-  
-  // Handler registry must be initialized with database strategy BEFORE
-  // gateway starts accepting requests, otherwise handlers will be created
-  // without database options and fail with "BonusPersistence requires database"
-  await initializeHandlerRegistry();
-
-  // ═══════════════════════════════════════════════════════════════════
-  // Gateway Configuration
-  // ═══════════════════════════════════════════════════════════════════
-
-  // Create gateway (this connects to database and starts accepting requests)
-  await createGateway(buildGatewayConfig());
-
-  await withRedis(bonusConfig.redisUrl, redis, { brand: context.brand ?? 'default' });
-
-  await ensureServiceDefaultConfigsCreated(SERVICE_NAME, context);
-
-  // Initialize bonus webhooks AFTER database connection is established
-  try {
-    const { strategy, context: dbContext } = await initializeDatabaseLayer();
-    // Use centralized initializeWebhooks helper from core-service
-    await initializeWebhooks(bonusWebhooks, {
-      databaseStrategy: strategy,
-      defaultContext: dbContext,
-    });
-    logger.info('Bonus webhooks initialized via centralized helper');
-  } catch (error) {
-    logger.error('Failed to initialize bonus webhooks', { error });
-    // Continue - webhooks are optional
-  }
-  
-  // Ledger initialization removed - using simplified architecture (wallets + transactions + transfers)
-  // Wallets are created automatically via createTransferWithTransactions
-  logger.info('Bonus service initialized - using wallets + transactions + transfers architecture');
-  
-  // Setup recovery system (transfer recovery + recovery job)
-  // Bonus operations use createTransferWithTransactions, so they need transfer recovery
-  try {
-    await setupRecovery();
-    logger.info('✅ Recovery system initialized');
-  } catch (err) {
-    logger.warn('Could not setup recovery system', { error: (err as Error).message });
-    // Don't throw - service can still run without recovery
-  }
-
-  // Note: User status flags are now stored in auth-service user.metadata
-  // No need for separate user_status collection - consistent with payment-service architecture
-  
-  // Cleanup old webhook deliveries daily
-  setInterval(async () => {
-    try {
-      const deleted = await cleanupBonusWebhookDeliveries(30);
-      if (deleted > 0) {
-        logger.info(`Cleaned up ${deleted} old bonus webhook deliveries`);
+  await runServiceStartup<BonusConfig>({
+    serviceName: SERVICE_NAME,
+    registerErrorCodes: () => registerServiceErrorCodes(BONUS_ERROR_CODES),
+    registerConfigDefaults: () => registerServiceConfigDefaults(SERVICE_NAME, BONUS_CONFIG_DEFAULTS),
+    resolveContext: async () => {
+      const c = await resolveContext();
+      return { brand: c.brand ?? 'default', tenantId: c.tenantId };
+    },
+    loadConfig: (brand?: string, tenantId?: string) => loadConfig(brand, tenantId),
+    validateConfig,
+    printConfigSummary,
+    afterDb: async (context, config) => {
+      bonusConfig = config;
+      setUseMongoTransactions(config.useMongoTransactions ?? true);
+      setupEventHandlers();
+      await initializeHandlerRegistry();
+    },
+    buildGatewayConfig: () => buildGatewayConfig(),
+    ensureDefaults: true,
+    withRedis: {
+      redis,
+      afterReady: async () => {
+        const channels = [
+          'integration:wallet',
+          'integration:activity',
+          'integration:user',
+          'integration:referral',
+          'integration:achievement',
+        ];
+        await startListening(channels);
+        logger.info('Started listening on event channels', { channels });
+        setInterval(async () => {
+          try {
+            const engine = await initializeBonusEngine();
+            const expired = await engine.expireOldBonuses();
+            if (expired > 0) logger.info(`Expired ${expired} bonuses`);
+          } catch (err) {
+            logger.error('Bonus expiration check failed', { error: err });
+          }
+        }, 60 * 60 * 1000);
+      },
+    },
+    afterGateway: async () => {
+      try {
+        const { strategy, context: dbContext } = await initializeDatabaseLayer();
+        await initializeWebhooks(bonusWebhooks, { databaseStrategy: strategy, defaultContext: dbContext });
+        logger.info('Bonus webhooks initialized via centralized helper');
+      } catch (error) {
+        logger.error('Failed to initialize bonus webhooks', { error });
       }
-    } catch (err) {
-      logger.error('Webhook cleanup failed', { error: err });
-    }
-  }, 24 * 60 * 60 * 1000); // Daily
-  
-  // Start listening to Redis channels after gateway is up
-  if (bonusConfig.redisUrl) {
-    try {
-      // Subscribe to all relevant event channels
-      const channels = [
-        'integration:wallet',    // wallet.deposit.completed, wallet.withdrawal.completed
-        'integration:activity',  // activity.completed (turnover tracking)
-        'integration:user',      // user.birthday, user.login, user.tier_upgraded
-        'integration:referral',  // referral.qualified
-        'integration:achievement', // achievement.unlocked
-      ];
-      await startListening(channels);
-      logger.info('Started listening on event channels', { channels });
-      
-      // Start periodic bonus expiration check (every hour)
+      try {
+        await setupRecovery();
+        logger.info('✅ Recovery system initialized');
+      } catch (err) {
+        logger.warn('Could not setup recovery system', { error: (err as Error).message });
+      }
       setInterval(async () => {
         try {
-          const engine = await initializeBonusEngine();
-          const expired = await engine.expireOldBonuses();
-          if (expired > 0) {
-            logger.info(`Expired ${expired} bonuses`);
-          }
+          const deleted = await cleanupBonusWebhookDeliveries(30);
+          if (deleted > 0) logger.info(`Cleaned up ${deleted} old bonus webhook deliveries`);
         } catch (err) {
-          logger.error('Bonus expiration check failed', { error: err });
+          logger.error('Webhook cleanup failed', { error: err });
         }
-      }, 60 * 60 * 1000); // Every hour
-      
-    } catch (err) {
-      logger.warn('Could not start event listener', { error: (err as Error).message });
-    }
-  }
+      }, 24 * 60 * 60 * 1000);
+    },
+  });
 }
 
 // Export webhook manager for advanced use cases (direct dispatch without internal events)

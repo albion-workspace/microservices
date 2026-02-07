@@ -207,7 +207,7 @@ async function main() {
     loadConfig: (brand?: string, tenantId?: string) => loadConfig(brand, tenantId),
     validateConfig,
     printConfigSummary,
-    afterDb: async (context: { brand: string; tenantId?: string }) => {
+    afterDb: async (context: { brand: string; tenantId?: string }, _config: KYCConfig) => {
       const { database } = await db.initialize({ brand: context.brand, tenantId: context.tenantId });
       logger.info('Database initialized', { database: database.databaseName });
       registerKYCIndexes();

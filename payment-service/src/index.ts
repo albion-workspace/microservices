@@ -30,9 +30,9 @@ import {
   withEventHandlerError,
   registerServiceErrorCodes,
   registerServiceConfigDefaults,
-  ensureServiceDefaultConfigsCreated,
   resolveContext,
   initializeWebhooks,
+  runServiceStartup,
   createWebhookService,
   findOneById,
   generateMongoId,
@@ -139,6 +139,8 @@ async function getSystemUserId(tenantId?: string): Promise<string> {
 
 // Configuration will be loaded asynchronously in main()
 let paymentConfig: PaymentConfig | null = null;
+let paymentDbStrategy: DatabaseStrategyResolver | null = null;
+let paymentDbContext: DatabaseContext | null = null;
 
 // Gateway config (will be built from paymentConfig)
 const buildGatewayConfig = (): Parameters<typeof createGateway>[0] => {
@@ -687,116 +689,71 @@ function setupBonusEventHandlers() {
 // ═══════════════════════════════════════════════════════════════════
 
 async function main() {
-  // ═══════════════════════════════════════════════════════════════════
-  // Configuration
-  // ═══════════════════════════════════════════════════════════════════
-
-  // Register error codes
-  registerServiceErrorCodes(PAYMENT_ERROR_CODES);
-
-  // Register default configs (auto-created in DB if missing)
-  registerServiceConfigDefaults(SERVICE_NAME, PAYMENT_CONFIG_DEFAULTS);
-
-  // Load config (MongoDB + env vars + defaults)
-  // Resolve brand/tenantId dynamically (from user context, config store, or env vars)
-  const context = await resolveContext();
-  paymentConfig = await loadConfig(context.brand, context.tenantId);
-  validateConfig(paymentConfig);
-  printConfigSummary(paymentConfig);
-  setUseMongoTransactions(paymentConfig.useMongoTransactions ?? true);
-
-  // ═══════════════════════════════════════════════════════════════════
-  // Initialize Services
-  // ═══════════════════════════════════════════════════════════════════
-
-  // Register event handlers before starting
-  setupBonusEventHandlers();
-
-  // ═══════════════════════════════════════════════════════════════════
-  // Gateway Configuration
-  // ═══════════════════════════════════════════════════════════════════
-
-  // Create gateway (this connects to database)
-  await createGateway(buildGatewayConfig());
-
-  await ensureServiceDefaultConfigsCreated(SERVICE_NAME, context);
-
-  // Initialize database using service database accessor
-  const { strategy: databaseStrategy, context: dbContext } = await db.initialize({
-    brand: context.brand,
-    tenantId: context.tenantId,
-  });
-  logger.info('Database initialized via service database accessor', {
-    context: dbContext,
-  });
-  
-  // Initialize payment webhooks AFTER database connection is established
-  try {
-    // Use centralized initializeWebhooks helper
-    await initializeWebhooks(paymentWebhooks, {
-      databaseStrategy,
-      defaultContext: dbContext,
-    });
-    logger.info('Payment webhooks initialized via centralized helper');
-  } catch (error) {
-    logger.error('Failed to initialize payment webhooks', { error });
-    // Continue - webhooks are optional
-  }
-  
-  // ✅ CRITICAL: Ensure unique index on metadata.externalRef for duplicate protection
-  try {
-    const database = await db.getDb();
-    const transactionsCollection = database.collection('transactions');
-    await createUniqueIndexSafe(
-      transactionsCollection,
-      { 'metadata.externalRef': 1 },
-      { name: 'metadata.externalRef_1_unique', dropConflictNames: ['metadata.externalRef_1', 'metadata.externalRef_1_unique'] }
-    );
-  } catch (indexError: unknown) {
-    logger.error('Failed to ensure unique index on metadata.externalRef', {
-      error: getErrorMessage(indexError),
-    });
-  }
-
-  // Ledger initialization removed - wallets are the source of truth, updated atomically via createTransferWithTransactions
-  // Transaction recovery is handled by saga state manager (Redis-backed)
-  logger.info('Payment service initialized - using wallets + transactions architecture');
-  
-  // Setup recovery system (transfer recovery + recovery job)
-  try {
-    await setupRecovery();
-    logger.info('✅ Recovery system initialized');
-  } catch (err) {
-    logger.warn('Could not setup recovery system', { error: (err as Error).message });
-    // Don't throw - service can still run without recovery
-  }
-  
-  // Cleanup old webhook deliveries daily
-  setInterval(async () => {
-    try {
-      const deleted = await cleanupPaymentWebhookDeliveries(30);
-      if (deleted > 0) {
-        logger.info(`Cleaned up ${deleted} old payment webhook deliveries`);
+  await runServiceStartup<PaymentConfig>({
+    serviceName: SERVICE_NAME,
+    registerErrorCodes: () => registerServiceErrorCodes(PAYMENT_ERROR_CODES),
+    registerConfigDefaults: () => registerServiceConfigDefaults(SERVICE_NAME, PAYMENT_CONFIG_DEFAULTS),
+    resolveContext: async () => {
+      const c = await resolveContext();
+      return { brand: c.brand ?? 'default', tenantId: c.tenantId };
+    },
+    loadConfig: (brand?: string, tenantId?: string) => loadConfig(brand, tenantId),
+    validateConfig,
+    printConfigSummary,
+    afterDb: async (context, config) => {
+      paymentConfig = config;
+      setUseMongoTransactions(config.useMongoTransactions ?? true);
+      setupBonusEventHandlers();
+      const { strategy, context: dbContext } = await db.initialize({ brand: context.brand, tenantId: context.tenantId });
+      paymentDbStrategy = strategy;
+      paymentDbContext = dbContext;
+      logger.info('Database initialized via service database accessor', { context: dbContext });
+    },
+    buildGatewayConfig: () => buildGatewayConfig(),
+    ensureDefaults: true,
+    withRedis: {
+      redis,
+      afterReady: async () => {
+        await startListening(['integration:bonus', 'integration:ledger']);
+        logger.info('Started listening on event channels', { channels: ['integration:bonus', 'integration:ledger'] });
+      },
+    },
+    afterGateway: async () => {
+      const databaseStrategy = paymentDbStrategy!;
+      const dbContext = paymentDbContext!;
+      try {
+        await initializeWebhooks(paymentWebhooks, { databaseStrategy, defaultContext: dbContext });
+        logger.info('Payment webhooks initialized via centralized helper');
+      } catch (error) {
+        logger.error('Failed to initialize payment webhooks', { error });
       }
-    } catch (err) {
-      logger.error('Webhook cleanup failed', { error: err });
-    }
-  }, 24 * 60 * 60 * 1000); // Daily
-  
-  // Start listening to events from Redis
-  if (paymentConfig.redisUrl) {
-    try {
-      // Subscribe to event channels
-      const channels = [
-        'integration:bonus',  // bonus.awarded, bonus.converted, bonus.forfeited, bonus.expired
-        'integration:ledger',  // ledger.deposit.completed, ledger.withdrawal.completed
-      ];
-      await startListening(channels);
-      logger.info('Started listening on event channels', { channels });
-    } catch (err) {
-      logger.warn('Could not start event listener', { error: (err as Error).message });
-    }
-  }
+      try {
+        const database = await db.getDb();
+        const transactionsCollection = database.collection('transactions');
+        await createUniqueIndexSafe(
+          transactionsCollection,
+          { 'metadata.externalRef': 1 },
+          { name: 'metadata.externalRef_1_unique', dropConflictNames: ['metadata.externalRef_1', 'metadata.externalRef_1_unique'] }
+        );
+      } catch (indexError: unknown) {
+        logger.error('Failed to ensure unique index on metadata.externalRef', { error: getErrorMessage(indexError) });
+      }
+      try {
+        await setupRecovery();
+        logger.info('✅ Recovery system initialized');
+      } catch (err) {
+        logger.warn('Could not setup recovery system', { error: (err as Error).message });
+      }
+      setInterval(async () => {
+        try {
+          const deleted = await cleanupPaymentWebhookDeliveries(30);
+          if (deleted > 0) logger.info(`Cleaned up ${deleted} old payment webhook deliveries`);
+        } catch (err) {
+          logger.error('Webhook cleanup failed', { error: err });
+        }
+      }, 24 * 60 * 60 * 1000);
+    },
+  });
 }
 
 // Export webhook manager for advanced use cases (direct dispatch without internal events)

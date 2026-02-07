@@ -22,8 +22,8 @@ export interface ServiceStartupOptions<C = { port?: number }> {
   loadConfig: (brand?: string, tenantId?: string) => Promise<C>;
   validateConfig?: (config: C) => void;
   printConfigSummary?: (config: C) => void;
-  /** Initialize DB, indexes, providers, etc. */
-  afterDb: (context: { brand: string; tenantId?: string }) => Promise<void>;
+  /** Initialize DB, indexes, providers, etc. Config is passed so services can set module-level config or use it for init. */
+  afterDb: (context: { brand: string; tenantId?: string }, config: C) => Promise<void>;
   buildGatewayConfig: (config: C) => GatewayConfig;
   ensureDefaults?: boolean;
   /** If set, run withRedis(config.redisUrl, redis, context, { afterReady }) after gateway. Config must have redisUrl. */
@@ -31,7 +31,8 @@ export interface ServiceStartupOptions<C = { port?: number }> {
     redis: ServiceRedisAccessor;
     afterReady?: () => Promise<void>;
   };
-  afterGateway?: () => Promise<void>;
+  /** Called after gateway is created; receives the gateway instance (e.g. for notification-service setGateway(broadcast, sse, io)). */
+  afterGateway?: (gateway: Awaited<ReturnType<typeof createGateway>>) => Promise<void>;
 }
 
 /**
@@ -63,8 +64,8 @@ export async function runServiceStartup<C>(options: ServiceStartupOptions<C>): P
     validateConfig?.(config);
     printConfigSummary?.(config);
 
-    await afterDb(context);
-    await createGateway(buildGatewayConfig(config));
+    await afterDb(context, config);
+    const gateway = await createGateway(buildGatewayConfig(config));
     logger.info(`${serviceName} started`, { port: (config as { port?: number }).port });
 
     if (ensureDefaults) {
@@ -76,7 +77,7 @@ export async function runServiceStartup<C>(options: ServiceStartupOptions<C>): P
         afterReady: withRedisOpt.afterReady,
       });
     }
-    await afterGateway?.();
+    await afterGateway?.(gateway);
   } catch (error) {
     logger.error(`Failed to start ${serviceName}`, { error: getErrorMessage(error) });
     process.exit(1);
