@@ -15,19 +15,25 @@
 // Timestamp Fields
 // ═══════════════════════════════════════════════════════════════════
 
+const TIMESTAMP_SDL = {
+  default: 'createdAt: String!\n    updatedAt: String',
+  required: 'createdAt: String!\n    updatedAt: String!',
+  optional: 'createdAt: String\n    updatedAt: String',
+} as const;
+
 /** createdAt required, updatedAt optional (default pattern for most entities). */
 export function timestampFieldsSDL(): string {
-  return 'createdAt: String!\n    updatedAt: String';
+  return TIMESTAMP_SDL.default;
 }
 
 /** Both createdAt and updatedAt required (e.g. User, ConfigEntry, Webhook). */
 export function timestampFieldsRequiredSDL(): string {
-  return 'createdAt: String!\n    updatedAt: String!';
+  return TIMESTAMP_SDL.required;
 }
 
 /** Both createdAt and updatedAt optional (e.g. KYC profiles/documents, bonus templates). */
 export function timestampFieldsOptionalSDL(): string {
-  return 'createdAt: String\n    updatedAt: String';
+  return TIMESTAMP_SDL.optional;
 }
 
 // ═══════════════════════════════════════════════════════════════════
