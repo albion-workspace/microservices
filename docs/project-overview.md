@@ -93,7 +93,7 @@ This is a **production-ready microservices platform** built with TypeScript, imp
 | `databases/mongodb/repository.ts` | Generic repository | Caching, lean queries, timestamps, cursor pagination |
 | `saga/engine.ts` | Saga orchestrator | MongoDB transactions OR compensation-based rollback |
 | `common/resilience/circuit-breaker.ts` | Fault tolerance | Configurable thresholds, half-open state |
-| `common/errors.ts` | Error handling | GraphQL errors with auto-logging, error code registry |
+| `common/errors.ts` | Error handling | GraphQL errors with auto-logging, error code registry; resolver path must use GraphQLError(SERVICE_ERRORS.*) only (CODING_STANDARDS) |
 | `access/` | Authorization | Cached access engine wrapper |
 
 ### 2.2 Repository Features (Well-Designed)
@@ -251,17 +251,8 @@ interface UpdateUserRolesInput {
 }
 ```
 
-#### 6.1.2 Error Handling Inconsistency
-**Problem:** Mixed error throwing patterns
-```typescript
-// Some places use GraphQLError
-throw new GraphQLError(AUTH_ERRORS.UserNotFound, { userId, tenantId });
-
-// Other places use plain Error
-throw new Error('User ID is required');
-```
-
-**Recommendation:** Standardize on `GraphQLError` for all resolver errors
+#### 6.1.2 Error Handling (standardized)
+**Status:** Resolver-path error handling is standardized. All resolvers, saga steps, and code called from them use `GraphQLError(SERVICE_ERRORS.*, { ... })` only; `throw new Error('message')` is forbidden in resolver path (see CODING_STANDARDS § Resolver error handling). Each service has `error-codes.ts`; the service generator and CODING_STANDARDS enforce this. Config/startup code may still use `throw new Error` for bootstrap failures.
 
 #### 6.1.3 Large Files
 **Problem:** Some files are excessively long
@@ -382,7 +373,7 @@ See **§14 Code Reduction and Reusable Patterns (Detailed Analysis)** for file-l
 
 ### 10.1 Immediate (Week 1-2)
 1. **Add CI/CD pipeline** - Automated testing and deployment
-2. **Standardize error handling** - All resolvers use GraphQLError
+2. ~~**Standardize error handling**~~ - **Done:** All resolver-path code uses GraphQLError + service error codes; CODING_STANDARDS and service generator enforce it.
 3. **Add rate limiting** - Protect auth endpoints
 4. **Remove hardcoded fallbacks** - JWT secrets, etc.
 
@@ -575,6 +566,10 @@ The following items from §14.1 and §14.5 have been implemented:
 - **Update user field helper:** `updateUserFieldResolver(args, ctx, opts)` local helper in `auth-service/src/graphql.ts` consolidates `updateUserRoles`, `updateUserPermissions`, `updateUserStatus` (3 mutations × ~65 lines each → 3 × ~10 lines + 40-line helper = **~115 lines saved**). Also fixes `updateUserStatus` which used `throw new Error(...)` instead of `GraphQLError` — added `AUTH_ERRORS.StatusRequired` and `AUTH_ERRORS.InvalidStatus` error codes.
 - **Paginated users helper:** `fetchPaginatedUsers(filter, args, errorCode, errorContext)` local helper consolidates `users` and `usersByRole` queries (**~45 lines saved**). Pagination setup, edge normalization, totalCount fallback, and error handling now defined once.
 - **Pending operation parser:** `parsePendingOperation(payload, token, ttl)` local helper consolidates Redis payload parsing in `pendingOperations` and `pendingOperation` resolvers (**~18 lines saved**).
+
+**Resolver error standardization (all services):**
+
+- **GraphQLError-only rule:** All resolver-path code (resolvers, saga steps, services called from resolvers) now throws `GraphQLError(SERVICE_ERRORS.*, { ... })` only; `throw new Error('message')` is forbidden. Auth, payment, bonus, notification, and KYC services updated; new error codes added where needed (e.g. SessionMissingId, WalletNotFound, TemplateNotActive, ChannelRequiresTo, ProviderNotFound). CODING_STANDARDS § Resolver error handling and the core-service service generator (error-codes.ts, graphql.ts, services/index.ts comments) document and enforce this.
 
 **Fourth phase (payment-service helper deduplication):**
 

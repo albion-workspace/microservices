@@ -64,3 +64,19 @@ export function buildSagaResultTypeSDL(
 export function paginationArgsSDL(): string {
   return 'first: Int, after: String, last: Int, before: String';
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Connection Type
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Build SDL for a cursor-style connection type (nodes + totalCount + pageInfo).
+ * PageInfo is defined in the gateway base schema.
+ *
+ * @param connectionName - e.g. "WalletConnection"
+ * @param nodeTypeName - e.g. "Wallet"
+ * @returns SDL string  e.g. "type WalletConnection { nodes: [Wallet!]! totalCount: Int! pageInfo: PageInfo! }"
+ */
+export function buildConnectionTypeSDL(connectionName: string, nodeTypeName: string): string {
+  return `type ${connectionName} { nodes: [${nodeTypeName}!]! totalCount: Int! pageInfo: PageInfo! }`;
+}
