@@ -1,8 +1,9 @@
 /**
  * Auth Service Configuration Defaults
  *
- * These defaults are registered at startup and automatically created in MongoDB
- * if they don't exist. Sensitive paths are filtered for non-admin users.
+ * Every key read in loadConfig (and by domain code) must exist here.
+ * Pass to registerServiceConfigDefaults('auth-service', AUTH_CONFIG_DEFAULTS) in index.ts; gateway keys (GATEWAY_*) registered separately.
+ * No process.env; no registration logic in this file (CODING_STANDARDS / service generator).
  *
  * JWT is common across microservices when using a shared strategy (like database).
  * Optional: register GATEWAY_JWT_DEFAULTS so getServiceConfigKey(..., { fallbackService: 'gateway' })

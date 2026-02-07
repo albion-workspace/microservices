@@ -186,9 +186,9 @@ export type ${serviceNamePascal}ErrorCode = typeof ${serviceNameConst.toUpperCas
     `/**
  * ${serviceNamePascal} Service Configuration Defaults
  *
- * Typed as Record<string, DefaultConfigEntry> (core-service). Pass to registerServiceConfigDefaults('${serviceNameKebab}', ...) in index.ts.
- * Stored in core_service.service_configs. loadBaseServiceConfig + getServiceConfigKey use these keys; common keys fallback to gateway.
- * No process.env (CODING_STANDARDS).
+ * Every key read in loadConfig (and by domain code) must exist here.
+ * Pass to registerServiceConfigDefaults('${serviceNameKebab}', ${serviceNameConst.toUpperCase()}_CONFIG_DEFAULTS) in index.ts.
+ * Typed as Record<string, DefaultConfigEntry> (core-service). No process.env; no registration logic in this file (CODING_STANDARDS / service generator).
  */
 
 import type { DefaultConfigEntry } from 'core-service';
@@ -236,6 +236,7 @@ export const ${serviceNameConst.toUpperCase()}_CONFIG_DEFAULTS: Record<string, D
  * ${serviceNamePascal} Service Configuration
  *
  * Dynamic config only: MongoDB config store + registered defaults. No process.env (CODING_STANDARDS).
+ * ${serviceNamePascal}Config extends DefaultServiceConfig (core-service); single config type in types.ts.
  * Base keys via loadBaseServiceConfig + getBaseServiceConfigDefaults; service-only keys with getServiceConfigKey + configKeyOpts.
  */
 
@@ -372,46 +373,66 @@ export {};
   // ─── src/index.ts ────────────────────────────────────────────────────────
   const accessorsImport = `
 import { db, redis } from './accessors.js';`;
-  const webhookBlock = useWebhooks
-    ? `
-  const webhookService = createWebhookService({
-    manager: ${name}Webhooks as any,
-    eventsDocs: \`${serviceNamePascal} Service Webhook Events: (add events)\`,
-  });`
-    : '';
   const eventDispatcherImport = useWebhooks
     ? `
 import { createWebhookService } from 'core-service';
 import { ${name}Webhooks } from './event-dispatcher.js';`
     : '';
 
-  const withRedisBlock = useRedis
-    ? `
-  await withRedis(config.redisUrl, redis, { brand: context.brand }, {
+  const buildGatewayConfigBody = useWebhooks
+    ? `const resolvers = create${serviceNamePascal}Resolvers(config);
+  const webhookService = createWebhookService({
+    manager: ${name}Webhooks as any,
+    eventsDocs: \`${serviceNamePascal} Service Webhook Events: (add events)\`,
+  });
+  return buildDefaultGatewayConfig(config, {
+    services: [
+      { name: '${name}', types: ${graphqlTypesName}, resolvers },
+      webhookService,
+    ],
+    permissions: {
+      Query: { health: allow, ${name}Health: allow },
+      Mutation: {},
+    },
+    name: config.serviceName,
+  });`
+    : `const resolvers = create${serviceNamePascal}Resolvers(config);
+  return buildDefaultGatewayConfig(config, {
+    services: [
+      { name: '${name}', types: ${graphqlTypesName}, resolvers },
+    ],
+    permissions: {
+      Query: { health: allow, ${name}Health: allow },
+      Mutation: {},
+    },
+    name: config.serviceName,
+  });`;
+
+  const withRedisOpt = useRedis
+    ? `withRedis: {
+    redis,
     afterReady: async () => {
       await startListening(['integration:${name}']);
       logger.info('Started listening on integration:${name}');
     },
-  });`
+  },`
     : '';
 
   const indexContent = `/**
  * ${serviceNamePascal} Service
  *
- * Generated scaffold. Aligned with CODING_STANDARDS: loadBaseServiceConfig, buildDefaultGatewayConfig, ensureServiceDefaultConfigsCreated, withRedis.
- * Restart trigger: \${Date.now()}
+ * Generated scaffold. Aligned with CODING_STANDARDS and runServiceStartup: same order as all microservices (auth, bonus, payment, notification, kyc).
+ * New services should match this structure, comments, and call order.
  */
 
 import {
-  createGateway,
   logger,
   allow,
   registerServiceErrorCodes,
   registerServiceConfigDefaults,
   resolveContext,
   buildDefaultGatewayConfig,
-  ensureServiceDefaultConfigsCreated,
-  withRedis,
+  runServiceStartup,
   startListening,
 } from 'core-service';
 ${accessorsImport}${eventDispatcherImport}
@@ -422,46 +443,35 @@ import { ${serviceNameConst.toUpperCase()}_CONFIG_DEFAULTS } from './config-defa
 import { ${serviceNameConst.toUpperCase()}_ERROR_CODES } from './error-codes.js';
 import { ${graphqlTypesName}, create${serviceNamePascal}Resolvers } from './graphql.js';
 
-function buildGatewayConfig(
-  config: ${serviceNamePascal}Config,
-  resolvers: ReturnType<typeof create${serviceNamePascal}Resolvers>${useWebhooks ? ',\n  webhookService: ReturnType<typeof createWebhookService>' : ''}
-) {
-  return buildDefaultGatewayConfig(config, {
-    services: ${useWebhooks ? `[\n      { name: '${name}', types: ${graphqlTypesName}, resolvers },\n      webhookService,\n    ]` : `[\n      { name: '${name}', types: ${graphqlTypesName}, resolvers },\n    ]`},
-    permissions: {
-      Query: { health: allow, ${name}Health: allow },
-      Mutation: {},
-    },
-    name: config.serviceName,
-  });
+function buildGatewayConfig(config: ${serviceNamePascal}Config) {
+  ${buildGatewayConfigBody}
 }
+
+// ─── Startup (same order as auth, bonus, payment, notification, kyc) ───────
 
 async function main() {
-  registerServiceConfigDefaults(SERVICE_NAME, ${serviceNameConst.toUpperCase()}_CONFIG_DEFAULTS);
-  const context = await resolveContext();
-  const config = await loadConfig(context.brand, context.tenantId);
-  validateConfig(config);
-  printConfigSummary(config);
-
-  const { database } = await db.initialize({
-    brand: context.brand,
-    tenantId: context.tenantId,
+  await runServiceStartup<${serviceNamePascal}Config>({
+    serviceName: SERVICE_NAME,
+    registerErrorCodes: () => registerServiceErrorCodes(${serviceNameConst.toUpperCase()}_ERROR_CODES),
+    registerConfigDefaults: () => registerServiceConfigDefaults(SERVICE_NAME, ${serviceNameConst.toUpperCase()}_CONFIG_DEFAULTS),
+    resolveContext: async () => {
+      const c = await resolveContext();
+      return { brand: c.brand ?? 'default', tenantId: c.tenantId };
+    },
+    loadConfig: (brand?: string, tenantId?: string) => loadConfig(brand, tenantId),
+    validateConfig,
+    printConfigSummary,
+    afterDb: async (context, _config) => {
+      const { database } = await db.initialize({ brand: context.brand, tenantId: context.tenantId });
+      logger.info('Database initialized', { database: database.databaseName });
+    },
+    buildGatewayConfig,
+    ensureDefaults: true,
+    ${withRedisOpt}
   });
-  logger.info('Database initialized', { database: database.databaseName });
-
-  const resolvers = create${serviceNamePascal}Resolvers(config);${webhookBlock}
-
-  await createGateway(buildGatewayConfig(config, resolvers${useWebhooks ? ', webhookService' : ''}));
-  await ensureServiceDefaultConfigsCreated(SERVICE_NAME, { brand: context.brand, tenantId: context.tenantId });${withRedisBlock}
-
-  registerServiceErrorCodes(${serviceNameConst.toUpperCase()}_ERROR_CODES);
-  logger.info('${serviceNamePascal} service started', { port: config.port });
 }
 
-main().catch((err) => {
-  logger.error('Failed to start ${serviceNameKebab}', { error: err?.message, stack: err?.stack });
-  process.exit(1);
-});
+main();
 `;
   await write('src/index.ts', indexContent);
 

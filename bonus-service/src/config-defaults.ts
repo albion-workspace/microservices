@@ -1,7 +1,9 @@
 /**
  * Bonus Service Configuration Defaults
  *
- * Every key read in loadConfig must exist here. Sensitive paths filtered for non-admin users.
+ * Every key read in loadConfig (and by domain code) must exist here.
+ * Pass to registerServiceConfigDefaults('bonus-service', BONUS_CONFIG_DEFAULTS) in index.ts.
+ * No process.env; no registration logic in this file (CODING_STANDARDS / service generator).
  */
 
 export const BONUS_CONFIG_DEFAULTS = {
