@@ -7,6 +7,7 @@ import {
   requireAuth, 
   getUserId, 
   getTenantId, 
+  getUserContext,
   logger,
   getErrorMessage,
   findById,
@@ -493,8 +494,7 @@ export function createAuthResolvers(
         requireAuth(ctx);
         
         const database = await db.getDb();
-        const userId = getUserId(ctx);
-        const tenantId = getTenantId(ctx);
+        const { userId, tenantId } = getUserContext(ctx);
         
         // Use generic helper function for document lookup with automatic ObjectId handling
         const user = await findById(database.collection('users'), userId, { tenantId });
@@ -614,12 +614,13 @@ export function createAuthResolvers(
        */
       mySessions: async (args: Record<string, unknown>, ctx: ResolverContext) => {
         requireAuth(ctx);
+        const { userId, tenantId } = getUserContext(ctx);
         
         const database = await db.getDb();
         const sessions = await database.collection('sessions')
           .find({
-            userId: getUserId(ctx),
-            tenantId: getTenantId(ctx),
+            userId,
+            tenantId,
             isValid: true,
           })
           .sort({ lastAccessedAt: -1 })
@@ -633,7 +634,7 @@ export function createAuthResolvers(
             
             // Skip sessions without an ID
             if (!sessionId) {
-              logger.warn('Session missing ID field', { userId: getUserId(ctx), session });
+              logger.warn('Session missing ID field', { userId, session });
               return null;
             }
             
@@ -715,7 +716,8 @@ export function createAuthResolvers(
       logoutAll: async (args: Record<string, unknown>, ctx: ResolverContext) => {
         requireAuth(ctx);
         
-        return await authenticationService.logoutAll(getUserId(ctx), getTenantId(ctx));
+        const { userId, tenantId } = getUserContext(ctx);
+        return await authenticationService.logoutAll(userId, tenantId);
       },
       
       /**
@@ -791,11 +793,11 @@ export function createAuthResolvers(
        */
       changePassword: async (args: Record<string, unknown>, ctx: ResolverContext) => {
         requireAuth(ctx);
-        
+        const { userId, tenantId } = getUserContext(ctx);
         return await passwordService.changePassword({
           ...(args as any).input,
-          userId: getUserId(ctx),
-          tenantId: getTenantId(ctx),
+          userId,
+          tenantId,
         });
       },
       
@@ -804,11 +806,11 @@ export function createAuthResolvers(
        */
       enable2FA: async (args: Record<string, unknown>, ctx: ResolverContext) => {
         requireAuth(ctx);
-        
+        const { userId, tenantId } = getUserContext(ctx);
         return await twoFactorService.enable2FA({
           ...(args as any).input,
-          userId: getUserId(ctx),
-          tenantId: getTenantId(ctx),
+          userId,
+          tenantId,
         });
       },
       
@@ -817,11 +819,11 @@ export function createAuthResolvers(
        */
       verify2FA: async (args: Record<string, unknown>, ctx: ResolverContext) => {
         requireAuth(ctx);
-        
+        const { userId, tenantId } = getUserContext(ctx);
         return await twoFactorService.verify2FA({
           ...(args as any).input,
-          userId: getUserId(ctx),
-          tenantId: getTenantId(ctx),
+          userId,
+          tenantId,
         });
       },
       
@@ -831,7 +833,8 @@ export function createAuthResolvers(
       disable2FA: async (args: Record<string, unknown>, ctx: ResolverContext) => {
         requireAuth(ctx);
         
-        return await twoFactorService.disable2FA(getUserId(ctx), getTenantId(ctx), (args as any).password);
+        const { userId, tenantId } = getUserContext(ctx);
+        return await twoFactorService.disable2FA(userId, tenantId, (args as any).password);
       },
       
       /**
@@ -839,10 +842,10 @@ export function createAuthResolvers(
        */
       regenerateBackupCodes: async (args: Record<string, unknown>, ctx: ResolverContext) => {
         requireAuth(ctx);
-        
+        const { userId, tenantId } = getUserContext(ctx);
         return await twoFactorService.regenerateBackupCodes({
-          userId: getUserId(ctx),
-          tenantId: getTenantId(ctx),
+          userId,
+          tenantId,
           password: (args as any).password,
         });
       },
@@ -902,9 +905,7 @@ export function createAuthResolvers(
        */
       pendingOperations: async (args: Record<string, unknown>, ctx: ResolverContext) => {
         requireAuth(ctx);
-        
-        const userId = getUserId(ctx);
-        const tenantId = getTenantId(ctx);
+        const { userId, tenantId } = getUserContext(ctx);
         const user = ctx.user!;
         
         // Check if user is admin/system (can see all operations)

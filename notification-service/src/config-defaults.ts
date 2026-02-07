@@ -1,10 +1,9 @@
 /**
  * Notification Service Configuration Defaults
- * 
- * These defaults are registered at startup and automatically created in MongoDB
- * if they don't exist. This provides a single source of truth for configuration.
- * 
- * Sensitive paths are marked so they're filtered for non-admin users.
+ *
+ * Every key read in loadConfig (and by domain code) must exist here.
+ * Pass to registerServiceConfigDefaults('notification-service', NOTIFICATION_CONFIG_DEFAULTS) in index.ts.
+ * No process.env; no registration logic in this file (CODING_STANDARDS / service generator).
  */
 
 export const NOTIFICATION_CONFIG_DEFAULTS = {

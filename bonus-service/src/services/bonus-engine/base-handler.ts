@@ -176,38 +176,23 @@ export abstract class BaseBonusHandler implements IBonusHandler {
     return { bonusValue, turnoverRequired, expiresAt };
   }
 
+  /** Strategy map for value calculation by valueType; cap by maxValue applied in calculateValue. */
+  private static readonly valueCalculators: Record<string, (template: BonusTemplate, baseAmount: number) => number> = {
+    percentage: (t, base) => Math.floor(base * (t.value / 100)),
+    fixed: (t) => t.value,
+    multiplier: (t, base) => Math.floor(base * t.value),
+    credit: (t) => t.value,
+    points: (t) => t.value,
+  };
+
   /**
    * Calculate the bonus value.
    * Can be overridden for special calculations.
    */
   protected calculateValue(template: BonusTemplate, context: BonusContext): number {
     const baseAmount = context.depositAmount || context.lossAmount || 0;
-
-    switch (template.valueType) {
-      case 'percentage':
-        let value = Math.floor(baseAmount * (template.value / 100));
-        if (template.maxValue && value > template.maxValue) {
-          value = template.maxValue;
-        }
-        return value;
-
-      case 'fixed':
-        return template.value;
-
-      case 'multiplier':
-        let mult = Math.floor(baseAmount * template.value);
-        if (template.maxValue && mult > template.maxValue) {
-          mult = template.maxValue;
-        }
-        return mult;
-
-      case 'credit':
-      case 'points':
-        return template.value;
-
-      default:
-        return template.value;
-    }
+    const raw = BaseBonusHandler.valueCalculators[template.valueType]?.(template, baseAmount) ?? template.value;
+    return template.maxValue != null && raw > template.maxValue ? template.maxValue : raw;
   }
 
   /**

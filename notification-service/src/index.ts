@@ -20,6 +20,7 @@
 
 import {
   createGateway,
+  buildDefaultGatewayConfig,
   allow,
   isAuthenticated,
   hasRole,
@@ -27,8 +28,8 @@ import {
   startListening,
   registerServiceErrorCodes,
   registerServiceConfigDefaults,
-  ensureDefaultConfigsCreated,
   resolveContext,
+  runServiceStartup,
 } from 'core-service';
 
 import { db } from './accessors.js';
@@ -45,33 +46,15 @@ import { NOTIFICATION_ERROR_CODES } from './error-codes.js';
 // ═══════════════════════════════════════════════════════════════════
 
 let notificationConfig: NotificationConfig | null = null;
+let notificationServiceInstance: NotificationService | null = null;
+let notificationResolversInstance: ReturnType<typeof createNotificationResolvers> | null = null;
 
-// Gateway config builder (will be built from notificationConfig)
-const buildGatewayConfig = (notificationService: NotificationService, notificationResolvers: ReturnType<typeof createNotificationResolvers>): Parameters<typeof createGateway>[0] => {
-  if (!notificationConfig) {
-    throw new Error('Configuration not loaded yet');
-  }
-  
-  const config = notificationConfig; // Type narrowing helper
-  
-  return {
-    name: config.serviceName,
-    port: config.port,
-    cors: {
-      origins: config.corsOrigins,
-    },
-    jwt: {
-      secret: config.jwtSecret,
-      expiresIn: config.jwtExpiresIn,
-      refreshSecret: config.jwtRefreshSecret,
-      refreshExpiresIn: config.jwtRefreshExpiresIn,
-    },
+// Gateway config builder (uses module-level service and resolvers set in afterDb)
+function buildGatewayConfigFromStored(): Parameters<typeof createGateway>[0] {
+  if (!notificationConfig || !notificationServiceInstance || !notificationResolversInstance) throw new Error('Configuration not loaded yet');
+  return buildDefaultGatewayConfig(notificationConfig, {
     services: [
-      {
-        name: 'notifications',
-        types: notificationGraphQLTypes,
-        resolvers: notificationResolvers,
-      },
+      { name: 'notifications', types: notificationGraphQLTypes, resolvers: notificationResolversInstance },
     ],
     permissions: {
       Query: {
@@ -82,100 +65,61 @@ const buildGatewayConfig = (notificationService: NotificationService, notificati
         availableChannels: allow,
       },
       Mutation: {
-        sendNotification: allow, // Allow service-to-service calls (auth-service, etc.)
+        sendNotification: allow,
       },
     },
-    mongoUri: config.mongoUri,
-    redisUrl: config.redisUrl,
-    defaultPermission: 'deny' as const,
-  };
-};
+  });
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // Startup
 // ═══════════════════════════════════════════════════════════════════
 
 async function main() {
-  // ═══════════════════════════════════════════════════════════════════
-  // Configuration
-  // ═══════════════════════════════════════════════════════════════════
-
-  // Register error codes
-  registerServiceErrorCodes(NOTIFICATION_ERROR_CODES);
-
-  // Register default configs (auto-created in DB if missing)
-  registerServiceConfigDefaults(SERVICE_NAME, NOTIFICATION_CONFIG_DEFAULTS);
-
-  // Load config (MongoDB + env vars + defaults)
-  // Resolve brand/tenantId dynamically (from user context, config store, or env vars)
-  const context = await resolveContext();
-  notificationConfig = await loadConfig(context.brand, context.tenantId);
-  validateConfig(notificationConfig);
-  printConfigSummary(notificationConfig);
-
-  // Initialize service database accessor (required for resolvers that use db.getDb())
-  const { database, context: dbContext } = await db.initialize({
-    brand: context.brand,
-    tenantId: context.tenantId,
-  });
-  logger.info('Database initialized via service database accessor', {
-    database: database.databaseName,
-    context: dbContext,
-  });
-  
-  // ═══════════════════════════════════════════════════════════════════
-  // Initialize Service
-  // ═══════════════════════════════════════════════════════════════════
-
-  const notificationService = new NotificationService(notificationConfig);
-  const notificationResolvers = createNotificationResolvers(notificationService);
-
-  // ═══════════════════════════════════════════════════════════════════
-  // Gateway Configuration
-  // ═══════════════════════════════════════════════════════════════════
-
-  // Create gateway (this connects to database)
-  const gateway = await createGateway(buildGatewayConfig(notificationService, notificationResolvers));
-  
-  // Set gateway instance for direct Socket.IO and SSE broadcasting
-  notificationService.setGateway({
-    broadcast: gateway.broadcast,
-    sse: gateway.sse,
-    io: gateway.io, // Socket.IO server instance for advanced features
-  });
-  
-  // Initialize Socket.IO after gateway starts
-  notificationService.initializeSocket();
-  
-  // Dynamically load handlers from other services (if available)
-  // This makes notification-service extensible - services can provide their own handlers
-  await loadHandlersFromServices(notificationService);
-  
-  // Initialize all registered handlers
-  handlerRegistry.initialize(notificationService);
-  
-  // Start listening to Redis events (only for channels that have handlers)
-  if (notificationConfig.redisUrl) {
-    try {
-      const channels = handlerRegistry.getChannels();
-      
-      if (channels.length > 0) {
-        await startListening(channels);
-        logger.info('Started listening to event channels', { 
-          channels,
-          plugins: handlerRegistry.getPlugins().map(p => p.name),
-        });
+  await runServiceStartup<NotificationConfig>({
+    serviceName: SERVICE_NAME,
+    registerErrorCodes: () => registerServiceErrorCodes(NOTIFICATION_ERROR_CODES),
+    registerConfigDefaults: () => registerServiceConfigDefaults(SERVICE_NAME, NOTIFICATION_CONFIG_DEFAULTS),
+    resolveContext: async () => {
+      const c = await resolveContext();
+      return { brand: c.brand ?? 'default', tenantId: c.tenantId };
+    },
+    loadConfig: (brand?: string, tenantId?: string) => loadConfig(brand, tenantId),
+    validateConfig,
+    printConfigSummary,
+    afterDb: async (context, config) => {
+      notificationConfig = config;
+      const { database, context: dbContext } = await db.initialize({ brand: context.brand, tenantId: context.tenantId });
+      logger.info('Database initialized via service database accessor', { database: database.databaseName, context: dbContext });
+      notificationServiceInstance = new NotificationService(config);
+      notificationResolversInstance = createNotificationResolvers(notificationServiceInstance);
+    },
+    buildGatewayConfig: () => buildGatewayConfigFromStored(),
+    ensureDefaults: true,
+    afterGateway: async (gateway) => {
+      const service = notificationServiceInstance!;
+      service.setGateway({ broadcast: gateway.broadcast, sse: gateway.sse, io: gateway.io });
+      service.initializeSocket();
+      await loadHandlersFromServices(service);
+      handlerRegistry.initialize(service);
+      if (notificationConfig!.redisUrl) {
+        try {
+          const channels = handlerRegistry.getChannels();
+          if (channels.length > 0) {
+            await startListening(channels);
+            logger.info('Started listening to event channels', { channels, plugins: handlerRegistry.getPlugins().map(p => p.name) });
+          } else {
+            logger.info('No handler plugins registered - event listening skipped');
+          }
+        } catch (err) {
+          logger.warn('Could not start event listener', { error: (err as Error).message });
+        }
       } else {
-        logger.info('No handler plugins registered - event listening skipped');
+        logger.warn('Redis not configured - inter-service events disabled');
       }
-    } catch (err) {
-      logger.warn('Could not start event listener', { error: (err as Error).message });
-    }
-  } else {
-    logger.warn('Redis not configured - inter-service events disabled');
-  }
-  
-  logger.info('Notification service started successfully', { port: notificationConfig.port });
+      logger.info('Notification service started successfully', { port: notificationConfig!.port });
+    },
+  });
 }
 
 /**

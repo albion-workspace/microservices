@@ -5,70 +5,41 @@
  * NotificationConfig extends DefaultServiceConfig (core-service); single config type in types.ts.
  */
 
-import { logger, getServiceConfigKey } from 'core-service';
+import { logger, loadBaseServiceConfig, getBaseServiceConfigDefaults, getServiceConfigKey, configKeyOpts } from 'core-service';
 import type { NotificationConfig } from './types.js';
-
-const opts = (brand?: string, tenantId?: string) => ({ brand, tenantId, fallbackService: 'gateway' as const });
 
 export type { NotificationConfig };
 
 export const SERVICE_NAME = 'notification-service';
 
 export async function loadConfig(brand?: string, tenantId?: string): Promise<NotificationConfig> {
-  const port = await getServiceConfigKey<number>(SERVICE_NAME, 'port', 9004, opts(brand, tenantId));
-  const serviceName = await getServiceConfigKey<string>(SERVICE_NAME, 'serviceName', SERVICE_NAME, opts(brand, tenantId));
-  const nodeEnv = await getServiceConfigKey<string>(SERVICE_NAME, 'nodeEnv', 'development', opts(brand, tenantId));
-  const corsOrigins = await getServiceConfigKey<string[]>(SERVICE_NAME, 'corsOrigins', [
-    'http://localhost:5173',
-    'http://localhost:3000',
-    'http://127.0.0.1:5173',
-  ], opts(brand, tenantId));
-  const jwtConfig = await getServiceConfigKey<{ secret: string; expiresIn: string; refreshSecret?: string; refreshExpiresIn?: string }>(SERVICE_NAME, 'jwt', {
-    secret: '',
-    expiresIn: '1h',
-    refreshSecret: '',
-    refreshExpiresIn: '7d',
-  }, opts(brand, tenantId));
-  const databaseConfig = await getServiceConfigKey<{ mongoUri?: string; redisUrl?: string }>(SERVICE_NAME, 'database', { mongoUri: '', redisUrl: '' }, opts(brand, tenantId));
-  const smtpConfig = await getServiceConfigKey<{ host: string; port: number; user: string; password: string; from: string; secure: boolean }>(SERVICE_NAME, 'smtp', {
-    host: '',
-    port: 587,
-    user: '',
-    password: '',
-    from: 'noreply@example.com',
-    secure: false,
-  }, { brand, tenantId });
-  const twilioConfig = await getServiceConfigKey<{ accountSid: string; authToken: string; phoneNumber: string; whatsappNumber: string }>(SERVICE_NAME, 'twilio', {
-    accountSid: '',
-    authToken: '',
-    phoneNumber: '',
-    whatsappNumber: '',
-  }, { brand, tenantId });
-  const pushConfig = await getServiceConfigKey<{ apiKey: string; projectId: string }>(SERVICE_NAME, 'push', {
-    apiKey: '',
-    projectId: '',
-  }, { brand, tenantId });
-  const queueConfig = await getServiceConfigKey<{ concurrency: number; maxRetries: number; retryDelay: number }>(SERVICE_NAME, 'queue', {
-    concurrency: 5,
-    maxRetries: 3,
-    retryDelay: 5000,
-  }, { brand, tenantId });
-  const realtimeConfig = await getServiceConfigKey<{ sseHeartbeatInterval: number; socketNamespace: string }>(SERVICE_NAME, 'realtime', {
-    sseHeartbeatInterval: 30000,
-    socketNamespace: '/notifications',
-  }, { brand, tenantId });
+  const base = await loadBaseServiceConfig(SERVICE_NAME, getBaseServiceConfigDefaults({ port: 9004, serviceName: SERVICE_NAME }), { brand, tenantId });
+  const opts = configKeyOpts(brand, tenantId);
+  const smtpConfig = await getServiceConfigKey<{ host: string; port: number; user: string; password: string; from: string; secure: boolean }>(
+    SERVICE_NAME, 'smtp',
+    { host: '', port: 587, user: '', password: '', from: 'noreply@example.com', secure: false },
+    opts
+  );
+  const twilioConfig = await getServiceConfigKey<{ accountSid: string; authToken: string; phoneNumber: string; whatsappNumber: string }>(
+    SERVICE_NAME, 'twilio',
+    { accountSid: '', authToken: '', phoneNumber: '', whatsappNumber: '' },
+    opts
+  );
+  const pushConfig = await getServiceConfigKey<{ apiKey: string; projectId: string }>(
+    SERVICE_NAME, 'push', { apiKey: '', projectId: '' },
+    opts
+  );
+  const queueConfig = await getServiceConfigKey<{ concurrency: number; maxRetries: number; retryDelay: number }>(
+    SERVICE_NAME, 'queue', { concurrency: 5, maxRetries: 3, retryDelay: 5000 },
+    opts
+  );
+  const realtimeConfig = await getServiceConfigKey<{ sseHeartbeatInterval: number; socketNamespace: string }>(
+    SERVICE_NAME, 'realtime', { sseHeartbeatInterval: 30000, socketNamespace: '/notifications' },
+    opts
+  );
 
   return {
-    port: typeof port === 'number' ? port : parseInt(String(port), 10),
-    nodeEnv,
-    serviceName,
-    corsOrigins,
-    jwtSecret: jwtConfig.secret || 'shared-jwt-secret-change-in-production',
-    jwtExpiresIn: jwtConfig.expiresIn,
-    jwtRefreshSecret: jwtConfig.refreshSecret,
-    jwtRefreshExpiresIn: jwtConfig.refreshExpiresIn ?? '7d',
-    mongoUri: databaseConfig.mongoUri || undefined,
-    redisUrl: databaseConfig.redisUrl || undefined,
+    ...base,
     smtpHost: smtpConfig.host || undefined,
     smtpPort: smtpConfig.port,
     smtpUser: smtpConfig.user || undefined,
