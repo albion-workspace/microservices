@@ -19,8 +19,9 @@ import { Strategy as LinkedInStrategy } from 'passport-linkedin-oauth2';
 import speakeasy from 'speakeasy';
 import type { AuthConfig } from '../config.js';
 import type { User, SocialProfile, AuthProvider } from '../types.js';
-import { logger } from 'core-service';
+import { logger, GraphQLError } from 'core-service';
 import { db } from '../accessors.js';
+import { AUTH_ERRORS } from '../error-codes.js';
 import { normalizeEmail, normalizePhone, detectIdentifierType, verifyPassword } from '../utils.js';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -387,7 +388,7 @@ async function handleSocialAuth(
   const database = await db.getDb();
   
   if (!tenantId) {
-    throw new Error('Tenant ID is required');
+    throw new GraphQLError(AUTH_ERRORS.TenantIdRequired, {});
   }
   
   // Look for existing user with this social profile

@@ -5,8 +5,9 @@
  * Supports context-based roles and hierarchical role inheritance.
  */
 
-import { logger, findOneById, updateOneById, extractDocumentId } from 'core-service';
+import { logger, findOneById, updateOneById, extractDocumentId, GraphQLError } from 'core-service';
 import { db } from '../accessors.js';
+import { AUTH_ERRORS } from '../error-codes.js';
 import { RoleResolver, type BaseRole as Role } from 'core-service/access';
 import type {
   UserRole,
@@ -173,7 +174,7 @@ export class RoleService {
     // Verify role exists in resolver
     const roleDef = this.roleResolver.getRoleDefinition(input.role);
     if (!roleDef) {
-      throw new Error(`Role "${input.role}" not found`);
+      throw new GraphQLError(AUTH_ERRORS.RoleNotFound, { role: input.role });
     }
     
     // Create role assignment
@@ -224,7 +225,7 @@ export class RoleService {
         );
       }
     } else {
-      throw new Error(`User "${userId}" not found`);
+      throw new GraphQLError(AUTH_ERRORS.UserNotFound, { userId });
     }
     
     logger.info('Role assigned', {
@@ -250,7 +251,7 @@ export class RoleService {
     // Use optimized findOneById utility (performance-optimized)
     const user = await findOneById(usersCollection, userId, { tenantId }) as any;
     if (!user) {
-      throw new Error(`User "${userId}" not found`);
+      throw new GraphQLError(AUTH_ERRORS.UserNotFound, { userId });
     }
     
     // Remove role

@@ -26,6 +26,11 @@ export const PAYMENT_ERRORS = {
   FailedToGetWalletBalance: 'MSPaymentFailedToGetWalletBalance',
   FailedToGetUserBalances: 'MSPaymentFailedToGetUserBalances',
   WalletAlreadyExists: 'MSPaymentWalletAlreadyExists',
+  DuplicateTransfer: 'MSPaymentDuplicateTransfer',
+  WalletNotFound: 'MSPaymentWalletNotFound',
+  InsufficientBalance: 'MSPaymentInsufficientBalance',
+  BulkBalancesFailed: 'MSPaymentBulkBalancesFailed',
+  ReferenceNotFound: 'MSPaymentReferenceNotFound',
 } as const;
 
 /**

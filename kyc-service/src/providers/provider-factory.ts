@@ -4,9 +4,10 @@
  * Factory for creating and managing KYC providers
  */
 
-import { getErrorMessage, getServiceConfigKey, logger } from 'core-service';
+import { getErrorMessage, getServiceConfigKey, logger, GraphQLError } from 'core-service';
 
 import { SERVICE_NAME } from '../config.js';
+import { KYC_ERRORS } from '../error-codes.js';
 import type {
   KYCProvider,
   ProviderFactory,
@@ -212,7 +213,7 @@ async function createProvider(name: string, config: ProviderConfig): Promise<KYC
 export function getDefaultProvider(): KYCProvider {
   const provider = providerFactory.getProvider(defaultProviderName);
   if (!provider) {
-    throw new Error(`Default KYC provider '${defaultProviderName}' not found`);
+    throw new GraphQLError(KYC_ERRORS.ProviderNotFound, { providerName: defaultProviderName });
   }
   return provider;
 }

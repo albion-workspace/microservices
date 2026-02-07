@@ -1315,7 +1315,7 @@ async function parseRedisPayload(
   const payload = JSON.parse(value);
   
   if (!redisClient && !redis.isInitialized()) {
-    throw new Error('Redis not available');
+    throw new GraphQLError(AUTH_ERRORS.RedisNotAvailable, {});
   }
   
   const client = redisClient || redis.getClient();

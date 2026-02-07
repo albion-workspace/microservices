@@ -241,7 +241,7 @@ export function createNotificationResolvers(notificationService: NotificationSer
           }
         } else {
           if (!to) {
-            throw new Error(`${normalizedChannel?.toUpperCase() || 'Notification'} channel requires 'to' field`);
+            throw new GraphQLError(NOTIFICATION_ERRORS.ChannelRequiresTo, { channel: normalizedChannel });
           }
         }
         
@@ -283,7 +283,7 @@ export function createNotificationResolvers(notificationService: NotificationSer
             };
           } else {
             if (!to) {
-              throw new Error(`${normalizedChannel?.toUpperCase() || 'Notification'} channel requires 'to' field`);
+              throw new GraphQLError(NOTIFICATION_ERRORS.ChannelRequiresTo, { channel: normalizedChannel });
             }
             request.to = to;
             if (userId) {
