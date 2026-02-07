@@ -7,12 +7,8 @@
  */
 
 import type { AuthConfig } from './types.js';
-import { logger, getServiceConfigKey } from 'core-service';
+import { logger, loadBaseServiceConfig, getBaseServiceConfigDefaults, getServiceConfigKey, configKeyOpts } from 'core-service';
 import type { AuthConfigDefaults } from './config-defaults.js';
-
-/** Options for config keys that fall back to gateway (port, nodeEnv, corsOrigins, jwt, database) */
-const optsGateway = (brand?: string, tenantId?: string) => ({ brand, tenantId, fallbackService: 'gateway' as const });
-const optsService = (brand?: string, tenantId?: string) => ({ brand, tenantId });
 
 export type { AuthConfig } from './types.js';
 
@@ -29,69 +25,46 @@ export function getAuthConfig(): AuthConfig {
 }
 
 export async function loadConfig(brand?: string, tenantId?: string): Promise<AuthConfig> {
-  const port = await getServiceConfigKey<number>(SERVICE_NAME, 'port', 9001, optsGateway(brand, tenantId));
-  const serviceName = await getServiceConfigKey<string>(SERVICE_NAME, 'serviceName', SERVICE_NAME, optsGateway(brand, tenantId));
-  const nodeEnv = await getServiceConfigKey<string>(SERVICE_NAME, 'nodeEnv', 'development', optsGateway(brand, tenantId));
-  const corsOrigins = await getServiceConfigKey<string[]>(SERVICE_NAME, 'corsOrigins', [
-    'http://localhost:5173',
-    'http://localhost:3000',
-    'http://127.0.0.1:5173',
-  ], optsGateway(brand, tenantId));
-  const jwtConfig = await getServiceConfigKey<AuthConfigDefaults['jwt']>(SERVICE_NAME, 'jwt', {
-    expiresIn: '2m',
-    refreshExpiresIn: '7d',
-    secret: '',
-    refreshSecret: '',
-  }, optsGateway(brand, tenantId));
-  const databaseConfig = await getServiceConfigKey<{ mongoUri?: string; redisUrl?: string }>(SERVICE_NAME, 'database', { mongoUri: '', redisUrl: '' }, optsGateway(brand, tenantId));
+  const base = await loadBaseServiceConfig(SERVICE_NAME, getBaseServiceConfigDefaults({ port: 9001, serviceName: SERVICE_NAME, jwt: { expiresIn: '2m' } }), { brand, tenantId });
+  const opts = configKeyOpts(brand, tenantId);
 
-  const otpLength = await getServiceConfigKey<number>(SERVICE_NAME, 'otpLength', 6, optsService(brand, tenantId));
-  const otpExpiryMinutes = await getServiceConfigKey<number>(SERVICE_NAME, 'otpExpiryMinutes', 10, optsService(brand, tenantId));
-  const sessionMaxAge = await getServiceConfigKey<number>(SERVICE_NAME, 'sessionMaxAge', 30, optsService(brand, tenantId));
-  const maxActiveSessions = await getServiceConfigKey<number>(SERVICE_NAME, 'maxActiveSessions', 5, optsService(brand, tenantId));
-  const passwordMinLength = await getServiceConfigKey<number>(SERVICE_NAME, 'passwordMinLength', 8, optsService(brand, tenantId));
-  const passwordRequireUppercase = await getServiceConfigKey<boolean>(SERVICE_NAME, 'passwordRequireUppercase', true, optsService(brand, tenantId));
-  const passwordRequireNumbers = await getServiceConfigKey<boolean>(SERVICE_NAME, 'passwordRequireNumbers', true, optsService(brand, tenantId));
-  const passwordRequireSymbols = await getServiceConfigKey<boolean>(SERVICE_NAME, 'passwordRequireSymbols', true, optsService(brand, tenantId));
+  const otpLength = await getServiceConfigKey<number>(SERVICE_NAME, 'otpLength', 6, opts);
+  const otpExpiryMinutes = await getServiceConfigKey<number>(SERVICE_NAME, 'otpExpiryMinutes', 10, opts);
+  const sessionMaxAge = await getServiceConfigKey<number>(SERVICE_NAME, 'sessionMaxAge', 30, opts);
+  const maxActiveSessions = await getServiceConfigKey<number>(SERVICE_NAME, 'maxActiveSessions', 5, opts);
+  const passwordMinLength = await getServiceConfigKey<number>(SERVICE_NAME, 'passwordMinLength', 8, opts);
+  const passwordRequireUppercase = await getServiceConfigKey<boolean>(SERVICE_NAME, 'passwordRequireUppercase', true, opts);
+  const passwordRequireNumbers = await getServiceConfigKey<boolean>(SERVICE_NAME, 'passwordRequireNumbers', true, opts);
+  const passwordRequireSymbols = await getServiceConfigKey<boolean>(SERVICE_NAME, 'passwordRequireSymbols', true, opts);
   const oauthConfig = await getServiceConfigKey<AuthConfigDefaults['oauth']>(SERVICE_NAME, 'oauth', {
     google: { clientId: '', clientSecret: '', callbackUrl: '' },
     facebook: { appId: '', appSecret: '', callbackUrl: '' },
     linkedin: { clientId: '', clientSecret: '', callbackUrl: '' },
     instagram: { clientId: '', clientSecret: '', callbackUrl: '' },
-  }, optsService(brand, tenantId));
+  }, opts);
   const smtpConfig = await getServiceConfigKey<AuthConfigDefaults['smtp']>(SERVICE_NAME, 'smtp', {
     host: '',
     port: 587,
     user: '',
     password: '',
     from: '',
-  }, optsService(brand, tenantId));
+  }, opts);
   const twilioConfig = await getServiceConfigKey<AuthConfigDefaults['twilio']>(SERVICE_NAME, 'twilio', {
     accountSid: '',
     authToken: '',
     phoneNumber: '',
-  }, optsService(brand, tenantId));
-  const whatsappConfig = await getServiceConfigKey<AuthConfigDefaults['whatsapp']>(SERVICE_NAME, 'whatsapp', { apiKey: '' }, optsService(brand, tenantId));
-  const telegramConfig = await getServiceConfigKey<AuthConfigDefaults['telegram']>(SERVICE_NAME, 'telegram', { botToken: '' }, optsService(brand, tenantId));
+  }, opts);
+  const whatsappConfig = await getServiceConfigKey<AuthConfigDefaults['whatsapp']>(SERVICE_NAME, 'whatsapp', { apiKey: '' }, opts);
+  const telegramConfig = await getServiceConfigKey<AuthConfigDefaults['telegram']>(SERVICE_NAME, 'telegram', { botToken: '' }, opts);
   const urlsConfig = await getServiceConfigKey<AuthConfigDefaults['urls'] & { notificationServiceUrl?: string; notificationServiceToken?: string }>(SERVICE_NAME, 'urls', {
     frontendUrl: 'http://localhost:5173',
     appUrl: 'http://localhost:3000',
     notificationServiceUrl: 'http://localhost:9004/graphql',
     notificationServiceToken: '',
-  }, optsService(brand, tenantId));
-
-  const portNum = typeof port === 'number' ? port : parseInt(String(port), 10);
+  }, opts);
 
   return {
-    port: portNum,
-    nodeEnv,
-    serviceName,
-    mongoUri: databaseConfig.mongoUri || undefined,
-    redisUrl: databaseConfig.redisUrl || undefined,
-    jwtSecret: jwtConfig.secret || 'shared-jwt-secret-change-in-production',
-    jwtExpiresIn: jwtConfig.expiresIn,
-    jwtRefreshSecret: jwtConfig.refreshSecret,
-    jwtRefreshExpiresIn: jwtConfig.refreshExpiresIn,
+    ...base,
     passwordMinLength: typeof passwordMinLength === 'number' ? passwordMinLength : parseInt(String(passwordMinLength), 10),
     passwordRequireUppercase,
     passwordRequireNumbers,
@@ -104,16 +77,16 @@ export async function loadConfig(brand?: string, tenantId?: string): Promise<Aut
     appUrl: urlsConfig.appUrl,
     googleClientId: oauthConfig.google.clientId || '',
     googleClientSecret: oauthConfig.google.clientSecret || '',
-    googleCallbackUrl: oauthConfig.google.callbackUrl || `http://localhost:${portNum}/auth/google/callback`,
+    googleCallbackUrl: oauthConfig.google.callbackUrl || `http://localhost:${base.port}/auth/google/callback`,
     facebookAppId: oauthConfig.facebook.appId || '',
     facebookAppSecret: oauthConfig.facebook.appSecret || '',
-    facebookCallbackUrl: oauthConfig.facebook.callbackUrl || `http://localhost:${portNum}/auth/facebook/callback`,
+    facebookCallbackUrl: oauthConfig.facebook.callbackUrl || `http://localhost:${base.port}/auth/facebook/callback`,
     linkedinClientId: oauthConfig.linkedin.clientId || '',
     linkedinClientSecret: oauthConfig.linkedin.clientSecret || '',
-    linkedinCallbackUrl: oauthConfig.linkedin.callbackUrl || `http://localhost:${portNum}/auth/linkedin/callback`,
+    linkedinCallbackUrl: oauthConfig.linkedin.callbackUrl || `http://localhost:${base.port}/auth/linkedin/callback`,
     instagramClientId: oauthConfig.instagram.clientId || '',
     instagramClientSecret: oauthConfig.instagram.clientSecret || '',
-    instagramCallbackUrl: oauthConfig.instagram.callbackUrl || `http://localhost:${portNum}/auth/instagram/callback`,
+    instagramCallbackUrl: oauthConfig.instagram.callbackUrl || `http://localhost:${base.port}/auth/instagram/callback`,
     twilioAccountSid: twilioConfig.accountSid,
     twilioAuthToken: twilioConfig.authToken,
     twilioPhoneNumber: twilioConfig.phoneNumber,
@@ -124,7 +97,7 @@ export async function loadConfig(brand?: string, tenantId?: string): Promise<Aut
     smtpFrom: smtpConfig.from,
     whatsappApiKey: whatsappConfig.apiKey,
     telegramBotToken: telegramConfig.botToken,
-    corsOrigins,
+    corsOrigins: base.corsOrigins,
     notificationServiceUrl: urlsConfig.notificationServiceUrl,
     notificationServiceToken: urlsConfig.notificationServiceToken,
   };

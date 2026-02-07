@@ -16,6 +16,7 @@
 // Internal packages
 import {
   createGateway,
+  buildDefaultGatewayConfig,
   hasRole,
   hasAnyRole,
   isAuthenticated,
@@ -29,7 +30,7 @@ import {
   withEventHandlerError,
   registerServiceErrorCodes,
   registerServiceConfigDefaults,
-  ensureDefaultConfigsCreated,
+  ensureServiceDefaultConfigsCreated,
   resolveContext,
   initializeWebhooks,
   createWebhookService,
@@ -141,23 +142,11 @@ let paymentConfig: PaymentConfig | null = null;
 
 // Gateway config (will be built from paymentConfig)
 const buildGatewayConfig = (): Parameters<typeof createGateway>[0] => {
-  if (!paymentConfig) {
-    throw new Error('Configuration not loaded yet');
-  }
-  
-  const config = paymentConfig; // Type narrowing helper
-  
-  return {
+  if (!paymentConfig) throw new Error('Configuration not loaded yet');
+  const config = paymentConfig;
+  return buildDefaultGatewayConfig(config, {
     name: 'payment-service',
-    port: config.port,
-    cors: {
-      origins: paymentConfig.corsOrigins,
-    },
-    jwt: {
-      secret: paymentConfig.jwtSecret,
-      expiresIn: paymentConfig.jwtExpiresIn,
-    },
-  services: [
+    services: [
     // Register transfer service FIRST so Transfer type is available for deposit/withdrawal results
     { name: 'transfer', types: transferService.types, resolvers: transferService.resolvers },
     { 
@@ -368,12 +357,7 @@ const buildGatewayConfig = (): Parameters<typeof createGateway>[0] => {
       testWebhook: hasRole('system'),
     },
   },
-    // Note: When connecting from localhost, directConnection=true prevents replica set member discovery
-    mongoUri: config.mongoUri,
-    // Redis password: default is redis123 (from Docker container), can be overridden via REDIS_PASSWORD env var
-    redisUrl: config.redisUrl,
-    defaultPermission: 'deny' as const, // Secure default
-  };
+  });
 };
 
 
@@ -735,20 +719,7 @@ async function main() {
   // Create gateway (this connects to database)
   await createGateway(buildGatewayConfig());
 
-  // Ensure all registered default configs are created in database
-  // This happens after database connection is established
-  try {
-    const createdCount = await ensureDefaultConfigsCreated(SERVICE_NAME, {
-      brand: context.brand,
-      tenantId: context.tenantId,
-    });
-    if (createdCount > 0) {
-      logger.info(`Created ${createdCount} default config(s) in database`);
-    }
-  } catch (error) {
-    logger.warn('Failed to ensure default configs are created', { error });
-    // Continue - configs will be created on first access
-  }
+  await ensureServiceDefaultConfigsCreated(SERVICE_NAME, context);
 
   // Initialize database using service database accessor
   const { strategy: databaseStrategy, context: dbContext } = await db.initialize({

@@ -6,7 +6,7 @@
  */
 
 import type { PaymentConfig } from './types.js';
-import { logger, getServiceConfigKey } from 'core-service';
+import { logger, loadBaseServiceConfig, getBaseServiceConfigDefaults, getServiceConfigKey, configKeyOpts } from 'core-service';
 
 export type { PaymentConfig } from './types.js';
 
@@ -20,61 +20,32 @@ export function getUseMongoTransactions(): boolean {
   return _useMongoTransactions;
 }
 
-const opts = (brand?: string, tenantId?: string) => ({ brand, tenantId, fallbackService: 'gateway' as const });
-
 export async function loadConfig(brand?: string, tenantId?: string): Promise<PaymentConfig> {
-  const port = await getServiceConfigKey<number>(SERVICE_NAME, 'port', 9002, opts(brand, tenantId));
-  const serviceName = await getServiceConfigKey<string>(SERVICE_NAME, 'serviceName', SERVICE_NAME, opts(brand, tenantId));
-  const nodeEnv = await getServiceConfigKey<string>(SERVICE_NAME, 'nodeEnv', 'development', opts(brand, tenantId));
-  const corsOrigins = await getServiceConfigKey<string[]>(SERVICE_NAME, 'corsOrigins', [
-    'http://localhost:5173',
-    'http://localhost:3000',
-    'http://127.0.0.1:5173',
-  ], opts(brand, tenantId));
-  const jwtConfig = await getServiceConfigKey<{ expiresIn: string; secret: string; refreshExpiresIn: string; refreshSecret: string }>(SERVICE_NAME, 'jwt', {
-    expiresIn: '8h',
-    secret: '',
-    refreshExpiresIn: '7d',
-    refreshSecret: '',
-  }, opts(brand, tenantId));
-  const databaseConfig = await getServiceConfigKey<{ mongoUri?: string; redisUrl?: string }>(SERVICE_NAME, 'database', { mongoUri: '', redisUrl: '' }, opts(brand, tenantId));
-  const optsService = (b?: string, t?: string) => ({ brand: b, tenantId: t });
-  const exchangeRateConfig = await getServiceConfigKey<{ defaultSource: string; cacheTtl: number; autoUpdateInterval: number; manualRates: Record<string, unknown> }>(SERVICE_NAME, 'exchangeRate', {
-    defaultSource: 'manual',
-    cacheTtl: 300,
-    autoUpdateInterval: 3600,
-    manualRates: {},
-  }, optsService(brand, tenantId));
-  const transactionConfig = await getServiceConfigKey<{ minAmount: number; maxAmount: number; allowNegativeBalance: boolean; useTransactions?: boolean }>(SERVICE_NAME, 'transaction', {
-    minAmount: 0.01,
-    maxAmount: 1000000,
-    allowNegativeBalance: false,
-    useTransactions: true,
-  }, optsService(brand, tenantId));
-  const walletConfig = await getServiceConfigKey<{ defaultCurrency: string; supportedCurrencies: string[]; allowNegativeBalance: boolean }>(SERVICE_NAME, 'wallet', {
-    defaultCurrency: 'USD',
-    supportedCurrencies: ['USD', 'EUR', 'GBP'],
-    allowNegativeBalance: false,
-  }, optsService(brand, tenantId));
-  const transferConfig = await getServiceConfigKey<{ requireApproval: boolean; maxPendingTransfers: number; approvalTimeout: number }>(SERVICE_NAME, 'transfer', {
-    requireApproval: false,
-    maxPendingTransfers: 10,
-    approvalTimeout: 3600,
-  }, optsService(brand, tenantId));
-
-  const portNum = typeof port === 'number' ? port : parseInt(String(port), 10);
+  const base = await loadBaseServiceConfig(SERVICE_NAME, getBaseServiceConfigDefaults({ port: 9002, serviceName: SERVICE_NAME, jwt: { expiresIn: '8h' } }), { brand, tenantId });
+  const opts = configKeyOpts(brand, tenantId);
+  const exchangeRateConfig = await getServiceConfigKey<{ defaultSource: string; cacheTtl: number; autoUpdateInterval: number; manualRates: Record<string, unknown> }>(
+    SERVICE_NAME, 'exchangeRate',
+    { defaultSource: 'manual', cacheTtl: 300, autoUpdateInterval: 3600, manualRates: {} },
+    opts
+  );
+  const transactionConfig = await getServiceConfigKey<{ minAmount: number; maxAmount: number; allowNegativeBalance: boolean; useTransactions?: boolean }>(
+    SERVICE_NAME, 'transaction',
+    { minAmount: 0.01, maxAmount: 1000000, allowNegativeBalance: false, useTransactions: true },
+    opts
+  );
+  const walletConfig = await getServiceConfigKey<{ defaultCurrency: string; supportedCurrencies: string[]; allowNegativeBalance: boolean }>(
+    SERVICE_NAME, 'wallet',
+    { defaultCurrency: 'USD', supportedCurrencies: ['USD', 'EUR', 'GBP'], allowNegativeBalance: false },
+    opts
+  );
+  const transferConfig = await getServiceConfigKey<{ requireApproval: boolean; maxPendingTransfers: number; approvalTimeout: number }>(
+    SERVICE_NAME, 'transfer',
+    { requireApproval: false, maxPendingTransfers: 10, approvalTimeout: 3600 },
+    opts
+  );
 
   return {
-    port: portNum,
-    nodeEnv,
-    serviceName,
-    mongoUri: databaseConfig.mongoUri || undefined,
-    redisUrl: databaseConfig.redisUrl || undefined,
-    corsOrigins,
-    jwtSecret: jwtConfig.secret || 'shared-jwt-secret-change-in-production',
-    jwtExpiresIn: jwtConfig.expiresIn,
-    jwtRefreshSecret: jwtConfig.refreshSecret,
-    jwtRefreshExpiresIn: jwtConfig.refreshExpiresIn,
+    ...base,
     exchangeRateDefaultSource: exchangeRateConfig.defaultSource,
     exchangeRateCacheTtl: typeof exchangeRateConfig.cacheTtl === 'number' ? exchangeRateConfig.cacheTtl : 300,
     exchangeRateAutoUpdateInterval: typeof exchangeRateConfig.autoUpdateInterval === 'number' ? exchangeRateConfig.autoUpdateInterval : 3600,

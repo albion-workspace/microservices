@@ -186,12 +186,14 @@ export type ${serviceNamePascal}ErrorCode = typeof ${serviceNameConst.toUpperCas
     `/**
  * ${serviceNamePascal} Service Configuration Defaults
  *
- * Pass to registerServiceConfigDefaults('${serviceNameKebab}', ...) in index.ts.
- * Stored in core_service.service_configs. config.ts loadConfig() uses getServiceConfigKey(SERVICE_NAME, key, defaultVal, opts) with these keys; common keys use opts with fallbackService: 'gateway'.
+ * Typed as Record<string, DefaultConfigEntry> (core-service). Pass to registerServiceConfigDefaults('${serviceNameKebab}', ...) in index.ts.
+ * Stored in core_service.service_configs. loadBaseServiceConfig + getServiceConfigKey use these keys; common keys fallback to gateway.
  * No process.env (CODING_STANDARDS).
  */
 
-export const ${serviceNameConst.toUpperCase()}_CONFIG_DEFAULTS = {
+import type { DefaultConfigEntry } from 'core-service';
+
+export const ${serviceNameConst.toUpperCase()}_CONFIG_DEFAULTS: Record<string, DefaultConfigEntry> = {
   port: {
     value: ${port},
     description: 'HTTP port',
@@ -234,46 +236,16 @@ export const ${serviceNameConst.toUpperCase()}_CONFIG_DEFAULTS = {
  * ${serviceNamePascal} Service Configuration
  *
  * Dynamic config only: MongoDB config store + registered defaults. No process.env (CODING_STANDARDS).
- * Single pattern: getServiceConfigKey(serviceName, key, defaultVal, opts). Common keys use opts with fallbackService: 'gateway'.
- * Service-only keys use { brand, tenantId } only. Add service-specific keys and register in config-defaults.ts.
+ * Base keys via loadBaseServiceConfig + getBaseServiceConfigDefaults; service-only keys with getServiceConfigKey + configKeyOpts.
  */
 
-import { getServiceConfigKey } from 'core-service';
+import { loadBaseServiceConfig, getBaseServiceConfigDefaults } from 'core-service';
 import type { ${serviceNamePascal}Config } from './types.js';
 
 export const SERVICE_NAME = '${serviceNameKebab}';
 
-const opts = (brand?: string, tenantId?: string) => ({ brand, tenantId, fallbackService: 'gateway' as const });
-
 export async function loadConfig(brand?: string, tenantId?: string): Promise<${serviceNamePascal}Config> {
-  const port = await getServiceConfigKey<number>(SERVICE_NAME, 'port', ${port}, opts(brand, tenantId));
-  const serviceName = await getServiceConfigKey<string>(SERVICE_NAME, 'serviceName', SERVICE_NAME, opts(brand, tenantId));
-  const nodeEnv = await getServiceConfigKey<string>(SERVICE_NAME, 'nodeEnv', 'development', opts(brand, tenantId));
-  const corsOrigins = await getServiceConfigKey<string[]>(SERVICE_NAME, 'corsOrigins', [
-    'http://localhost:5173',
-    'http://localhost:3000',
-    'http://127.0.0.1:5173',
-  ], opts(brand, tenantId));
-  const jwtConfig = await getServiceConfigKey<{ secret: string; expiresIn: string; refreshSecret: string; refreshExpiresIn: string }>(SERVICE_NAME, 'jwt', {
-    secret: '',
-    expiresIn: '1h',
-    refreshSecret: '',
-    refreshExpiresIn: '7d',
-  }, opts(brand, tenantId));
-  const databaseConfig = await getServiceConfigKey<{ mongoUri?: string; redisUrl?: string }>(SERVICE_NAME, 'database', { mongoUri: '', redisUrl: '' }, opts(brand, tenantId));
-
-  return {
-    port: typeof port === 'number' ? port : parseInt(String(port), 10),
-    nodeEnv,
-    serviceName,
-    corsOrigins,
-    mongoUri: databaseConfig.mongoUri || undefined,
-    redisUrl: databaseConfig.redisUrl || undefined,
-    jwtSecret: jwtConfig.secret || 'shared-jwt-secret-change-in-production',
-    jwtExpiresIn: jwtConfig.expiresIn,
-    jwtRefreshSecret: jwtConfig.refreshSecret,
-    jwtRefreshExpiresIn: jwtConfig.refreshExpiresIn,
-  };
+  return loadBaseServiceConfig(SERVICE_NAME, getBaseServiceConfigDefaults({ port: ${port}, serviceName: SERVICE_NAME }), { brand, tenantId });
 }
 
 export function validateConfig(config: ${serviceNamePascal}Config): void {
@@ -400,18 +372,6 @@ export {};
   // ─── src/index.ts ────────────────────────────────────────────────────────
   const accessorsImport = `
 import { db, redis } from './accessors.js';`;
-  const redisInit = useRedis
-    ? `
-  if (config.redisUrl) {
-    try {
-      await configureRedisStrategy({ strategy: 'shared', defaultUrl: config.redisUrl });
-      await redis.initialize({ brand: context.brand });
-      logger.info('Redis accessor initialized', { brand: context.brand });
-    } catch (err) {
-      logger.warn('Could not initialize Redis accessor', { error: (err as Error).message });
-    }
-  }`
-    : '';
   const webhookBlock = useWebhooks
     ? `
   const webhookService = createWebhookService({
@@ -425,10 +385,20 @@ import { createWebhookService } from 'core-service';
 import { ${name}Webhooks } from './event-dispatcher.js';`
     : '';
 
+  const withRedisBlock = useRedis
+    ? `
+  await withRedis(config.redisUrl, redis, { brand: context.brand }, {
+    afterReady: async () => {
+      await startListening(['integration:${name}']);
+      logger.info('Started listening on integration:${name}');
+    },
+  });`
+    : '';
+
   const indexContent = `/**
  * ${serviceNamePascal} Service
  *
- * Generated scaffold. Uses dynamic config (MongoDB + env), createGateway, optional Redis.
+ * Generated scaffold. Aligned with CODING_STANDARDS: loadBaseServiceConfig, buildDefaultGatewayConfig, ensureServiceDefaultConfigsCreated, withRedis.
  * Restart trigger: \${Date.now()}
  */
 
@@ -438,17 +408,33 @@ import {
   allow,
   registerServiceErrorCodes,
   registerServiceConfigDefaults,
-  ensureDefaultConfigsCreated,
   resolveContext,
-  configureRedisStrategy,
+  buildDefaultGatewayConfig,
+  ensureServiceDefaultConfigsCreated,
+  withRedis,
   startListening,
 } from 'core-service';
 ${accessorsImport}${eventDispatcherImport}
 
 import { loadConfig, validateConfig, printConfigSummary, SERVICE_NAME } from './config.js';
+import type { ${serviceNamePascal}Config } from './types.js';
 import { ${serviceNameConst.toUpperCase()}_CONFIG_DEFAULTS } from './config-defaults.js';
 import { ${serviceNameConst.toUpperCase()}_ERROR_CODES } from './error-codes.js';
 import { ${graphqlTypesName}, create${serviceNamePascal}Resolvers } from './graphql.js';
+
+function buildGatewayConfig(
+  config: ${serviceNamePascal}Config,
+  resolvers: ReturnType<typeof create${serviceNamePascal}Resolvers>${useWebhooks ? ',\n  webhookService: ReturnType<typeof createWebhookService>' : ''}
+) {
+  return buildDefaultGatewayConfig(config, {
+    services: ${useWebhooks ? `[\n      { name: '${name}', types: ${graphqlTypesName}, resolvers },\n      webhookService,\n    ]` : `[\n      { name: '${name}', types: ${graphqlTypesName}, resolvers },\n    ]`},
+    permissions: {
+      Query: { health: allow, ${name}Health: allow },
+      Mutation: {},
+    },
+    name: config.serviceName,
+  });
+}
 
 async function main() {
   registerServiceConfigDefaults(SERVICE_NAME, ${serviceNameConst.toUpperCase()}_CONFIG_DEFAULTS);
@@ -457,7 +443,7 @@ async function main() {
   validateConfig(config);
   printConfigSummary(config);
 
-  const { database, strategy, context: defaultContext } = await db.initialize({
+  const { database } = await db.initialize({
     brand: context.brand,
     tenantId: context.tenantId,
   });
@@ -465,41 +451,8 @@ async function main() {
 
   const resolvers = create${serviceNamePascal}Resolvers(config);${webhookBlock}
 
-  await createGateway({
-    name: config.serviceName,
-    port: config.port,
-    cors: { origins: config.corsOrigins },
-    jwt: {
-      secret: config.jwtSecret,
-      refreshSecret: config.jwtRefreshSecret,
-      expiresIn: config.jwtExpiresIn,
-      refreshExpiresIn: config.jwtRefreshExpiresIn,
-    },
-    services: ${useWebhooks ? `[\n      { name: '${name}', types: ${graphqlTypesName}, resolvers },\n      webhookService,\n    ]` : `[\n      { name: '${name}', types: ${graphqlTypesName}, resolvers },\n    ]`},
-    permissions: {
-      Query: { health: allow, ${name}Health: allow },
-      Mutation: {},
-    },
-    mongoUri: config.mongoUri,
-    redisUrl: config.redisUrl,
-    defaultPermission: 'deny' as const,
-  });${redisInit}
-
-  try {
-    const created = await ensureDefaultConfigsCreated(SERVICE_NAME, { brand: context.brand, tenantId: context.tenantId });
-    if (created > 0) logger.info(\`Created \${created} default config(s)\`);
-  } catch (e) {
-    logger.warn('ensureDefaultConfigsCreated failed', { error: (e as Error).message });
-  }
-
-  if (config.redisUrl) {
-    try {
-      await startListening(['integration:${name}']);
-      logger.info('Started listening on integration:${name}');
-    } catch (err) {
-      logger.warn('Could not start event listener', { error: (err as Error).message });
-    }
-  }
+  await createGateway(buildGatewayConfig(config, resolvers${useWebhooks ? ', webhookService' : ''}));
+  await ensureServiceDefaultConfigsCreated(SERVICE_NAME, { brand: context.brand, tenantId: context.tenantId });${withRedisBlock}
 
   registerServiceErrorCodes(${serviceNameConst.toUpperCase()}_ERROR_CODES);
   logger.info('${serviceNamePascal} service started', { port: config.port });

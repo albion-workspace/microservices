@@ -6,9 +6,7 @@
  */
 
 import type { BonusConfig } from './types.js';
-import { logger, getServiceConfigKey } from 'core-service';
-
-const opts = (brand?: string, tenantId?: string) => ({ brand, tenantId, fallbackService: 'gateway' as const });
+import { logger, loadBaseServiceConfig, getBaseServiceConfigDefaults, getServiceConfigKey, configKeyOpts } from 'core-service';
 
 export type { BonusConfig } from './types.js';
 
@@ -24,34 +22,15 @@ export function getUseMongoTransactions(): boolean {
 }
 
 export async function loadConfig(brand?: string, tenantId?: string): Promise<BonusConfig> {
-  const port = await getServiceConfigKey<number>(SERVICE_NAME, 'port', 9003, opts(brand, tenantId));
-  const serviceName = await getServiceConfigKey<string>(SERVICE_NAME, 'serviceName', SERVICE_NAME, opts(brand, tenantId));
-  const nodeEnv = await getServiceConfigKey<string>(SERVICE_NAME, 'nodeEnv', 'development', opts(brand, tenantId));
-  const corsOrigins = await getServiceConfigKey<string[]>(SERVICE_NAME, 'corsOrigins', [
-    'http://localhost:5173',
-    'http://localhost:3000',
-    'http://127.0.0.1:5173',
-  ], opts(brand, tenantId));
-  const jwtConfig = await getServiceConfigKey<{ expiresIn: string; secret: string; refreshExpiresIn: string; refreshSecret: string }>(SERVICE_NAME, 'jwt', {
-    expiresIn: '8h',
-    secret: '',
-    refreshExpiresIn: '7d',
-    refreshSecret: '',
-  }, opts(brand, tenantId));
-  const databaseConfig = await getServiceConfigKey<{ mongoUri?: string; redisUrl?: string }>(SERVICE_NAME, 'database', { mongoUri: '', redisUrl: '' }, opts(brand, tenantId));
-  const transactionConfig = await getServiceConfigKey<{ useTransactions?: boolean }>(SERVICE_NAME, 'transaction', { useTransactions: true }, { brand, tenantId });
-
+  const base = await loadBaseServiceConfig(SERVICE_NAME, getBaseServiceConfigDefaults({ port: 9003, serviceName: SERVICE_NAME, jwt: { expiresIn: '8h' } }), { brand, tenantId });
+  const transactionConfig = await getServiceConfigKey<{ useTransactions?: boolean }>(
+    SERVICE_NAME,
+    'transaction',
+    { useTransactions: true },
+    configKeyOpts(brand, tenantId)
+  );
   return {
-    port: typeof port === 'number' ? port : parseInt(String(port), 10),
-    nodeEnv,
-    serviceName,
-    mongoUri: databaseConfig.mongoUri || undefined,
-    redisUrl: databaseConfig.redisUrl || undefined,
-    corsOrigins,
-    jwtSecret: jwtConfig.secret || 'shared-jwt-secret-change-in-production',
-    jwtExpiresIn: jwtConfig.expiresIn,
-    jwtRefreshSecret: jwtConfig.refreshSecret,
-    jwtRefreshExpiresIn: jwtConfig.refreshExpiresIn,
+    ...base,
     useMongoTransactions: transactionConfig.useTransactions !== false,
   };
 }

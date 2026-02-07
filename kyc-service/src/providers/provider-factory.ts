@@ -171,36 +171,18 @@ export async function initializeProviders(): Promise<void> {
   });
 }
 
-/**
- * Create a provider instance
- */
+/** Registry: add entries for onfido, sumsub, jumio when implemented. */
+const providerConstructors: Record<string, (config: ProviderConfig) => KYCProvider | null> = {
+  mock: (c) => new MockKYCProvider(c),
+};
+
 async function createProvider(name: string, config: ProviderConfig): Promise<KYCProvider | null> {
-  switch (name) {
-    case 'mock':
-      return new MockKYCProvider(config);
-    
-    case 'onfido':
-      // TODO: Implement OnfidoProvider
-      // return new OnfidoProvider(config);
-      logger.warn('Onfido provider not yet implemented, using mock');
-      return null;
-    
-    case 'sumsub':
-      // TODO: Implement SumsubProvider
-      // return new SumsubProvider(config);
-      logger.warn('Sumsub provider not yet implemented, using mock');
-      return null;
-    
-    case 'jumio':
-      // TODO: Implement JumioProvider
-      // return new JumioProvider(config);
-      logger.warn('Jumio provider not yet implemented, using mock');
-      return null;
-    
-    default:
-      logger.warn('Unknown KYC provider', { name });
-      return null;
+  const factory = providerConstructors[name];
+  if (!factory) {
+    logger.warn('Unknown KYC provider', { name });
+    return null;
   }
+  return factory(config);
 }
 
 // ═══════════════════════════════════════════════════════════════════

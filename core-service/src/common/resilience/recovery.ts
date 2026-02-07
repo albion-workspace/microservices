@@ -51,6 +51,7 @@ import { onShutdown } from '../lifecycle/shutdown.js';
 import { getRedis, scanKeysArray } from '../../databases/redis/connection.js';
 import type { DatabaseStrategyResolver, DatabaseContext } from '../../databases/mongodb/strategy.js';
 import { DEFAULT_TRANSACTION_OPTIONS } from '../wallet/wallet.js';
+import { createTransferRecoveryHandler } from '../wallet/transfer-recovery.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // Types
@@ -787,4 +788,13 @@ export function createTransferRecoverySetup(
     recoveryJob.stop();
     logger.info('Recovery job stopped');
   });
+}
+
+/**
+ * One-liner for services that use transfer recovery: register handler, start job, shutdown hook.
+ * Use in bonus-service and payment-service instead of duplicating createTransferRecoverySetup + createTransferRecoveryHandler.
+ */
+export function createTransferRecoverySetupForService(serviceLabel: string): void {
+  const handler = createTransferRecoveryHandler() as unknown as RecoveryHandler<RecoverableOperation>;
+  createTransferRecoverySetup(handler, { serviceLabel });
 }

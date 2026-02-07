@@ -20,6 +20,7 @@
 
 import {
   createGateway,
+  buildDefaultGatewayConfig,
   allow,
   isAuthenticated,
   hasRole,
@@ -48,30 +49,11 @@ let notificationConfig: NotificationConfig | null = null;
 
 // Gateway config builder (will be built from notificationConfig)
 const buildGatewayConfig = (notificationService: NotificationService, notificationResolvers: ReturnType<typeof createNotificationResolvers>): Parameters<typeof createGateway>[0] => {
-  if (!notificationConfig) {
-    throw new Error('Configuration not loaded yet');
-  }
-  
-  const config = notificationConfig; // Type narrowing helper
-  
-  return {
-    name: config.serviceName,
-    port: config.port,
-    cors: {
-      origins: config.corsOrigins,
-    },
-    jwt: {
-      secret: config.jwtSecret,
-      expiresIn: config.jwtExpiresIn,
-      refreshSecret: config.jwtRefreshSecret,
-      refreshExpiresIn: config.jwtRefreshExpiresIn,
-    },
+  if (!notificationConfig) throw new Error('Configuration not loaded yet');
+  const config = notificationConfig;
+  return buildDefaultGatewayConfig(config, {
     services: [
-      {
-        name: 'notifications',
-        types: notificationGraphQLTypes,
-        resolvers: notificationResolvers,
-      },
+      { name: 'notifications', types: notificationGraphQLTypes, resolvers: notificationResolvers },
     ],
     permissions: {
       Query: {
@@ -82,13 +64,10 @@ const buildGatewayConfig = (notificationService: NotificationService, notificati
         availableChannels: allow,
       },
       Mutation: {
-        sendNotification: allow, // Allow service-to-service calls (auth-service, etc.)
+        sendNotification: allow,
       },
     },
-    mongoUri: config.mongoUri,
-    redisUrl: config.redisUrl,
-    defaultPermission: 'deny' as const,
-  };
+  });
 };
 
 // ═══════════════════════════════════════════════════════════════════

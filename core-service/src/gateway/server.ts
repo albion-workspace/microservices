@@ -46,6 +46,7 @@ import {
 import { createHandler as createHttpHandler } from 'graphql-http/lib/use/http';
 import { createHandler as createSSEHandler } from 'graphql-sse/lib/use/http';
 import type { UserContext, PermissionRule, Resolvers, ResolverContext, JwtConfig, SubscriptionResolver } from '../types/index.js';
+import type { DefaultServiceConfig } from '../types/config.js';
 import { extractToken, verifyToken, createToken } from '../common/auth/jwt.js';
 import { connectDatabase, checkDatabaseHealth } from '../databases/mongodb/connection.js';
 import { connectRedis, checkRedisHealth, getRedis } from '../databases/redis/connection.js';
@@ -104,6 +105,43 @@ export interface GatewayConfig {
     logComplexity?: boolean;
     /** Enable complexity validation (default: true if complexity config provided) */
     enabled?: boolean;
+  };
+}
+
+/** Spec for buildDefaultGatewayConfig: services and permissions; optional name, subscriptions, complexity. */
+export interface GatewayConfigSpec {
+  services: ServiceModule[];
+  permissions: GatewayPermissions;
+  name?: string;
+  subscriptions?: SubscriptionConfig;
+  complexity?: GatewayConfig['complexity'];
+}
+
+/**
+ * Build gateway config from DefaultServiceConfig and a spec (services + permissions).
+ * Fills name, port, cors, jwt, mongoUri, redisUrl, defaultPermission from config.
+ */
+export function buildDefaultGatewayConfig(
+  config: DefaultServiceConfig,
+  spec: GatewayConfigSpec
+): GatewayConfig {
+  return {
+    name: spec.name ?? config.serviceName,
+    port: config.port,
+    cors: { origins: config.corsOrigins },
+    jwt: {
+      secret: config.jwtSecret,
+      expiresIn: config.jwtExpiresIn,
+      refreshSecret: config.jwtRefreshSecret,
+      refreshExpiresIn: config.jwtRefreshExpiresIn ?? '7d',
+    },
+    services: spec.services,
+    permissions: spec.permissions,
+    subscriptions: spec.subscriptions,
+    complexity: spec.complexity,
+    mongoUri: config.mongoUri,
+    redisUrl: config.redisUrl,
+    defaultPermission: 'deny',
   };
 }
 
@@ -690,6 +728,39 @@ export interface GatewayInstance {
   shutdown: () => Promise<void>;
 }
 
+/**
+ * Resolve and connect gateway infrastructure (DB + optional Redis).
+ * Separates infra wiring from schema/server orchestration for testability.
+ */
+async function connectGatewayInfrastructure(config: Pick<GatewayConfig, 'name' | 'mongoUri' | 'redisUrl'>): Promise<void> {
+  const { name, mongoUri, redisUrl } = config;
+  let dbUri = mongoUri || process.env.MONGO_URI;
+  if (!dbUri) {
+    const dbName = (name === 'auth-service' || name === 'core-service') ? 'core_service' : name.replace(/-/g, '_');
+    dbUri = `mongodb://localhost:27017/${dbName}`;
+  }
+  await connectDatabase(dbUri);
+  const dbHealth = await checkDatabaseHealth();
+  if (!dbHealth.healthy) {
+    throw new Error('Database health check failed after connection');
+  }
+
+  const redisUri = redisUrl || process.env.REDIS_URL;
+  if (redisUri) {
+    try {
+      await connectRedis(redisUri);
+      const redisHealth = await checkRedisHealth();
+      if (!redisHealth.healthy) {
+        logger.warn('Redis health check failed - continuing without Redis');
+      }
+    } catch (error) {
+      logger.warn(`Failed to connect to Redis for ${name} - continuing without Redis`, {
+        error: getErrorMessage(error),
+      });
+    }
+  }
+}
+
 export async function createGateway(config: GatewayConfig): Promise<GatewayInstance> {
   const { 
     name, port, jwt, services, 
@@ -703,44 +774,14 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayInsta
   const startTime = Date.now();
   logger.info(`Starting ${name}...`);
 
-  // Connect to databases: config > env > local dev default (same as strategy-config)
-  let dbUri = mongoUri || process.env.MONGO_URI;
-  if (!dbUri) {
-    const dbName = (name === 'auth-service' || name === 'core-service') ? 'core_service' : name.replace(/-/g, '_');
-    dbUri = `mongodb://localhost:27017/${dbName}`;
-  }
   try {
-    await connectDatabase(dbUri);
-    // Verify connection
-    const dbHealth = await checkDatabaseHealth();
-    if (!dbHealth.healthy) {
-      throw new Error('Database health check failed after connection');
-    }
+    await connectGatewayInfrastructure({ name, mongoUri, redisUrl });
   } catch (error) {
     logger.error(`Failed to connect to database for ${name}`, {
       error: getErrorMessage(error),
-      uri: dbUri.replace(/:[^:@]+@/, ':***@'), // Hide password
+      uri: (mongoUri || process.env.MONGO_URI || '').replace(/:[^:@]+@/, ':***@'),
     });
     throw error;
-  }
-  
-  // Redis connection - URI must come from config or environment
-  // IMPORTANT: No localhost fallbacks per CODING_STANDARDS
-  const redisUri = redisUrl || process.env.REDIS_URL;
-  if (redisUri) {
-    try {
-      await connectRedis(redisUri);
-      // Verify connection
-      const redisHealth = await checkRedisHealth();
-      if (!redisHealth.healthy) {
-        logger.warn('Redis health check failed - continuing without Redis');
-      }
-    } catch (error) {
-      logger.warn(`Failed to connect to Redis for ${name} - continuing without Redis`, {
-        error: getErrorMessage(error),
-      });
-      // Don't throw - Redis is optional for most services
-    }
   }
 
   const checkPermission = createPermissionMiddleware(permissions, defaultPermission);

@@ -72,6 +72,13 @@ export interface ConfigEntry {
   __v?: number;
 }
 
+/** Entry shape for registerServiceConfigDefaults; services use Record<string, DefaultConfigEntry>. */
+export interface DefaultConfigEntry {
+  value: unknown;
+  sensitivePaths?: string[];
+  description?: string;
+}
+
 export interface ConfigStoreOptions {
   /** Collection name (default: 'service_configs') */
   collectionName?: string;
@@ -171,11 +178,7 @@ const defaultConfigRegistry = new Map<string, Map<string, {
  */
 export function registerServiceConfigDefaults(
   service: string,
-  defaults: Record<string, {
-    value: unknown;
-    sensitivePaths?: string[];
-    description?: string;
-  }>
+  defaults: Record<string, DefaultConfigEntry>
 ): void {
   if (!defaultConfigRegistry.has(service)) {
     defaultConfigRegistry.set(service, new Map());
@@ -281,6 +284,30 @@ export async function ensureDefaultConfigsCreated(
   });
   
   return createdCount;
+}
+
+/**
+ * One-liner helper: ensure default configs are created with consistent try/catch and logging.
+ * Call after database connection is established (e.g. after createGateway).
+ */
+export async function ensureServiceDefaultConfigsCreated(
+  serviceName: string,
+  context: { brand?: string; tenantId?: string }
+): Promise<void> {
+  try {
+    const createdCount = await ensureDefaultConfigsCreated(serviceName, {
+      brand: context.brand,
+      tenantId: context.tenantId,
+    });
+    if (createdCount > 0) {
+      logger.info(`Created ${createdCount} default config(s) in database`);
+    }
+  } catch (error) {
+    logger.warn('Failed to ensure default configs are created', {
+      service: serviceName,
+      error: getErrorMessage(error),
+    });
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════

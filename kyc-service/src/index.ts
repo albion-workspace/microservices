@@ -13,11 +13,13 @@
  */
 
 import {
-  createGateway,
+  buildDefaultGatewayConfig,
+  type DefaultConfigEntry,
   logger,
   registerServiceConfigDefaults,
   registerServiceErrorCodes,
   resolveContext,
+  runServiceStartup,
   isAuthenticated,
   hasRole,
   hasAnyRole,
@@ -26,10 +28,11 @@ import {
   startListening,
   getUserId,
   getTenantId,
+  getUserContext,
   getErrorMessage,
-  configureRedisStrategy,
   type ResolverContext,
   type IntegrationEvent,
+  type GatewayConfig,
 } from 'core-service';
 
 import { db, redis, registerKYCIndexes } from './accessors.js';
@@ -63,11 +66,6 @@ import { verificationRepository } from './repositories/verification-repository.j
 
 // Import types
 import type { KYCTier } from './types/kyc-types.js';
-
-/** Resolver-scoped user context (authenticated). Use in Query/Mutation resolvers that need userId + tenantId. */
-function getUserContext(ctx: ResolverContext): { userId: string; tenantId: string } {
-  return { userId: getUserId(ctx), tenantId: getTenantId(ctx) };
-}
 
 // ═══════════════════════════════════════════════════════════════════
 // Custom Resolvers
@@ -157,56 +155,40 @@ const customResolvers = {
 // Gateway Configuration
 // ═══════════════════════════════════════════════════════════════════
 
-function buildGatewayConfig(config: KYCConfig): Parameters<typeof createGateway>[0] {
-  return {
-    name: config.serviceName,
-    port: config.port,
-    cors: {
-      origins: config.corsOrigins,
-    },
-    jwt: {
-      secret: config.jwtSecret,
-      expiresIn: config.jwtExpiresIn,
-      refreshSecret: config.jwtRefreshSecret,
-      refreshExpiresIn: config.jwtRefreshExpiresIn ?? '7d',
-    },
+const kycPermissions = {
+  Query: {
+    health: allow,
+    myKYCProfile: isAuthenticated,
+    myKYCLimits: isAuthenticated,
+    checkKYCEligibility: isAuthenticated,
+    checkTransactionLimit: isAuthenticated,
+    tierInfo: allow,
+    kycProfiles: isAuthenticated,
+    kycProfileByUserId: hasAnyRole('system', 'admin'),
+    kycDocuments: isAuthenticated,
+    kycDocument: isAuthenticated,
+    kycVerifications: isAuthenticated,
+    kycVerification: isAuthenticated,
+    pendingVerifications: hasAnyRole('system', 'admin'),
+    highRiskProfiles: hasAnyRole('system', 'admin'),
+  },
+  Mutation: {
+    createKycProfile: hasAnyRole('system', 'admin'),
+    uploadKycDocument: isAuthenticated,
+    startKycVerification: isAuthenticated,
+  },
+};
+
+function buildGatewayConfig(config: KYCConfig): GatewayConfig {
+  return buildDefaultGatewayConfig(config, {
     services: [
       { name: 'kycProfile', types: kycProfileService.types, resolvers: kycProfileService.resolvers },
       { name: 'kycDocument', types: kycDocumentService.types, resolvers: kycDocumentService.resolvers },
       { name: 'kycVerification', types: kycVerificationService.types, resolvers: kycVerificationService.resolvers },
       { name: 'kycCustom', types: customTypeDefs, resolvers: customResolvers },
     ],
-    permissions: {
-      Query: {
-        health: allow,
-        // User queries (authenticated)
-        myKYCProfile: isAuthenticated,
-        myKYCLimits: isAuthenticated,
-        checkKYCEligibility: isAuthenticated,
-        checkTransactionLimit: isAuthenticated,
-        tierInfo: allow,
-        // Entity queries (authenticated)
-        kycProfiles: isAuthenticated,
-        kycProfileByUserId: hasAnyRole('system', 'admin'),
-        kycDocuments: isAuthenticated,
-        kycDocument: isAuthenticated,
-        kycVerifications: isAuthenticated,
-        kycVerification: isAuthenticated,
-        // Admin queries
-        pendingVerifications: hasAnyRole('system', 'admin'),
-        highRiskProfiles: hasAnyRole('system', 'admin'),
-      },
-      Mutation: {
-        // User mutations
-        createKycProfile: hasAnyRole('system', 'admin'),
-        uploadKycDocument: isAuthenticated,
-        startKycVerification: isAuthenticated,
-      },
-    },
-    mongoUri: config.mongoUri,
-    redisUrl: config.redisUrl,
-    defaultPermission: 'deny' as const,
-  };
+    permissions: kycPermissions,
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -214,53 +196,27 @@ function buildGatewayConfig(config: KYCConfig): Parameters<typeof createGateway>
 // ═══════════════════════════════════════════════════════════════════
 
 async function main() {
-  try {
-    logger.info('Starting KYC service');
-
-    registerServiceErrorCodes(KYC_ERROR_CODES);
-    registerServiceConfigDefaults(SERVICE_NAME, KYC_CONFIG_DEFAULTS as unknown as Record<string, { value: unknown; sensitivePaths?: string[]; description?: string }>);
-
-    const context = await resolveContext();
-    const config = await loadConfig(context.brand, context.tenantId);
-    validateConfig(config);
-    printConfigSummary(config);
-
-    const { database } = await db.initialize({
-      brand: context.brand,
-      tenantId: context.tenantId,
-    });
-    logger.info('Database initialized', { database: database.databaseName });
-
-    registerKYCIndexes();
-    await db.ensureIndexes();
-
-    await initializeProviders();
-
-    await createGateway(buildGatewayConfig(config));
-
-    logger.info('KYC service started', { port: config.port });
-
-    if (config.redisUrl) {
-      try {
-        await configureRedisStrategy({
-          strategy: 'shared',
-          defaultUrl: config.redisUrl,
-        });
-        await redis.initialize({ brand: context.brand });
-        logger.info('Redis accessor initialized', { brand: context.brand });
-        await initializeEventHandlers();
-      } catch (err) {
-        logger.warn('Could not initialize Redis/event handlers', {
-          error: getErrorMessage(err),
-        });
-      }
-    }
-  } catch (error) {
-    logger.error('Failed to start KYC service', {
-      error: getErrorMessage(error),
-    });
-    process.exit(1);
-  }
+  await runServiceStartup({
+    serviceName: SERVICE_NAME,
+    registerErrorCodes: () => registerServiceErrorCodes(KYC_ERROR_CODES),
+    registerConfigDefaults: () => registerServiceConfigDefaults(SERVICE_NAME, KYC_CONFIG_DEFAULTS as unknown as Record<string, DefaultConfigEntry>),
+    resolveContext: async () => {
+      const c = await resolveContext();
+      return { brand: c.brand ?? 'default', tenantId: c.tenantId };
+    },
+    loadConfig: (brand?: string, tenantId?: string) => loadConfig(brand, tenantId),
+    validateConfig,
+    printConfigSummary,
+    afterDb: async (context: { brand: string; tenantId?: string }) => {
+      const { database } = await db.initialize({ brand: context.brand, tenantId: context.tenantId });
+      logger.info('Database initialized', { database: database.databaseName });
+      registerKYCIndexes();
+      await db.ensureIndexes();
+      await initializeProviders();
+    },
+    buildGatewayConfig: (config: KYCConfig) => buildGatewayConfig(config),
+    withRedis: { redis, afterReady: initializeEventHandlers },
+  });
 }
 
 // Run if this is the main module

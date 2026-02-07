@@ -32,11 +32,11 @@ import {
   setupCleanupTasks,
   registerServiceErrorCodes,
   registerServiceConfigDefaults,
-  ensureDefaultConfigsCreated,
+  ensureServiceDefaultConfigsCreated,
   getErrorMessage,
   resolveContext,
   initializeWebhooks,
-  configureRedisStrategy,
+  withRedis,
   type IntegrationEvent,
   type ResolverContext,
   type DatabaseStrategyResolver,
@@ -539,34 +539,9 @@ async function main() {
     ...config,
   });
 
-  // Initialize Redis accessor (after gateway connects to Redis)
-  if (authConfig.redisUrl) {
-    try {
-      await configureRedisStrategy({
-        strategy: 'shared',
-        defaultUrl: authConfig.redisUrl,
-      });
-      await redis.initialize({ brand: context.brand });
-      logger.info('Redis accessor initialized', { brand: context.brand });
-    } catch (err) {
-      logger.warn('Could not initialize Redis accessor', { error: (err as Error).message });
-    }
-  }
+  await withRedis(authConfig.redisUrl, redis, { brand: context.brand ?? 'default' });
 
-  // Ensure all registered default configs are created in database
-  // This happens after database connection is established
-  try {
-    const createdCount = await ensureDefaultConfigsCreated(SERVICE_NAME, {
-      brand: context.brand,
-      tenantId: context.tenantId,
-    });
-    if (createdCount > 0) {
-      logger.info(`Created ${createdCount} default config(s) in database`);
-    }
-  } catch (error) {
-    logger.warn('Failed to ensure default configs are created', { error });
-    // Continue - configs will be created on first access
-  }
+  await ensureServiceDefaultConfigsCreated(SERVICE_NAME, context);
 
   // Initialize webhooks AFTER database connection is established
   // Use centralized initializeWebhooks helper from core-service

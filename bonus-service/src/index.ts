@@ -13,6 +13,7 @@
 // Internal packages
 import {
   createGateway,
+  buildDefaultGatewayConfig,
   hasRole,
   hasAnyRole,
   isAuthenticated,
@@ -26,10 +27,10 @@ import {
   GraphQLError,
   registerServiceErrorCodes,
   registerServiceConfigDefaults,
-  ensureDefaultConfigsCreated,
+  ensureServiceDefaultConfigsCreated,
   resolveContext,
   initializeWebhooks,
-  configureRedisStrategy,
+  withRedis,
   type IntegrationEvent,
   type ResolverContext,
 } from 'core-service';
@@ -208,82 +209,32 @@ const availableBonusesResolver = {
   Mutation: {}, // Required by Resolvers type
 };
 
+/** Apply list scope: system/admin see all; others get args with filter merged with userId. */
+function withListScope(
+  args: Record<string, unknown>,
+  ctx: ResolverContext,
+  opts: { userIdFilterKey: string }
+): Record<string, unknown> {
+  const user = ctx.user;
+  if (!user) return args;
+  if (hasRole('system')(user) || hasAnyRole('system', 'admin', 'super-admin')(user)) return args;
+  const filter = (args.filter as Record<string, unknown>) || {};
+  return { ...args, filter: { ...filter, [opts.userIdFilterKey]: user.userId } };
+}
+
 /**
  * Custom resolver for userBonuss query to enforce role-based filtering.
  * System/admin users can see all bonuses, regular users only see their own.
  */
 const userBonussCustomResolver = {
   Query: {
-    userBonuss: async (
-      args: Record<string, unknown>,
-      ctx: ResolverContext
-    ) => {
-      const user = ctx.user;
-      
-      // Get default resolver from userBonusService
+    userBonuss: async (args: Record<string, unknown>, ctx: ResolverContext) => {
       const defaultResolver = userBonusService.resolvers?.Query?.userBonuss;
       if (!defaultResolver) {
         throw new GraphQLError(BONUS_ERRORS.ResolverNotFound, { resolver: 'userBonuss' });
       }
-      
-      // Check if user is system or admin
-      // Handle both string[] and object[] role formats
-      const userRoles = user?.roles ? (
-        Array.isArray(user.roles) 
-          ? (typeof user.roles[0] === 'string' 
-              ? user.roles as string[]
-              : (user.roles as any[]).map((r: any) => r.role || r).filter(Boolean))
-          : []
-      ) : [];
-      
-      const isSystemOrAdmin = user && (
-        userRoles.includes('system') || 
-        userRoles.includes('admin') || 
-        userRoles.includes('super-admin') ||
-        hasRole('system')(user) || 
-        hasAnyRole('system', 'admin', 'super-admin')(user)
-      );
-      
-      logger.debug('userBonuss query', { 
-        userId: user?.userId, 
-        roles: userRoles, 
-        isSystemOrAdmin,
-        hasFilter: !!args.filter,
-        filterKeys: args.filter ? Object.keys(args.filter as Record<string, unknown>) : []
-      });
-      
-      // If not system/admin, enforce userId filter
-      if (!isSystemOrAdmin && user) {
-        // Merge userId filter with existing filter
-        const existingFilter = (args.filter as Record<string, unknown>) || {};
-        const mergedFilter = {
-          ...existingFilter,
-          userId: user.userId,
-        };
-        
-        logger.debug('Applying userId filter for non-system user', { userId: user.userId, mergedFilter });
-        
-        // Call default resolver with merged filter
-        return defaultResolver({ ...args, filter: mergedFilter }, ctx);
-      }
-      
-      // System/admin users: use default resolver (no filtering)
-      // Remove filter entirely for system users to show all bonuses
-      const systemArgs = { ...args };
-      if (systemArgs.filter !== undefined) {
-        // If filter is empty object or undefined, remove it to show all bonuses
-        const filterObj = systemArgs.filter as Record<string, unknown>;
-        if (!filterObj || Object.keys(filterObj).length === 0) {
-          delete systemArgs.filter;
-        }
-      }
-      
-      logger.debug('System/admin user - showing all bonuses', { 
-        userId: user?.userId,
-        filterRemoved: !systemArgs.filter 
-      });
-      
-      return defaultResolver(systemArgs, ctx);
+      const scopedArgs = withListScope(args, ctx, { userIdFilterKey: 'userId' });
+      return defaultResolver(scopedArgs, ctx);
     },
   },
 };
@@ -484,20 +435,9 @@ const buildGatewayConfig = (): Parameters<typeof createGateway>[0] => {
     throw new Error('Configuration not loaded yet');
   }
   
-  const config = bonusConfig; // Type narrowing helper
-  
-  return {
+  const config = bonusConfig;
+  return buildDefaultGatewayConfig(config, {
     name: 'bonus-service',
-    port: config.port,
-    cors: {
-      origins: config.corsOrigins,
-    },
-    jwt: {
-      secret: config.jwtSecret,
-      expiresIn: config.jwtExpiresIn,
-      refreshSecret: config.jwtRefreshSecret,
-      refreshExpiresIn: config.jwtRefreshExpiresIn,
-    },
     services: [
       { name: 'bonusTemplate', types: bonusTemplateService.types, resolvers: bonusTemplateService.resolvers },
       { 
@@ -541,47 +481,36 @@ const buildGatewayConfig = (): Parameters<typeof createGateway>[0] => {
     permissions: {
       Query: {
         health: allow,
-        // Templates (read) - system/admin only
         bonusTemplates: hasAnyRole('system', 'admin', 'super-admin'),
         bonusTemplate: hasAnyRole('system', 'admin', 'super-admin'),
         bonusTemplateByCode: hasAnyRole('system', 'admin', 'super-admin'),
-        availableBonuses: isAuthenticated, // Client-side eligibility check (users need to see available bonuses)
-        // User bonuses (includes referral bonuses)
-        // System/admin see all, regular users see only their own (enforced in resolver)
+        availableBonuses: isAuthenticated,
         userBonuss: isAuthenticated,
         userBonus: isAuthenticated,
-        // Transactions (includes turnover tracking)
         bonusTransactions: isAuthenticated,
         bonusTransaction: isAuthenticated,
         pendingBonuses: hasAnyRole('system', 'admin'),
         pendingBonus: hasAnyRole('system', 'admin'),
-        // Webhooks (system only)
         webhooks: hasRole('system'),
         webhook: hasRole('system'),
         webhookStats: hasRole('system'),
         webhookDeliveries: hasRole('system'),
       },
       Mutation: {
-        // User actions (authenticated users)
         claimBonus: isAuthenticated,
         recordActivity: isAuthenticated,
-        // Admin actions (system/admin only)
         createBonusTemplate: hasAnyRole('system', 'admin'),
         createUserBonus: hasAnyRole('system', 'admin'),
         createBonusTransaction: hasAnyRole('system', 'admin'),
         approveBonus: hasAnyRole('system', 'admin'),
         rejectBonus: hasAnyRole('system', 'admin'),
-        // Webhooks (system only)
         registerWebhook: hasRole('system'),
         updateWebhook: hasRole('system'),
         deleteWebhook: hasRole('system'),
         testWebhook: hasRole('system'),
       },
     },
-    mongoUri: config.mongoUri,
-    redisUrl: config.redisUrl,
-    defaultPermission: 'deny' as const,
-  };
+  });
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -998,34 +927,9 @@ async function main() {
   // Create gateway (this connects to database and starts accepting requests)
   await createGateway(buildGatewayConfig());
 
-  // Initialize Redis accessor (after gateway connects to Redis)
-  if (bonusConfig.redisUrl) {
-    try {
-      await configureRedisStrategy({
-        strategy: 'shared',
-        defaultUrl: bonusConfig.redisUrl,
-      });
-      await redis.initialize({ brand: context.brand });
-      logger.info('Redis accessor initialized', { brand: context.brand });
-    } catch (err) {
-      logger.warn('Could not initialize Redis accessor', { error: (err as Error).message });
-    }
-  }
+  await withRedis(bonusConfig.redisUrl, redis, { brand: context.brand ?? 'default' });
 
-  // Ensure all registered default configs are created in database
-  // This happens after database connection is established
-  try {
-    const createdCount = await ensureDefaultConfigsCreated(SERVICE_NAME, {
-      brand: context.brand,
-      tenantId: context.tenantId,
-    });
-    if (createdCount > 0) {
-      logger.info(`Created ${createdCount} default config(s) in database`);
-    }
-  } catch (error) {
-    logger.warn('Failed to ensure default configs are created', { error });
-    // Continue - configs will be created on first access
-  }
+  await ensureServiceDefaultConfigsCreated(SERVICE_NAME, context);
 
   // Initialize bonus webhooks AFTER database connection is established
   try {
