@@ -898,9 +898,9 @@ When using `createService`, the result type must follow this naming convention:
 // Entity name: "kycVerification" → Result type: "CreateKycVerificationResult"
 
 graphqlType: `
-  type Feature { ... }
-  type FeatureConnection { ... }
-  type CreateFeatureResult { success: Boolean! feature: Feature sagaId: ID! errors: [String!] }
+  type Feature { id: ID! name: String! ${timestampFieldsSDL()} }
+  ${buildConnectionTypeSDL('FeatureConnection', 'Feature')}
+  ${buildSagaResultTypeSDL('CreateFeatureResult', 'feature', 'Feature')}
 `,
 ```
 
@@ -964,7 +964,7 @@ extend type Query {
   - Database types (`Db`, `ClientSession`, `Collection`, `Filter`, `MongoClient`)
   - Redis abstractions (`createServiceRedisAccess`, `configureRedisStrategy`; prefer `createServiceAccessors` for new code)
   - Generic utilities (logging, retry, circuit breaker, `getErrorMessage`, `getServiceConfigKey`)
-  - Generic patterns (saga, gateway, event system, `withEventHandlerError`, `createTransferRecoverySetup`, `buildConnectionTypeSDL`, `timestampFieldsSDL` / `timestampFieldsRequiredSDL` / `timestampFieldsOptionalSDL`, `buildSagaResultTypeSDL`, `paginationArgsSDL`)
+  - Generic patterns (saga, gateway, event system, `withEventHandlerError`, `createTransferRecoverySetup`, `checkSystemOrPermission`, `buildConnectionTypeSDL`, `timestampFieldsSDL` / `timestampFieldsRequiredSDL` / `timestampFieldsOptionalSDL`, `buildSagaResultTypeSDL`, `paginationArgsSDL`)
   - Type definitions and interfaces (e.g. `NotificationHandlerPlugin`, `HandlerContext` in core-service)
   - Shared helpers (pagination, validation, wallet operations)
 - **Core-Service**: Must NOT include:
@@ -1554,7 +1554,7 @@ for (const key of keys) { /* check if stuck */ }
 
 ### Generic Helpers in Core-Service
 - **Always**: Add generic, reusable helpers to `core-service`
-- **Examples**: `extractDocumentId()`, `retry()`, `circuitBreaker()`, pagination helpers; `getErrorMessage(error)` for consistent error messages; `getServiceConfigKey()` for config with optional gateway fallback; `createServiceAccessors()`, `buildConnectionTypeSDL()`, `timestampFieldsSDL()` / `timestampFieldsRequiredSDL()`, `createUniqueIndexSafe()`, `normalizeWalletForGraphQL()`, `withEventHandlerError()`, `createTransferRecoverySetup()`, notification handler plugin types (`NotificationHandlerPlugin`, `HandlerContext`)
+- **Examples**: `extractDocumentId()`, `retry()`, `circuitBreaker()`, pagination helpers; `getErrorMessage(error)` for consistent error messages; `getServiceConfigKey()` for config with optional gateway fallback; `createServiceAccessors()`, `checkSystemOrPermission()`, `normalizeWalletForGraphQL()`, `createUniqueIndexSafe()`, `withEventHandlerError()`, `createTransferRecoverySetup()`, notification handler plugin types (`NotificationHandlerPlugin`, `HandlerContext`); SDL builders: `buildConnectionTypeSDL()`, `buildSagaResultTypeSDL()`, `timestampFieldsSDL()` / `timestampFieldsRequiredSDL()` / `timestampFieldsOptionalSDL()`, `paginationArgsSDL()` (all in `sdl-fragments.ts`)
 - **Never**: Add service-specific logic to `core-service`
 - **Pattern**: If a helper can be used by multiple services, it belongs in `core-service`
 
@@ -1567,6 +1567,23 @@ for (const key of keys) { /* check if stuck */ }
 - **Always**: Create service-specific utilities when logic is unique to that service
 - **Pattern**: Use `core-service` for generic patterns, service code for specifics
 - **Example**: `core-service` provides `createTransferWithTransactions()`, service provides transfer validation rules
+
+### Service-Local Dedup Pattern
+When 2+ resolvers/sagas in the same service share identical structure, extract a **local helper function** within that service file (not in core-service, since the logic is service-specific).
+
+**Auth-service examples** (`auth-service/src/graphql.ts`):
+- `updateUserFieldResolver(args, ctx, opts)` — consolidates `updateUserRoles`, `updateUserPermissions`, `updateUserStatus` (3 mutations with identical auth check → DB update → normalize → log pattern)
+- `fetchPaginatedUsers(filter, args, errorCode, errorContext)` — consolidates `users` and `usersByRole` queries (identical pagination + normalization + totalCount logic)
+- `parsePendingOperation(payload, token, ttl)` — consolidates Redis payload parsing in `pendingOperations` and `pendingOperation` resolvers
+
+**Payment-service examples** (`payment-service/src/services/transaction.ts`):
+- `calculateFee(amount, feePercentage)` — consolidates inline fee math in deposit and withdrawal sagas
+- `buildTransactionDescription(method, txType)` — consolidates duplicated description generation in deposit/withdrawal sagas
+- `buildDateRangeFilter(dateFrom?, dateTo?)` — consolidates date filter building in transaction and wallet queries (exported for cross-file use within payment-service)
+
+**When to use core-service vs local helper:**
+- **Core-service**: Pattern used by 2+ services, or generic enough to be reusable (e.g. SDL builders, error handling, accessors)
+- **Local helper**: Pattern used only within one service file, tied to service-specific business logic (e.g. auth user updates, payment fee calculation)
 
 ---
 
