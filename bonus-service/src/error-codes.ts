@@ -28,6 +28,8 @@ export const BONUS_ERRORS = {
   ResolverNotFound: 'MSBonusResolverNotFound',
   SystemOrAdminAccessRequired: 'MSBonusSystemOrAdminAccessRequired',
   RedisNotAvailable: 'MSBonusRedisNotAvailable',
+  TemplateNotActive: 'MSBonusTemplateNotActive',
+  NoHandlerForBonusType: 'MSBonusNoHandlerForBonusType',
 } as const;
 
 /**

@@ -163,7 +163,7 @@ export class NotificationService {
     
     // Validate channel is provided
     if (!request.channel) {
-      throw new Error('Channel is required');
+      throw new GraphQLError(NOTIFICATION_ERRORS.ChannelRequired, {});
     }
     
     // Ensure channel is lowercase for consistency

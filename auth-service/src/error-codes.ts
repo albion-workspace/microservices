@@ -32,6 +32,11 @@ export const AUTH_ERRORS = {
   TokenRequired: 'MSAuthTokenRequired',
   SystemOrAdminAccessRequired: 'MSAuthSystemOrAdminAccessRequired',
   RedisNotAvailable: 'MSAuthRedisNotAvailable',
+  SessionMissingId: 'MSAuthSessionMissingId',
+  SessionNotFound: 'MSAuthSessionNotFound',
+  RoleNotFound: 'MSAuthRoleNotFound',
+  EmailAndIdRequiredForPasswordReset: 'MSAuthEmailAndIdRequiredForPasswordReset',
+  PhoneAndIdRequiredForPasswordReset: 'MSAuthPhoneAndIdRequiredForPasswordReset',
 } as const;
 
 /**

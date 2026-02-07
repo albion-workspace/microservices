@@ -43,6 +43,13 @@ const SERVICES = {
     color: 'var(--accent-yellow)',
     description: 'Multi-channel notifications (Email, SMS, WhatsApp, SSE, Socket.IO)',
   },
+  kyc: {
+    name: 'KYC Service',
+    url: 'http://localhost:9005',
+    graphqlUrl: 'http://localhost:9005/graphql',
+    color: 'var(--accent-green, #22c55e)',
+    description: 'Know Your Customer verification, profiles, documents, and tier limits',
+  },
 }
 
 type ServiceId = keyof typeof SERVICES

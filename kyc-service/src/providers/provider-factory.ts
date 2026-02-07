@@ -4,9 +4,10 @@
  * Factory for creating and managing KYC providers
  */
 
-import { getErrorMessage, getServiceConfigKey, logger } from 'core-service';
+import { getErrorMessage, getServiceConfigKey, logger, GraphQLError } from 'core-service';
 
 import { SERVICE_NAME } from '../config.js';
+import { KYC_ERRORS } from '../error-codes.js';
 import type {
   KYCProvider,
   ProviderFactory,
@@ -170,36 +171,18 @@ export async function initializeProviders(): Promise<void> {
   });
 }
 
-/**
- * Create a provider instance
- */
+/** Registry: add entries for onfido, sumsub, jumio when implemented. */
+const providerConstructors: Record<string, (config: ProviderConfig) => KYCProvider | null> = {
+  mock: (c) => new MockKYCProvider(c),
+};
+
 async function createProvider(name: string, config: ProviderConfig): Promise<KYCProvider | null> {
-  switch (name) {
-    case 'mock':
-      return new MockKYCProvider(config);
-    
-    case 'onfido':
-      // TODO: Implement OnfidoProvider
-      // return new OnfidoProvider(config);
-      logger.warn('Onfido provider not yet implemented, using mock');
-      return null;
-    
-    case 'sumsub':
-      // TODO: Implement SumsubProvider
-      // return new SumsubProvider(config);
-      logger.warn('Sumsub provider not yet implemented, using mock');
-      return null;
-    
-    case 'jumio':
-      // TODO: Implement JumioProvider
-      // return new JumioProvider(config);
-      logger.warn('Jumio provider not yet implemented, using mock');
-      return null;
-    
-    default:
-      logger.warn('Unknown KYC provider', { name });
-      return null;
+  const factory = providerConstructors[name];
+  if (!factory) {
+    logger.warn('Unknown KYC provider', { name });
+    return null;
   }
+  return factory(config);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -212,7 +195,7 @@ async function createProvider(name: string, config: ProviderConfig): Promise<KYC
 export function getDefaultProvider(): KYCProvider {
   const provider = providerFactory.getProvider(defaultProviderName);
   if (!provider) {
-    throw new Error(`Default KYC provider '${defaultProviderName}' not found`);
+    throw new GraphQLError(KYC_ERRORS.ProviderNotFound, { providerName: defaultProviderName });
   }
   return provider;
 }

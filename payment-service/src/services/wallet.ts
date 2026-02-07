@@ -51,7 +51,7 @@
  *    - Consistent across all entities
  */
 
-import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, resolveDatabase, deleteCache, deleteCachePattern, logger, getErrorMessage, normalizeWalletForGraphQL, validateInput, findOneById, findOneAndUpdateById, requireAuth, getUserId, getTenantId, getOrCreateWallet, paginateCollection, extractDocumentId, GraphQLError, buildConnectionTypeSDL, buildSagaResultTypeSDL, type DatabaseResolutionOptions } from 'core-service';
+import { createService, generateId, type, type Repository, type SagaContext, type ResolverContext, resolveDatabase, deleteCache, deleteCachePattern, logger, getErrorMessage, normalizeWalletForGraphQL, validateInput, findOneById, findOneAndUpdateById, requireAuth, getUserId, getTenantId, getUserContext, getOrCreateWallet, paginateCollection, extractDocumentId, GraphQLError, buildConnectionTypeSDL, buildSagaResultTypeSDL, type DatabaseResolutionOptions } from 'core-service';
 import { getUseMongoTransactions } from '../config.js';
 import { db } from '../accessors.js';
 import { PAYMENT_ERRORS } from '../error-codes.js';
@@ -226,13 +226,14 @@ export const walletResolvers = {
       const input = (args.input as Record<string, unknown>) || args;
       
       // Extract parameters from input or direct args
-      const userId = (input.userId as string) || getUserId(ctx);
+      const { userId: ctxUserId, tenantId: ctxTenantId } = getUserContext(ctx);
+      const userId = (input.userId as string) || ctxUserId;
       const category = (input.category as string) || (input.subtype as string) || 'main';
       const currency = (input.currency as string) || SYSTEM_CURRENCY;
       const walletId = input.walletId as string | undefined;
       
       try {
-        const tenantId = getTenantId(ctx) || 'default-tenant';
+        const tenantId = ctxTenantId || 'default-tenant';
         const database = await db.getDb();
         const walletsCollection = database.collection('wallets');
         
@@ -302,11 +303,12 @@ export const walletResolvers = {
       ctx: ResolverContext
     ) => {
       requireAuth(ctx);
-      const userId = args.userId as string || getUserId(ctx);
+      const { userId: ctxUserId, tenantId: ctxTenantId } = getUserContext(ctx);
+      const userId = args.userId as string || ctxUserId;
       const currencies = (args.currencies as string[]) || [SYSTEM_CURRENCY];
       
       try {
-        const tenantId = getTenantId(ctx) || 'default-tenant';
+        const tenantId = ctxTenantId || 'default-tenant';
         const database = await db.getDb();
         const balances: Array<{
           currency: string;
@@ -452,7 +454,7 @@ export const walletResolvers = {
         };
       } catch (error) {
         logger.error('Failed to get bulk wallet balances', { error, userIds });
-        throw new Error(`Failed to get bulk wallet balances: ${getErrorMessage(error)}`);
+        throw new GraphQLError(PAYMENT_ERRORS.BulkBalancesFailed, { message: getErrorMessage(error), userIds });
       }
     },
     

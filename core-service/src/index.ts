@@ -90,9 +90,11 @@ export {
   createGateway, 
   createPermissionMiddleware,
   createHealthSubscription,
+  buildDefaultGatewayConfig,
 } from './gateway/index.js';
 export type { 
   GatewayConfig, 
+  GatewayConfigSpec,
   GatewayPermissions, 
   GatewayPermissionRule,
   SubscriptionConfig,
@@ -169,6 +171,7 @@ export {
   getOperationStateTracker,
   getRecoveryJob,
   createTransferRecoverySetup,
+  createTransferRecoverySetupForService,
   OperationStateTracker,
   RecoveryJob,
 } from './common/resilience/recovery.js';
@@ -238,16 +241,27 @@ export {
   getConfigWithDefault,
   getServiceConfigKey,
   ensureDefaultConfigsCreated,
+  ensureServiceDefaultConfigsCreated,
   ConfigStore,
 } from './common/config/store.js';
 export type {
   ConfigEntry,
+  DefaultConfigEntry,
   ConfigStoreOptions,
   GetConfigOptions,
   GetAllConfigOptions,
   SetConfigOptions,
   GetServiceConfigKeyOptions,
 } from './common/config/store.js';
+
+export {
+  loadBaseServiceConfig,
+  getBaseServiceConfigDefaults,
+  configKeyOpts,
+  type BaseServiceConfigDefaults,
+  type BaseServiceConfigDefaultsOverrides,
+  type LoadBaseServiceConfigOptions,
+} from './common/config/load-base.js';
 
 // Shared defaults (simple constants services can optionally use)
 // NOTE: Service defaults removed - database/redis config is handled by strategy-config.ts
@@ -403,6 +417,10 @@ export type { ShutdownOptions } from './common/lifecycle/shutdown.js';
 
 export { setupCleanupTask, setupCleanupTasks, setupEventListener } from './common/lifecycle/tasks.js';
 export { initializeService, initializeDatabase, initializeRedis, safeInitialize } from './common/lifecycle/startup.js';
+export { withRedis } from './common/lifecycle/redis-startup.js';
+export type { WithRedisOptions } from './common/lifecycle/redis-startup.js';
+export { runServiceStartup } from './common/lifecycle/service-startup.js';
+export type { ServiceStartupOptions } from './common/lifecycle/service-startup.js';
 export type { CleanupTask, EventListenerConfig } from './common/lifecycle/tasks.js';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -440,14 +458,13 @@ export {
 // ═══════════════════════════════════════════════════════════════════
 // GraphQL Resolver Utilities
 // ═══════════════════════════════════════════════════════════════════
-export { requireAuth, getTenantId, getUserId, createObjectModelQueryResolver } from './common/graphql/utils.js';
+export { requireAuth, getTenantId, getUserId, getUserContext, createObjectModelQueryResolver } from './common/graphql/utils.js';
 export { 
   ResolverBuilder,
   createResolverBuilder,
 } from './common/graphql/builder.js';
 export type { ResolverFunction, ServiceResolvers } from './common/graphql/builder.js';
-export { buildConnectionTypeSDL } from './common/graphql/connection-builder.js';
-export { timestampFieldsSDL, timestampFieldsRequiredSDL, timestampFieldsOptionalSDL, buildSagaResultTypeSDL, paginationArgsSDL } from './common/graphql/sdl-fragments.js';
+export { timestampFieldsSDL, timestampFieldsRequiredSDL, timestampFieldsOptionalSDL, buildSagaResultTypeSDL, paginationArgsSDL, buildConnectionTypeSDL } from './common/graphql/sdl-fragments.js';
 
 // GraphQL Query Complexity
 export {

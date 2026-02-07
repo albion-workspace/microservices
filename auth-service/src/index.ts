@@ -17,6 +17,7 @@
 
 import {
   createGateway,
+  buildDefaultGatewayConfig,
   hasRole,
   hasAnyRole,
   isAuthenticated,
@@ -32,11 +33,10 @@ import {
   setupCleanupTasks,
   registerServiceErrorCodes,
   registerServiceConfigDefaults,
-  ensureDefaultConfigsCreated,
   getErrorMessage,
   resolveContext,
   initializeWebhooks,
-  configureRedisStrategy,
+  runServiceStartup,
   type IntegrationEvent,
   type ResolverContext,
   type DatabaseStrategyResolver,
@@ -80,6 +80,9 @@ let otpService: OTPService;
 let passwordService: PasswordService;
 let twoFactorService: TwoFactorService;
 let authResolvers: ReturnType<typeof createAuthResolvers>;
+let authWebhookServiceInstance: ReturnType<typeof createWebhookService> | null = null;
+let authDatabaseStrategy: DatabaseStrategyResolver | null = null;
+let authDefaultContext: DatabaseContext | null = null;
 
 
 
@@ -344,289 +347,114 @@ function setupEventHandlers() {
 // Startup
 // ═══════════════════════════════════════════════════════════════════
 
+const AUTH_PERMISSIONS = {
+  Query: {
+    health: allow,
+    authHealth: allow,
+    me: isAuthenticated,
+    getUser: or(hasRole('system'), can('user', 'read')),
+    users: or(hasRole('system'), can('user', 'list')),
+    usersByRole: or(hasRole('system'), can('user', 'list')),
+    mySessions: isAuthenticated,
+    pendingOperations: or(hasRole('system'), isAuthenticated),
+    pendingOperation: or(hasRole('system'), isAuthenticated),
+    pendingOperationTypes: or(hasRole('system'), isAuthenticated),
+    pendingOperationRawData: hasAnyRole('system', 'admin'),
+    webhooks: or(hasRole('system'), can('webhook', 'read')),
+    webhook: or(hasRole('system'), can('webhook', 'read')),
+    webhookStats: or(hasRole('system'), can('webhook', 'read')),
+    webhookDeliveries: or(hasRole('system'), can('webhook', 'read')),
+  },
+  Mutation: {
+    register: allow,
+    verifyRegistration: allow,
+    login: allow,
+    forgotPassword: allow,
+    resetPassword: allow,
+    sendOTP: allow,
+    verifyOTP: allow,
+    resendOTP: allow,
+    logout: isAuthenticated,
+    logoutAll: isAuthenticated,
+    refreshToken: allow,
+    changePassword: isAuthenticated,
+    enable2FA: isAuthenticated,
+    verify2FA: isAuthenticated,
+    disable2FA: isAuthenticated,
+    regenerateBackupCodes: isAuthenticated,
+    registerWebhook: or(hasRole('system'), can('webhook', 'create')),
+    updateWebhook: or(hasRole('system'), can('webhook', 'update')),
+    deleteWebhook: or(hasRole('system'), can('webhook', 'delete')),
+    testWebhook: or(hasRole('system'), can('webhook', 'execute')),
+    updateUserRoles: or(hasRole('system'), can('user', 'update')),
+    updateUserPermissions: or(hasRole('system'), can('user', 'update')),
+    updateUserStatus: or(hasRole('system'), can('user', 'update')),
+  },
+};
+
 async function main() {
-  // ═══════════════════════════════════════════════════════════════════
-  // Configuration
-  // ═══════════════════════════════════════════════════════════════════
-
-  // Register default configs (auto-created in DB if missing)
-  registerServiceConfigDefaults(SERVICE_NAME, AUTH_CONFIG_DEFAULTS);
-  registerServiceConfigDefaults('gateway', { ...GATEWAY_JWT_DEFAULTS, ...GATEWAY_DATABASE_DEFAULTS, ...GATEWAY_COMMON_DEFAULTS });
-
-  // Load config (MongoDB config store; JWT can fall back to gateway key)
-  // Resolve brand/tenantId dynamically (from user context, config store, or env vars)
-  const context = await resolveContext();
-  authConfig = await loadConfig(context.brand, context.tenantId);
-  validateConfig(authConfig);
-  setAuthConfig(authConfig);
-
-  // ═══════════════════════════════════════════════════════════════════
-  // Initialize Services
-  // ═══════════════════════════════════════════════════════════════════
-
-  // Initialize database using service database accessor
-  // Auth-service uses core_service database (users, sessions are shared)
-  // The accessor is configured with 'core-service' in database.ts
-  const { database: registrationDb, strategy: databaseStrategy, context: defaultContext } = await db.initialize({
-    brand: context.brand,
-    tenantId: context.tenantId,
-  });
-  
-  logger.info('Database initialized via service database accessor', {
-    database: registrationDb.databaseName,
-    context: defaultContext,
-  });
-
-  otpProviders = new OTPProviderFactory(authConfig);
-  authenticationService = new AuthenticationService(authConfig);
-  registrationService = new RegistrationService(authConfig, otpProviders, authenticationService, {
-    database: registrationDb,
-    databaseStrategy,
-    defaultContext,
-  });
-  otpService = new OTPService(authConfig, otpProviders);
-  passwordService = new PasswordService(authConfig, otpProviders);
-  twoFactorService = new TwoFactorService();
-
-  // Configure Passport.js strategies
-  configurePassport(authConfig);
-
-  // Create resolvers
-  authResolvers = createAuthResolvers(
-    registrationService,
-    authenticationService,
-    otpService,
-    passwordService,
-    twoFactorService,
-    authConfig // Pass config for JWT secret access
-  );
-
-  // ═══════════════════════════════════════════════════════════════════
-  // Webhook Service
-  // ═══════════════════════════════════════════════════════════════════
-
-  const webhookService = createWebhookService({
-    manager: authWebhooks as any,
-    eventsDocs: `
-      Authentication Service Webhook Events:
-      • user.registered - New user registered
-      • user.login - User logged in
-      • user.logout - User logged out
-      • user.email_verified - Email verified
-      • user.phone_verified - Phone verified
-      • user.password_changed - Password changed
-      • user.password_reset - Password reset
-      • user.2fa_enabled - Two-factor authentication enabled
-      • user.2fa_disabled - Two-factor authentication disabled
-      • user.locked - Account locked due to failed attempts
-      • user.unlocked - Account unlocked
-      • user.suspended - Account suspended
-      • user.deleted - Account deleted
-      • user.metadata - User metadata updated (type: deposit/withdrawal/purchase/action)
-      • session.created - New session created
-      • session.expired - Session expired
-      • session.revoked - Session revoked
-      • social.connected - Social profile connected
-      • social.disconnected - Social profile disconnected
-      • user.* - All user events (wildcard)
-    `,
-  });
-
-  // ═══════════════════════════════════════════════════════════════════
-  // Gateway Configuration
-  // ═══════════════════════════════════════════════════════════════════
-
-  const config = {
-    name: authConfig.serviceName,
-    port: authConfig.port,
-    cors: {
-      origins: authConfig.corsOrigins,
+  await runServiceStartup<Awaited<ReturnType<typeof loadConfig>>>({
+    serviceName: SERVICE_NAME,
+    registerErrorCodes: () => registerServiceErrorCodes(AUTH_ERROR_CODES),
+    registerConfigDefaults: () => {
+      registerServiceConfigDefaults(SERVICE_NAME, AUTH_CONFIG_DEFAULTS);
+      registerServiceConfigDefaults('gateway', { ...GATEWAY_JWT_DEFAULTS, ...GATEWAY_DATABASE_DEFAULTS, ...GATEWAY_COMMON_DEFAULTS });
     },
-    jwt: {
-      secret: authConfig.jwtSecret,
-      refreshSecret: authConfig.jwtRefreshSecret,
-      expiresIn: authConfig.jwtExpiresIn,
-      refreshExpiresIn: authConfig.jwtRefreshExpiresIn,
+    resolveContext: async () => {
+      const c = await resolveContext();
+      return { brand: c.brand ?? 'default', tenantId: c.tenantId };
     },
-    services: [
-      { 
-        name: 'auth', 
-        types: authGraphQLTypes, 
-        resolvers: authResolvers 
-      },
-      webhookService,
-    ],
-    permissions: {
-      Query: {
-        health: allow,
-        authHealth: allow,
-        me: isAuthenticated,
-        // URN-based permissions for user management
-        getUser: or(hasRole('system'), can('user', 'read')), // System or user:read permission
-        users: or(hasRole('system'), can('user', 'list')), // System or user:list permission
-        usersByRole: or(hasRole('system'), can('user', 'list')), // System or user:list permission
-        mySessions: isAuthenticated,
-        // Pending Operations - allow all authenticated users (including system)
-        // Same pattern as payment-service: transactions, transfers, etc.
-        pendingOperations: or(hasRole('system'), isAuthenticated),
-        pendingOperation: or(hasRole('system'), isAuthenticated),
-        pendingOperationTypes: or(hasRole('system'), isAuthenticated),
-        pendingOperationRawData: hasAnyRole('system', 'admin'), // Admin-only for security
-        // Webhooks (system only - using URN for consistency)
-        webhooks: or(hasRole('system'), can('webhook', 'read')),
-        webhook: or(hasRole('system'), can('webhook', 'read')),
-        webhookStats: or(hasRole('system'), can('webhook', 'read')),
-        webhookDeliveries: or(hasRole('system'), can('webhook', 'read')),
-      },
-      Mutation: {
-        // Public mutations (no auth required)
-        register: allow,
-        verifyRegistration: allow, // Public - part of registration flow
-        login: allow,
-        forgotPassword: allow,
-        resetPassword: allow,
-        sendOTP: allow,
-        verifyOTP: allow,
-        resendOTP: allow,
-        
-        // Authenticated mutations (users can manage their own account)
-        logout: isAuthenticated,
-        logoutAll: isAuthenticated,
-        refreshToken: allow, // Token validation in resolver
-        changePassword: isAuthenticated, // Users can change their own password
-        enable2FA: isAuthenticated, // Users can enable 2FA for themselves
-        verify2FA: isAuthenticated,
-        disable2FA: isAuthenticated,
-        regenerateBackupCodes: isAuthenticated,
-        
-        // Webhooks (system only - using URN for consistency)
-        registerWebhook: or(hasRole('system'), can('webhook', 'create')),
-        updateWebhook: or(hasRole('system'), can('webhook', 'update')),
-        deleteWebhook: or(hasRole('system'), can('webhook', 'delete')),
-        testWebhook: or(hasRole('system'), can('webhook', 'execute')),
-
-        // User Management (system only - using URN for granular control)
-        updateUserRoles: or(hasRole('system'), can('user', 'update')), // System or user:update permission
-        updateUserPermissions: or(hasRole('system'), can('user', 'update')), // System or user:update permission
-        updateUserStatus: or(hasRole('system'), can('user', 'update')), // System or user:update permission
-      },
-    },
-    mongoUri: authConfig.mongoUri,
-    redisUrl: authConfig.redisUrl,
-    defaultPermission: 'deny' as const,
-  };
-
-  printConfigSummary(authConfig);
-
-  // Register error codes
-  registerServiceErrorCodes(AUTH_ERROR_CODES);
-
-  // Register event handlers
-  setupEventHandlers();
-
-  // Create resolvers
-  authResolvers = createAuthResolvers(
-    registrationService,
-    authenticationService,
-    otpService,
-    passwordService,
-    twoFactorService,
-    authConfig // Pass config for JWT secret access
-  );
-
-  // Create and start gateway first (this connects to database)
-  await createGateway({
-    ...config,
-  });
-
-  // Initialize Redis accessor (after gateway connects to Redis)
-  if (authConfig.redisUrl) {
-    try {
-      await configureRedisStrategy({
-        strategy: 'shared',
-        defaultUrl: authConfig.redisUrl,
+    loadConfig: (brand?: string, tenantId?: string) => loadConfig(brand, tenantId),
+    validateConfig,
+    printConfigSummary,
+    afterDb: async (context, config) => {
+      authConfig = config;
+      setAuthConfig(config);
+      const { database: registrationDb, strategy, context: defaultContext } = await db.initialize({ brand: context.brand, tenantId: context.tenantId });
+      authDatabaseStrategy = strategy;
+      authDefaultContext = defaultContext;
+      logger.info('Database initialized via service database accessor', { database: registrationDb.databaseName, context: defaultContext });
+      otpProviders = new OTPProviderFactory(config);
+      authenticationService = new AuthenticationService(config);
+      registrationService = new RegistrationService(config, otpProviders, authenticationService, { database: registrationDb, databaseStrategy: strategy, defaultContext });
+      otpService = new OTPService(config, otpProviders);
+      passwordService = new PasswordService(config, otpProviders);
+      twoFactorService = new TwoFactorService();
+      configurePassport(config);
+      authResolvers = createAuthResolvers(registrationService, authenticationService, otpService, passwordService, twoFactorService, config);
+      authWebhookServiceInstance = createWebhookService({
+        manager: authWebhooks as any,
+        eventsDocs: `Authentication Service Webhook Events: user.registered, user.login, user.logout, user.email_verified, user.phone_verified, user.password_changed, user.password_reset, user.2fa_enabled, user.2fa_disabled, user.locked, user.unlocked, user.suspended, user.deleted, user.metadata, session.created, session.expired, session.revoked, social.connected, social.disconnected, user.*`,
       });
-      await redis.initialize({ brand: context.brand });
-      logger.info('Redis accessor initialized', { brand: context.brand });
-    } catch (err) {
-      logger.warn('Could not initialize Redis accessor', { error: (err as Error).message });
-    }
-  }
-
-  // Ensure all registered default configs are created in database
-  // This happens after database connection is established
-  try {
-    const createdCount = await ensureDefaultConfigsCreated(SERVICE_NAME, {
-      brand: context.brand,
-      tenantId: context.tenantId,
-    });
-    if (createdCount > 0) {
-      logger.info(`Created ${createdCount} default config(s) in database`);
-    }
-  } catch (error) {
-    logger.warn('Failed to ensure default configs are created', { error });
-    // Continue - configs will be created on first access
-  }
-
-  // Initialize webhooks AFTER database connection is established
-  // Use centralized initializeWebhooks helper from core-service
-  try {
-    await initializeWebhooks(authWebhooks, {
-      databaseStrategy,
-      defaultContext,
-    });
-    logger.info('Auth webhooks initialized via centralized helper');
-  } catch (error) {
-    logger.error('Failed to initialize auth webhooks', { error });
-    // Continue - webhooks are optional
-  }
-  
-  // ═══════════════════════════════════════════════════════════════════
-  // Unified Cleanup System
-  // ═══════════════════════════════════════════════════════════════════
-  
-  // Setup all cleanup tasks using unified system
-  setupCleanupTasks([
-    {
-      name: 'webhook deliveries',
-      execute: async () => cleanupAuthWebhookDeliveries(30),
-      intervalMs: 24 * 60 * 60 * 1000, // Daily
     },
-    {
-      name: 'password reset tokens (legacy DB entries)',
-      execute: async () => passwordService.cleanupExpiredTokens(),
-      intervalMs: 24 * 60 * 60 * 1000, // Daily
+    buildGatewayConfig: (config) => buildDefaultGatewayConfig(config, {
+      services: [{ name: 'auth', types: authGraphQLTypes, resolvers: authResolvers }, authWebhookServiceInstance!],
+      permissions: AUTH_PERMISSIONS,
+      name: config.serviceName,
+    }),
+    ensureDefaults: true,
+    withRedis: { redis },
+    afterGateway: async () => {
+      setupEventHandlers();
+      try {
+        await initializeWebhooks(authWebhooks, { databaseStrategy: authDatabaseStrategy!, defaultContext: authDefaultContext! });
+        logger.info('Auth webhooks initialized via centralized helper');
+      } catch (error) {
+        logger.error('Failed to initialize auth webhooks', { error });
+      }
+      setupCleanupTasks([
+        { name: 'webhook deliveries', execute: async () => cleanupAuthWebhookDeliveries(30), intervalMs: 24 * 60 * 60 * 1000 },
+        { name: 'password reset tokens', execute: async () => passwordService.cleanupExpiredTokens(), intervalMs: 24 * 60 * 60 * 1000 },
+        { name: 'expired/invalid sessions', execute: async () => authenticationService.cleanupExpiredSessions(), intervalMs: 24 * 60 * 60 * 1000 },
+      ]);
+      try {
+        await startListening(['integration:auth', 'integration:wallet']);
+        logger.info('Started listening on event channels', { channels: ['integration:auth', 'integration:wallet'] });
+      } catch (err) {
+        logger.warn('Could not start event listener', { error: (err as Error).message });
+      }
     },
-    {
-      name: 'expired/invalid sessions',
-      execute: async () => authenticationService.cleanupExpiredSessions(),
-      intervalMs: 24 * 60 * 60 * 1000, // Daily
-    },
-    // Note: Pending operations (Redis) don't need cleanup - Redis TTL auto-expires keys
-    // Note: OTPs use JWT-based pending operations, so they auto-expire (no cleanup needed)
-  ]);
-  
-  logger.info('Unified cleanup system initialized');
-  
-  // Note: OAuth routes would need to be added via a custom Express middleware
-  // For now, OAuth is configured in Passport strategies and can be triggered from frontend
-  logger.info('OAuth strategies configured and ready');
-  
-  // Start listening to Redis events
-  if (authConfig.redisUrl) {
-    try {
-      const channels = [
-        'integration:auth',      // Auth service events
-        'integration:wallet',    // Payment service events (wallet.deposit.completed, etc.)
-      ];
-      await startListening(channels);
-      logger.info('Started listening on event channels', { channels });
-    } catch (err) {
-      logger.warn('Could not start event listener', { error: (err as Error).message });
-    }
-  }
-  
-  logger.info('Auth service started successfully', { port: config.port });
+  });
 }
 
 // Export webhook manager for advanced use cases

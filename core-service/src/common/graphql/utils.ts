@@ -87,6 +87,14 @@ export function getUserId(ctx: ResolverContext): string {
 }
 
 /**
+ * Get authenticated user context (userId + tenantId) for resolvers.
+ * Use in Query/Mutation resolvers that need both; getUserId already enforces auth.
+ */
+export function getUserContext(ctx: ResolverContext): { userId: string; tenantId: string } {
+  return { userId: getUserId(ctx), tenantId: getTenantId(ctx) };
+}
+
+/**
  * Creates a cursor-paginated query resolver that filters by objectModel
  * 
  * This utility is useful for services that query a shared collection (like transactions)

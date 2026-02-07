@@ -32,10 +32,12 @@ import {
   buildConnectionTypeSDL,
   buildSagaResultTypeSDL,
   type ClientSession,
+  GraphQLError,
 } from 'core-service';
 
 // Local imports
 import { db } from '../accessors.js';
+import { PAYMENT_ERRORS } from '../error-codes.js';
 import type { Transaction, Transfer } from '../types.js';
 
 /**
@@ -91,7 +93,7 @@ async function checkDuplicateTransfer(
       existingTransferId: existing.id,
       existingStatus,
     });
-    throw new Error(`Duplicate ${type} detected. A transfer with the same externalRef already exists (${existing.id}, status: ${existingStatus})`);
+    throw new GraphQLError(PAYMENT_ERRORS.DuplicateTransfer, { type, externalRef, existingTransferId: existing.id, existingStatus });
   }
 }
 
@@ -324,12 +326,12 @@ const withdrawalSaga = [
       });
       
       if (!wallet) {
-        throw new Error(`Wallet not found for user ${input.userId} and currency ${input.currency}`);
+        throw new GraphQLError(PAYMENT_ERRORS.WalletNotFound, { userId: input.userId, currency: input.currency });
       }
       
       const balance = (wallet as any).balance || 0;
       if (balance < totalRequired) {
-        throw new Error(`Insufficient balance. Required: ${totalRequired}, Available: ${balance}`);
+        throw new GraphQLError(PAYMENT_ERRORS.InsufficientBalance, { required: totalRequired, available: balance, userId: input.userId, currency: input.currency });
       }
       
       data.walletId = extractDocumentId(wallet) || '';

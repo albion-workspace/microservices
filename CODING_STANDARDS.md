@@ -4,7 +4,7 @@
 
 **Project Status**: Pre-Production - This project has not yet been released to production. Code cleanup rules are simplified (no backward compatibility concerns). After production/release, these rules will be updated to include backward compatibility and legacy code management.
 
-**Last Updated**: 2026-02-06
+**Last Updated**: 2026-02-07
 
 ---
 
@@ -571,7 +571,7 @@ service-name/
 │   ├── accessors.ts       # db + redis via createServiceAccessors (single factory call)
 │   ├── config.ts          # Service configuration (getServiceConfigKey only)
 │   ├── config-defaults.ts # registerServiceConfigDefaults values
-│   ├── error-codes.ts     # SERVICE_ERRORS, SERVICE_ERROR_CODES
+│   ├── error-codes.ts     # SERVICE_ERRORS, SERVICE_ERROR_CODES (use with GraphQLError only; no throw new Error in resolver path)
 │   ├── graphql.ts         # Types + createResolvers
 │   ├── services/
 │   │   └── feature.ts     # createService definitions
@@ -736,23 +736,27 @@ Keep import order: core-service → accessors → local. Index header should inc
 import {
   createGateway,
   logger,
-  configureRedisStrategy,
+  buildDefaultGatewayConfig,
+  withRedis,
+  ensureServiceDefaultConfigsCreated,
   type ResolverContext,
   type GatewayConfig,
+  GraphQLError,
 } from 'core-service';
 import { db, redis } from './accessors.js';
 
 import { loadConfig, validateConfig, printConfigSummary, SERVICE_NAME } from './config.js';
+import { SERVICE_ERRORS } from './error-codes.js';
 import { featureService } from './services/feature.js';
 
 // Configuration from config store only (no process.env in microservices)
 const context = await resolveContext();
 const config = await loadConfig(context.brand, context.tenantId);
 
-// Helper functions for resolvers
+// Helper functions for resolvers (use GraphQLError + error code, never throw new Error)
 function getUserId(ctx: ResolverContext): string {
   const userId = ctx.user?.id || ctx.user?.userId;
-  if (!userId) throw new Error('Unauthorized');
+  if (!userId) throw new GraphQLError(SERVICE_ERRORS.Unauthorized, {});
   return userId;
 }
 
@@ -779,46 +783,24 @@ const customResolvers = {
   },
 };
 
-// Build gateway configuration
-function buildGatewayConfig(): GatewayConfig {
-  return {
-    port: config.port,
-    serviceName: 'service-name',
-    mongoUri: config.mongoUri,
-    typeDefs: customTypeDefs,
-    resolvers: customResolvers,
-    services: [featureService],
-    contextBuilder: (req) => ({
-      user: (req as any).user,
-      tenantId: (req as any).user?.tenantId || 'default',
-    }),
-  };
+// Build gateway configuration (use buildDefaultGatewayConfig from core-service)
+function buildGatewayConfig(config: ServiceConfig): GatewayConfig {
+  return buildDefaultGatewayConfig(config, {
+    services: [{ name: 'service-name', types: customTypeDefs, resolvers: customResolvers }, featureService],
+    permissions: { Query: { myFeatures: allow }, Mutation: {} },
+    name: config.serviceName,
+  });
 }
 
-// Main startup
+// Main startup (use withRedis and ensureServiceDefaultConfigsCreated from core-service)
 async function main() {
   logger.info('Starting service-name...');
 
-  // Start gateway (handles MongoDB connection)
-  await createGateway(buildGatewayConfig());
+  await createGateway(buildGatewayConfig(config));
+  await ensureServiceDefaultConfigsCreated(SERVICE_NAME, { brand: context.brand, tenantId: context.tenantId });
+  await withRedis(config.redisUrl, redis, { brand: context.brand }, { afterReady: async () => { /* optional */ } });
 
   logger.info(`Service started on port ${config.port}`);
-
-  // Initialize Redis accessor (after gateway)
-  if (config.redisUrl) {
-    try {
-      await configureRedisStrategy({
-        strategy: 'shared',
-        defaultUrl: config.redisUrl,
-      });
-      await redis.initialize({ brand: 'default' });
-      logger.info('Redis accessor initialized');
-    } catch (err) {
-      logger.warn('Could not initialize Redis', {
-        error: err instanceof Error ? err.message : 'Unknown error'
-      });
-    }
-  }
 }
 
 main().catch((err) => {
@@ -858,6 +840,34 @@ const wrongResolvers = {
 };
 ```
 
+### Resolver error handling (GraphQLError only)
+
+**Critical**: In **resolver-path code** (resolvers, saga steps, and any code called from them), **do not** use `throw new Error('message')`. Use **`GraphQLError`** with a code from the service's `error-codes.ts` so errors are discoverable and consistent for clients and i18n.
+
+- **Always**: Throw `throw new GraphQLError(SERVICE_ERRORS.SomeCode, { ...context })` (e.g. `SERVICE_ERRORS.NotFound`, `SERVICE_ERRORS.Unauthorized`). Add context (ids, field names) in the second argument for debugging and i18n.
+- **Never**: Use `throw new Error('any string message')` in resolvers, saga steps, or services invoked from resolvers.
+- **Exception**: Config validation, bootstrap, and scripts (e.g. `config.ts` validate, `index.ts` "Configuration not loaded yet") may still use `throw new Error` for startup failures; only **resolver-visible** errors must use GraphQLError.
+
+```typescript
+// ✅ Correct: use GraphQLError with error code from error-codes.ts
+import { GraphQLError } from 'core-service';
+import { SERVICE_ERRORS } from './error-codes.js';
+
+function getUserId(ctx: ResolverContext): string {
+  const userId = ctx.user?.id || ctx.user?.userId;
+  if (!userId) throw new GraphQLError(SERVICE_ERRORS.Unauthorized, {});
+  return userId;
+}
+```
+
+```typescript
+// ❌ Wrong: throw new Error with string message (forbidden in resolver path)
+if (!userId) throw new Error('Unauthorized');
+if (!entity) throw new Error(`Item ${id} not found`);
+```
+
+Every service has `error-codes.ts` with `SERVICE_ERRORS` and `SERVICE_ERROR_CODES`. Add new codes there when needed; use them with `GraphQLError` only.
+
 ### GraphQL Type Naming Convention
 
 When using `createService`, the result type must follow this naming convention:
@@ -868,9 +878,9 @@ When using `createService`, the result type must follow this naming convention:
 // Entity name: "kycVerification" → Result type: "CreateKycVerificationResult"
 
 graphqlType: `
-  type Feature { ... }
-  type FeatureConnection { ... }
-  type CreateFeatureResult { success: Boolean! feature: Feature sagaId: ID! errors: [String!] }
+  type Feature { id: ID! name: String! ${timestampFieldsSDL()} }
+  ${buildConnectionTypeSDL('FeatureConnection', 'Feature')}
+  ${buildSagaResultTypeSDL('CreateFeatureResult', 'feature', 'Feature')}
 `,
 ```
 
@@ -934,7 +944,7 @@ extend type Query {
   - Database types (`Db`, `ClientSession`, `Collection`, `Filter`, `MongoClient`)
   - Redis abstractions (`createServiceRedisAccess`, `configureRedisStrategy`; prefer `createServiceAccessors` for new code)
   - Generic utilities (logging, retry, circuit breaker, `getErrorMessage`, `getServiceConfigKey`)
-  - Generic patterns (saga, gateway, event system, `withEventHandlerError`, `createTransferRecoverySetup`, `buildConnectionTypeSDL`, `timestampFieldsSDL` / `timestampFieldsRequiredSDL` / `timestampFieldsOptionalSDL`, `buildSagaResultTypeSDL`, `paginationArgsSDL`)
+  - Generic patterns (saga, gateway, event system, `withEventHandlerError`, `createTransferRecoverySetup`, `checkSystemOrPermission`, `buildConnectionTypeSDL`, `timestampFieldsSDL` / `timestampFieldsRequiredSDL` / `timestampFieldsOptionalSDL`, `buildSagaResultTypeSDL`, `paginationArgsSDL`)
   - Type definitions and interfaces (e.g. `NotificationHandlerPlugin`, `HandlerContext` in core-service)
   - Shared helpers (pagination, validation, wallet operations)
 - **Core-Service**: Must NOT include:
@@ -1524,7 +1534,7 @@ for (const key of keys) { /* check if stuck */ }
 
 ### Generic Helpers in Core-Service
 - **Always**: Add generic, reusable helpers to `core-service`
-- **Examples**: `extractDocumentId()`, `retry()`, `circuitBreaker()`, pagination helpers; `getErrorMessage(error)` for consistent error messages; `getServiceConfigKey()` for config with optional gateway fallback; `createServiceAccessors()`, `buildConnectionTypeSDL()`, `timestampFieldsSDL()` / `timestampFieldsRequiredSDL()`, `createUniqueIndexSafe()`, `normalizeWalletForGraphQL()`, `withEventHandlerError()`, `createTransferRecoverySetup()`, notification handler plugin types (`NotificationHandlerPlugin`, `HandlerContext`)
+- **Examples**: `extractDocumentId()`, `retry()`, `circuitBreaker()`, pagination helpers; `getErrorMessage(error)` for consistent error messages; `getServiceConfigKey()` for config with optional gateway fallback; `createServiceAccessors()`, `checkSystemOrPermission()`, `normalizeWalletForGraphQL()`, `createUniqueIndexSafe()`, `withEventHandlerError()`, `createTransferRecoverySetup()`, notification handler plugin types (`NotificationHandlerPlugin`, `HandlerContext`); SDL builders: `buildConnectionTypeSDL()`, `buildSagaResultTypeSDL()`, `timestampFieldsSDL()` / `timestampFieldsRequiredSDL()` / `timestampFieldsOptionalSDL()`, `paginationArgsSDL()` (all in `sdl-fragments.ts`). **Config/lifecycle**: `loadBaseServiceConfig()`, `getBaseServiceConfigDefaults()`, `configKeyOpts()`, `DefaultConfigEntry`, `ensureServiceDefaultConfigsCreated()`, `buildDefaultGatewayConfig()`, `getUserContext()`, `withRedis()`, `runServiceStartup()`, `createTransferRecoverySetupForService()`; list-scope: `withListScope(args, ctx, { userIdFilterKey })` (bonus/core).
 - **Never**: Add service-specific logic to `core-service`
 - **Pattern**: If a helper can be used by multiple services, it belongs in `core-service`
 
@@ -1532,11 +1542,36 @@ for (const key of keys) { /* check if stuck */ }
 - **Always**: New and existing microservices should look as if generated by the service generator (same structure, comments, naming). Only domain-specific code (resolvers, sagas, event handlers) should differ.
 - **Accessors**: One `accessors.ts` per service with generator-style comment: "[Name] service accessors (db + redis) from one factory call." then "Per-service database: {name}_service." or "Uses core_service database." for auth.
 - **Index**: Include the line "Aligned with service generator scaffold (accessors, config, createGateway). Domain-specific code below." in the top comment block; keep import order: core-service → accessors → local.
+- **Config**: Use `loadBaseServiceConfig(serviceName, getBaseServiceConfigDefaults({ port, serviceName }), { brand, tenantId })` from core-service for base keys (override only port and serviceName, or add jwt/nodeEnv/corsOrigins/database as needed). For service-only keys use `getServiceConfigKey(SERVICE_NAME, key, defaultVal, configKeyOpts(brand, tenantId))` so all services use the same helper instead of local optsService/opts. Do not duplicate base default values or option builders in each service.
+- **Config defaults**: Type defaults as `Record<string, DefaultConfigEntry>` (exported from core-service). Pass them to `registerServiceConfigDefaults(SERVICE_NAME, DEFAULTS)` without cast.
+- **Default configs created**: Use `ensureServiceDefaultConfigsCreated(SERVICE_NAME, context)` after gateway (one line; no local try/catch). Prefer over raw `ensureDefaultConfigsCreated` in main().
+- **Gateway config**: Use `buildDefaultGatewayConfig(config, { services, permissions, name?, subscriptions?, complexity? })` from core-service so services only pass services array and permissions map; core fills name, port, cors, jwt, mongoUri, redisUrl, defaultPermission.
+- **Redis after gateway**: Use `withRedis(config.redisUrl, redis, { brand: context.brand }, { afterReady?: () => Promise<void> })` from core-service instead of inline configureRedisStrategy + redis.initialize + try/catch.
+- **Transfer recovery**: For services that use transfer recovery (e.g. bonus, payment), call `createTransferRecoverySetupForService('service label')` in recovery-setup; do not duplicate createTransferRecoverySetup + createTransferRecoveryHandler.
+- **Resolver user context**: Use `getUserContext(ctx)` from core-service when a resolver needs both userId and tenantId (authenticated); avoids repeating getUserId + getTenantId.
+- **Startup pipeline (optional)**: For a minimal main(), use `runServiceStartup({ serviceName, registerErrorCodes, registerConfigDefaults, resolveContext, loadConfig, validateConfig, printConfigSummary, afterDb, buildGatewayConfig, ensureDefaults?, withRedis?, afterGateway? })` from core-service. Handles registration, context, config, DB init, gateway, defaults, Redis, and top-level error handling.
 
 ### Service-Specific Patterns
 - **Always**: Create service-specific utilities when logic is unique to that service
 - **Pattern**: Use `core-service` for generic patterns, service code for specifics
 - **Example**: `core-service` provides `createTransferWithTransactions()`, service provides transfer validation rules
+
+### Service-Local Dedup Pattern
+When 2+ resolvers/sagas in the same service share identical structure, extract a **local helper function** within that service file (not in core-service, since the logic is service-specific).
+
+**Auth-service examples** (`auth-service/src/graphql.ts`):
+- `updateUserFieldResolver(args, ctx, opts)` — consolidates `updateUserRoles`, `updateUserPermissions`, `updateUserStatus` (3 mutations with identical auth check → DB update → normalize → log pattern)
+- `fetchPaginatedUsers(filter, args, errorCode, errorContext)` — consolidates `users` and `usersByRole` queries (identical pagination + normalization + totalCount logic)
+- `parsePendingOperation(payload, token, ttl)` — consolidates Redis payload parsing in `pendingOperations` and `pendingOperation` resolvers
+
+**Payment-service examples** (`payment-service/src/services/transaction.ts`):
+- `calculateFee(amount, feePercentage)` — consolidates inline fee math in deposit and withdrawal sagas
+- `buildTransactionDescription(method, txType)` — consolidates duplicated description generation in deposit/withdrawal sagas
+- `buildDateRangeFilter(dateFrom?, dateTo?)` — consolidates date filter building in transaction and wallet queries (exported for cross-file use within payment-service)
+
+**When to use core-service vs local helper:**
+- **Core-service**: Pattern used by 2+ services, or generic enough to be reusable (e.g. SDL builders, error handling, accessors)
+- **Local helper**: Pattern used only within one service file, tied to service-specific business logic (e.g. auth user updates, payment fee calculation)
 
 ---
 
@@ -1913,7 +1948,7 @@ All microservices that use core-service should follow the same naming so pattern
 |------|------------|----------------------|
 | **Config** | **Export** `SERVICE_NAME = '{service}-service'` from config.ts. `loadConfig(brand?, tenantId?)` **via getServiceConfigKey** (common keys with `fallbackService: 'gateway'`, service-only keys with `{ brand, tenantId }`; no `process.env`), `validateConfig`, `printConfigSummary`. Interface `{Service}Config` **extends `DefaultServiceConfig`** (from core-service) in types.ts; add only service-specific properties. | `auth-service`, `AuthConfig`, `loadConfig`, `SERVICE_NAME` |
 | **Config defaults** | Export `{SERVICE}_CONFIG_DEFAULTS` with **every** key used by loadConfig: `port`, `serviceName`, `nodeEnv`, `corsOrigins`, `jwt`, `database` (mongoUri, redisUrl). Each key: `{ value, description }`; use `sensitivePaths` for secrets. **No** registration in config-defaults; index calls `registerServiceConfigDefaults(SERVICE_NAME, {SERVICE}_CONFIG_DEFAULTS)`. | `AUTH_CONFIG_DEFAULTS`, `TEST_CONFIG_DEFAULTS` |
-| **Error codes** | `{SERVICE}_ERRORS` (object), `{SERVICE}_ERROR_CODES` (array), code values `MS{Service}*`, type `{Service}ErrorCode` | `AUTH_ERRORS`, `AUTH_ERROR_CODES`, `MSAuthUserNotFound`, `AuthErrorCode` |
+| **Error codes** | `{SERVICE}_ERRORS` (object), `{SERVICE}_ERROR_CODES` (array), code values `MS{Service}*`, type `{Service}ErrorCode`. **Resolver path**: throw `GraphQLError(SERVICE_ERRORS.*, { ... })` only; **never** `throw new Error('message')`. | `AUTH_ERRORS`, `AUTH_ERROR_CODES`, `MSAuthUserNotFound`, `AuthErrorCode` |
 | **GraphQL** | Types: `{shortName}GraphQLTypes` (camelCase short name). Resolvers: `create{Service}Resolvers(config)` | `authGraphQLTypes`, `createAuthResolvers`; `testGraphQLTypes`, `createTestResolvers` |
 | **Accessors** | Single `accessors.ts`: `createServiceAccessors('{service}-service')` → `{ db, redis }`; auth uses `{ databaseServiceName: 'core-service' }`. All code imports from `./accessors.js`. | `export const { db, redis } = createServiceAccessors('auth-service', { databaseServiceName: 'core-service' });` |
 | **Index** | Import `SERVICE_NAME` from config; `registerServiceConfigDefaults(SERVICE_NAME, …)`, `resolveContext`, `loadConfig`, `validateConfig`, `printConfigSummary`, `db.initialize`, `createGateway`, optional Redis (`config.redisUrl`) / `ensureDefaultConfigsCreated(SERVICE_NAME, …)` / `startListening`, `registerServiceErrorCodes` | Same order as template; see SERVICE_GENERATOR.md §2.1 |
@@ -1927,7 +1962,7 @@ All microservices that use core-service should follow the same naming so pattern
 - **Legacy fallback:** Remove; do not keep `process.env` as fallback in config.ts or index. Remove legacy/deprecated code instead of keeping it (see Refactoring Guidelines).
 - **Config interface:** Use `DefaultServiceConfig` from core-service for common properties (port, nodeEnv, serviceName, mongoUri, redisUrl, corsOrigins, jwtSecret, jwtExpiresIn, jwtRefreshSecret, jwtRefreshExpiresIn). Each service defines `export interface {Service}Config extends DefaultServiceConfig { ... }` and adds **only** service-specific properties. Reduces duplication and keeps config shape consistent; see SERVICE_GENERATOR.md.
 - Register **every** value used at runtime in `config-defaults.ts`: `port`, `serviceName`, `nodeEnv`, `corsOrigins`, `jwt` (secret, expiresIn, refreshSecret, refreshExpiresIn), `database` (mongoUri, redisUrl). Use `{ value, description }` per key; add `sensitivePaths` for secrets.
-- **In `loadConfig`:** Use `getServiceConfigKey(SERVICE_NAME, key, defaultVal, opts)` for every key. For **common keys** (port, serviceName, nodeEnv, corsOrigins, jwt, database) use `opts = { brand, tenantId, fallbackService: 'gateway' }` so missing service key falls back to gateway. For **service-only keys** use `opts = { brand, tenantId }`. No fallback to `process.env`. Same pattern elsewhere when reading config (e.g. provider config): use `getServiceConfigKey` with an appropriate default.
+- **In `loadConfig`:** Use `loadBaseServiceConfig(SERVICE_NAME, getBaseServiceConfigDefaults({ port, serviceName, ...overrides }), { brand, tenantId })` for base keys (core adds fallback to gateway internally). For **service-only keys** use `getServiceConfigKey(SERVICE_NAME, key, defaultVal, configKeyOpts(brand, tenantId))` from core-service (no local optsService/opts). No fallback to `process.env`. Same pattern elsewhere when reading config (e.g. provider config): use `getServiceConfigKey` with `configKeyOpts(brand, tenantId)`.
 - **File separation:** Keep instructions in the correct file: **types.ts** = type/interface definitions only (no defaults, no loadConfig). **config.ts** = loadConfig, validateConfig, printConfigSummary only (no config interface definition, no default constants). **config-defaults.ts** = default value object `{SERVICE}_CONFIG_DEFAULTS` only (no loadConfig, no registration call; index calls `registerServiceConfigDefaults(SERVICE_NAME, {SERVICE}_CONFIG_DEFAULTS)`). See SERVICE_GENERATOR.md §3.1.
 - **SERVICE_NAME constant:** Export `SERVICE_NAME` from config.ts (`export const SERVICE_NAME = '{service}-service'`). Use it in index.ts for `registerServiceConfigDefaults(SERVICE_NAME, ...)` and `ensureDefaultConfigsCreated(SERVICE_NAME, ...)`; do not use a static string for the service name there. Same pattern in the service generator.
 - **Current state:** All five services (auth, bonus, payment, notification, kyc) use `getServiceConfigKey` in loadConfig; the service generator emits the same pattern. You can run and test all services; see **README.md** (repo root) § Config and standards status and **core-service/src/infra/SERVICE_GENERATOR.md** for alignment status and maintenance rules.

@@ -11,8 +11,9 @@
  * - Uses service database accessor (db.getDb()) for same-service database access
  */
 
-import { logger, findOneById, CORE_DATABASE_NAME } from 'core-service';
+import { logger, findOneById, CORE_DATABASE_NAME, GraphQLError } from 'core-service';
 import { db } from '../accessors.js';
+import { PAYMENT_ERRORS } from '../error-codes.js';
 
 /**
  * Collection mapping for reference types
@@ -256,7 +257,7 @@ export async function validateReference(
 ): Promise<void> {
   const exists = await referenceExists(refId, refType);
   if (!exists) {
-    throw new Error(`Reference not found: ${refType}:${refId}`);
+    throw new GraphQLError(PAYMENT_ERRORS.ReferenceNotFound, { refType, refId });
   }
 }
 
