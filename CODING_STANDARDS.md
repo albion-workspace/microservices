@@ -571,7 +571,7 @@ service-name/
 │   ├── accessors.ts       # db + redis via createServiceAccessors (single factory call)
 │   ├── config.ts          # Service configuration (getServiceConfigKey only)
 │   ├── config-defaults.ts # registerServiceConfigDefaults values
-│   ├── error-codes.ts     # SERVICE_ERRORS, SERVICE_ERROR_CODES
+│   ├── error-codes.ts     # SERVICE_ERRORS, SERVICE_ERROR_CODES (use with GraphQLError only; no throw new Error in resolver path)
 │   ├── graphql.ts         # Types + createResolvers
 │   ├── services/
 │   │   └── feature.ts     # createService definitions
@@ -739,20 +739,22 @@ import {
   configureRedisStrategy,
   type ResolverContext,
   type GatewayConfig,
+  GraphQLError,
 } from 'core-service';
 import { db, redis } from './accessors.js';
 
 import { loadConfig, validateConfig, printConfigSummary, SERVICE_NAME } from './config.js';
+import { SERVICE_ERRORS } from './error-codes.js';
 import { featureService } from './services/feature.js';
 
 // Configuration from config store only (no process.env in microservices)
 const context = await resolveContext();
 const config = await loadConfig(context.brand, context.tenantId);
 
-// Helper functions for resolvers
+// Helper functions for resolvers (use GraphQLError + error code, never throw new Error)
 function getUserId(ctx: ResolverContext): string {
   const userId = ctx.user?.id || ctx.user?.userId;
-  if (!userId) throw new Error('Unauthorized');
+  if (!userId) throw new GraphQLError(SERVICE_ERRORS.Unauthorized, {});
   return userId;
 }
 
@@ -858,6 +860,34 @@ const wrongResolvers = {
 };
 ```
 
+### Resolver error handling (GraphQLError only)
+
+**Critical**: In **resolver-path code** (resolvers, saga steps, and any code called from them), **do not** use `throw new Error('message')`. Use **`GraphQLError`** with a code from the service's `error-codes.ts` so errors are discoverable and consistent for clients and i18n.
+
+- **Always**: Throw `throw new GraphQLError(SERVICE_ERRORS.SomeCode, { ...context })` (e.g. `SERVICE_ERRORS.NotFound`, `SERVICE_ERRORS.Unauthorized`). Add context (ids, field names) in the second argument for debugging and i18n.
+- **Never**: Use `throw new Error('any string message')` in resolvers, saga steps, or services invoked from resolvers.
+- **Exception**: Config validation, bootstrap, and scripts (e.g. `config.ts` validate, `index.ts` "Configuration not loaded yet") may still use `throw new Error` for startup failures; only **resolver-visible** errors must use GraphQLError.
+
+```typescript
+// ✅ Correct: use GraphQLError with error code from error-codes.ts
+import { GraphQLError } from 'core-service';
+import { SERVICE_ERRORS } from './error-codes.js';
+
+function getUserId(ctx: ResolverContext): string {
+  const userId = ctx.user?.id || ctx.user?.userId;
+  if (!userId) throw new GraphQLError(SERVICE_ERRORS.Unauthorized, {});
+  return userId;
+}
+```
+
+```typescript
+// ❌ Wrong: throw new Error with string message (forbidden in resolver path)
+if (!userId) throw new Error('Unauthorized');
+if (!entity) throw new Error(`Item ${id} not found`);
+```
+
+Every service has `error-codes.ts` with `SERVICE_ERRORS` and `SERVICE_ERROR_CODES`. Add new codes there when needed; use them with `GraphQLError` only.
+
 ### GraphQL Type Naming Convention
 
 When using `createService`, the result type must follow this naming convention:
@@ -868,9 +898,9 @@ When using `createService`, the result type must follow this naming convention:
 // Entity name: "kycVerification" → Result type: "CreateKycVerificationResult"
 
 graphqlType: `
-  type Feature { ... }
-  type FeatureConnection { ... }
-  type CreateFeatureResult { success: Boolean! feature: Feature sagaId: ID! errors: [String!] }
+  type Feature { id: ID! name: String! ${timestampFieldsSDL()} }
+  ${buildConnectionTypeSDL('FeatureConnection', 'Feature')}
+  ${buildSagaResultTypeSDL('CreateFeatureResult', 'feature', 'Feature')}
 `,
 ```
 
@@ -934,7 +964,7 @@ extend type Query {
   - Database types (`Db`, `ClientSession`, `Collection`, `Filter`, `MongoClient`)
   - Redis abstractions (`createServiceRedisAccess`, `configureRedisStrategy`; prefer `createServiceAccessors` for new code)
   - Generic utilities (logging, retry, circuit breaker, `getErrorMessage`, `getServiceConfigKey`)
-  - Generic patterns (saga, gateway, event system, `withEventHandlerError`, `createTransferRecoverySetup`, `buildConnectionTypeSDL`, `timestampFieldsSDL` / `timestampFieldsRequiredSDL` / `timestampFieldsOptionalSDL`, `buildSagaResultTypeSDL`, `paginationArgsSDL`)
+  - Generic patterns (saga, gateway, event system, `withEventHandlerError`, `createTransferRecoverySetup`, `checkSystemOrPermission`, `buildConnectionTypeSDL`, `timestampFieldsSDL` / `timestampFieldsRequiredSDL` / `timestampFieldsOptionalSDL`, `buildSagaResultTypeSDL`, `paginationArgsSDL`)
   - Type definitions and interfaces (e.g. `NotificationHandlerPlugin`, `HandlerContext` in core-service)
   - Shared helpers (pagination, validation, wallet operations)
 - **Core-Service**: Must NOT include:
@@ -1524,7 +1554,7 @@ for (const key of keys) { /* check if stuck */ }
 
 ### Generic Helpers in Core-Service
 - **Always**: Add generic, reusable helpers to `core-service`
-- **Examples**: `extractDocumentId()`, `retry()`, `circuitBreaker()`, pagination helpers; `getErrorMessage(error)` for consistent error messages; `getServiceConfigKey()` for config with optional gateway fallback; `createServiceAccessors()`, `buildConnectionTypeSDL()`, `timestampFieldsSDL()` / `timestampFieldsRequiredSDL()`, `createUniqueIndexSafe()`, `normalizeWalletForGraphQL()`, `withEventHandlerError()`, `createTransferRecoverySetup()`, notification handler plugin types (`NotificationHandlerPlugin`, `HandlerContext`)
+- **Examples**: `extractDocumentId()`, `retry()`, `circuitBreaker()`, pagination helpers; `getErrorMessage(error)` for consistent error messages; `getServiceConfigKey()` for config with optional gateway fallback; `createServiceAccessors()`, `checkSystemOrPermission()`, `normalizeWalletForGraphQL()`, `createUniqueIndexSafe()`, `withEventHandlerError()`, `createTransferRecoverySetup()`, notification handler plugin types (`NotificationHandlerPlugin`, `HandlerContext`); SDL builders: `buildConnectionTypeSDL()`, `buildSagaResultTypeSDL()`, `timestampFieldsSDL()` / `timestampFieldsRequiredSDL()` / `timestampFieldsOptionalSDL()`, `paginationArgsSDL()` (all in `sdl-fragments.ts`)
 - **Never**: Add service-specific logic to `core-service`
 - **Pattern**: If a helper can be used by multiple services, it belongs in `core-service`
 
@@ -1537,6 +1567,23 @@ for (const key of keys) { /* check if stuck */ }
 - **Always**: Create service-specific utilities when logic is unique to that service
 - **Pattern**: Use `core-service` for generic patterns, service code for specifics
 - **Example**: `core-service` provides `createTransferWithTransactions()`, service provides transfer validation rules
+
+### Service-Local Dedup Pattern
+When 2+ resolvers/sagas in the same service share identical structure, extract a **local helper function** within that service file (not in core-service, since the logic is service-specific).
+
+**Auth-service examples** (`auth-service/src/graphql.ts`):
+- `updateUserFieldResolver(args, ctx, opts)` — consolidates `updateUserRoles`, `updateUserPermissions`, `updateUserStatus` (3 mutations with identical auth check → DB update → normalize → log pattern)
+- `fetchPaginatedUsers(filter, args, errorCode, errorContext)` — consolidates `users` and `usersByRole` queries (identical pagination + normalization + totalCount logic)
+- `parsePendingOperation(payload, token, ttl)` — consolidates Redis payload parsing in `pendingOperations` and `pendingOperation` resolvers
+
+**Payment-service examples** (`payment-service/src/services/transaction.ts`):
+- `calculateFee(amount, feePercentage)` — consolidates inline fee math in deposit and withdrawal sagas
+- `buildTransactionDescription(method, txType)` — consolidates duplicated description generation in deposit/withdrawal sagas
+- `buildDateRangeFilter(dateFrom?, dateTo?)` — consolidates date filter building in transaction and wallet queries (exported for cross-file use within payment-service)
+
+**When to use core-service vs local helper:**
+- **Core-service**: Pattern used by 2+ services, or generic enough to be reusable (e.g. SDL builders, error handling, accessors)
+- **Local helper**: Pattern used only within one service file, tied to service-specific business logic (e.g. auth user updates, payment fee calculation)
 
 ---
 
@@ -1913,7 +1960,7 @@ All microservices that use core-service should follow the same naming so pattern
 |------|------------|----------------------|
 | **Config** | **Export** `SERVICE_NAME = '{service}-service'` from config.ts. `loadConfig(brand?, tenantId?)` **via getServiceConfigKey** (common keys with `fallbackService: 'gateway'`, service-only keys with `{ brand, tenantId }`; no `process.env`), `validateConfig`, `printConfigSummary`. Interface `{Service}Config` **extends `DefaultServiceConfig`** (from core-service) in types.ts; add only service-specific properties. | `auth-service`, `AuthConfig`, `loadConfig`, `SERVICE_NAME` |
 | **Config defaults** | Export `{SERVICE}_CONFIG_DEFAULTS` with **every** key used by loadConfig: `port`, `serviceName`, `nodeEnv`, `corsOrigins`, `jwt`, `database` (mongoUri, redisUrl). Each key: `{ value, description }`; use `sensitivePaths` for secrets. **No** registration in config-defaults; index calls `registerServiceConfigDefaults(SERVICE_NAME, {SERVICE}_CONFIG_DEFAULTS)`. | `AUTH_CONFIG_DEFAULTS`, `TEST_CONFIG_DEFAULTS` |
-| **Error codes** | `{SERVICE}_ERRORS` (object), `{SERVICE}_ERROR_CODES` (array), code values `MS{Service}*`, type `{Service}ErrorCode` | `AUTH_ERRORS`, `AUTH_ERROR_CODES`, `MSAuthUserNotFound`, `AuthErrorCode` |
+| **Error codes** | `{SERVICE}_ERRORS` (object), `{SERVICE}_ERROR_CODES` (array), code values `MS{Service}*`, type `{Service}ErrorCode`. **Resolver path**: throw `GraphQLError(SERVICE_ERRORS.*, { ... })` only; **never** `throw new Error('message')`. | `AUTH_ERRORS`, `AUTH_ERROR_CODES`, `MSAuthUserNotFound`, `AuthErrorCode` |
 | **GraphQL** | Types: `{shortName}GraphQLTypes` (camelCase short name). Resolvers: `create{Service}Resolvers(config)` | `authGraphQLTypes`, `createAuthResolvers`; `testGraphQLTypes`, `createTestResolvers` |
 | **Accessors** | Single `accessors.ts`: `createServiceAccessors('{service}-service')` → `{ db, redis }`; auth uses `{ databaseServiceName: 'core-service' }`. All code imports from `./accessors.js`. | `export const { db, redis } = createServiceAccessors('auth-service', { databaseServiceName: 'core-service' });` |
 | **Index** | Import `SERVICE_NAME` from config; `registerServiceConfigDefaults(SERVICE_NAME, …)`, `resolveContext`, `loadConfig`, `validateConfig`, `printConfigSummary`, `db.initialize`, `createGateway`, optional Redis (`config.redisUrl`) / `ensureDefaultConfigsCreated(SERVICE_NAME, …)` / `startListening`, `registerServiceErrorCodes` | Same order as template; see SERVICE_GENERATOR.md §2.1 |

@@ -28,6 +28,8 @@ export const NOTIFICATION_ERRORS = {
   FailedToSendWhatsApp: 'MSNotificationFailedToSendWhatsApp',
   SMSProviderNotConfigured: 'MSNotificationSMSProviderNotConfigured',
   FailedToSendSMS: 'MSNotificationFailedToSendSMS',
+  ChannelRequired: 'MSNotificationChannelRequired',
+  ChannelRequiresTo: 'MSNotificationChannelRequiresTo',
 } as const;
 
 /**

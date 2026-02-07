@@ -19,9 +19,8 @@
 
 import { requireAuth, getUserId, getTenantId } from './utils.js';
 import type { ResolverContext } from '../../types/index.js';
-import { logger } from '../logger.js';
 import { getErrorMessage } from '../errors.js';
-import { hasRole } from '../../access/index.js';
+import { hasRole, matchAnyUrn } from '../../access/index.js';
 
 /**
  * Validation context passed through the chain
@@ -211,36 +210,17 @@ export class PermissionValidator extends ValidationHandler {
   }
   
   protected validate(context: ValidationContext): ValidationResult {
-    // Dynamic import to avoid circular dependency
-    const accessModule = require('../../access/index.js');
-    const matchAnyUrn = accessModule.matchAnyUrn || accessModule.default?.matchAnyUrn;
-    
-    if (!matchAnyUrn) {
-      logger.warn('matchAnyUrn not available in PermissionValidator', { 
-        availableExports: Object.keys(accessModule) 
-      });
-      return { valid: false, error: 'Permission checking not available' };
-    }
-    
     const user = context.ctx.user;
-    
     if (!user) {
       return { valid: false, error: 'Authentication required' };
     }
-    
-    // Check system role - use hasRole from access-engine
     if (hasRole('system')(user)) {
       return { valid: true };
     }
-    
-    // Check permissions using access-engine
     const requiredUrn = `${this.resource}:${this.action}:${this.target}`;
-    const permissions = user.permissions || [];
-    
-    if (matchAnyUrn(permissions, requiredUrn)) {
+    if (matchAnyUrn(user.permissions ?? [], requiredUrn)) {
       return { valid: true };
     }
-    
     return {
       valid: false,
       error: `Unauthorized: Insufficient permissions (required: ${requiredUrn})`,

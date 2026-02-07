@@ -6,8 +6,9 @@
  * This eliminates database writes for temporary reset operations
  */
 
-import { logger, normalizeDocument, findById, createPendingOperationStore } from 'core-service';
+import { logger, normalizeDocument, findById, createPendingOperationStore, GraphQLError } from 'core-service';
 import { db } from '../accessors.js';
+import { AUTH_ERRORS } from '../error-codes.js';
 import type { 
   ForgotPasswordInput, 
   ResetPasswordInput, 
@@ -371,7 +372,7 @@ export class PasswordService {
    */
   private async sendPasswordResetEmail(user: User): Promise<string> {
     if (!user.email || !user.id) {
-      throw new Error('User email and ID are required for password reset');
+      throw new GraphQLError(AUTH_ERRORS.EmailAndIdRequiredForPasswordReset, {});
     }
     
     // Store reset operation in JWT (no DB write needed)
@@ -433,7 +434,7 @@ export class PasswordService {
    */
   private async sendPasswordResetOTP(user: User): Promise<string> {
     if (!user.phone || !user.id) {
-      throw new Error('User phone and ID are required for password reset OTP');
+      throw new GraphQLError(AUTH_ERRORS.PhoneAndIdRequiredForPasswordReset, {});
     }
     
     const channel = this.otpProviders.isChannelAvailable('whatsapp') ? 'whatsapp' : 'sms';

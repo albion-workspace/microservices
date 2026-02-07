@@ -13,7 +13,7 @@
  *   service-only keys use getServiceConfigKey(..., { brand, tenantId }) (no fallback).
  * - GraphQL types + resolvers, permissions, createGateway
  * - SDL helpers: timestampFieldsSDL, buildSagaResultTypeSDL, buildConnectionTypeSDL, paginationArgsSDL
- * - Error codes (registerServiceErrorCodes), optional Redis, optional webhooks
+ * - Error codes (registerServiceErrorCodes); resolver path must throw GraphQLError(SERVICE_ERRORS.*), not Error
  *
  * Usage: service-infra service --name <name> [--port 9006] [--output ../../] [--redis] [--webhooks] [--core-db]
  */
@@ -162,7 +162,9 @@ export const { db, redis } = createServiceAccessors('${serviceNameKebab}'${useCo
     `/**
  * ${serviceNamePascal} Service Error Codes
  *
- * Register with registerServiceErrorCodes; use constants with GraphQLError.
+ * Register with registerServiceErrorCodes. In resolver-path code (resolvers, saga steps,
+ * services called from resolvers), throw GraphQLError with these codes only; do not use
+ * throw new Error('message'). See CODING_STANDARDS § Resolver error handling.
  * Prefix: MS${serviceNameConst}
  */
 
@@ -307,6 +309,7 @@ export interface ${serviceNamePascal}Config extends DefaultServiceConfig {}
  * GraphQL schema and resolvers for ${serviceNamePascal} Service
  *
  * Follow auth-service/notification-service pattern: types string + createResolvers(config).
+ * Resolver errors: throw GraphQLError(SERVICE_ERRORS.*, { ... }) only; never throw new Error('message').
  *
  * REUSABLE SDL HELPERS (from core-service – single source of truth, see CODING_STANDARDS § GraphQL):
  *   timestampFieldsSDL()         → createdAt: String!  updatedAt: String   (default)
@@ -374,6 +377,7 @@ export function create${serviceNamePascal}Resolvers(config: ${serviceNamePascal}
  * Add createService definitions here; export from index.
  *
  * REUSABLE PATTERNS (from core-service – avoid reinventing, see CODING_STANDARDS):
+ *   In saga steps and resolvers: throw GraphQLError(SERVICE_ERRORS.*, { ... }), never throw new Error('message').
  *   createService<Entity, Input>({ name, entity, saga, ... })  → saga-based CRUD service
  *   buildSagaResultTypeSDL(name, field, type, extra?)           → saga result SDL (in graphql.ts)
  *   buildConnectionTypeSDL(connectionName, nodeType)            → connection type SDL (in graphql.ts)

@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { CreditCard, Gift, Database, Wifi, Shield, Bell, Zap } from 'lucide-react'
+import { CreditCard, Gift, Database, Wifi, Shield, Bell, Zap, ShieldCheck } from 'lucide-react'
 
 interface ServiceHealth {
   status: string
@@ -155,6 +155,12 @@ export default function Dashboard() {
           icon={Bell}
           url="http://localhost:9004/health"
           color="var(--accent-yellow)"
+        />
+        <ServiceCard 
+          name="KYC Service" 
+          icon={ShieldCheck}
+          url="http://localhost:9005/health"
+          color="var(--accent-green, #22c55e)"
         />
       </div>
 

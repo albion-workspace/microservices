@@ -452,7 +452,7 @@ export const walletResolvers = {
         };
       } catch (error) {
         logger.error('Failed to get bulk wallet balances', { error, userIds });
-        throw new Error(`Failed to get bulk wallet balances: ${getErrorMessage(error)}`);
+        throw new GraphQLError(PAYMENT_ERRORS.BulkBalancesFailed, { message: getErrorMessage(error), userIds });
       }
     },
     

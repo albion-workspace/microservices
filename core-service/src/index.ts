@@ -446,8 +446,7 @@ export {
   createResolverBuilder,
 } from './common/graphql/builder.js';
 export type { ResolverFunction, ServiceResolvers } from './common/graphql/builder.js';
-export { buildConnectionTypeSDL } from './common/graphql/connection-builder.js';
-export { timestampFieldsSDL, timestampFieldsRequiredSDL, timestampFieldsOptionalSDL, buildSagaResultTypeSDL, paginationArgsSDL } from './common/graphql/sdl-fragments.js';
+export { timestampFieldsSDL, timestampFieldsRequiredSDL, timestampFieldsOptionalSDL, buildSagaResultTypeSDL, paginationArgsSDL, buildConnectionTypeSDL } from './common/graphql/sdl-fragments.js';
 
 // GraphQL Query Complexity
 export {

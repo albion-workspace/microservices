@@ -19,8 +19,9 @@ export async function loadConfig(brand?: string, tenantId?: string): Promise<KYC
   const serviceName = await getServiceConfigKey<string>(SERVICE_NAME, 'serviceName', SERVICE_NAME, opts(brand, tenantId));
   const nodeEnv = await getServiceConfigKey<string>(SERVICE_NAME, 'nodeEnv', 'development', opts(brand, tenantId));
   const corsOrigins = await getServiceConfigKey<string[]>(SERVICE_NAME, 'corsOrigins', [
-    'http://localhost:3000',
     'http://localhost:5173',
+    'http://localhost:3000',
+    'http://127.0.0.1:5173',
   ], opts(brand, tenantId));
   const jwtConfig = await getServiceConfigKey<{ secret: string; expiresIn: string; refreshSecret?: string; refreshExpiresIn?: string }>(SERVICE_NAME, 'jwt', {
     secret: '',

@@ -246,7 +246,7 @@ const userBonusSaga = [
         throw new GraphQLError(BONUS_ERRORS.TemplateNotFound, { templateCode: input.templateCode });
       }
       if (!template.isActive) {
-        throw new Error(`Template ${input.templateCode} is not active`);
+        throw new GraphQLError(BONUS_ERRORS.TemplateNotActive, { templateCode: input.templateCode });
       }
       data.template = template;
       data.templateCode = input.templateCode;
@@ -265,7 +265,7 @@ const userBonusSaga = [
       // Get handler for this bonus type
       const handler = getHandler(template.type as any);
       if (!handler) {
-        throw new Error(`No handler for bonus type: ${template.type}`);
+        throw new GraphQLError(BONUS_ERRORS.NoHandlerForBonusType, { bonusType: template.type });
       }
 
       // Build context for eligibility check

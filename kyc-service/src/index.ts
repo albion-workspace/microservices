@@ -64,6 +64,11 @@ import { verificationRepository } from './repositories/verification-repository.j
 // Import types
 import type { KYCTier } from './types/kyc-types.js';
 
+/** Resolver-scoped user context (authenticated). Use in Query/Mutation resolvers that need userId + tenantId. */
+function getUserContext(ctx: ResolverContext): { userId: string; tenantId: string } {
+  return { userId: getUserId(ctx), tenantId: getTenantId(ctx) };
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Custom Resolvers
 // ═══════════════════════════════════════════════════════════════════
@@ -97,32 +102,22 @@ const customResolvers = {
   Query: {
     // User queries
     myKYCProfile: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-      const userId = getUserId(ctx);
-      const tenantId = getTenantId(ctx);
+      const { userId, tenantId } = getUserContext(ctx);
       return kycRepository.findByUserId(userId, tenantId);
     },
-    
     myKYCLimits: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-      const userId = getUserId(ctx);
-      const tenantId = getTenantId(ctx);
+      const { userId, tenantId } = getUserContext(ctx);
       const profile = await kycRepository.findByUserId(userId, tenantId);
       const tier = profile?.currentTier ?? 'none';
       const jurisdiction = profile?.jurisdictionCode ?? 'US';
       return getTierLimits(tier, jurisdiction);
     },
-    
     checkKYCEligibility: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-      const userId = getUserId(ctx);
-      const tenantId = getTenantId(ctx);
+      const { userId, tenantId } = getUserContext(ctx);
       return kycEngine.checkEligibility(userId, tenantId, args.requiredTier as KYCTier);
     },
-    
-    checkTransactionLimit: async (
-      args: Record<string, unknown>, 
-      ctx: ResolverContext
-    ) => {
-      const userId = getUserId(ctx);
-      const tenantId = getTenantId(ctx);
+    checkTransactionLimit: async (args: Record<string, unknown>, ctx: ResolverContext) => {
+      const { userId, tenantId } = getUserContext(ctx);
       return kycEngine.checkTransactionLimit(
         userId,
         tenantId,
@@ -144,17 +139,13 @@ const customResolvers = {
     
     // Admin queries
     kycProfileByUserId: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-      const tenantId = getTenantId(ctx);
-      return kycRepository.findByUserId(args.userId as string, tenantId);
+      return kycRepository.findByUserId(args.userId as string, getTenantId(ctx));
     },
-    
     pendingVerifications: async (args: Record<string, unknown>) => {
       return verificationRepository.findPendingManualReviews((args.limit as number) ?? 50);
     },
-    
     highRiskProfiles: async (args: Record<string, unknown>, ctx: ResolverContext) => {
-      const tenantId = getTenantId(ctx);
-      return kycRepository.findHighRiskProfiles(tenantId, (args.limit as number) ?? 50);
+      return kycRepository.findHighRiskProfiles(getTenantId(ctx), (args.limit as number) ?? 50);
     },
   },
   Mutation: {

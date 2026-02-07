@@ -31,6 +31,7 @@ import {
   resolveContext,
 } from 'core-service';
 
+import { db } from './accessors.js';
 import { loadConfig, validateConfig, printConfigSummary, SERVICE_NAME, type NotificationConfig } from './config.js';
 import { NOTIFICATION_CONFIG_DEFAULTS } from './config-defaults.js';
 import { NotificationService } from './notification-service.js';
@@ -111,6 +112,16 @@ async function main() {
   notificationConfig = await loadConfig(context.brand, context.tenantId);
   validateConfig(notificationConfig);
   printConfigSummary(notificationConfig);
+
+  // Initialize service database accessor (required for resolvers that use db.getDb())
+  const { database, context: dbContext } = await db.initialize({
+    brand: context.brand,
+    tenantId: context.tenantId,
+  });
+  logger.info('Database initialized via service database accessor', {
+    database: database.databaseName,
+    context: dbContext,
+  });
   
   // ═══════════════════════════════════════════════════════════════════
   // Initialize Service
